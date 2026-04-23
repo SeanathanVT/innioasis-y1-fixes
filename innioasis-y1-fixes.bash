@@ -3,7 +3,15 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.0
+# Version: 1.0.6
+# History:
+# 2026-04-23 (1.0.6): Add build.prop value.
+# 2026-04-23 (1.0.5): Fine tune echo statements.
+# 2026-04-23 (1.0.4): Use unmodified (non-sparse) system.img source.
+# 2026-04-23 (1.0.3): Add explicit Python virtual environment activation / deactivation.
+# 2026-04-23 (1.0.2): Convert app removal to loop because it looks prettier.
+# 2026-04-23 (1.0.1): Append to build.prop, do not overwrite (oops).
+# 2026-04-23 (1.0.0): Initial release.
 # Usage: ./innioasis-y1-fixes.bash
 #
 
@@ -12,13 +20,14 @@ VERSION_FIRMWARE="3.0.2"
 FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
-FILENAME_SYSTEM_IMAGE_SOURCE="system-${VERSION_FIRMWARE}-patched.img"
+FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
 
 PATH_ARTIFACTS="/home/sphalpin/Downloads"
 PATH_MOUNT="/mnt/y1-devel"
 PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
+PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
 
 # Copy clean system.img
 echo "Copying clean system.img.."
@@ -48,11 +57,12 @@ sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
 
 # Configure build.prop
 echo "Configuring build.prop.."
-sudo tee "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
+sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to fix ADB / Bluetooth
 persist.bluetooth.avrcpversion=avrcp13
 persist.service.adb.enable=1
 persist.service.debuggable=1
+ro.bluetooth.avrcpversion=avrcp13
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
@@ -69,24 +79,30 @@ sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
 
 # Remove unnecessary APK files
 echo "Removing unnecessary APK files.."
-sudo rm -rf "${PATH_MOUNT}/app/ApplicationGuide.*"
-sudo rm -rf "${PATH_MOUNT}/app/BackupRestoreConfirmation.*"
-sudo rm -rf "${PATH_MOUNT}/app/BasicDreams.*"
-sudo rm -rf "${PATH_MOUNT}/app/Calendar*"
-sudo rm -rf "${PATH_MOUNT}/app/CellConnService.*"
-sudo rm -rf "${PATH_MOUNT}/app/DataTransfer.*"
-sudo rm -rf "${PATH_MOUNT}/app/FusedLocation.*"
-sudo rm -rf "${PATH_MOUNT}/app/MemClear.*"
-sudo rm -rf "${PATH_MOUNT}/app/MtkWorldClockWidget.*"
-sudo rm -rf "${PATH_MOUNT}/app/Nfc.apk"
-sudo rm -rf "${PATH_MOUNT}/app/PhotoTable.*"
-sudo rm -rf "${PATH_MOUNT}/app/PicoTts.*"
-sudo rm -rf "${PATH_MOUNT}/app/Protips.*"
-#sudo rm -rf "${PATH_MOUNT}/app/SchedulePowerOnOff.*"
-sudo rm -rf "${PATH_MOUNT}/app/SharedStorageBackup.*"
-sudo rm -rf "${PATH_MOUNT}/app/TelephonyProvider.*"
-sudo rm -rf "${PATH_MOUNT}/app/UserDictionaryProvider.*"
-sudo rm -rf "${PATH_MOUNT}/app/VpnDialogs.*"
+apps_to_remove=(
+  "ApplicationGuide.*"
+  "BackupRestoreConfirmation.*"
+  "BasicDreams.*"
+  "Calendar*"
+  "CellConnService.*"
+  "DataTransfer.*"
+  "FusedLocation.*"
+  "MemClear.*"
+  "MtkWorldClockWidget.*"
+  "Nfc.*"
+  "PhotoTable.*"
+  "PicoTts.*"
+  "Protips.*"
+  # "SchedulePowerOnOff.*"
+  "SharedStorageBackup.*"
+  "TelephonyProvider.*"
+  "UserDictionaryProvider.*"
+  "VpnDialogs.*"
+)
+
+for app in "${apps_to_remove[@]}"; do
+  sudo rm -rf "${PATH_MOUNT}/app/${app}"
+done
 
 # Unmount patched system.img
 echo "Unmounting development system.img.."
@@ -97,6 +113,11 @@ echo "Changing directories to MTK Client root directory.."
 cd "${PATH_MTKCLIENT}"
 
 # Write patched system.img
+echo "Activating MTKClient Python virtual environment.."
+source "${PATH_VENV_MTKCLIENT}/bin/activate"
 echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
 python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+echo "Deactivating MTKClient Python virtual environment.."
+deactivate
+echo "Done!"
 
