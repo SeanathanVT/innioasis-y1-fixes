@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.2
+# Version: 1.0.3
 # History:
+# 2026-04-23 (1.0.3): Add explicit Python virtual environment activation / deactivation.
 # 2026-04-23 (1.0.2): Convert app removal to loop because it looks prettier.
 # 2026-04-23 (1.0.1): Append to build.prop, do not overwrite (oops).
 # 2026-04-23 (1.0.0): Initial release.
@@ -23,6 +24,7 @@ FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
 PATH_ARTIFACTS="/home/sphalpin/Downloads"
 PATH_MOUNT="/mnt/y1-devel"
 PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
+PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
 
 # Copy clean system.img
 echo "Copying clean system.img.."
@@ -108,5 +110,7 @@ cd "${PATH_MTKCLIENT}"
 
 # Write patched system.img
 echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
+source "${PATH_VENV_MTKCLIENT}/bin/activate"
 python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+deactivate
 
