@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.1
+# Version: 1.0.2
 # History:
+# 2026-04-23 (1.0.2): Convert app removal to loop because it looks prettier.
 # 2026-04-23 (1.0.1): Append to build.prop, do not overwrite (oops).
 # 2026-04-23 (1.0.0): Initial release.
 # Usage: ./innioasis-y1-fixes.bash
@@ -72,24 +73,30 @@ sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
 
 # Remove unnecessary APK files
 echo "Removing unnecessary APK files.."
-sudo rm -rf "${PATH_MOUNT}/app/ApplicationGuide.*"
-sudo rm -rf "${PATH_MOUNT}/app/BackupRestoreConfirmation.*"
-sudo rm -rf "${PATH_MOUNT}/app/BasicDreams.*"
-sudo rm -rf "${PATH_MOUNT}/app/Calendar*"
-sudo rm -rf "${PATH_MOUNT}/app/CellConnService.*"
-sudo rm -rf "${PATH_MOUNT}/app/DataTransfer.*"
-sudo rm -rf "${PATH_MOUNT}/app/FusedLocation.*"
-sudo rm -rf "${PATH_MOUNT}/app/MemClear.*"
-sudo rm -rf "${PATH_MOUNT}/app/MtkWorldClockWidget.*"
-sudo rm -rf "${PATH_MOUNT}/app/Nfc.apk"
-sudo rm -rf "${PATH_MOUNT}/app/PhotoTable.*"
-sudo rm -rf "${PATH_MOUNT}/app/PicoTts.*"
-sudo rm -rf "${PATH_MOUNT}/app/Protips.*"
-#sudo rm -rf "${PATH_MOUNT}/app/SchedulePowerOnOff.*"
-sudo rm -rf "${PATH_MOUNT}/app/SharedStorageBackup.*"
-sudo rm -rf "${PATH_MOUNT}/app/TelephonyProvider.*"
-sudo rm -rf "${PATH_MOUNT}/app/UserDictionaryProvider.*"
-sudo rm -rf "${PATH_MOUNT}/app/VpnDialogs.*"
+apps_to_remove=(
+  "ApplicationGuide.*"
+  "BackupRestoreConfirmation.*"
+  "BasicDreams.*"
+  "Calendar*"
+  "CellConnService.*"
+  "DataTransfer.*"
+  "FusedLocation.*"
+  "MemClear.*"
+  "MtkWorldClockWidget.*"
+  "Nfc.*"
+  "PhotoTable.*"
+  "PicoTts.*"
+  "Protips.*"
+  # "SchedulePowerOnOff.*"
+  "SharedStorageBackup.*"
+  "TelephonyProvider.*"
+  "UserDictionaryProvider.*"
+  "VpnDialogs.*"
+)
+
+for app in "${apps_to_remove[@]}"; do
+  sudo rm -rf "${PATH_MOUNT}/app/${app}"
+done
 
 # Unmount patched system.img
 echo "Unmounting development system.img.."
