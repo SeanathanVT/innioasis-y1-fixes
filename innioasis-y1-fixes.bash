@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.5
+# Version: 1.0.6
 # History:
+# 2026-04-23 (1.0.6): Add build.prop value.
 # 2026-04-23 (1.0.5): Fine tune echo statements.
 # 2026-04-23 (1.0.4): Use unmodified (non-sparse) system.img source.
 # 2026-04-23 (1.0.3): Add explicit Python virtual environment activation / deactivation.
@@ -61,6 +62,7 @@ sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 persist.bluetooth.avrcpversion=avrcp13
 persist.service.adb.enable=1
 persist.service.debuggable=1
+ro.bluetooth.avrcpversion=avrcp13
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
