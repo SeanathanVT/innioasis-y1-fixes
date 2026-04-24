@@ -1,0 +1,38 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.y1.mediabridge'
+
+    // AGP 8.x requires compileSdk >= 28. We compile against 34 for toolchain
+    // compatibility but our code ONLY uses APIs available on API 17 (Android 4.2.2).
+    // All API 17 compliance is verified by manual audit — see MediaBridgeService.java.
+    compileSdkVersion 34
+
+    defaultConfig {
+        applicationId "com.y1.mediabridge"
+        minSdkVersion 17
+        targetSdkVersion 17
+        versionCode 3
+        versionName "1.2"
+    }
+
+    compileOptions {
+        // Java 7 source/target was removed in JDK 21+.
+        // Java 8 bytecode is fully compatible with Android 4.2.2 via D8/dex.
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+}
