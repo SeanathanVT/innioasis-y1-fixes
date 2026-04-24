@@ -193,6 +193,11 @@ public class MediaBridgeService extends Service {
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
     private LogcatMonitor mLogcatMonitor;
 
+    /** Path currently being scanned — prevents duplicate MediaScanner requests
+     *  when the player emits both a lyrics line and an album-art line for the
+     *  same track before the first scan completes. Written/read on main thread. */
+    private String mPendingScanPath = null;
+
     /** Callback IBinders registered by MtkBt via IBTAvrcpMusic.registerCallback. */
     private final CopyOnWriteArrayList<IBinder> mAvrcpCallbacks =
             new CopyOnWriteArrayList<IBinder>();
@@ -627,14 +632,7 @@ public class MediaBridgeService extends Service {
 
     @Override
     public IBinder onBind(Intent intent) {
-        // Log.e so visible regardless of filtering. Stack trace confirms this
-        // onBind is the one MtkBt's bind resolves to (rules out shadowing by
-        // another installed com.android.music.MediaPlaybackService).
-        Log.e(TAG, "onBind: " + (intent != null ? intent.getAction() : "null")
-                + " returning mBinder=" + mBinder
-                + " mBinder.class=" + mBinder.getClass().getName());
-        Log.e(TAG, "onBind stack: " + android.util.Log.getStackTraceString(
-                new Throwable("onBind caller")));
+        Log.d(TAG, "onBind: " + (intent != null ? intent.getAction() : "null"));
         return mBinder;
     }
 
@@ -859,7 +857,12 @@ public class MediaBridgeService extends Service {
 
         if (!queryMetadataFromStore(path)) {
             // Not indexed yet — scan this single file, then retry.
+            if (path.equals(mPendingScanPath)) {
+                Log.d(TAG, "MediaStore miss for " + path + " — scan already in progress, skipping");
+                return;
+            }
             Log.d(TAG, "MediaStore miss for " + path + " — triggering scan");
+            mPendingScanPath = path;
             MediaScannerConnection.scanFile(this, new String[]{ path }, null,
                     new MediaScannerConnection.OnScanCompletedListener() {
                         @Override
@@ -867,6 +870,7 @@ public class MediaBridgeService extends Service {
                             final String finalPath = p;
                             mMainHandler.post(new Runnable() {
                                 @Override public void run() {
+                                    mPendingScanPath = null;
                                     if (!queryMetadataFromStore(finalPath)) {
                                         readTagsDirectly(finalPath);
                                     }

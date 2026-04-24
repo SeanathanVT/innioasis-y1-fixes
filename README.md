@@ -19,16 +19,38 @@ One system app. No separate daemon, no shared files, no IPC.
   button events from the car directly to the stock player's
   `PlayControllerReceiver`.
 
-## Changes in 1.2 (versionCode 3)
+## Changes in 1.2 (versionCode 9)
 
+**versionCode 9** fixes the remaining issues from the versionCode 8 session log.
+
+### versionCode 9 changes
+- **`AndroidManifest.xml` versionCode synced to `9`** — previously hardcoded to `1`,
+  which would cause the package manager to reject an upgrade from versionCode 8 as a
+  downgrade on Android 4.2 installs.
+- **`onBind` logging demoted** — was `Log.e` with a full stack trace on every bind.
+  Reduced to `Log.d` with just the action. Binding happens on every car reconnect;
+  the stack trace was written to verify MtkBt was resolving to our service (confirmed
+  in the versionCode 8 session — no longer needed).
+- **Duplicate-scan guard** — `mPendingScanPath` field prevents two concurrent
+  `MediaScannerConnection.scanFile` calls for the same path when the Y1 player emits
+  both a lyrics line (`刷新一次歌词`) and an album-art line (`刷新一次专辑图`) before
+  the first scan completes. The second call is now a no-op; `mPendingScanPath` is
+  cleared in the scan callback before `broadcastTrackAndState`.
+
+### versionCode 8 changes (prior session — callbacks=0 fix)
+`attachInterface` was removed from `AvrcpBinder`. Adding it (versionCode 7) had
+caused `IBTAvrcpMusic.Stub.asInterface()` to take the local path and cast our
+`AvrcpBinder` to `IBTAvrcpMusic` — a cast it doesn't satisfy — silently swallowing
+`registerCallback`. Removing `attachInterface` forces the remote Proxy path for all
+callers; `registerCallback` now arrives as `onTransact code=1` and populates
+`mAvrcpCallbacks`. Confirmed fixed: no `callbacks=0` entries after first bind in
+the versionCode 9 session.
+
+### versionCode 3/1.2 changes (full code coverage)
 Previous builds bound successfully and `registerCallback` ran, but cars still
 logged `[BT][AVRCP] onReceive EVENT_TRACK_CHANGED fail`. Root cause: our
 binder's `onTransact` only handled ~14 of the 37 codes `IBTAvrcpMusic$Stub`
-actually declares. The unhandled ones fell through to `return false`, which
-the kernel reports back to the caller as an unknown transaction — MtkBt's
-`BTAvrcpMusicAdapter.registerNotification()` sees that as failure, never sets
-its `mRegBit`, and every subsequent `notifyTrackChanged` gets dropped before
-an AVRCP packet is emitted.
+actually declares.
 
 Ground truth transaction codes were extracted directly from the device's
 `MtkBt.odex` (de-odex → `MtkBt.dex`, parsed with androguard) and every code
