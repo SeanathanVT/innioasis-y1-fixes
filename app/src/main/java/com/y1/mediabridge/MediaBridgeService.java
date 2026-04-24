@@ -16,7 +16,6 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.RemoteException;
@@ -199,47 +198,77 @@ public class MediaBridgeService extends Service {
             new CopyOnWriteArrayList<IBinder>();
 
     // =======================================================================
-    // The binder — single instance, dual-interface dispatch
+    // The binder — single instance, dual-interface dispatch (see AvrcpBinder)
     // =======================================================================
 
-    private final Binder mBinder = new Binder() {
+    /**
+     * The binder — single instance, dual-interface dispatch.
+     *
+     * Plain Binder subclass — deliberately does NOT call attachInterface and
+     * does NOT implement IInterface. This ensures IBTAvrcpMusic.Stub.asInterface()
+     * always takes the remote Proxy path: queryLocalInterface returns null →
+     * asInterface wraps us in a Proxy → all calls including registerCallback
+     * arrive as binder transactions at onTransact where our handlers live.
+     *
+     * History: attachInterface was added (versionCode 7) hoping to populate
+     * queryLocalInterface so asInterface() takes the local path. It did — but
+     * the local path casts the result to IBTAvrcpMusic, which AvrcpBinder does
+     * not implement. MtkBt's registerCallback call hit a missing method and was
+     * silently swallowed, leaving callbacks=0 permanently (confirmed by
+     * notifyPlaybackStatus callbacks=0 throughout the versionCode 7 session).
+     * Removing attachInterface forces the Proxy path for all calls.
+     */
+    private final class AvrcpBinder extends Binder {
+        AvrcpBinder() {
+            // No attachInterface — see class javadoc.
+        }
+
+        @Override
+        public String getInterfaceDescriptor() {
+            return DESCRIPTOR_AVRCP_MUSIC;
+        }
+
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
-            // INTERFACE_TRANSACTION has no strictmode+token prefix; let
-            // Binder.onTransact return our attached descriptor directly.
+            // Log.e so this is visible regardless of log-level filtering.
+            Log.e(TAG, "onTransact: code=" + code + " pid=" + getCallingPid()
+                    + " uid=" + getCallingUid());
             if (code == INTERFACE_TRANSACTION) {
                 return super.onTransact(code, data, reply, flags);
             }
 
-            // Peek the descriptor at the head of the parcel. writeInterfaceToken
-            // writes: int32 strictModePolicy, then UTF-16 descriptor string.
-            // We read both to advance past them, then rewind so each case can
-            // call enforceInterface itself — that keeps the dispatch symmetric
-            // with AOSP-generated stub code.
-            final int startPos = data.dataPosition();
-            String descriptor;
-            try {
-                data.readInt();                  // strictModePolicy (discarded)
-                descriptor = data.readString();  // interface token
-            } catch (Exception e) {
-                data.setDataPosition(startPos);
-                return super.onTransact(code, data, reply, flags);
-            }
-            data.setDataPosition(startPos);
+            // Skip the interface token header unconditionally rather than
+            // enforcing it. Every previous dispatch strategy (peek+rewind,
+            // try/enforceInterface/catch) failed because the descriptor string
+            // MtkBt writes may differ from what we expect — different package
+            // path, ROM variation, or encoding difference — causing all
+            // transactions including registerCallback (code 1) to fall through
+            // to super.onTransact() and return false, silently aborting
+            // registration and leaving cardinality permanently at 0.
+            //
+            // writeInterfaceToken writes:
+            //   int32  strictModePolicy
+            //   string descriptor (int32 charCount + UTF-16 chars, 4-byte aligned)
+            // We consume both to advance the cursor to the first argument byte,
+            // then dispatch on code number alone. Both interfaces share this
+            // layout so the skip is correct for either caller.
+            data.readInt();    // strictModePolicy — discard
+            data.readString(); // descriptor — discard
 
-            Log.v(TAG, "onTransact code=" + code + " descriptor=" + descriptor);
-
-            if (DESCRIPTOR_AVRCP_MUSIC.equals(descriptor)) {
+            // IBTAvrcpMusic covers codes 1–37. IMediaPlaybackService codes
+            // (4, 10–17, 24) all fall within that range and are handled there
+            // with compatible return types, so route everything 1–37 to the
+            // AVRCP handler. Anything outside that range falls to the media
+            // playback handler (defensive; MtkBt shouldn't send those here).
+            if (code >= 1 && code <= 37) {
                 return handleAvrcpMusic(code, data, reply);
             }
-            if (DESCRIPTOR_MEDIA_PLAYBACK.equals(descriptor)) {
-                return handleMediaPlayback(code, data, reply);
-            }
-            Log.v(TAG, "onTransact unhandled descriptor, super-fallthrough");
-            return super.onTransact(code, data, reply, flags);
+            return handleMediaPlayback(code, data, reply);
         }
-    };
+    }
+
+    private final AvrcpBinder mBinder = new AvrcpBinder();
 
     // -----------------------------------------------------------------------
     // IBTAvrcpMusic dispatch — every declared code returns a well-formed reply
@@ -251,23 +280,19 @@ public class MediaBridgeService extends Service {
             throws RemoteException {
         switch (code) {
             case 1: { // registerCallback(IBTAvrcpMusicCallback cb)
-                //
-                // CRITICAL: enforceInterface MUST run before readStrongBinder.
-                // It reads and discards the strictModePolicy int32 AND the
-                // UTF-16 interface token string, advancing the parcel cursor
-                // past them. Without it, readStrongBinder() reads the token
-                // bytes as flat_binder_object data and returns null — the
-                // callback is silently dropped, MtkBt never hears from us,
-                // and the car sees no metadata.
-                //
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
+                // On the local binder path this is called directly by
+                // BTAvrcpMusicAdapter.onServiceConnected — no onTransact involved.
+                // On the remote path it arrives via onTransact code 1.
                 IBinder cb = data.readStrongBinder();
+                Log.d(TAG, "IBTAvrcpMusic.registerCallback cb=" + cb
+                        + " pid=" + android.os.Binder.getCallingPid()
+                        + " uid=" + android.os.Binder.getCallingUid());
                 if (cb != null && !mAvrcpCallbacks.contains(cb)) {
                     mAvrcpCallbacks.add(cb);
-                    Log.d(TAG, "IBTAvrcpMusic.registerCallback total="
-                            + mAvrcpCallbacks.size());
-                    // Push current state so MtkBt's internal callback arrays
-                    // populate right now, not on the next track change.
+                    Log.d(TAG, "IBTAvrcpMusic.registerCallback registered total="
+                            + mAvrcpCallbacks.size()
+                            + " — pushing status=" + (mIsPlaying ? 2 : 3)
+                            + " audioId=" + mCurrentAudioId);
                     notifyAvrcpCallbacks(1, mIsPlaying ? (byte) 2 : (byte) 3);
                     notifyAvrcpCallbacks(2, mCurrentAudioId);
                 } else {
@@ -278,11 +303,10 @@ public class MediaBridgeService extends Service {
                 return true;
             }
             case 2: { // unregisterCallback(IBTAvrcpMusicCallback cb)
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 IBinder cb = data.readStrongBinder();
-                if (cb != null) mAvrcpCallbacks.remove(cb);
-                Log.d(TAG, "IBTAvrcpMusic.unregisterCallback total="
-                        + mAvrcpCallbacks.size());
+                boolean removed = cb != null && mAvrcpCallbacks.remove(cb);
+                Log.d(TAG, "IBTAvrcpMusic.unregisterCallback cb=" + cb
+                        + " removed=" + removed + " remaining=" + mAvrcpCallbacks.size());
                 if (reply != null) reply.writeNoException();
                 return true;
             }
@@ -294,7 +318,6 @@ public class MediaBridgeService extends Service {
                 // leaves MtkBt's mRegBit empty and every later notifyTrackChanged
                 // gets dropped before the AVRCP packet is emitted. We always
                 // ack success (true). The adapter owns the bitset, not us.
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 byte eventId = data.readByte();
                 int  param   = data.readInt();
                 Log.d(TAG, "IBTAvrcpMusic.regNotificationEvent event=0x"
@@ -304,7 +327,6 @@ public class MediaBridgeService extends Service {
             }
 
             case 4: { // setPlayerApplicationSettingValue(byte attr, byte val) -> boolean
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 // Read args so the parcel is consumed; we don't apply them.
                 try { data.readByte(); data.readByte(); } catch (Exception ignored) {}
                 if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
@@ -312,13 +334,24 @@ public class MediaBridgeService extends Service {
             }
 
             case 5: { // getCapabilities() -> byte[]
-                // MtkBt stashes this in mCapabilities. A nonempty byte array
-                // avoids NPE paths in BTAvrcpMusicAdapter. We return an empty
-                // array — length 0 — which Parcel encodes as writeInt(0).
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
+                // MtkBt stashes this in mCapabilities and the car reads it
+                // during GET_CAPABILITIES to decide which events to register
+                // for via REGISTER_NOTIFICATION. An empty array is legal per
+                // our AIDL contract, but some AVRCP 1.3 CTs interpret it as
+                // "TG supports no events" and skip REGISTER_NOTIFICATION
+                // entirely — leaving cardinality:0 and no metadata flow.
+                //
+                // Return the two mandatory AVRCP event IDs:
+                //   0x01 = EVENT_PLAYBACK_STATUS_CHANGED
+                //   0x02 = EVENT_TRACK_CHANGED
+                // These are the only events MtkBt's BTAvrcpMusicAdapter
+                // notifies us about (via notifyPlaybackStatus and
+                // notifyTrackChanged), so this is both necessary and sufficient.
+                Log.d(TAG, "IBTAvrcpMusic.getCapabilities called → returning [0x01, 0x02]"
+                        + " pid=" + android.os.Binder.getCallingPid());
                 if (reply != null) {
                     reply.writeNoException();
-                    reply.writeByteArray(new byte[0]);
+                    reply.writeByteArray(new byte[]{ 0x01, 0x02 });
                 }
                 return true;
             }
@@ -326,14 +359,14 @@ public class MediaBridgeService extends Service {
             // Transport commands — forward as media keys to the stock player.
             // Note: IBTAvrcpMusic code 6 = play, NOT pause (differs from
             // IMediaPlaybackService which uses 6=pause, 7=play).
-            case 6:  return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
-            case 7:  return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_STOP);
-            case 8:  return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PAUSE);
-            case 9:  return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
-            case 10: return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
-            case 11: return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
-            case 12: return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS); // prevGroup
-            case 13: return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);     // nextGroup
+            case 6:  Log.d(TAG, "IBTAvrcpMusic.play → KEYCODE_MEDIA_PLAY");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
+            case 7:  Log.d(TAG, "IBTAvrcpMusic.stop → KEYCODE_MEDIA_STOP");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_STOP);
+            case 8:  Log.d(TAG, "IBTAvrcpMusic.pause → KEYCODE_MEDIA_PAUSE"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PAUSE);
+            case 9:  Log.d(TAG, "IBTAvrcpMusic.resume → KEYCODE_MEDIA_PLAY"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
+            case 10: Log.d(TAG, "IBTAvrcpMusic.prev → KEYCODE_MEDIA_PREVIOUS"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+            case 11: Log.d(TAG, "IBTAvrcpMusic.next → KEYCODE_MEDIA_NEXT");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
+            case 12: Log.d(TAG, "IBTAvrcpMusic.prevGroup → KEYCODE_MEDIA_PREVIOUS"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+            case 13: Log.d(TAG, "IBTAvrcpMusic.nextGroup → KEYCODE_MEDIA_NEXT");     return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
 
             // Setter/getter pairs for player-app settings. Setters return
             // boolean success; getters return int (zero = not-applicable).
@@ -341,7 +374,6 @@ public class MediaBridgeService extends Service {
             case 16: // setShuffleMode(int)  -> boolean
             case 18: // setRepeatMode(int)   -> boolean
             case 20: // setScanMode(int)     -> boolean
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 try { data.readInt(); } catch (Exception ignored) {}
                 if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
                 return true;
@@ -350,62 +382,74 @@ public class MediaBridgeService extends Service {
             case 19: // getRepeatMode()    -> int
             case 21: // getScanMode()      -> int
             case 36: // getQueuePosition() -> int
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 if (reply != null) { reply.writeNoException(); reply.writeInt(0); }
                 return true;
 
             case 22: // informDisplayableCharacterSet(int) -> boolean
             case 23: // informBatteryStatusOfCT()         -> boolean
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 if (code == 22) { try { data.readInt(); } catch (Exception ignored) {} }
                 if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
                 return true;
 
             case 24: // getPlayStatus() -> byte (1=stopped, 2=playing, 3=paused)
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 if (reply != null) {
+                    byte status = mIsPlaying ? (byte) 2 : (byte) 3;
+                    Log.v(TAG, "IBTAvrcpMusic.getPlayStatus → " + status);
                     reply.writeNoException();
-                    reply.writeByte(mIsPlaying ? (byte) 2 : (byte) 3);
+                    reply.writeByte(status);
                 }
                 return true;
             case 25: // position() -> long
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeLong(computePosition()); }
+                if (reply != null) {
+                    long pos = computePosition();
+                    Log.v(TAG, "IBTAvrcpMusic.position → " + pos);
+                    reply.writeNoException(); reply.writeLong(pos);
+                }
                 return true;
             case 26: // duration() -> long
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentDuration); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.duration → " + mCurrentDuration);
+                    reply.writeNoException(); reply.writeLong(mCurrentDuration);
+                }
                 return true;
             case 27: // getAudioId() -> long
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentAudioId); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.getAudioId → " + mCurrentAudioId);
+                    reply.writeNoException(); reply.writeLong(mCurrentAudioId);
+                }
                 return true;
             case 28: // getTrackName() -> String
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentTitle)); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.getTrackName → " + safeString(mCurrentTitle));
+                    reply.writeNoException(); reply.writeString(safeString(mCurrentTitle));
+                }
                 return true;
             case 29: // getAlbumName() -> String
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentAlbum)); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.getAlbumName → " + safeString(mCurrentAlbum));
+                    reply.writeNoException(); reply.writeString(safeString(mCurrentAlbum));
+                }
                 return true;
             case 30: // getAlbumId() -> long (IBTAvrcpMusic numbering)
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentAlbumId); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.getAlbumId → " + mCurrentAlbumId);
+                    reply.writeNoException(); reply.writeLong(mCurrentAlbumId);
+                }
                 return true;
             case 31: // getArtistName() -> String
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
-                if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentArtist)); }
+                if (reply != null) {
+                    Log.v(TAG, "IBTAvrcpMusic.getArtistName → " + safeString(mCurrentArtist));
+                    reply.writeNoException(); reply.writeString(safeString(mCurrentArtist));
+                }
                 return true;
 
             case 32: // enqueue(long[], int) -> void
             case 35: // open(long[], int)    -> void
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 try { data.createLongArray(); data.readInt(); } catch (Exception ignored) {}
                 if (reply != null) reply.writeNoException();
                 return true;
 
             case 33: // getNowPlaying() -> long[]
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 if (reply != null) {
                     reply.writeNoException();
                     reply.writeLongArray(new long[0]);
@@ -413,13 +457,11 @@ public class MediaBridgeService extends Service {
                 return true;
 
             case 34: // getNowPlayingItemName(long) -> String
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 try { data.readLong(); } catch (Exception ignored) {}
                 if (reply != null) { reply.writeNoException(); reply.writeString(""); }
                 return true;
 
             case 37: // setQueuePosition(int) -> void
-                data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
                 try { data.readInt(); } catch (Exception ignored) {}
                 if (reply != null) reply.writeNoException();
                 return true;
@@ -438,7 +480,6 @@ public class MediaBridgeService extends Service {
         // All void transport methods still must consume the interface token
         // and write writeNoException so the caller's readException sees a
         // clean reply parcel.
-        data.enforceInterface(DESCRIPTOR_AVRCP_MUSIC);
         sendMediaKey(keyCode);
         if (reply != null) reply.writeNoException();
         return true;
@@ -456,33 +497,41 @@ public class MediaBridgeService extends Service {
 
     private boolean handleMediaPlayback(int code, Parcel data, Parcel reply)
             throws RemoteException {
-        data.enforceInterface(DESCRIPTOR_MEDIA_PLAYBACK);
         switch (code) {
             case 4:  // isPlaying() -> int (0/1)
+                Log.v(TAG, "IMediaPlayback.isPlaying → " + mIsPlaying);
                 if (reply != null) { reply.writeNoException(); reply.writeInt(mIsPlaying ? 1 : 0); }
                 return true;
             case 10: // duration() -> long
+                Log.v(TAG, "IMediaPlayback.duration → " + mCurrentDuration);
                 if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentDuration); }
                 return true;
             case 11: // position() -> long
+                Log.v(TAG, "IMediaPlayback.position → " + computePosition());
                 if (reply != null) { reply.writeNoException(); reply.writeLong(computePosition()); }
                 return true;
             case 13: // getTrackName() -> String
+                Log.v(TAG, "IMediaPlayback.getTrackName → " + safeString(mCurrentTitle));
                 if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentTitle)); }
                 return true;
             case 14: // getAlbumName() -> String
+                Log.v(TAG, "IMediaPlayback.getAlbumName → " + safeString(mCurrentAlbum));
                 if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentAlbum)); }
                 return true;
             case 15: // getAlbumId() -> long
+                Log.v(TAG, "IMediaPlayback.getAlbumId → " + mCurrentAlbumId);
                 if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentAlbumId); }
                 return true;
             case 16: // getArtistName() -> String
+                Log.v(TAG, "IMediaPlayback.getArtistName → " + safeString(mCurrentArtist));
                 if (reply != null) { reply.writeNoException(); reply.writeString(safeString(mCurrentArtist)); }
                 return true;
             case 17: // getArtistId() -> long
+                Log.v(TAG, "IMediaPlayback.getArtistId → " + mCurrentArtistId);
                 if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentArtistId); }
                 return true;
             case 24: // getAudioId() -> long
+                Log.v(TAG, "IMediaPlayback.getAudioId → " + mCurrentAudioId);
                 if (reply != null) { reply.writeNoException(); reply.writeLong(mCurrentAudioId); }
                 return true;
             default:
@@ -501,6 +550,18 @@ public class MediaBridgeService extends Service {
     // -----------------------------------------------------------------------
 
     private void notifyAvrcpCallbacks(int code, Object... args) {
+        if (mAvrcpCallbacks.isEmpty()) {
+            Log.v(TAG, "notifyAvrcpCallbacks code=" + code + " — no callbacks registered");
+            return;
+        }
+        // Build a readable arg summary for logging
+        StringBuilder argStr = new StringBuilder();
+        if (args != null) {
+            for (Object a : args) argStr.append(a).append(' ');
+        }
+        Log.d(TAG, "notifyAvrcpCallbacks code=" + code
+                + " args=[" + argStr.toString().trim() + "]"
+                + " targets=" + mAvrcpCallbacks.size());
         for (IBinder cb : mAvrcpCallbacks) {
             Parcel data  = Parcel.obtain();
             Parcel reply = Parcel.obtain();
@@ -513,10 +574,11 @@ public class MediaBridgeService extends Service {
                         else if (arg instanceof Integer) data.writeInt((Integer) arg);
                     }
                 }
-                cb.transact(code, data, reply, 0);
+                int rc = cb.transact(code, data, reply, 0) ? 0 : -1;
+                Log.v(TAG, "notifyAvrcpCallbacks code=" + code + " cb=" + cb + " rc=" + rc);
             } catch (RemoteException e) {
                 Log.w(TAG, "AVRCP callback transact failed code=" + code
-                        + " — dropping: " + e);
+                        + " cb=" + cb + " — dropping: " + e);
                 mAvrcpCallbacks.remove(cb);
             } finally {
                 reply.recycle();
@@ -525,8 +587,18 @@ public class MediaBridgeService extends Service {
         }
     }
 
-    private void notifyPlaybackStatus(byte status) { notifyAvrcpCallbacks(1, status); }
-    private void notifyTrackChanged(long id)       { notifyAvrcpCallbacks(2, id); }
+    private void notifyPlaybackStatus(byte status) {
+        Log.d(TAG, "notifyPlaybackStatus status=" + status
+                + " (" + (status == 2 ? "playing" : status == 3 ? "paused" : "stopped") + ")"
+                + " callbacks=" + mAvrcpCallbacks.size());
+        notifyAvrcpCallbacks(1, status);
+    }
+    private void notifyTrackChanged(long id) {
+        Log.d(TAG, "notifyTrackChanged id=" + id
+                + " title=" + safeString(mCurrentTitle)
+                + " callbacks=" + mAvrcpCallbacks.size());
+        notifyAvrcpCallbacks(2, id);
+    }
 
     /** Live position estimate. Approximate since the Y1 player emits no
      *  position updates, but accurate enough for head-unit scrub bars. */
@@ -545,16 +617,8 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=9 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
-
-        // Attach a non-null IInterface under the IBTAvrcpMusic descriptor.
-        // This only matters for in-process queryLocalInterface() lookups;
-        // MtkBt is out-of-process so queryLocalInterface always returns null
-        // there regardless. Harmless belt-and-suspenders.
-        mBinder.attachInterface(new IInterface() {
-            @Override public IBinder asBinder() { return mBinder; }
-        }, DESCRIPTOR_AVRCP_MUSIC);
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         setupRemoteControlClient();
@@ -563,7 +627,14 @@ public class MediaBridgeService extends Service {
 
     @Override
     public IBinder onBind(Intent intent) {
-        Log.d(TAG, "onBind: " + (intent != null ? intent.getAction() : "null"));
+        // Log.e so visible regardless of filtering. Stack trace confirms this
+        // onBind is the one MtkBt's bind resolves to (rules out shadowing by
+        // another installed com.android.music.MediaPlaybackService).
+        Log.e(TAG, "onBind: " + (intent != null ? intent.getAction() : "null")
+                + " returning mBinder=" + mBinder
+                + " mBinder.class=" + mBinder.getClass().getName());
+        Log.e(TAG, "onBind stack: " + android.util.Log.getStackTraceString(
+                new Throwable("onBind caller")));
         return mBinder;
     }
 
@@ -769,8 +840,8 @@ public class MediaBridgeService extends Service {
 
     private void onStateDetected(boolean playing) {
         if (playing == mIsPlaying) return;
-        Log.d(TAG, "State change: " + (playing ? "playing" : "paused"));
-        // Freeze position estimate before flipping the clock.
+        Log.d(TAG, "State change: " + (playing ? "playing" : "paused")
+                + " callbacks=" + mAvrcpCallbacks.size());
         mPositionAtStateChange = computePosition();
         mStateChangeTime = SystemClock.elapsedRealtime();
         mIsPlaying = playing;
@@ -788,6 +859,7 @@ public class MediaBridgeService extends Service {
 
         if (!queryMetadataFromStore(path)) {
             // Not indexed yet — scan this single file, then retry.
+            Log.d(TAG, "MediaStore miss for " + path + " — triggering scan");
             MediaScannerConnection.scanFile(this, new String[]{ path }, null,
                     new MediaScannerConnection.OnScanCompletedListener() {
                         @Override
@@ -809,6 +881,11 @@ public class MediaBridgeService extends Service {
     }
 
     private void broadcastTrackAndState() {
+        Log.d(TAG, "broadcastTrackAndState title=" + safeString(mCurrentTitle)
+                + " artist=" + safeString(mCurrentArtist)
+                + " audioId=" + mCurrentAudioId
+                + " playing=" + mIsPlaying
+                + " callbacks=" + mAvrcpCallbacks.size());
         publishMetadata();
         publishState();
         sendMusicBroadcast("com.android.music.metachanged");
@@ -940,8 +1017,11 @@ public class MediaBridgeService extends Service {
             if (is == null) return null;
             Bitmap bmp = BitmapFactory.decodeStream(is, null, opts);
             is.close();
+            Log.v(TAG, "loadAlbumArt id=" + albumId + " → "
+                    + (bmp != null ? bmp.getWidth() + "x" + bmp.getHeight() : "null"));
             return bmp;
         } catch (Exception e) {
+            Log.v(TAG, "loadAlbumArt id=" + albumId + " failed: " + e.getMessage());
             return null;
         }
     }

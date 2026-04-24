@@ -14,7 +14,7 @@ android {
         applicationId "com.y1.mediabridge"
         minSdkVersion 17
         targetSdkVersion 17
-        versionCode 3
+        versionCode 9
         versionName "1.2"
     }
 
