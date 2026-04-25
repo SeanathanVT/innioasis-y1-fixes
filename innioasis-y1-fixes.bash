@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.8
+# Version: 1.0.9
 # History:
+# 2026-04-25 (1.0.9): Sort some stuff to make it look cleaner (yes I still care about this).
 # 2026-04-25 (1.0.8): Add bash parameter handling for selective patching.
 # 2026-04-24 (1.0.7): Install patched Y1 music player APK.
 # 2026-04-24 (1.0.6): Install patched MtkBt.odex for AVRCP 1.3 Java selector fix.
@@ -65,13 +66,13 @@ while [[ $# -gt 0 ]]; do
       PATH_ARTIFACTS="$2"
       shift 2
       ;;
-    --music-apk)
-      FLAG_MUSIC_APK=true
+    --avrcp)
+      FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
-    --avrcp)
-      FLAG_AVRCP=true
+    --bluetooth)
+      FLAG_BLUETOOTH=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -80,8 +81,8 @@ while [[ $# -gt 0 ]]; do
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
-    --bluetooth)
-      FLAG_BLUETOOTH=true
+    --music-apk)
+      FLAG_MUSIC_APK=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -92,9 +93,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --all)
       FLAG_AVRCP=true
-      FLAG_MUSIC_APK=true
       FLAG_BLUETOOTH=true
       FLAG_BUILD_PROP=true
+      FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
       FLAG_ANY_SPECIFIED=true
       shift
@@ -132,9 +133,9 @@ FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
 FILENAME_MTKBT_APK="MtkBt.apk"
+FILENAME_MTKBT_ODEX="MtkBt.odex"
 FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
 FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
-FILENAME_MTKBT_ODEX="MtkBt.odex"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
@@ -150,14 +151,6 @@ cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILE
 # Mount working copy of system.img
 echo "Mounting working copy of system.img.."
 sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
-
-# Copy patched Y1 music player APK
-if [[ "$FLAG_MUSIC_APK" == true ]]; then
-  echo "Copying patched Y1 music player APK.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MUSIC_APK_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
-  sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
-  sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
-fi
 
 # Copy support files for AVRCP fix (Y1 Media Bridge APK, MtkBt odex, AVRCP JNI, mtkbt binary)
 if [[ "$FLAG_AVRCP" == true ]]; then
@@ -182,6 +175,17 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
 fi
 
+# Configure Bluetooth
+if [[ "$FLAG_BLUETOOTH" == true ]]; then
+  echo "Configuring Bluetooth.."
+  sudo sed -i 's/^Enable=.*/Enable=Source,Control,Target/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
+  sudo sed -i 's/^Master=.*/Master=true/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
+  sudo sed -i 's/^AddressBlacklist=.*/AddressBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
+  sudo sed -i 's/^ExactNameBlacklist=.*/ExactNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
+  sudo sed -i 's/^PartialNameBlacklist=.*/PartialNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
+  sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
+fi
+
 # Configure build.prop
 if [[ "$FLAG_BUILD_PROP" == true ]]; then
   echo "Configuring build.prop.."
@@ -196,15 +200,12 @@ ro.bluetooth.profiles.avrcp.target.enabled=true
 EOF
 fi
 
-# Configure Bluetooth
-if [[ "$FLAG_BLUETOOTH" == true ]]; then
-  echo "Configuring Bluetooth.."
-  sudo sed -i 's/^Enable=.*/Enable=Source,Control,Target/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
-  sudo sed -i 's/^Master=.*/Master=true/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
-  sudo sed -i 's/^AddressBlacklist=.*/AddressBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
-  sudo sed -i 's/^ExactNameBlacklist=.*/ExactNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
-  sudo sed -i 's/^PartialNameBlacklist=.*/PartialNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
-  sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
+# Copy patched Y1 music player APK
+if [[ "$FLAG_MUSIC_APK" == true ]]; then
+  echo "Copying patched Y1 music player APK.."
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MUSIC_APK_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+  sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+  sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
 fi
 
 # Remove unnecessary APK files
