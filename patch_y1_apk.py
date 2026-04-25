@@ -23,7 +23,13 @@ USAGE
   If no argument is given, the script looks for any
   com_innioasis_y1_*.apk in the current directory.
 
-Produces:  com.innioasis.y1_<version>-patched.apk  (unsigned)
+Produces:  com.innioasis.y1_<version>-patched.apk
+
+  The original META-INF/ signature block is retained from the stock APK.
+  PackageManager requires a parseable signature block to be present at boot
+  even for system apps pushed directly to /system/app/ — a completely
+  unsigned zip triggers "no certificates" rejection. The stale signature
+  is harmless since cert verification is bypassed when pushing via ADB.
 
 DEPLOYMENT
 ----------
@@ -133,7 +139,7 @@ pkg_name, version = get_apk_info(ORIGINAL_APK)
 OUTPUT_APK = f"{pkg_name}_{version}-patched.apk"
 print(f"  Package:  {pkg_name}")
 print(f"  Version:  {version}")
-print(f"  Output:   {OUTPUT_APK}  (unsigned — deploy via ADB push or firmware flash)")
+print(f"  Output:   {OUTPUT_APK}")
 
 java = find_java()
 print(f"✓ Java found: {java}")
@@ -530,7 +536,13 @@ if not os.path.exists(dex1) or not os.path.exists(dex2):
 print(f"  ✓ classes.dex  {os.path.getsize(dex1):,} bytes")
 print(f"  ✓ classes2.dex {os.path.getsize(dex2):,} bytes")
 
-# ── Build unsigned APK (replace DEX in original zip) ─────────────────────────
+# ── Build patched APK (replace DEX, keep original META-INF) ──────────────────
+# The original META-INF/ signature block must be preserved. Stripping it
+# produces an unsigned zip that PackageManager rejects at boot with:
+#   "Package com.innioasis.y1 has no certificates at entry AndroidManifest.xml; ignoring!"
+# Since we are pushing directly to /system/app/ and bypassing the PackageManager
+# install flow, cert *verification* is not the issue — the block just needs to
+# exist and be parseable. The stale signature is harmless in this context.
 with open(dex1, 'rb') as f: dex1_bytes = f.read()
 with open(dex2, 'rb') as f: dex2_bytes = f.read()
 
@@ -539,24 +551,22 @@ with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
                          compression=zipfile.ZIP_DEFLATED,
                          allowZip64=True) as zout:
         for item in zin.infolist():
-            if item.filename.startswith('META-INF/'):
-                continue          # strip original signature
             if item.filename == 'classes.dex':
                 zout.writestr(item, dex1_bytes)
             elif item.filename == 'classes2.dex':
                 zout.writestr(item, dex2_bytes)
             else:
-                zout.writestr(item, zin.read(item.filename))
+                zout.writestr(item, zin.read(item.filename))  # includes META-INF/
 
 size = os.path.getsize(OUTPUT_APK)
-print(f"  ✓ Unsigned APK: {OUTPUT_APK} ({size:,} bytes)")
+print(f"  ✓ Patched APK: {OUTPUT_APK} ({size:,} bytes)")
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 print(f"""
 {'=' * 60}
 SUCCESS
 {'=' * 60}
-Output:  {OUTPUT_APK}  (unsigned)
+Output:  {OUTPUT_APK}
 
 Deploy via ADB push (requires root / remounted /system):
   adb root
