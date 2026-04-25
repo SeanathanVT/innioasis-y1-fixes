@@ -361,7 +361,7 @@ INIT_VIEW_PATTERN = re.compile(
     r'(\.method public initView\(\)V\n'
     r'    \.locals 2\n'
     r'\n'
-    r'    )(const v0, \d+)'
+    r'    )(const v0, (?:0x[0-9a-fA-F]+|\d+))'
     r'(\n'
     r'\n'
     r'    \.line 50\n'
@@ -437,7 +437,7 @@ if not m:
         "  Inspect AlbumsActivity.smali manually."
     )
 
-res_id_instr = m.group(2)  # e.g. "const v0, 2131820833"
+res_id_instr = m.group(2)  # e.g. "const v0, 0x7f110121" (apktool writes hex for large constants)
 print(f"  Detected initView resource ID: {res_id_instr}")
 
 NEW_INIT_VIEW = (
