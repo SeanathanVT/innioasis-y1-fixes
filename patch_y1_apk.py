@@ -528,7 +528,7 @@ NEW_INIT_VIEW = (
     "    #            v4=result ArrayList, v5=seen LinkedHashSet,\n"
     "    #            v6=current Song / album String, v7=scratch\n"
     "\n"
-   "    sget-object v1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;\n"
+    "    sget-object v1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;\n"
     "\n"
     "    invoke-virtual {v1}, Lcom/innioasis/y1/Y1Application$Companion;->getY1Repository()Lcom/innioasis/y1/database/Y1Repository;\n"
     "\n"
