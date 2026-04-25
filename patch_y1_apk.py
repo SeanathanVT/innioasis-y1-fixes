@@ -97,7 +97,11 @@ DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
     SQL: SELECT * FROM song WHERE isAudiobook = 0 AND artist = ?
          ORDER BY lower(pinyinAlbum)
     Returns List<Song> for an exact artist match, sorted by album.
-    Accessible via Y1Repository.songDao field (Lcom/innioasis/y1/database/SongDao;).
+    SongDao is accessed via Y1Repository.access$getSongDao$p(repo) -- a Kotlin
+    compiler-generated static accessor. The songDao field itself is private and
+    cannot be read via iget-object from outside Y1Repository (IllegalAccessError).
+    The accessor exists in the DEX but exhibits NoSuchMethodError on this device's
+    old Dalvik (API 17). Instead, Patch C makes songDao public so iget-object works.
     Song.getAlbum() returns Ljava/lang/String;.
 
   AlbumListAdapter.setAlbums(List)V:
@@ -125,6 +129,7 @@ UNPACKED_DIR  = os.path.join(WORK_DIR, "unpacked")
 
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
 ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
+REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
 
 # Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
 ARTIST_INTENT_KEY = "artist_key"
@@ -534,6 +539,7 @@ NEW_INIT_VIEW = (
     "\n"
     "    move-result-object v1\n"
     "\n"
+    "    # songDao field is made public by Patch C (Y1Repository.smali) so iget-object works.\n"
     "    iget-object v2, v1, Lcom/innioasis/y1/database/Y1Repository;->songDao:Lcom/innioasis/y1/database/SongDao;\n"
     "\n"
     "    invoke-interface {v2, v0}, Lcom/innioasis/y1/database/SongDao;->getSongsByArtistSortByAlbum(Ljava/lang/String;)Ljava/util/List;\n"
@@ -601,6 +607,46 @@ albums_src = INIT_VIEW_PATTERN.sub(NEW_INIT_VIEW, albums_src, count=1)
 with open(albums_path, 'w') as f:
     f.write(albums_src)
 print(f"  Patch B: AlbumsActivity -- initView reads {ARTIST_INTENT_KEY!r} and filters albums")
+
+# ============================================================
+# Patch C: Y1Repository.smali -- make songDao field public
+# ============================================================
+#
+# Y1Repository.songDao is declared `private final` (access_flags=0x12).
+# AlbumsActivity (in a different package) cannot access it via iget-object:
+# Dalvik's verifier throws IllegalAccessError at class load time.
+#
+# The Kotlin-generated accessor access$getSongDao$p exists but exhibits
+# unreliable NoSuchMethodError behaviour on this device's old Dalvik (API 17).
+#
+# Simplest fix: change the field to `public final` (access_flags=0x11).
+# The field is internal to a private system app, so no security implication.
+# apktool writes the declaration as:
+#   .field private final songDao:Lcom/innioasis/y1/database/SongDao;
+# We change it to:
+#   .field public final songDao:Lcom/innioasis/y1/database/SongDao;
+
+repo_path = os.path.join(UNPACKED_DIR, REPO_SMALI)
+if not os.path.exists(repo_path):
+    sys.exit(f"ERROR: Expected smali not found: {repo_path}")
+
+with open(repo_path, 'r') as f:
+    repo_src = f.read()
+
+OLD_FIELD = ".field private final songDao:Lcom/innioasis/y1/database/SongDao;"
+NEW_FIELD = ".field public final songDao:Lcom/innioasis/y1/database/SongDao;"
+
+if OLD_FIELD not in repo_src:
+    sys.exit(
+        "ERROR: Y1Repository songDao field declaration not found.\n"
+        f"  Expected: {OLD_FIELD}\n"
+        "  Inspect Y1Repository.smali manually."
+    )
+
+repo_src = repo_src.replace(OLD_FIELD, NEW_FIELD, 1)
+with open(repo_path, 'w') as f:
+    f.write(repo_src)
+print("  Patch C: Y1Repository -- songDao field changed from private to public")
 
 # -- Step 4: Reassemble DEX with apktool -------------------------------------
 print(f"\n[4/4] Reassembling smali -> DEX (this takes ~30 seconds)...")
