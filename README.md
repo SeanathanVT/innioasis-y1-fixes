@@ -39,7 +39,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 ### APK Changes (patch_y1_apk.py)
 
-Three bytecode patches are applied to the Y1 music player DEX:
+Two bytecode patches and one scope-related patch are applied to the Y1 music player DEX:
 
 **Patch A – ArtistsActivity.confirm():**
 - Replaces the direct song list navigation with an Intent launch to AlbumsActivity
