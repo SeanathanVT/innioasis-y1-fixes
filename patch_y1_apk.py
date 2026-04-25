@@ -67,8 +67,11 @@ WHAT THIS PATCH DOES
   Patch B -- AlbumsActivity.initView():
     After the existing setup (title, ListView adapter, SPV bind), reads
     the "artist_key" Intent extra. If present and non-empty, calls
-    Y1Repository.getAlbumsByKey(artist) -- which returns List<Album>
-    synchronously -- then calls AlbumListAdapter.setAlbums() and returns.
+    SongDao.getSongsByArtistSortByAlbum(artist) -- which runs
+    SELECT * FROM song WHERE artist = ? ORDER BY lower(pinyinAlbum) --
+    deduplicates the returned Song list by album name using a LinkedHashSet,
+    builds an ArrayList<String> of unique album names in album sort order,
+    then calls AlbumListAdapter.setAlbums() and returns.
     If the extra is absent, falls through to the original getAlbumListBySort()
     call, preserving the normal Albums screen behavior.
 
@@ -81,17 +84,24 @@ DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
     switchSongSortType() call is at instructions 72-73 -- this is what we replace
 
   AlbumsActivity.initView():
-    registers_size=3; p0=this=v2; locals=2 (v0, v1 scratch)
+    registers_size=3; p0=this=v2; locals=2 original (patched to .locals 8)
     Resource ID const: 2131820833 (0x7f110121)
     getAlbumListBySort() launches a coroutine (async) -- safe to skip via early return
 
-  Y1Repository.getAlbumsByKey(String)List:
-    EXISTS. Takes a String, returns List<Album> synchronously.
-    There is NO separate getAlbumsByKeySync method on Y1Repository --
-    getAlbumsByKey IS the synchronous method (calls SongDao.getAlbumsByKeySync internally).
+  Y1Repository.getAlbumsByKey(String)List -- NOT used:
+    Queries album column LIKE '%key%' -- searches by album name substring.
+    Passing an artist name returns albums whose title contains the artist name,
+    which produces empty results. This method is NOT the correct one to use.
+
+  SongDao.getSongsByArtistSortByAlbum(String)List -- CORRECT method:
+    SQL: SELECT * FROM song WHERE isAudiobook = 0 AND artist = ?
+         ORDER BY lower(pinyinAlbum)
+    Returns List<Song> for an exact artist match, sorted by album.
+    Accessible via Y1Repository.songDao field (Lcom/innioasis/y1/database/SongDao;).
+    Song.getAlbum() returns Ljava/lang/String;.
 
   AlbumListAdapter.setAlbums(List)V:
-    EXISTS. Correct method name is setAlbums, NOT setItems.
+    EXISTS. Takes List<String> (album names). Correct method name is setAlbums.
 
   Intent extra key for album->song drill-down:
     ShowSongListActivity reads "album_name" (lowercase, underscore).
@@ -442,7 +452,7 @@ print(f"  Detected initView resource ID: {res_id_instr}")
 
 NEW_INIT_VIEW = (
     ".method public initView()V\n"
-    "    .locals 4\n"
+    "    .locals 8\n"
     "\n"
     f"    {res_id_instr}\n"
     "\n"
@@ -511,21 +521,60 @@ NEW_INIT_VIEW = (
     "\n"
     "    if-nez v1, :cond_no_artist\n"
     "\n"
+    "    # Get Y1Repository -> SongDao -> call getSongsByArtistSortByAlbum(artist)\n"
+    "    # Returns List<Song> ordered by pinyinAlbum. We deduplicate by album name\n"
+    "    # into an ordered ArrayList<String>, then pass to setAlbums().\n"
+    "    # Registers: v0=artist, v1=repo, v2=songDao, v3=songs iterator,\n"
+    "    #            v4=result ArrayList, v5=seen LinkedHashSet,\n"
+    "    #            v6=current Song / album String, v7=scratch\n"
+    "\n"
     "    sget-object v1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;\n"
     "\n"
     "    invoke-virtual {v1}, Lcom/innioasis/y1/Y1Application$Companion;->getY1Repository()Lcom/innioasis/y1/database/Y1Repository;\n"
     "\n"
     "    move-result-object v1\n"
     "\n"
-    "    invoke-virtual {v1, v0}, Lcom/innioasis/y1/database/Y1Repository;->getAlbumsByKey(Ljava/lang/String;)Ljava/util/List;\n"
+    "    iget-object v2, v1, Lcom/innioasis/y1/database/Y1Repository;->songDao:Lcom/innioasis/y1/database/SongDao;\n"
     "\n"
-    "    move-result-object v2\n"
-    "\n"
-    "    invoke-direct {p0}, Lcom/innioasis/music/AlbumsActivity;->getAdapter()Lcom/innioasis/music/adapter/AlbumListAdapter;\n"
+    "    invoke-interface {v2, v0}, Lcom/innioasis/y1/database/SongDao;->getSongsByArtistSortByAlbum(Ljava/lang/String;)Ljava/util/List;\n"
     "\n"
     "    move-result-object v3\n"
     "\n"
-    "    invoke-virtual {v3, v2}, Lcom/innioasis/music/adapter/AlbumListAdapter;->setAlbums(Ljava/util/List;)V\n"
+    "    new-instance v4, Ljava/util/ArrayList;\n"
+    "    invoke-direct {v4}, Ljava/util/ArrayList;-><init>()V\n"
+    "\n"
+    "    new-instance v5, Ljava/util/LinkedHashSet;\n"
+    "    invoke-direct {v5}, Ljava/util/LinkedHashSet;-><init>()V\n"
+    "\n"
+    "    invoke-interface {v3}, Ljava/util/List;->iterator()Ljava/util/Iterator;\n"
+    "    move-result-object v3\n"
+    "\n"
+    "    :loop_songs\n"
+    "    invoke-interface {v3}, Ljava/util/Iterator;->hasNext()Z\n"
+    "    move-result v7\n"
+    "    if-eqz v7, :loop_done\n"
+    "\n"
+    "    invoke-interface {v3}, Ljava/util/Iterator;->next()Ljava/lang/Object;\n"
+    "    move-result-object v6\n"
+    "    check-cast v6, Lcom/innioasis/y1/database/Song;\n"
+    "\n"
+    "    invoke-virtual {v6}, Lcom/innioasis/y1/database/Song;->getAlbum()Ljava/lang/String;\n"
+    "    move-result-object v6\n"
+    "\n"
+    "    if-eqz v6, :loop_songs\n"
+    "\n"
+    "    invoke-virtual {v5, v6}, Ljava/util/LinkedHashSet;->add(Ljava/lang/Object;)Z\n"
+    "    move-result v7\n"
+    "    if-eqz v7, :loop_songs\n"
+    "\n"
+    "    invoke-interface {v4, v6}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n"
+    "    goto :loop_songs\n"
+    "\n"
+    "    :loop_done\n"
+    "    invoke-direct {p0}, Lcom/innioasis/music/AlbumsActivity;->getAdapter()Lcom/innioasis/music/adapter/AlbumListAdapter;\n"
+    "    move-result-object v3\n"
+    "\n"
+    "    invoke-virtual {v3, v4}, Lcom/innioasis/music/adapter/AlbumListAdapter;->setAlbums(Ljava/util/List;)V\n"
     "\n"
     "    return-void\n"
     "\n"
