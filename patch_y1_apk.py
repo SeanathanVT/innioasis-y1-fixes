@@ -93,14 +93,20 @@ def get_apk_info(apk_path: str):
         return apk.get_package(), apk.get_androidversion_name()
     except Exception:
         pass
-    # Fallback: scan binary manifest for UTF-16LE strings
+    # Fallback: scan binary manifest for UTF-16LE strings.
+    # The manifest string pool may contain multiple com.innioasis.* entries
+    # (e.g. com.innioasis.fm as a string constant) before the actual package
+    # name appears. Using the most-frequent match picks the declared package
+    # name reliably, since it appears many times across permission/activity
+    # declarations while incidental strings appear only once.
+    from collections import Counter
     with zipfile.ZipFile(apk_path) as z:
         data = z.read("AndroidManifest.xml")
     text = data.decode('utf-16-le', errors='replace')
-    pkg = re.search(r'(com\.innioasis\.[a-z0-9_]+)', text)
+    matches = re.findall(r'(com\.innioasis\.[a-z0-9_]+)', text)
+    pkg = Counter(matches).most_common(1)[0][0] if matches else "com.innioasis.y1"
     ver = re.search(r'(\d+\.\d+\.\d+)', text)
-    return (pkg.group(1) if pkg else "com.innioasis.y1",
-            ver.group(1) if ver else "unknown")
+    return (pkg, ver.group(1) if ver else "unknown")
 
 # ── Step 0: Pre-flight ───────────────────────────────────────────────────────
 print("=" * 60)
