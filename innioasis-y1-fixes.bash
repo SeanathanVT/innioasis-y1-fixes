@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.6
+# Version: 1.0.7
 # History:
+# 2026-04-24 (1.0.7): Install patched Y1 music player APK.
 # 2026-04-24 (1.0.6): Install patched MtkBt.odex for AVRCP 1.3 Java selector fix.
 # 2026-04-23 (1.0.5): Fine tune echo statements.
 # 2026-04-23 (1.0.4): Use unmodified (non-sparse) system.img source.
@@ -21,6 +22,8 @@ FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
 FILENAME_MTKBT_APK="MtkBt.apk"
+FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
+FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
 FILENAME_MTKBT_ODEX="MtkBt.odex"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
@@ -38,6 +41,12 @@ cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILE
 # Mount working copy of system.img
 echo "Mounting working copy of system.img.."
 sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
+
+# Copy patched Y1 music player APK
+echo "Copying patched Y1 music player APK.."
+sudo cp "${PATH_ARTIFACTS}/${FILENAME_MUSIC_APK_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
 
 # Copy Y1 Media Bridge APK
 echo "Copying Y1 Media Bridge APK.."
