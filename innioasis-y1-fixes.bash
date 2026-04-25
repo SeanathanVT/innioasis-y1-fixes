@@ -3,9 +3,10 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.6
+# Version: 1.0.7
 # History:
-# 2026-04-23 (1.0.6): Add build.prop value.
+# 2026-04-24 (1.0.7): Install patched Y1 music player APK.
+# 2026-04-24 (1.0.6): Install patched MtkBt.odex for AVRCP 1.3 Java selector fix.
 # 2026-04-23 (1.0.5): Fine tune echo statements.
 # 2026-04-23 (1.0.4): Use unmodified (non-sparse) system.img source.
 # 2026-04-23 (1.0.3): Add explicit Python virtual environment activation / deactivation.
@@ -20,6 +21,10 @@ VERSION_FIRMWARE="3.0.2"
 FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
+FILENAME_MTKBT_APK="MtkBt.apk"
+FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
+FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
+FILENAME_MTKBT_ODEX="MtkBt.odex"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
@@ -37,11 +42,22 @@ cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILE
 echo "Mounting working copy of system.img.."
 sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
 
+# Copy patched Y1 music player APK
+echo "Copying patched Y1 music player APK.."
+sudo cp "${PATH_ARTIFACTS}/${FILENAME_MUSIC_APK_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+
 # Copy Y1 Media Bridge APK
 echo "Copying Y1 Media Bridge APK.."
 sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
 sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
 sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
+
+echo "Copying patched MtkBt odex.."
+sudo cp "${PATH_ARTIFACTS}/${FILENAME_MTKBT_ODEX}" "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
+sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
+sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
 
 # Copy patched AVRCP JNI library
 echo "Copying patched AVRCP JNI library.."
@@ -62,7 +78,6 @@ sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 persist.bluetooth.avrcpversion=avrcp13
 persist.service.adb.enable=1
 persist.service.debuggable=1
-ro.bluetooth.avrcpversion=avrcp13
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
@@ -108,16 +123,18 @@ done
 echo "Unmounting development system.img.."
 sudo umount "${PATH_MOUNT}"
 
-# Change directories to MTK Client root directory 
+# Change directories to MTK Client root directory
 echo "Changing directories to MTK Client root directory.."
 cd "${PATH_MTKCLIENT}"
 
-# Write patched system.img
+# Activate MTKClient venv
 echo "Activating MTKClient Python virtual environment.."
 source "${PATH_VENV_MTKCLIENT}/bin/activate"
+
+# Write patched system.img
 echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
 python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+
 echo "Deactivating MTKClient Python virtual environment.."
 deactivate
 echo "Done!"
-
