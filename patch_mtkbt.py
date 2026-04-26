@@ -2,7 +2,8 @@
 """
 patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
-Stock binary md5: 3af1d4ad8f955038186696950430ffda
+Stock binary md5:  3af1d4ad8f955038186696950430ffda
+Output md5:        3a951f58bfbac12aa52c9a755cebc6d0
 
 Patches applied:
   1. 0xeba1d  Browse channel PSM 0x1b → 0x00 (remove browse advertisement)
@@ -35,7 +36,8 @@ import hashlib
 import sys
 from pathlib import Path
 
-STOCK_MD5 = "3af1d4ad8f955038186696950430ffda"
+STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
+OUTPUT_MD5 = "3a951f58bfbac12aa52c9a755cebc6d0"
 
 PATCHES = [
     {
@@ -156,7 +158,8 @@ def main():
     output_md5 = md5(data)
 
     print(f"\nOutput: {output_path}")
-    print(f"MD5:    {output_md5}")
+    print(f"MD5:    {output_md5}", end="")
+    print(f"  ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")
