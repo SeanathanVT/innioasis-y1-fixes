@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img and boot.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB root access.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.1.2
+# Version: 1.1.3
 # History:
+# 2026-04-26 (1.1.3): Prompt for sudo credentials upfront to prevent mid-execution prompt.
 # 2026-04-26 (1.1.2): Fix --root: sudo cpio to preserve device nodes; add ro.adb.secure=0 and service.adb.root=1. Remove fail on size mismatch (non-issue).
 # 2026-04-26 (1.1.1): Fix macOS compatibility: replace stat -c%s with wc -c for file size.
 # 2026-04-26 (1.1.0): Add --root flag to patch boot.img ramdisk for ADB root access.
@@ -153,6 +154,13 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   show_help
   exit 0
 fi
+
+# Prompt for sudo credentials upfront and keep the ticket alive for the duration of the script
+echo "This script requires sudo for mounting, cpio, and file operations."
+sudo -v
+while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
+SUDO_KEEPALIVE_PID=$!
+trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
 
 VERSION_FIRMWARE="3.0.2"
 

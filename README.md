@@ -32,7 +32,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Two ARM Thumb2 instruction overwrites in the version-selection function at 0x375c
   - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `485a632e799e0cd9ed44455238a8340e`)
 
-- **`innioasis-y1-fixes.bash`** (v1.1.2)
+- **`innioasis-y1-fixes.bash`** (v1.1.3)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts and patches the system.img firmware image (only when a system flag is specified)
@@ -247,6 +247,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.1.3** (2026-04-26) – Prompt for sudo credentials upfront; keep ticket alive for script duration to prevent mid-execution prompts
 - **v1.1.2** (2026-04-26) – Fix `--root`: use `sudo cpio` to preserve device nodes; add `ro.adb.secure=0` and `service.adb.root=1` to ramdisk `default.prop`; remove size mismatch failure (non-issue)
 - **v1.1.1** (2026-04-26) – Fix macOS compatibility: replace `stat -c%s` with `wc -c` for file size
 - **v1.1.0** (2026-04-26) – Add `--root` flag to patch boot.img ramdisk for ADB root access
