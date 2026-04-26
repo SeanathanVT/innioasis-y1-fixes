@@ -97,8 +97,9 @@ Mode `644`, owner `root:root`. See `innioasis-y1-fixes.bash` for the full
 system.img patch + flash flow.
 
 Ship alongside:
-- Patched `/system/bin/mtkbt` (AVRCP 1.3 SDP record, 3 byte patch in `.rodata`)
-- Patched `/system/lib/libextavrcp_jni.so` (forces `g_tg_feature = 0x0d`, 2 byte patch)
+- Patched `/system/bin/mtkbt` (AVRCP 1.4 SDP record; 6 patches: browse PSM zeroed, version/feature bytes set, ProfileDescList version `0x03→0x04`, descriptor table flags)
+- Patched `/system/lib/libextavrcp_jni.so` (forces `g_tg_feature = 0x0e` (1.4), `sdpfeature = 0x23`; 2 byte patches at `0x3764`, `0x37a8`)
+- Patched `/system/app/MtkBt.odex` (`getPreferVersion()` returns `0x0e` (1.4); DEX adler32 recomputed)
 
 ## Verify install
 
