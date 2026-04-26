@@ -21,7 +21,7 @@ Usage:
     python3 patch_odex.py MtkBt.odex --verify-only
 
 Deploy:
-    adb push MtkBt.odex.patched /system/framework/MtkBt.odex
+    adb push MtkBt.odex.patched /system/app/MtkBt.odex
     adb reboot
 """
 
@@ -144,7 +144,7 @@ def main():
     print(f"MD5:    {output_md5}", end="")
     print(f"  ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
     print(f"\nDeploy:")
-    print(f"  adb push {output_path} /system/framework/MtkBt.odex")
+    print(f"  adb push {output_path} /system/app/MtkBt.odex")
     print(f"  adb reboot")
 
 
