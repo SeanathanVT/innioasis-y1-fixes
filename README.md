@@ -1,12 +1,13 @@
 # Innioasis Y1 Firmware Fixes
 
-A comprehensive patching toolkit for the Innioasis Y1 media player (firmware 3.0.2) that fixes Bluetooth AVRCP functionality and improves the media player UI navigation.
+A comprehensive patching toolkit for the Innioasis Y1 media player (firmware 3.0.2) that fixes Bluetooth AVRCP functionality, improves the media player UI navigation, and enables ADB root access.
 
 ## Overview
 
 This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **Bluetooth AVRCP 1.4 Support** ⚠️ **WIP** – Forces AVRCP 1.4 advertisement across all three BT stack layers (daemon, ODEX, JNI library); pending flash verification
+- **ADB Root Access** – Patches the boot.img ramdisk to set `ro.secure=0`, `ro.debuggable=1`, and `persist.service.adb.enable=1`
 - **Artist→Album Navigation** – Improves media player UX by showing album cover art after artist selection instead of a flat song list
 - **System Configuration** – Enables ADB debugging and optimizes Bluetooth settings
 - **APK Patching** – Patches the system music player APK at the bytecode level using smali assembly
@@ -31,13 +32,14 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Two ARM Thumb2 instruction overwrites in the version-selection function at 0x375c
   - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `485a632e799e0cd9ed44455238a8340e`)
 
-- **`innioasis-y1-fixes.bash`** (v1.0.10)
+- **`innioasis-y1-fixes.bash`** (v1.1.0)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
-  - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`
-  - Mounts and patches the system.img firmware image
+  - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
+  - Mounts and patches the system.img firmware image (only when a system flag is specified)
   - Copies patched APKs, libraries, and binaries into the filesystem
   - Configures build.prop and Bluetooth settings
   - Removes unnecessary bloatware APKs
+  - Patches the boot.img ramdisk for ADB root access (`--root`)
 
 - **`patch_y1_apk.py`**
   - Unpacks, decompiles, and patches the Y1 music player APK at the smali level
@@ -92,6 +94,13 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - audio.conf: `Enable=Source,Control,Target`, `Master=true`
 - Clears Bluetooth device blacklists (auto_pairing.conf, blacklist.conf)
 
+**Boot Image Changes (`--root`):**
+- `ro.secure=0`
+- `ro.debuggable=1`
+- `persist.service.adb.enable=1`
+
+Scans `boot.img` for the GZIP-compressed CPIO ramdisk, patches `default.prop` in-place, and repacks. The Android boot image header is parsed to read the `ramdisk_size` and `page_size` fields; the padded ramdisk region size is computed as `ceil(ramdisk_size / page_size) * page_size`. The new ramdisk must fit within that region (allowing gzip recompression to produce slightly different output sizes). The `ramdisk_size` field in the header is updated to the new compressed size, and the ramdisk region is padded with null bytes to the page-aligned size before stitching. The output image is always the same total size as the input, which is required for flashing to a fixed-size partition. Output: `boot-3.0.2-rooted.img`.
+
 **Other Changes:**
 - Removes bloatware APKs (`--remove-apps`): ApplicationGuide, BackupRestoreConfirmation, BasicDreams, etc.
 
@@ -114,7 +123,8 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - Bash 4+
 - `sudo` access (for mounting and modifying system.img)
 - `--artifacts-dir` parameter pointing to a directory containing:
-  - `system.img` – Original firmware system image
+  - `system.img` – Original firmware system image (required for any system flag)
+  - `boot.img` – Original firmware boot image (required for `--root`)
   - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player APK (from patch_y1_apk.py)
   - `Y1MediaBridge.apk`, `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched` – Patched BT binaries (from patch scripts, for `--avrcp` flag)
 - mtkclient 2.1.4.1 installed at `/opt/mtkclient-2.1.4.1`
@@ -151,7 +161,7 @@ Each script verifies the input MD5, checks patch sites before and after, and ref
 ### Step 3: Prepare Patch Artifacts
 
 Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`):
-- `system.img` (original firmware system image)
+- `system.img` (original firmware system image, required for any system flag)
   - Obtained from an OTA update package, or dumped from the device block device via ADB:
     ```bash
     adb shell "dd if=/dev/block/<partition> bs=4096" > system.img
@@ -162,6 +172,8 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
     simg2img system.img system-raw.img
     mv system-raw.img system.img
     ```
+- `boot.img` (original firmware boot image, required for `--root`)
+  - Obtained and converted the same way as `system.img` above
 - `com.innioasis.y1_3.0.2-patched.apk` (from Step 1)
 - `Y1MediaBridge.apk` (required for `--avrcp` flag)
 - `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched` (from Step 2, required for `--avrcp` flag)
@@ -179,7 +191,8 @@ chmod +x innioasis-y1-fixes.bash
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
 - `--remove-apps` – Remove unnecessary APK files
-- `--all` – Apply all patches
+- `--all` – Apply all system patches (excludes `--root`)
+- `--root` – Patch boot.img ramdisk for ADB root access
 
 **Example:**
 ```bash
@@ -187,15 +200,18 @@ chmod +x innioasis-y1-fixes.bash
 ```
 
 The script will:
-1. Copy and mount system.img as a working copy
+1. Copy and mount system.img as a working copy (only when a system flag is specified)
 2. Apply selected patches
-3. Unmount and generate the patched firmware image
+3. Unmount and generate the patched system image
+4. Patch the boot.img ramdisk and generate the patched boot image (only when `--root` is specified)
 
-**Output:** `system-3.0.2-devel.img` (patched firmware image)
+**Outputs:**
+- `system-3.0.2-devel.img` – Patched system image (when any system flag is specified)
+- `boot-3.0.2-rooted.img` – Patched boot image (when `--root` is specified)
 
 ### Step 5: Flash Firmware
 
-Use the MTK scatter tool or mtkclient to flash `system-3.0.2-devel.img` back to the device.
+Use mtkclient to flash the patched images back to the device. If both `--root` and system flags are specified, the script will prompt for two separate device connections (one per partition).
 
 ## Deployment Notes
 
@@ -227,6 +243,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.1.0** (2026-04-26) – Add `--root` flag to patch boot.img ramdisk for ADB root access
 - **v1.0.11** (2026-04-26) – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4
 - **v1.0.10** (2026-04-25) – Split build.prop configuration, sorting and cleanup
 - **v1.0.9** (2026-04-25) – Sort some stuff to make it look cleaner
