@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.9
+# Version: 1.0.10
 # History:
+# 2026-04-25 (1.0.10): Split build.prop configuration stuff. More sorting. More cleanup. More renames.
 # 2026-04-25 (1.0.9): Sort some stuff to make it look cleaner (yes I still care about this).
 # 2026-04-25 (1.0.8): Add bash parameter handling for selective patching.
 # 2026-04-24 (1.0.7): Install patched Y1 music player APK.
@@ -32,9 +33,9 @@ MANDATORY:
   --artifacts-dir <path> Directory containing binary files and APKs
 
 OPTIONS:
-  --avrcp              Copy support files for AVRCP fix (Y1 Media Bridge, MtkBt odex, AVRCP JNI, mtkbt binary)
-  --bluetooth          Configure Bluetooth settings
-  --build-prop         Configure build.prop for ADB and Bluetooth
+  --adb                Enable ADB debugging
+  --avrcp              Enable AVRCP 1.3 support and fix Bluetooth media control issues
+  --bluetooth          Configure Bluetooth fixes
   --music-apk          Copy patched Y1 music player APK
   --remove-apps        Remove unnecessary APK files from system
   --all                Apply all patches (equivalent to all flags above)
@@ -45,16 +46,16 @@ EXAMPLES:
   ./innioasis-y1-fixes.bash --artifacts-dir /path/to/artifacts --all
 
   # Apply only specific patches
-  ./innioasis-y1-fixes.bash --artifacts-dir /path/to/artifacts --music-apk --bluetooth --remove-apps
+  ./innioasis-y1-fixes.bash --artifacts-dir /path/to/artifacts --bluetooth --music-apk --remove-apps
 
 EOF
 }
 
 # Initialize flags
+FLAG_ADB=false
 FLAG_ANY_SPECIFIED=false
 FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
-FLAG_BUILD_PROP=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
 PATH_ARTIFACTS=""
@@ -66,6 +67,11 @@ while [[ $# -gt 0 ]]; do
       PATH_ARTIFACTS="$2"
       shift 2
       ;;
+    --adb)
+      FLAG_ADB=true
+      FLAG_ANY_SPECIFIED=true
+      shift
+      ;;
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
@@ -73,11 +79,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bluetooth)
       FLAG_BLUETOOTH=true
-      FLAG_ANY_SPECIFIED=true
-      shift
-      ;;
-    --build-prop)
-      FLAG_BUILD_PROP=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -94,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --all)
       FLAG_AVRCP=true
       FLAG_BLUETOOTH=true
-      FLAG_BUILD_PROP=true
+      FLAG_ADB=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
       FLAG_ANY_SPECIFIED=true
@@ -132,7 +133,6 @@ VERSION_FIRMWARE="3.0.2"
 FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
-FILENAME_MTKBT_APK="MtkBt.apk"
 FILENAME_MTKBT_ODEX="MtkBt.odex"
 FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
 FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
@@ -152,48 +152,55 @@ cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILE
 echo "Mounting working copy of system.img.."
 sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
 
-# Copy support files for AVRCP fix (Y1 Media Bridge APK, MtkBt odex, AVRCP JNI, mtkbt binary)
+# Enable ADB debugging
+if [[ "$FLAG_ADB" == true ]]; then
+  echo "Configuring build.prop for ADB debugging.."
+  sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
+# Modified to enable ADB debugging
+persist.service.adb.enable=1
+persist.service.debuggable=1
+EOF
+fi
+
+# Enable AVRCP 1.3 support and fix Bluetooth media control issues
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Copying Y1 Media Bridge APK.."
+  echo "Enabling AVRCP 1.3 support and fixing Bluetooth media control issues.."
+
+  echo "  Copying Y1 Media Bridge APK.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
   sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
 
-  echo "Copying patched MtkBt odex.."
+  echo "  Copying patched MtkBt odex.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_MTKBT_ODEX}" "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
   sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
 
-  echo "Copying patched AVRCP JNI library.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
-  sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
-  sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
-
-  echo "Copying patched mtkbt binary.."
+  echo "  Copying patched mtkbt binary.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_BIN_MTKBT}" "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chmod 755 "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
+
+  echo "  Copying patched AVRCP JNI library.."
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
+  sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
+  sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
 fi
 
-# Configure Bluetooth
+# Configure Bluetooth fixes
 if [[ "$FLAG_BLUETOOTH" == true ]]; then
-  echo "Configuring Bluetooth.."
+  echo "Configuring Bluetooth fixes.."
   sudo sed -i 's/^Enable=.*/Enable=Source,Control,Target/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
   sudo sed -i 's/^Master=.*/Master=true/' "${PATH_MOUNT}/etc/bluetooth/audio.conf"
   sudo sed -i 's/^AddressBlacklist=.*/AddressBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
   sudo sed -i 's/^ExactNameBlacklist=.*/ExactNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
   sudo sed -i 's/^PartialNameBlacklist=.*/PartialNameBlacklist=/' "${PATH_MOUNT}/etc/bluetooth/auto_pairing.conf"
   sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
-fi
 
-# Configure build.prop
-if [[ "$FLAG_BUILD_PROP" == true ]]; then
-  echo "Configuring build.prop.."
+  echo "Configuring build.prop for Bluetooth fixes.."
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
-# Modified to fix ADB / Bluetooth
+# Modified to properly configure Bluetooth
 persist.bluetooth.avrcpversion=avrcp13
-persist.service.adb.enable=1
-persist.service.debuggable=1
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true

@@ -15,9 +15,9 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 ### Main Scripts
 
-- **`innioasis-y1-fixes.bash`** (v1.0.8)
+- **`innioasis-y1-fixes.bash`** (v1.0.10)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
-  - Supports selective patching with individual flags: `--music-apk`, `--avrcp`, `--build-prop`, `--bluetooth`, `--remove-apps`
+  - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`
   - Mounts and patches the system.img firmware image
   - Copies patched APKs, libraries, and binaries into the filesystem
   - Configures build.prop and Bluetooth settings
@@ -31,7 +31,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 ### Reference Files
 
-- `reference/3.0.2/` – Original system files for firmware version 3.0.2
+- `reference/3.0.2/` – Manually-patched system files for firmware version 3.0.2
   - `system/build.prop` – Build properties
   - `system/etc/bluetooth/` – Bluetooth configuration files
 
@@ -64,12 +64,20 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player
 - `Y1MediaBridge.apk` – Additional media integration
 
-**Configuration Changes:**
-- Enables AVRCP 1.3 via build.prop: `persist.bluetooth.avrcpversion=avrcp13`
-- Enables ADB debugging: `persist.service.adb.enable=1`
-- Updates audio.conf to enable Source, Control, and Target roles
+**Configuration Changes (`--adb`):**
+- `persist.service.adb.enable=1`
+- `persist.service.debuggable=1`
+
+**Configuration Changes (`--bluetooth`):**
+- `persist.bluetooth.avrcpversion=avrcp13`
+- `ro.bluetooth.class=2098204`
+- `ro.bluetooth.profiles.a2dp.source.enabled=true`
+- `ro.bluetooth.profiles.avrcp.target.enabled=true`
+- audio.conf: `Enable=Source,Control,Target`, `Master=true`
 - Clears Bluetooth device blacklists (auto_pairing.conf, blacklist.conf)
-- Removes bloatware APKs (ApplicationGuide, BackupRestoreConfirmation, BasicDreams, etc.)
+
+**Other Changes:**
+- Removes bloatware APKs (`--remove-apps`): ApplicationGuide, BackupRestoreConfirmation, BasicDreams, etc.
 
 ## Requirements
 
@@ -109,8 +117,11 @@ python3 patch_y1_apk.py
 
 Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`):
 - `system.img` (original firmware system image)
-  - Can be extracted from a live device via ADB: `adb pull /system system.img`
-  - Or obtained from an OTA update package
+  - Obtained from an OTA update package, or dumped from the device block device via ADB:
+    ```bash
+    adb shell "dd if=/dev/block/<partition> bs=4096" > system.img
+    ```
+    (Replace `<partition>` with the correct block device node for your device.)
   - **Important:** If the image is sparse (output of `file` shows "Android sparse image"), convert it to raw format using simg2img:
     ```bash
     simg2img system.img system-raw.img
@@ -130,16 +141,16 @@ chmod +x innioasis-y1-fixes.bash
 ```
 
 **Available options:**
+- `--adb` – Enable ADB debugging via build.prop
+- `--avrcp` – Enable AVRCP 1.3 support and fix Bluetooth media control issues ⚠️ **WIP**
+- `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
-- `--avrcp` – Install AVRCP support files ⚠️ **WIP**
-- `--build-prop` – Configure build.prop for ADB and Bluetooth
-- `--bluetooth` – Configure Bluetooth settings
 - `--remove-apps` – Remove unnecessary APK files
 - `--all` – Apply all patches
 
 **Example:**
 ```bash
-./innioasis-y1-fixes.bash --artifacts-dir /home/user/y1-patches --music-apk --build-prop --bluetooth --remove-apps
+./innioasis-y1-fixes.bash --artifacts-dir /home/user/y1-patches --bluetooth --music-apk --remove-apps
 ```
 
 The script will:
@@ -183,6 +194,8 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.0.10** (2026-04-25) – Split build.prop configuration, sorting and cleanup
+- **v1.0.9** (2026-04-25) – Sort some stuff to make it look cleaner
 - **v1.0.8** (2026-04-25) – Add bash parameter handling for selective patching
 - **v1.0.7** (2026-04-24) – Install patched Y1 music player APK
 - **v1.0.6** (2026-04-24) – Install patched MtkBt.odex for AVRCP 1.3 Java selector fix
