@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img and boot.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB root access.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.1.0
+# Version: 1.1.1
 # History:
+# 2026-04-26 (1.1.1): Fix macOS compatibility: replace stat -c%s with wc -c for file size.
 # 2026-04-26 (1.1.0): Add --root flag to patch boot.img ramdisk for ADB root access.
 # 2026-04-26 (1.0.11): Update --avrcp to deploy AVRCP 1.4 patched binaries (.patched filenames).
 # 2026-04-25 (1.0.10): Split build.prop configuration stuff. More sorting. More cleanup. More renames.
@@ -295,7 +296,7 @@ if [[ "$FLAG_ROOT" == true ]]; then
 
     if [[ "${IS_CPIO}" == "070701" ]]; then
       BOOT_OFFSET="${OFF}"
-      BOOT_TOTAL_SIZE=$(stat -c%s "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}")
+      BOOT_TOTAL_SIZE=$(wc -c < "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" | tr -d ' ')
       BOOT_ORIG_RAMDISK_SIZE=$((BOOT_TOTAL_SIZE - BOOT_OFFSET))
       echo "  Ramdisk found at offset ${BOOT_OFFSET} (original ramdisk size: ${BOOT_ORIG_RAMDISK_SIZE} bytes).."
 
@@ -328,7 +329,6 @@ print(ramdisk_size, page_size)
       echo "  Patching default.prop for ADB root.."
       sed -i 's/ro.secure=1/ro.secure=0/g' "${PATH_BOOT_RAMDISK}/default.prop"
       sed -i 's/ro.debuggable=0/ro.debuggable=1/g' "${PATH_BOOT_RAMDISK}/default.prop"
-      echo "persist.service.adb.enable=1" >> "${PATH_BOOT_RAMDISK}/default.prop"
 
       echo "  Re-compressing the ramdisk.."
       (cd "${PATH_BOOT_RAMDISK}" && find . -mindepth 1 | sort | cpio -o -H newc 2>/dev/null | python3 -c "
@@ -340,7 +340,7 @@ crc = zlib.crc32(data) & 0xffffffff
 sys.stdout.buffer.write(b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff' + compressed + struct.pack('<II', crc, len(data) & 0xffffffff))
 " > "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz")
 
-      BOOT_NEW_RAMDISK_SIZE=$(stat -c%s "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz")
+      BOOT_NEW_RAMDISK_SIZE=$(wc -c < "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" | tr -d ' ')
       echo "  New ramdisk size: ${BOOT_NEW_RAMDISK_SIZE} bytes (padded space: ${BOOT_RAMDISK_PADDED_SIZE} bytes).."
 
       if [[ "${BOOT_NEW_RAMDISK_SIZE}" -gt "${BOOT_RAMDISK_PADDED_SIZE}" ]]; then
@@ -365,7 +365,7 @@ with open('${PATH_ARTIFACTS}/kernel_header.bin', 'rb+') as f:
       echo "  Stitching kernel header + padded ramdisk.."
       cat "${PATH_ARTIFACTS}/kernel_header.bin" "${PATH_ARTIFACTS}/padded_ramdisk.cpio.gz" > "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 
-      BOOT_FINAL_SIZE=$(stat -c%s "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}")
+      BOOT_FINAL_SIZE=$(wc -c < "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}" | tr -d ' ')
       if [[ "${BOOT_FINAL_SIZE}" -eq "${BOOT_TOTAL_SIZE}" ]]; then
         echo "  ${FILENAME_BOOT_IMAGE_TARGET} created successfully (size-matched: ${BOOT_FINAL_SIZE} bytes).."
       else
