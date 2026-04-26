@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 """
-patch_mtkbt.py — Patch stock mtkbt binary
+patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
-Stock binary md5:  3af1d4ad8f955038186696950430ffda
+Stock binary md5: 3af1d4ad8f955038186696950430ffda
 
-Supported targets:
-  patched4a  — SDP blob patches only (no descriptor table ptr redirects)
-               Safe: BT init works. tg_feature:0 (expected — bisect confirmed ptr redirects crash init)
-               Patches 1-4 from patched4.
+Patches applied:
+  1. 0xeba1d  Browse channel PSM 0x1b → 0x00 (remove browse advertisement)
+  2. 0xeba4b  AVRCP version byte 0x00 → 0x03
+  3. 0xeba58  MTK vendor version byte 0x00 → 0x03
+  4. 0xeba4e  SupportedFeatures Uint16 value 0x21 → 0x23
+  5. 0x0f97b2 Descriptor table flags for AttrID 0x0311: 0x03 → 0x05
+  6. 0xeba77  ProfileDescList AVRCP version 0x03 → 0x04 (1.3 → 1.4)
 
-  patched5   — SDP blob patches + in-place value fixes at descriptor table ptr targets
-               Goal: tg_feature:0x0023 without ptr redirects or region crossings
-               Patches 1-6 (no ptr redirects; two new value patches in-place)
+Patch 6 changes the registered SDP record from:
+  "AV Remote" (0x110e)  Version: 0x0103
+to:
+  "AV Remote" (0x110e)  Version: 0x0104
 
-Patch map:
-  1. 0xeba1d  Browse channel PSM 0x001b → 0x00 (removes browse advertisement)
-  2. 0xeba4b  ProfileDescriptorList AVRCP version 1.0 → 1.3
-  3. 0xeba58  MTK vendor AttrID 0x0021 AVRCP version 1.0 → 1.3
-  4. 0xeba97  Replace language descriptor with AttrID 0x0311 = 0x0023 (SupportedFeatures blob write)
-  [patched4a stops here]
-  5. 0xeba4e  Descriptor table entry1 ptr target: Uint16 value 0x0021 → 0x0023
-  6. 0xeba5b  Descriptor table entry2 ptr target: Uint16 value 0x0001 → 0x0023
-  [patched5 uses patches 1-4 + 5-6]
-
-Descriptor table (3 entries for AttrID 0x0311):
-  0x0f97b0  ptr=0x0eba4c → 09 00 21  (Uint16, value patched by patch 5)
-  0x0f97ec  ptr=0x0eba59 → 09 00 01  (Uint16, value patched by patch 6)
-  0x0f9828  ptr=0x0eba0f → 09 00 0f  (AttrID 0x000f context — left untouched)
+Verify with: sdptool browse <Y1_BT_ADDR>
 
 Usage:
-    python3 patch_mtkbt.py mtkbt --target patched5
-    python3 patch_mtkbt.py mtkbt --target patched4a
-    python3 patch_mtkbt.py mtkbt --target patched5 --output mtkbt.patched5
-    python3 patch_mtkbt.py mtkbt --target patched5 --verify-only
+    python3 patch_mtkbt.py mtkbt
+    python3 patch_mtkbt.py mtkbt --output /tmp/mtkbt.patched
+    python3 patch_mtkbt.py mtkbt --verify-only
+
+Deploy:
+    adb push mtkbt.patched /system/bin/mtkbt
+    adb shell chmod 755 /system/bin/mtkbt
+    adb reboot
 """
 
 import argparse
@@ -42,175 +37,131 @@ from pathlib import Path
 
 STOCK_MD5 = "3af1d4ad8f955038186696950430ffda"
 
-PATCHES_BASE = [
+PATCHES = [
     {
-        "name": "Browse channel PSM 0x001b → 0x00",
+        "name": "Browse channel PSM 0x1b → 0x00",
         "offset": 0xeba1d,
         "before": bytes([0x1b]),
         "after":  bytes([0x00]),
     },
     {
-        "name": "ProfileDescriptorList AVRCP version 1.0 → 1.3",
+        "name": "AVRCP version byte 0x00 → 0x03",
         "offset": 0xeba4b,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name": "MTK vendor AttrID 0x0021 AVRCP version 1.0 → 1.3",
+        "name": "MTK vendor version byte 0x00 → 0x03",
         "offset": 0xeba58,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name": "0xeba97: replace language descriptor with SupportedFeatures blob",
-        "offset": 0xeba97,
-        "before": bytes([0x35, 0x09, 0x09, 0x65, 0x6e, 0x09, 0x00, 0x6a, 0x09, 0x01, 0x00]),
-        "after":  bytes([0x09, 0x03, 0x11, 0x09, 0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00]),
-    },
-]
-
-PATCHES_P5_EXTRA = [
-    {
-        "name": "0xeba4e: desc table entry1 ptr target value 0x0021 → 0x0023",
+        "name": "SupportedFeatures value 0x21 → 0x23",
         "offset": 0xeba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x23]),
     },
     {
-        "name": "0xeba5b: desc table entry2 ptr target value 0x0001 → 0x0023",
-        "offset": 0xeba5b,
-        "before": bytes([0x01]),
-        "after":  bytes([0x23]),
+        "name": "AttrID 0x0311 descriptor table flags 0x03 → 0x05",
+        "offset": 0x0f97b2,
+        "before": bytes([0x03]),
+        "after":  bytes([0x05]),
+    },
+    {
+        "name": "ProfileDescList AVRCP version 0x03 → 0x04 (1.3 → 1.4)",
+        "offset": 0xeba77,
+        "before": bytes([0x03]),
+        "after":  bytes([0x04]),
     },
 ]
-
-TARGETS = {
-    "patched4a": {
-        "patches": PATCHES_BASE,
-        "md5": None,  # fill in after first confirmed flash
-        "description": "blob-only, no ptr redirects (bisect confirmed safe)",
-    },
-    "patched5": {
-        "patches": PATCHES_BASE + PATCHES_P5_EXTRA,
-        "md5": "8578c3b374a082f30e6935308c208efb",
-        "description": "blob + in-place desc table value patches (no ptr redirects)",
-    },
-}
 
 
 def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def verify_patches(data: bytes, patches: list, mode: str = "before") -> list[dict]:
+def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
     results = []
-    for p in patches:
-        offset = p["offset"]
+    for p in PATCHES:
         expected = p[mode]
-        actual = data[offset: offset + len(expected)]
-        results.append({
-            "name": p["name"],
-            "offset": offset,
-            "expected": expected,
-            "actual": actual,
-            "ok": actual == expected,
-        })
-    return results
+        actual = data[p["offset"]: p["offset"] + len(expected)]
+        results.append({**p, "actual": actual, "ok": actual == expected})
+    return all(r["ok"] for r in results), results
 
 
-def print_results(results: list[dict], label: str) -> bool:
+def print_results(label: str, results: list[dict]) -> None:
     print(f"\n{label}")
     print("-" * 72)
-    all_ok = True
     for r in results:
-        status = "OK" if r["ok"] else "FAIL"
+        print(f"  [{'OK' if r['ok'] else 'FAIL'}] 0x{r['offset']:06x}  {r['name']}")
         if not r["ok"]:
-            all_ok = False
-        print(f"  [{status}] 0x{r['offset']:06x}  {r['name']}")
-        if not r["ok"]:
-            print(f"          expected: {r['expected'].hex(' ')}")
+            print(f"          expected: {r['before'].hex(' ')}")
             print(f"          actual:   {r['actual'].hex(' ')}")
     print("-" * 72)
-    return all_ok
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Patch stock mtkbt")
+    parser = argparse.ArgumentParser(description="Patch stock mtkbt → mtkbt.patched")
     parser.add_argument("input", help="Path to stock mtkbt binary")
-    parser.add_argument("--target", "-t", choices=list(TARGETS.keys()), default="patched5",
-                        help="Patch target (default: patched5)")
-    parser.add_argument("--output", "-o", default=None,
-                        help="Output path (default: <input>.<target>)")
-    parser.add_argument("--verify-only", action="store_true",
-                        help="Verify patch sites without writing output")
-    parser.add_argument("--skip-md5", action="store_true",
-                        help="Skip stock md5 check")
+    parser.add_argument("--output", "-o", default=None, help="Output path (default: mtkbt.patched)")
+    parser.add_argument("--verify-only", action="store_true", help="Check patch sites only, no output")
+    parser.add_argument("--skip-md5", action="store_true", help="Skip stock md5 check")
     args = parser.parse_args()
-
-    target = TARGETS[args.target]
-    patches = target["patches"]
 
     input_path = Path(args.input)
     if not input_path.exists():
-        print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
+        print(f"ERROR: {input_path} not found", file=sys.stderr)
         sys.exit(1)
 
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
-    print(f"Input:    {input_path}")
-    print(f"Target:   {args.target} — {target['description']}")
-    print(f"Size:     {len(data):,} bytes")
-    print(f"MD5:      {input_md5}")
+    print(f"Input:  {input_path}  ({len(data):,} bytes)")
+    print(f"MD5:    {input_md5}")
 
-    if not args.skip_md5:
-        if input_md5 == STOCK_MD5:
-            print(f"MD5:      OK (matches stock)")
-        else:
-            print(f"MD5:      WARNING — does not match known stock md5 ({STOCK_MD5})")
-            print("          Use --skip-md5 to patch anyway.")
-            sys.exit(1)
+    if not args.skip_md5 and input_md5 != STOCK_MD5:
+        print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
+        print("       Use --skip-md5 to override.")
+        sys.exit(1)
 
-    pre_results = verify_patches(data, patches, mode="before")
-    pre_ok = print_results(pre_results, "Pre-patch verification (expect stock bytes)")
+    pre_ok, pre_results = verify(data, "before")
+    print_results("Pre-patch verification", pre_results)
 
     if not pre_ok:
-        post_results = verify_patches(data, patches, mode="after")
-        post_ok = print_results(post_results, "Already-patched check")
+        post_ok, post_results = verify(data, "after")
+        print_results("Already-patched check", post_results)
         if post_ok:
-            print(f"\nBinary appears to already be {args.target}. Nothing to do.")
-        else:
-            print(f"\nERROR: patch sites match neither stock nor {args.target}.")
-        sys.exit(1 if not post_ok else 0)
+            print("\nBinary is already patched. Nothing to do.")
+            sys.exit(0)
+        print("\nERROR: patch sites match neither stock nor patched.")
+        sys.exit(1)
 
     if args.verify_only:
-        print("\nVerify-only mode — no output written.")
+        print("\nVerify-only — no output written.")
         sys.exit(0)
 
-    for p in patches:
-        offset = p["offset"]
-        data[offset: offset + len(p["after"])] = p["after"]
+    for p in PATCHES:
+        data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
-    post_results = verify_patches(data, patches, mode="after")
-    post_ok = print_results(post_results, f"Post-patch verification (expect {args.target} bytes)")
+    post_ok, post_results = verify(data, "after")
+    print_results("Post-patch verification", post_results)
 
     if not post_ok:
         print("\nERROR: post-patch verification failed — output not written.")
         sys.exit(1)
 
-    output_path = Path(args.output) if args.output else Path(f"{input_path}.{args.target}")
+    output_path = Path(args.output) if args.output else Path("mtkbt.patched")
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
-    print(f"\nOutput:   {output_path}")
-    print(f"MD5:      {output_md5}")
-    if target["md5"]:
-        md5_status = "OK" if output_md5 == target["md5"] else f"WARNING — expected {target['md5']}"
-        print(f"MD5 check: {md5_status}")
+    print(f"\nOutput: {output_path}")
+    print(f"MD5:    {output_md5}")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")
     print(f"  adb reboot")
+    print(f"  sdptool browse <Y1_BT_ADDR>  # verify: AV Remote Version: 0x0104")
 
 
 if __name__ == "__main__":

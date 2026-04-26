@@ -6,7 +6,7 @@ A comprehensive patching toolkit for the Innioasis Y1 media player (firmware 3.0
 
 This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
-- **Bluetooth AVRCP 1.3 Support** ⚠️ **WIP** – Fixes Java selector issues in Bluetooth audio profile handling
+- **Bluetooth AVRCP 1.4 Support** ⚠️ **WIP** – Forces AVRCP 1.4 advertisement across all three BT stack layers (daemon, ODEX, JNI library); pending flash verification
 - **Artist→Album Navigation** – Improves media player UX by showing album cover art after artist selection instead of a flat song list
 - **System Configuration** – Enables ADB debugging and optimizes Bluetooth settings
 - **APK Patching** – Patches the system music player APK at the bytecode level using smali assembly
@@ -14,6 +14,22 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 ## Contents
 
 ### Main Scripts
+
+- **`patch_mtkbt.py`**
+  - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
+  - 6 patches: removes browse channel PSM, sets SupportedFeatures=0x23, bumps ProfileDescList version to 0x0104
+  - Verifies stock MD5 before patching and output MD5 after; supports `--verify-only` and `--skip-md5`
+  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `mtkbt.patched` (md5 `3a951f58bfbac12aa52c9a755cebc6d0`)
+
+- **`patch_odex.py`**
+  - Patches `MtkBt.odex` so `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10
+  - Recomputes the DEX adler32 checksum embedded in the ODEX header
+  - Input: stock `MtkBt.odex` (md5 `11566bc23001e78de64b5db355238175`) → Output: `MtkBt.odex.patched` (md5 `004d5439e514c42403cf9b470dc0c8cf`)
+
+- **`patch_so.py`**
+  - Patches `libextavrcp_jni.so` to force `g_tg_feature=14` (AVRCP 1.4) and `sdpfeature=0x23`
+  - Two ARM Thumb2 instruction overwrites in the version-selection function at 0x375c
+  - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `485a632e799e0cd9ed44455238a8340e`)
 
 - **`innioasis-y1-fixes.bash`** (v1.0.10)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
@@ -58,9 +74,9 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 ### Firmware Changes (innioasis-y1-fixes.bash)
 
 **Files Deployed:**
-- `MtkBt.odex` – Patched Bluetooth MTK HAL with AVRCP 1.3 fix
-- `libextavrcp_jni.so` – Patched AVRCP JNI library
-- `mtkbt` binary – Updated Bluetooth daemon
+- `mtkbt.patched` – Patched Bluetooth daemon (AVRCP 1.4 SDP advertisement)
+- `MtkBt.odex.patched` – Patched ODEX (`getPreferVersion()` returns 14)
+- `libextavrcp_jni.so.patched` – Patched JNI library (`g_tg_feature=14`, `sdpfeature=0x23`)
 - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player
 - `Y1MediaBridge.apk` – Additional media integration
 
@@ -69,7 +85,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - `persist.service.debuggable=1`
 
 **Configuration Changes (`--bluetooth`):**
-- `persist.bluetooth.avrcpversion=avrcp13`
+- `persist.bluetooth.avrcpversion=avrcp14`
 - `ro.bluetooth.class=2098204`
 - `ro.bluetooth.profiles.a2dp.source.enabled=true`
 - `ro.bluetooth.profiles.avrcp.target.enabled=true`
@@ -80,6 +96,11 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - Removes bloatware APKs (`--remove-apps`): ApplicationGuide, BackupRestoreConfirmation, BasicDreams, etc.
 
 ## Requirements
+
+### For patch_mtkbt.py / patch_odex.py / patch_so.py
+
+- Python 3.8 or later
+- No third-party dependencies (stdlib only)
 
 ### For patch_y1_apk.py
 
@@ -95,7 +116,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - `--artifacts-dir` parameter pointing to a directory containing:
   - `system.img` – Original firmware system image
   - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player APK (from patch_y1_apk.py)
-  - `Y1MediaBridge.apk`, `MtkBt.odex`, `libextavrcp_jni.so`, `mtkbt` – Pre-built patches (for `--avrcp` flag)
+  - `Y1MediaBridge.apk`, `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched` – Patched BT binaries (from patch scripts, for `--avrcp` flag)
 - mtkclient 2.1.4.1 installed at `/opt/mtkclient-2.1.4.1`
 
 ## Usage
@@ -113,7 +134,21 @@ Alternatively, if the APK is in the current directory:
 python3 patch_y1_apk.py
 ```
 
-### Step 2: Prepare Patch Artifacts
+### Step 2: Patch the Bluetooth Binaries (for `--avrcp`)
+
+Run each patch script against the corresponding stock binary extracted from the firmware:
+
+```bash
+python3 patch_mtkbt.py mtkbt
+python3 patch_odex.py MtkBt.odex
+python3 patch_so.py libextavrcp_jni.so
+```
+
+Outputs: `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`
+
+Each script verifies the input MD5, checks patch sites before and after, and refuses to write output if anything is unexpected.
+
+### Step 3: Prepare Patch Artifacts
 
 Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`):
 - `system.img` (original firmware system image)
@@ -129,11 +164,9 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
     ```
 - `com.innioasis.y1_3.0.2-patched.apk` (from Step 1)
 - `Y1MediaBridge.apk` (required for `--avrcp` flag)
-- `MtkBt.odex` (required for `--avrcp` flag)
-- `libextavrcp_jni.so` (required for `--avrcp` flag)
-- `mtkbt` (binary, required for `--avrcp` flag)
+- `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched` (from Step 2, required for `--avrcp` flag)
 
-### Step 3: Apply Firmware Patches
+### Step 4: Apply Firmware Patches
 
 ```bash
 chmod +x innioasis-y1-fixes.bash
@@ -142,7 +175,7 @@ chmod +x innioasis-y1-fixes.bash
 
 **Available options:**
 - `--adb` – Enable ADB debugging via build.prop
-- `--avrcp` – Enable AVRCP 1.3 support and fix Bluetooth media control issues ⚠️ **WIP**
+- `--avrcp` – Deploy AVRCP 1.4 patched binaries (`mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `Y1MediaBridge.apk`) ⚠️ **WIP**
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
 - `--remove-apps` – Remove unnecessary APK files
@@ -160,7 +193,7 @@ The script will:
 
 **Output:** `system-3.0.2-devel.img` (patched firmware image)
 
-### Step 4: Flash Firmware
+### Step 5: Flash Firmware
 
 Use the MTK scatter tool or mtkclient to flash `system-3.0.2-devel.img` back to the device.
 
@@ -194,6 +227,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.0.11** (2026-04-26) – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4
 - **v1.0.10** (2026-04-25) – Split build.prop configuration, sorting and cleanup
 - **v1.0.9** (2026-04-25) – Sort some stuff to make it look cleaner
 - **v1.0.8** (2026-04-25) – Add bash parameter handling for selective patching

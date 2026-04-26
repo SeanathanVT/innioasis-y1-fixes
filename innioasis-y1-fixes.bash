@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img file to fix Bluetooth AVRCP and remove APK-related cruft.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.0.10
+# Version: 1.0.11
 # History:
+# 2026-04-26 (1.0.11): Update --avrcp to deploy AVRCP 1.4 patched binaries (.patched filenames).
 # 2026-04-25 (1.0.10): Split build.prop configuration stuff. More sorting. More cleanup. More renames.
 # 2026-04-25 (1.0.9): Sort some stuff to make it look cleaner (yes I still care about this).
 # 2026-04-25 (1.0.8): Add bash parameter handling for selective patching.
@@ -34,7 +35,7 @@ MANDATORY:
 
 OPTIONS:
   --adb                Enable ADB debugging
-  --avrcp              Enable AVRCP 1.3 support and fix Bluetooth media control issues
+  --avrcp              Enable AVRCP 1.4 support (WIP - pending flash verification)
   --bluetooth          Configure Bluetooth fixes
   --music-apk          Copy patched Y1 music player APK
   --remove-apps        Remove unnecessary APK files from system
@@ -131,9 +132,12 @@ fi
 VERSION_FIRMWARE="3.0.2"
 
 FILENAME_BIN_MTKBT="mtkbt"
+FILENAME_BIN_MTKBT_PATCHED="mtkbt.patched"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
+FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED="libextavrcp_jni.so.patched"
 FILENAME_MTKBT_ODEX="MtkBt.odex"
+FILENAME_MTKBT_ODEX_PATCHED="MtkBt.odex.patched"
 FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
 FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
@@ -162,9 +166,9 @@ persist.service.debuggable=1
 EOF
 fi
 
-# Enable AVRCP 1.3 support and fix Bluetooth media control issues
+# Enable AVRCP 1.4 support (WIP - pending flash verification)
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Enabling AVRCP 1.3 support and fixing Bluetooth media control issues.."
+  echo "Enabling AVRCP 1.4 support (WIP).."
 
   echo "  Copying Y1 Media Bridge APK.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
@@ -172,17 +176,17 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
 
   echo "  Copying patched MtkBt odex.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MTKBT_ODEX}" "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MTKBT_ODEX_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
   sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
 
   echo "  Copying patched mtkbt binary.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_BIN_MTKBT}" "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_BIN_MTKBT_PATCHED}" "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chmod 755 "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
 
   echo "  Copying patched AVRCP JNI library.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
   sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
   sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
 fi
@@ -200,7 +204,7 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   echo "Configuring build.prop for Bluetooth fixes.."
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
-persist.bluetooth.avrcpversion=avrcp13
+persist.bluetooth.avrcpversion=avrcp14
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
