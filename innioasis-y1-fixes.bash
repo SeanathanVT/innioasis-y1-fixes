@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.2.0
+# Version: 1.2.1
 # History:
+# 2026-04-26 (1.2.1): Add libextavrcp.so.patched deployment to --avrcp.
 # 2026-04-26 (1.2.0): Remove --root flag and boot.img handling (broken).
 # 2026-04-26 (1.1.3): Prompt for sudo credentials upfront to prevent mid-execution prompt.
 # 2026-04-26 (1.1.2): Fix --root: sudo cpio to preserve device nodes; add ro.adb.secure=0 and service.adb.root=1. Remove fail on size mismatch (non-issue).
@@ -146,6 +147,8 @@ VERSION_FIRMWARE="3.0.2"
 FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BIN_MTKBT_PATCHED="mtkbt.patched"
 FILENAME_BUILD_PROP="build.prop"
+FILENAME_LIBRARY_LIBEXTAVRCP="libextavrcp.so"
+FILENAME_LIBRARY_LIBEXTAVRCP_PATCHED="libextavrcp.so.patched"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
 FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED="libextavrcp_jni.so.patched"
 FILENAME_MTKBT_ODEX="MtkBt.odex"
@@ -195,6 +198,11 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_BIN_MTKBT_PATCHED}" "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chmod 755 "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
   sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
+
+  echo "  Copying patched AVRCP library.."
+  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_PATCHED}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
+  sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
+  sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
 
   echo "  Copying patched AVRCP JNI library.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"

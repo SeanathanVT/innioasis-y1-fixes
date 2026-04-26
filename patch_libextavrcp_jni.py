@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-patch_so.py — Patch stock libextavrcp_jni.so → libextavrcp_jni.so.patched
+patch_libextavrcp_jni.py — Patch stock libextavrcp_jni.so → libextavrcp_jni.so.patched
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
 Output md5:        485a632e799e0cd9ed44455238a8340e
@@ -29,9 +29,9 @@ Patches applied:
   activate_config always receives version=14 and sdpfeature=0x23.
 
 Usage:
-    python3 patch_so.py libextavrcp_jni.so
-    python3 patch_so.py libextavrcp_jni.so --output /tmp/libextavrcp_jni.so.patched
-    python3 patch_so.py libextavrcp_jni.so --verify-only
+    python3 patch_libextavrcp_jni.py libextavrcp_jni.so
+    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --output /tmp/libextavrcp_jni.so.patched
+    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --verify-only
 
 Deploy:
     adb push libextavrcp_jni.so.patched /system/lib/libextavrcp_jni.so
