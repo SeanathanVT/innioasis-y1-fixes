@@ -7,7 +7,7 @@ A comprehensive patching toolkit for the Innioasis Y1 media player (firmware 3.0
 This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **Bluetooth AVRCP 1.4 Support** ⚠️ **WIP** – Forces AVRCP 1.4 advertisement across all three BT stack layers (daemon, ODEX, JNI library); pending flash verification
-- **ADB Root Access** – Patches the boot.img ramdisk to set `ro.secure=0`, `ro.debuggable=1`, and `persist.service.adb.enable=1`
+- **ADB Root Access** – Patches the boot.img ramdisk to set `ro.secure=0` and `ro.debuggable=1`
 - **Artist→Album Navigation** – Improves media player UX by showing album cover art after artist selection instead of a flat song list
 - **System Configuration** – Enables ADB debugging and optimizes Bluetooth settings
 - **APK Patching** – Patches the system music player APK at the bytecode level using smali assembly
@@ -32,7 +32,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Two ARM Thumb2 instruction overwrites in the version-selection function at 0x375c
   - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `485a632e799e0cd9ed44455238a8340e`)
 
-- **`innioasis-y1-fixes.bash`** (v1.1.0)
+- **`innioasis-y1-fixes.bash`** (v1.1.1)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts and patches the system.img firmware image (only when a system flag is specified)
@@ -97,7 +97,6 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 **Boot Image Changes (`--root`):**
 - `ro.secure=0`
 - `ro.debuggable=1`
-- `persist.service.adb.enable=1`
 
 Scans `boot.img` for the GZIP-compressed CPIO ramdisk, patches `default.prop` in-place, and repacks. The Android boot image header is parsed to read the `ramdisk_size` and `page_size` fields; the padded ramdisk region size is computed as `ceil(ramdisk_size / page_size) * page_size`. The new ramdisk must fit within that region (allowing gzip recompression to produce slightly different output sizes). The `ramdisk_size` field in the header is updated to the new compressed size, and the ramdisk region is padded with null bytes to the page-aligned size before stitching. The output image is always the same total size as the input, which is required for flashing to a fixed-size partition. Output: `boot-3.0.2-rooted.img`.
 
@@ -121,6 +120,7 @@ Scans `boot.img` for the GZIP-compressed CPIO ramdisk, patches `default.prop` in
 ### For innioasis-y1-fixes.bash
 
 - Bash 4+
+- macOS or Linux (file size calculations use `wc -c` for cross-platform compatibility)
 - `sudo` access (for mounting and modifying system.img)
 - `--artifacts-dir` parameter pointing to a directory containing:
   - `system.img` – Original firmware system image (required for any system flag)
@@ -243,6 +243,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.1.1** (2026-04-26) – Fix macOS compatibility: replace `stat -c%s` with `wc -c` for file size
 - **v1.1.0** (2026-04-26) – Add `--root` flag to patch boot.img ramdisk for ADB root access
 - **v1.0.11** (2026-04-26) – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4
 - **v1.0.10** (2026-04-25) – Split build.prop configuration, sorting and cleanup
