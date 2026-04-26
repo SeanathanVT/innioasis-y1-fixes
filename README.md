@@ -32,7 +32,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Two ARM Thumb2 instruction overwrites in the version-selection function at 0x375c
   - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `485a632e799e0cd9ed44455238a8340e`)
 
-- **`innioasis-y1-fixes.bash`** (v1.1.1)
+- **`innioasis-y1-fixes.bash`** (v1.1.2)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts and patches the system.img firmware image (only when a system flag is specified)
@@ -97,8 +97,12 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 **Boot Image Changes (`--root`):**
 - `ro.secure=0`
 - `ro.debuggable=1`
+- `ro.adb.secure=0`
+- `service.adb.root=1`
 
 Scans `boot.img` for the GZIP-compressed CPIO ramdisk, patches `default.prop` in-place, and repacks. The Android boot image header is parsed to read the `ramdisk_size` and `page_size` fields; the padded ramdisk region size is computed as `ceil(ramdisk_size / page_size) * page_size`. The new ramdisk must fit within that region (allowing gzip recompression to produce slightly different output sizes). The `ramdisk_size` field in the header is updated to the new compressed size, and the ramdisk region is padded with null bytes to the page-aligned size before stitching. The output image is always the same total size as the input, which is required for flashing to a fixed-size partition. Output: `boot-3.0.2-rooted.img`.
+
+The ramdisk is extracted and repacked using `sudo cpio` to ensure device nodes (`/dev/console`, `/dev/null`, etc.) are preserved with correct types and permissions. Without root, `cpio -i` silently drops device nodes, which causes `init` to fail at console open and the device to immediately power off.
 
 **Other Changes:**
 - Removes bloatware APKs (`--remove-apps`): ApplicationGuide, BackupRestoreConfirmation, BasicDreams, etc.
@@ -243,6 +247,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Version History
 
+- **v1.1.2** (2026-04-26) – Fix `--root`: use `sudo cpio` to preserve device nodes; add `ro.adb.secure=0` and `service.adb.root=1` to ramdisk `default.prop`; remove size mismatch failure (non-issue)
 - **v1.1.1** (2026-04-26) – Fix macOS compatibility: replace `stat -c%s` with `wc -c` for file size
 - **v1.1.0** (2026-04-26) – Add `--root` flag to patch boot.img ramdisk for ADB root access
 - **v1.0.11** (2026-04-26) – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4

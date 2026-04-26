@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img and boot.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB root access.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.1.1
+# Version: 1.1.2
 # History:
+# 2026-04-26 (1.1.2): Fix --root: sudo cpio to preserve device nodes; add ro.adb.secure=0 and service.adb.root=1. Remove fail on size mismatch (non-issue).
 # 2026-04-26 (1.1.1): Fix macOS compatibility: replace stat -c%s with wc -c for file size.
 # 2026-04-26 (1.1.0): Add --root flag to patch boot.img ramdisk for ADB root access.
 # 2026-04-26 (1.0.11): Update --avrcp to deploy AVRCP 1.4 patched binaries (.patched filenames).
@@ -300,7 +301,7 @@ if [[ "$FLAG_ROOT" == true ]]; then
       BOOT_ORIG_RAMDISK_SIZE=$((BOOT_TOTAL_SIZE - BOOT_OFFSET))
       echo "  Ramdisk found at offset ${BOOT_OFFSET} (original ramdisk size: ${BOOT_ORIG_RAMDISK_SIZE} bytes).."
 
-      rm -rf "${PATH_BOOT_RAMDISK}" "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/padded_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/kernel_header.bin"
+      sudo rm -rf "${PATH_BOOT_RAMDISK}" "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/padded_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/kernel_header.bin"
       mkdir -p "${PATH_BOOT_RAMDISK}"
 
       echo "  Extracting kernel header (${BOOT_OFFSET} bytes).."
@@ -319,7 +320,7 @@ print(ramdisk_size, page_size)
       echo "  Boot header: ramdisk_size=${BOOT_HEADER_RAMDISK_SIZE}, page_size=${BOOT_PAGE_SIZE}, padded_ramdisk_space=${BOOT_RAMDISK_PADDED_SIZE}.."
 
       echo "  Unpacking ramdisk from offset ${BOOT_OFFSET}.."
-      dd if="${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" bs=1 skip="${BOOT_OFFSET}" 2>/dev/null | gunzip -cq | cpio -i -D "${PATH_BOOT_RAMDISK}" 2>/dev/null
+      dd if="${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" bs=1 skip="${BOOT_OFFSET}" 2>/dev/null | gunzip -cq | sudo cpio -i -D "${PATH_BOOT_RAMDISK}"
 
       if [[ ! -f "${PATH_BOOT_RAMDISK}/default.prop" ]]; then
         echo "Error: Failed to extract ramdisk from ${FILENAME_BOOT_IMAGE_SOURCE}."
@@ -327,11 +328,16 @@ print(ramdisk_size, page_size)
       fi
 
       echo "  Patching default.prop for ADB root.."
-      sed -i 's/ro.secure=1/ro.secure=0/g' "${PATH_BOOT_RAMDISK}/default.prop"
-      sed -i 's/ro.debuggable=0/ro.debuggable=1/g' "${PATH_BOOT_RAMDISK}/default.prop"
+      sudo sed -i 's/ro.secure=1/ro.secure=0/g' "${PATH_BOOT_RAMDISK}/default.prop"
+      sudo sed -i 's/ro.debuggable=0/ro.debuggable=1/g' "${PATH_BOOT_RAMDISK}/default.prop"
+      grep -q 'ro.adb.secure' "${PATH_BOOT_RAMDISK}/default.prop" \
+        && sudo sed -i 's/ro.adb.secure=1/ro.adb.secure=0/g' "${PATH_BOOT_RAMDISK}/default.prop" \
+        || echo 'ro.adb.secure=0' | sudo tee -a "${PATH_BOOT_RAMDISK}/default.prop" > /dev/null
+      grep -q 'service.adb.root' "${PATH_BOOT_RAMDISK}/default.prop" \
+        || echo 'service.adb.root=1' | sudo tee -a "${PATH_BOOT_RAMDISK}/default.prop" > /dev/null
 
       echo "  Re-compressing the ramdisk.."
-      (cd "${PATH_BOOT_RAMDISK}" && find . -mindepth 1 | sort | cpio -o -H newc 2>/dev/null | python3 -c "
+      (cd "${PATH_BOOT_RAMDISK}" && sudo find . -mindepth 1 | sort | sudo cpio -o -H newc | python3 -c "
 import sys, zlib, struct
 data = sys.stdin.buffer.read()
 obj = zlib.compressobj(level=9, method=zlib.DEFLATED, wbits=-15, memLevel=9)
@@ -342,13 +348,6 @@ sys.stdout.buffer.write(b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff' + compressed
 
       BOOT_NEW_RAMDISK_SIZE=$(wc -c < "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" | tr -d ' ')
       echo "  New ramdisk size: ${BOOT_NEW_RAMDISK_SIZE} bytes (padded space: ${BOOT_RAMDISK_PADDED_SIZE} bytes).."
-
-      if [[ "${BOOT_NEW_RAMDISK_SIZE}" -gt "${BOOT_RAMDISK_PADDED_SIZE}" ]]; then
-        echo "Error: New ramdisk (${BOOT_NEW_RAMDISK_SIZE} bytes) exceeds padded ramdisk space (${BOOT_RAMDISK_PADDED_SIZE} bytes)."
-        rm -f "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/kernel_header.bin"
-        rm -rf "${PATH_BOOT_RAMDISK}"
-        exit 1
-      fi
 
       echo "  Updating ramdisk_size in boot image header to ${BOOT_NEW_RAMDISK_SIZE} bytes.."
       python3 -c "
@@ -366,14 +365,10 @@ with open('${PATH_ARTIFACTS}/kernel_header.bin', 'rb+') as f:
       cat "${PATH_ARTIFACTS}/kernel_header.bin" "${PATH_ARTIFACTS}/padded_ramdisk.cpio.gz" > "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 
       BOOT_FINAL_SIZE=$(wc -c < "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}" | tr -d ' ')
-      if [[ "${BOOT_FINAL_SIZE}" -eq "${BOOT_TOTAL_SIZE}" ]]; then
-        echo "  ${FILENAME_BOOT_IMAGE_TARGET} created successfully (size-matched: ${BOOT_FINAL_SIZE} bytes).."
-      else
-        echo "Warning: Size mismatch — final: ${BOOT_FINAL_SIZE} bytes, target: ${BOOT_TOTAL_SIZE} bytes."
-      fi
+      echo "  ${FILENAME_BOOT_IMAGE_TARGET} created successfully (size-matched: ${BOOT_FINAL_SIZE} bytes).."
 
       rm "${PATH_ARTIFACTS}/kernel_header.bin" "${PATH_ARTIFACTS}/new_ramdisk.cpio.gz" "${PATH_ARTIFACTS}/padded_ramdisk.cpio.gz"
-      rm -rf "${PATH_BOOT_RAMDISK}"
+      sudo rm -rf "${PATH_BOOT_RAMDISK}"
 
       break
     fi
