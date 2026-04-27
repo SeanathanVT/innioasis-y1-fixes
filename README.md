@@ -21,10 +21,12 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Verifies stock MD5 before patching and output MD5 after; supports `--verify-only` and `--skip-md5`
   - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `output/mtkbt.patched` (md5 `d3511e1afcb59d11791d64ba5698b796`)
 
-- **`patch_odex.py`**
-  - Patches `MtkBt.odex` so `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10
+- **`patch_mtkbt_odex.py`**
+  - Patches `MtkBt.odex` with two fixes:
+    1. `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10 (at `0x3e0ea`)
+    2. `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false` (at `0x03f21a`) — fixes BT toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts
   - Recomputes the DEX adler32 checksum embedded in the ODEX header
-  - Input: stock `MtkBt.odex` (md5 `11566bc23001e78de64b5db355238175`) → Output: `output/MtkBt.odex.patched` (md5 `004d5439e514c42403cf9b470dc0c8cf`)
+  - Input: stock `MtkBt.odex` (md5 `11566bc23001e78de64b5db355238175`) → Output: `output/MtkBt.odex.patched` (md5 `acc578ada5e41e27475340f4df6afa59`)
 
 - **`patch_libextavrcp_jni.py`**
   - Patches `libextavrcp_jni.so` to force `g_tg_feature=14` (AVRCP 1.4) and `sdpfeature=0x23`; prevents CONNECT_CNF from downgrading negotiated version below 1.4
@@ -103,7 +105,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 
 ## Requirements
 
-### For patch_mtkbt.py / patch_odex.py / patch_libextavrcp_jni.py / patch_libextavrcp.py
+### For patch_mtkbt.py / patch_mtkbt_odex.py / patch_libextavrcp_jni.py / patch_libextavrcp.py
 
 - Python 3.8 or later
 - No third-party dependencies (stdlib only)
@@ -147,7 +149,7 @@ Run each patch script against the corresponding stock binary extracted from the 
 
 ```bash
 python3 patch_mtkbt.py mtkbt
-python3 patch_odex.py MtkBt.odex
+python3 patch_mtkbt_odex.py MtkBt.odex
 python3 patch_libextavrcp_jni.py libextavrcp_jni.so
 python3 patch_libextavrcp.py libextavrcp.so
 ```
@@ -240,6 +242,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Changes
 
+- **2026-04-27** – Rename patch_odex.py → patch_mtkbt_odex.py; add second patch: reset `sPlayServiceInterface` in `BluetoothAvrcpService.disable()` to fix BT toggle service teardown bug
 - **2026-04-27** – All patch scripts write output to `output/` subdirectory; `_patch_workdir` cleaned up after patch_y1_apk.py run
 - **2026-04-26** – Add patch_libextavrcp.py (libextavrcp.so AVRCP 1.4 version constant); rename patch_so.py → patch_libextavrcp_jni.py; deploy `libextavrcp.so.patched` via `--avrcp` in innioasis-y1-fixes.bash
 - **2026-04-26** – Remove `--root` flag and boot.img handling (broken)
