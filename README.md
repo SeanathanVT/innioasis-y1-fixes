@@ -17,9 +17,9 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **`patch_mtkbt.py`**
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
-  - 10 patches: removes browse channel PSM, sets SupportedFeatures=0x23, bumps ProfileDescList version to 0x0104, intercepts SDP load path
+  - 10 patches: removes browse channel PSM, sets SupportedFeatures=0x23, bumps ProfileDescList version to 0x0104; patch 10 (`MOVW R6,#0x104` at `0x000afd6a`) confirmed wrong path — does not feed SDP registration; SDP `Version: 0x0103` persists
   - Verifies stock MD5 before patching and output MD5 after; supports `--verify-only` and `--skip-md5`
-  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `mtkbt.patched` (md5 `efa92cde41a9d81114b2bbe32526f94f`)
+  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `mtkbt.patched` (md5 `d3511e1afcb59d11791d64ba5698b796`)
 
 - **`patch_odex.py`**
   - Patches `MtkBt.odex` so `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10
