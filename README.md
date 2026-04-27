@@ -19,22 +19,22 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
   - 10 patches: removes browse channel PSM, sets SupportedFeatures=0x23, bumps ProfileDescList version to 0x0104; patch 10 (`MOVW R6,#0x104` at `0x000afd6a`) confirmed wrong path — does not feed SDP registration; SDP `Version: 0x0103` persists
   - Verifies stock MD5 before patching and output MD5 after; supports `--verify-only` and `--skip-md5`
-  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `mtkbt.patched` (md5 `d3511e1afcb59d11791d64ba5698b796`)
+  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `output/mtkbt.patched` (md5 `d3511e1afcb59d11791d64ba5698b796`)
 
 - **`patch_odex.py`**
   - Patches `MtkBt.odex` so `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10
   - Recomputes the DEX adler32 checksum embedded in the ODEX header
-  - Input: stock `MtkBt.odex` (md5 `11566bc23001e78de64b5db355238175`) → Output: `MtkBt.odex.patched` (md5 `004d5439e514c42403cf9b470dc0c8cf`)
+  - Input: stock `MtkBt.odex` (md5 `11566bc23001e78de64b5db355238175`) → Output: `output/MtkBt.odex.patched` (md5 `004d5439e514c42403cf9b470dc0c8cf`)
 
 - **`patch_libextavrcp_jni.py`**
   - Patches `libextavrcp_jni.so` to force `g_tg_feature=14` (AVRCP 1.4) and `sdpfeature=0x23`; prevents CONNECT_CNF from downgrading negotiated version below 1.4
   - 4 ARM Thumb2 instruction overwrites: 2 in version-selection at 0x375c, 2 in CONNECT_CNF handler at 0x5e56/0x5e5c
-  - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `libextavrcp_jni.so.patched` (md5 `6c348ed9b2da4bb9cc364c16d20e3527`)
+  - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `output/libextavrcp_jni.so.patched` (md5 `6c348ed9b2da4bb9cc364c16d20e3527`)
 
 - **`patch_libextavrcp.py`**
   - Patches `libextavrcp.so` to advertise AVRCP 1.4 instead of 1.3
   - Single patch: version constant at 0x002e3b changed from `0x0103` (1.3) to `0x0104` (1.4)
-  - Input: stock `libextavrcp.so` → Output: `libextavrcp.so.patched`
+  - Input: stock `libextavrcp.so` → Output: `output/libextavrcp.so.patched`
 
 - **`innioasis-y1-fixes.bash`** (v1.2.0)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
@@ -134,7 +134,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 python3 patch_y1_apk.py path/to/com.innioasis.y1_3.0.2.apk
 ```
 
-Output: `com.innioasis.y1_3.0.2-patched.apk`
+Output: `output/com.innioasis.y1_3.0.2-patched.apk`
 
 Alternatively, if the APK is in the current directory:
 ```bash
@@ -149,10 +149,14 @@ Run each patch script against the corresponding stock binary extracted from the 
 python3 patch_mtkbt.py mtkbt
 python3 patch_odex.py MtkBt.odex
 python3 patch_libextavrcp_jni.py libextavrcp_jni.so
-python3 patch_libextavrcp.py libextavrcp.so libextavrcp.so.patched
+python3 patch_libextavrcp.py libextavrcp.so
 ```
 
-Outputs: `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched`
+Outputs (all written to the `output/` directory):
+- `output/mtkbt.patched`
+- `output/MtkBt.odex.patched`
+- `output/libextavrcp_jni.so.patched`
+- `output/libextavrcp.so.patched`
 
 Each script verifies the input MD5, checks patch sites before and after, and refuses to write output if anything is unexpected.
 
@@ -170,9 +174,9 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
     simg2img system.img system-raw.img
     mv system-raw.img system.img
     ```
-- `com.innioasis.y1_3.0.2-patched.apk` (from Step 1)
+- `com.innioasis.y1_3.0.2-patched.apk` – copy from `output/` produced in Step 1
 - `Y1MediaBridge.apk` (required for `--avrcp` flag)
-- `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched` (from Step 2, required for `--avrcp` flag)
+- `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched` – copy from `output/` produced in Step 2 (required for `--avrcp` flag)
 
 ### Step 4: Apply Firmware Patches
 
@@ -234,26 +238,21 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 - Device: Innioasis Y1 media player
 - Platform: MTK (MediaTek) ARM chipset with Dalvik VM (API 17)
 
-## Version History
+## Changes
 
-- **v1.2.1** (2026-04-26) – Add patch_libextavrcp.py (libextavrcp.so AVRCP 1.4 version constant); rename patch_so.py → patch_libextavrcp_jni.py; deploy `libextavrcp.so.patched` via `--avrcp` in innioasis-y1-fixes.bash
-- **v1.2.0** (2026-04-26) – Remove `--root` flag and boot.img handling (broken)
-- **v1.1.3** (2026-04-26) – Prompt for sudo credentials upfront; keep ticket alive for script duration to prevent mid-execution prompts
-- **v1.1.2** (2026-04-26) – Fix `--root`: use `sudo cpio` to preserve device nodes; add `ro.adb.secure=0` and `service.adb.root=1` to ramdisk `default.prop`; remove size mismatch failure (non-issue)
-- **v1.1.1** (2026-04-26) – Fix macOS compatibility: replace `stat -c%s` with `wc -c` for file size
-- **v1.1.0** (2026-04-26) – Add `--root` flag to patch boot.img ramdisk for ADB root access
-- **v1.0.11** (2026-04-26) – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4
-- **v1.0.10** (2026-04-25) – Split build.prop configuration, sorting and cleanup
-- **v1.0.9** (2026-04-25) – Sort some stuff to make it look cleaner
-- **v1.0.8** (2026-04-25) – Add bash parameter handling for selective patching
-- **v1.0.7** (2026-04-24) – Install patched Y1 music player APK
-- **v1.0.6** (2026-04-24) – Install patched MtkBt.odex for AVRCP 1.3 Java selector fix
-- **v1.0.5** (2026-04-23) – Fine tune echo statements
-- **v1.0.4** (2026-04-23) – Use unmodified (non-sparse) system.img source
-- **v1.0.3** (2026-04-23) – Add explicit Python virtual environment activation/deactivation
-- **v1.0.2** (2026-04-23) – Convert app removal to loop for better readability
-- **v1.0.1** (2026-04-23) – Append to build.prop instead of overwriting
-- **v1.0.0** (2026-04-23) – Initial release
+- **2026-04-27** – All patch scripts write output to `output/` subdirectory; `_patch_workdir` cleaned up after patch_y1_apk.py run
+- **2026-04-26** – Add patch_libextavrcp.py (libextavrcp.so AVRCP 1.4 version constant); rename patch_so.py → patch_libextavrcp_jni.py; deploy `libextavrcp.so.patched` via `--avrcp` in innioasis-y1-fixes.bash
+- **2026-04-26** – Remove `--root` flag and boot.img handling (broken)
+- **2026-04-26** – Prompt for sudo credentials upfront; keep ticket alive for script duration to prevent mid-execution prompts
+- **2026-04-26** – Fix `--root`: use `sudo cpio` to preserve device nodes; add `ro.adb.secure=0` and `service.adb.root=1` to ramdisk `default.prop`; remove size mismatch failure (non-issue)
+- **2026-04-26** – Fix macOS compatibility: replace `stat -c%s` with `wc -c` for file size
+- **2026-04-26** – Add `--root` flag to patch boot.img ramdisk for ADB root access
+- **2026-04-26** – Add patch_mtkbt.py, patch_odex.py, patch_so.py; all three BT binaries patched for AVRCP 1.4
+- **2026-04-25** – Split build.prop configuration, sorting and cleanup
+- **2026-04-25** – Add bash parameter handling for selective patching
+- **2026-04-24** – Install patched Y1 music player APK
+- **2026-04-24** – Install patched MtkBt.odex for AVRCP 1.3 Java selector fix
+- **2026-04-23** – Initial release
 
 ## Author
 
