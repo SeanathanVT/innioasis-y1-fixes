@@ -3,20 +3,23 @@
 patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
 Stock binary md5:  3af1d4ad8f955038186696950430ffda
-Output md5:        3a951f58bfbac12aa52c9a755cebc6d0
+Output md5:        efa92cde41a9d81114b2bbe32526f94f
 
 Patches applied:
-  1. 0xeba1d  Browse channel PSM 0x1b → 0x00 (remove browse advertisement)
-  2. 0xeba4b  AVRCP version byte 0x00 → 0x03
-  3. 0xeba58  MTK vendor version byte 0x00 → 0x03
-  4. 0xeba4e  SupportedFeatures Uint16 value 0x21 → 0x23
-  5. 0x0f97b2 Descriptor table flags for AttrID 0x0311: 0x03 → 0x05
-  6. 0xeba77  ProfileDescList AVRCP version 0x03 → 0x04 (1.3 → 1.4)
+  1. 0xeba1d    Browse channel PSM 0x1b → 0x00 (remove browse advertisement)
+  2. 0xeba4b    AVRCP version byte 0x00 → 0x03
+  3. 0xeba58    MTK vendor version byte 0x00 → 0x03
+  4. 0xeba4e    SupportedFeatures Uint16 value 0x21 → 0x23
+  5. 0x0f97b2   Descriptor table flags for AttrID 0x0311: 0x03 → 0x05
+  6. 0xeba77    ProfileDescList blob version 0x03 → 0x04 (read-back only)
+  7. 0x00012d7c MOVW r0,#0x1003 → #0x1004 (FUN_00022cec — wrong path, harmless)
+  8. 0x00012d84 MOVW r1,#0x1003 → #0x1004 (FUN_00022cec — wrong path, harmless)
+  9. 0x0000ead4 ldrb.w r1,[r4,#0xb7e] → movs r1,#4 + nop (log read, cosmetic)
+ 10. 0x0000eb0a ldrb.w r1,[r4,#0xb7e] → movs r1,#4 + nop (SDP registration read)
 
-Patch 6 changes the registered SDP record from:
-  "AV Remote" (0x110e)  Version: 0x0103
-to:
-  "AV Remote" (0x110e)  Version: 0x0104
+Patches 7+8: located via Ghidra static analysis of mtkbt (ARM32, base 0x10000).
+FUN_00022cec at vaddr 0x22cec writes AVRCP TG ProfileDescList version to
+DAT_001c8e4e via strh. 0x1003 is big-endian 0x0103 stored as Thumb2 MOVW immediate.
 
 Verify with: sdptool browse <Y1_BT_ADDR>
 
@@ -37,7 +40,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "3a951f58bfbac12aa52c9a755cebc6d0"
+OUTPUT_MD5 = "efa92cde41a9d81114b2bbe32526f94f"
 
 PATCHES = [
     {
@@ -75,6 +78,30 @@ PATCHES = [
         "offset": 0xeba77,
         "before": bytes([0x03]),
         "after":  bytes([0x04]),
+    },
+    {
+        "name": "MOVW r0,#0x1003 → #0x1004 — runtime SDP struct strh (FUN_00022cec)",
+        "offset": 0x00012d7c,
+        "before": bytes([0x41, 0xf2, 0x03, 0x00]),
+        "after":  bytes([0x41, 0xf2, 0x04, 0x00]),
+    },
+    {
+        "name": "MOVW r1,#0x1003 → #0x1004 — SDP struct arg to FUN_000205dc",
+        "offset": 0x00012d84,
+        "before": bytes([0x41, 0xf2, 0x03, 0x01]),
+        "after":  bytes([0x41, 0xf2, 0x04, 0x01]),
+    },
+    {
+        "name": "ldrb.w r1,[r4,#0xb7e] → movs r1,#4 + nop (log read, cosmetic)",
+        "offset": 0x0000ead4,
+        "before": bytes([0x94, 0xf8, 0x7e, 0x1b]),
+        "after":  bytes([0x04, 0x21, 0x00, 0xbf]),
+    },
+    {
+        "name": "ldrb.w r1,[r4,#0xb7e] → movs r1,#4 + nop (SDP registration path)",
+        "offset": 0x0000eb0a,
+        "before": bytes([0x94, 0xf8, 0x7e, 0x1b]),
+        "after":  bytes([0x04, 0x21, 0x00, 0xbf]),
     },
 ]
 

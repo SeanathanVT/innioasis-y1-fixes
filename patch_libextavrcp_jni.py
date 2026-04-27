@@ -3,30 +3,24 @@
 patch_libextavrcp_jni.py — Patch stock libextavrcp_jni.so → libextavrcp_jni.so.patched
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        485a632e799e0cd9ed44455238a8340e
-
-Context (ARM Thumb2 function at 0x375c):
-  The function selects an AVRCP version (r4) and sdpfeature (r5) based on
-  capability bits, then stores both to globals before calling _activate_1req.
-
-  Version selection logic (stock):
-    0x379a: movne r4, #0xa   → version 10 (AVRCP 1.0, fallback)
-    0x379e: movs  r4, #0xd   → version 13 (AVRCP 1.3)
-    0x37a2: movs  r4, #0xe   → version 14 (AVRCP 1.4)
-  ...followed by:
-    0x37b2: strb r4, [lr]    → stores version to g_tg_feature global
-    0x37b6: strb r5, [ip]    → stores sdpfeature to sdpfeature global
+Output md5:        6c348ed9b2da4bb9cc364c16d20e3527
 
 Patches applied:
-  1. 0x3764  mov r5, r3  → movs r5, #0x23
-             Forces sdpfeature = 0x23 (SupportedFeatures bitmask, correct for 1.3 and 1.4)
+  1. 0x3764  mov r5,r3 → movs r5,#0x23         Forces sdpfeature = 0x23
+  2. 0x37a8  movs r0,#1 → movs r4,#0x0e        Forces g_tg_feature = 14 (AVRCP 1.4)
+  3. 0x5e56  cmp r4,#0xd → cmp r4,#0xe         CONNECT_CNF: don't cap version at 1.3
+  4. 0x5e5c  movs r4,#0xd → movs r4,#0xe       CONNECT_CNF: cap at 1.4 not 1.3
 
-  2. 0x37a8  movs r0, #1 → movs r4, #0x0e
-             Overwrites version selection result with 0x0e = 14 (AVRCP 1.4)
-             Was 0x0d = 13 (AVRCP 1.3) in prior patch
+Patches 1+2 (function at 0x375c):
+  The function selects AVRCP version (r4) and sdpfeature (r5) from capability
+  bits, stores both to globals, then calls _activate_1req. Patches force
+  version=14 and sdpfeature=0x23 regardless of capability bit logic.
 
-  These override whatever the capability-bit logic selected, ensuring
-  activate_config always receives version=14 and sdpfeature=0x23.
+Patches 3+4 (FUN_005de8 — CONNECT_CNF handler):
+  Stock code at 0x5e56 caps the negotiated AVRCP version at 0x0d (1.3) after
+  every connection, silently downgrading 1.4 to 1.3. This caused cardinality:0
+  because the car CT requires AVRCP 1.4 to send REGISTER_NOTIFICATION.
+  Patches raise the cap to 0x0e (1.4).
 
 Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so
@@ -44,7 +38,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "485a632e799e0cd9ed44455238a8340e"
+OUTPUT_MD5 = "6c348ed9b2da4bb9cc364c16d20e3527"
 
 PATCHES = [
     {
@@ -58,6 +52,18 @@ PATCHES = [
         "offset": 0x37a8,
         "before": bytes([0x01, 0x20]),   # movs r0, #1
         "after":  bytes([0x0e, 0x24]),   # movs r4, #0x0e
+    },
+    {
+        "name": "CONNECT_CNF version cap: cmp r4,#0xd → cmp r4,#0xe",
+        "offset": 0x5e56,
+        "before": bytes([0x0d, 0x2c]),   # cmp r4, #0xd
+        "after":  bytes([0x0e, 0x2c]),   # cmp r4, #0xe
+    },
+    {
+        "name": "CONNECT_CNF version cap: movs r4,#0xd → movs r4,#0xe",
+        "offset": 0x5e5c,
+        "before": bytes([0x0d, 0x24]),   # movs r4, #0xd
+        "after":  bytes([0x0e, 0x24]),   # movs r4, #0xe
     },
 ]
 
