@@ -214,7 +214,12 @@ def main():
         print("\nERROR: post-patch verification failed — output not written.")
         sys.exit(1)
 
-    output_path = Path(args.output) if args.output else Path("mtkbt.patched")
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / "mtkbt.patched"
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
