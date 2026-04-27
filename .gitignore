@@ -1,2 +1,3 @@
-*.apk
 _patch_workdir
+.DS_Store
+*.apk
