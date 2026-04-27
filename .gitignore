@@ -1,3 +1,5 @@
 _patch_workdir
 .DS_Store
+hwparam.json
 *.apk
+.state
