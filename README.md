@@ -17,10 +17,13 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **`patch_mtkbt.py`**
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
-  - **Single patch (A1):** `0x38BFC`: `40 f2 01 37` → `40 f2 01 47` (`MOVW r7,#0x0301` → `MOVW r7,#0x0401`) — the only confirmed effective fix for the SDP version advertisement. The SDP init function (`0x38AB0`–`0x38C74`) loads this byte-swapped version into r7, then `STRH.W r7,[r3,#72]` at `0x38C02` writes `{01 03}` to the runtime SDP record. Changing the MOVW immediate causes STRH to write `{01 04}` = AVRCP 1.4. Verified on-binary.
-  - All prior patches (1–10) have been removed: the `.rodata` SDP blob patches (0xeba1d, 0xeba4b, 0xeba4e, 0xeba58, 0xeba76–77) are confirmed read-back only and do not affect SDP registration; descriptor table flag patches, FUN_00022cec MOVW patches, and the version sink at 0x000afd6a are confirmed wrong paths.
-  - Stock MD5: `3af1d4ad8f955038186696950430ffda` (alt build on disk: `f50c480edbd55c78e7b1fd47a2875f52` — use `--skip-md5`)
-  - Output MD5: recompute after first run (printed by script)
+  - **Four patches applied:**
+    - **B0** `0x0eba4b`: `0x00` → `0x04` — record [23] ProfileDescList minor version (AVRCP 1.0 → 1.4)
+    - **B1** `0x0eba58`: `0x00` → `0x04` — record [18] ProfileDescList minor version (AVRCP 1.0 → 1.4)
+    - **B2** `0x0eba77`: `0x03` → `0x04` — record [13] ProfileDescList minor version (AVRCP 1.3 → 1.4)
+    - **A1** `0x38BFC`: `40 f2 01 37` → `40 f2 01 47` — `MOVW r7,#0x0301` → `MOVW r7,#0x0401` (runtime SDP struct belt-and-suspenders)
+  - The descriptor table contains **three** `AttrID=0x0009` (ProfileDescList) entries for the AVRCP TG SDP record (records [13], [18], [23]). The SDP stack serves the last-wins entry. All three minor version bytes are patched to `0x04` so AVRCP 1.4 is advertised regardless of which entry wins at runtime. Stock blobs: records [23] and [18] were AVRCP 1.0, record [13] was AVRCP 1.3.
+  - Stock MD5: `3af1d4ad8f955038186696950430ffda` — Output MD5: `9e8d155987f64596091335d2d4225898`
 
 - **`patch_mtkbt_odex.py`**
   - Patches `MtkBt.odex` with two fixes:
@@ -244,7 +247,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Changes
 
-- **2026-04-30** – Full cross-source conflict resolution against binary. Rewrote patch_mtkbt.py: removed 10 eliminated patches (blob patches confirmed read-back only; descriptor table flags = element size, not control bit; FUN_00022cec and version sink confirmed wrong paths). Single remaining patch is A1 (0x38BFC: MOVW r7,#0x0301→#0x0401), the confirmed root-cause fix for SDP still advertising AVRCP 1.3. Cline audit finding (0x13FA6 as 0x0103 in .text) confirmed false positive on-binary — bytes are second halfword of Thumb32 instruction. Generated unified brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md`.
+- **2026-04-30** – Regression analysis and SDP confirmation. Discovered descriptor table contains THREE `AttrID=0x0009` (ProfileDescList) entries (records [13], [18], [23]) — not two as previously believed. Old patches #2 (0xeba4b) and #3 (0xeba58) were incorrectly eliminated as "read-back only"; removing them caused SDP to regress from 0x0103 → 0x0100, proving both target live descriptor table entries. Restored and upgraded all three blob patches to 0x04 (AVRCP 1.4): B0=0xeba4b, B1=0xeba58, B2=0xeba77. Retained A1 (0x38BFC MOVW) as belt-and-suspenders. Confirmed: `sdptool browse` shows `AV Remote (0x110e) Version: 0x0104` after flash. Patched MD5: `9e8d155987f64596091335d2d4225898`. Generated unified brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md`. Outstanding: un-pair/re-pair required for car to pick up fresh SDP (cardinality/tg_feature still 0 from cached prior pairing).
 - **2026-04-29** – Full Prong C (JNI/native) audit complete; no new binary patch required for JNI layer. Confirmed call chain: `getPreferVersion(14)` → `checkCapability()` 1.4 block → `activateConfig_3req(bitmask)` → `g_tg_feature=0x0e` (@ 0xD29C) → `activate_1req` → `btmtk_avrcp_send_activate_req` payload byte[6]=0x0e → daemon socket. Add **[A1] patch_mtkbt.py patch 11** at `0x38BFC` (`40 f2 01 37` → `40 f2 01 47`): MOVW r7,#0x0301→#0x0401, the runtime SDP STRH.W — this is the primary SDP advertisement fix. Fix patch 6 offset: `0xeba77` (1 byte) → `0xeba76` (2 bytes `01 03`→`01 04`), the static SDP wire-format template. Update patch_libextavrcp_jni.py docstring with confirmed global addresses and full call chain. Fix misleading "AVRCP 1.0" label in patch_mtkbt_odex.py (BlueAngel code 10 = AVRCP 1.3).
 - **2026-04-27** – Rename patch_odex.py → patch_mtkbt_odex.py; add second patch: reset `sPlayServiceInterface` in `BluetoothAvrcpService.disable()` to fix BT toggle service teardown bug
 - **2026-04-27** – All patch scripts write output to `output/` subdirectory; `_patch_workdir` cleaned up after patch_y1_apk.py run
