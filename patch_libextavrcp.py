@@ -1,18 +1,35 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp.py — Patch stock libextavrcp.so → libextavrcp.so.patched
+patch_libextavrcp.py — Patch stock libextavrcp.so -> libextavrcp.so.patched
 
-Stock binary md5:  6442b137d3074e5ac9a654de83a4941a
+Stock binary md5:  6442b137d3074e5ac9a654de83a4941a  (size: 17,552 bytes)
 Output md5:        943d406bfbb7669fd62cf1c450d34c42
 
-Patches applied:
-  1. 0x002e3b  AVRCP version 0x0103 (1.3) → 0x0104 (1.4)
+Binary: ARM32 ELF shared object, ET_DYN, base 0x00000000.
+        File offsets equal virtual addresses for the first PT_LOAD segment.
 
-Patch 1 changes the AVRCP version constant advertised in the SDP record from
-1.3 to 1.4, enabling bidirectional metadata flow with AVRCP 1.4 car head units.
+--- Patch: AVRCP version constant in .text ---
 
-Verify with: sdptool browse <Y1_BT_ADDR>
-  # Should show: AV Remote (0x110e) Version: 0x0104
+  Offset 0x002E3B is within .text (range 0x17E0-0x2FC4). The two bytes at
+  0x002E3B are a little-endian uint16 embedded in a Thumb-2 instruction sequence:
+
+    Surrounding bytes: 46 f0 01 03 [03 01] 90
+                                    ^^^^^
+                                 0x0103 in LE = AVRCP 1.3
+
+  Patch changes the LE encoding from 03 01 (= 0x0103) to 04 01 (= 0x0104).
+
+  Confirmed on-binary: stock bytes [0x002e3b:0x002e3d] = 03 01.
+
+  Note (Cline report conflict): an external audit claimed 0x0103 appears as
+  inline data at mtkbt offset 0x13FA6. Binary analysis confirms this is a
+  false positive — the bytes 09 01 at 0x13FA6 are the second halfword of a
+  Thumb32 instruction (hw1=0xEB00, Thumb32 prefix bits[15:13]=111). No
+  additional 0x0103 literal exists in mtkbt .text as standalone data.
+
+  Note (file size conflict): an external audit claimed libextavrcp.so is
+  17,504 bytes. Confirmed size on stock binary: 17,552 bytes. The external
+  audit was run against a different file.
 
 Usage:
     python3 patch_libextavrcp.py libextavrcp.so
@@ -20,8 +37,9 @@ Usage:
     python3 patch_libextavrcp.py libextavrcp.so --verify-only
 
 Deploy:
-    adb push libextavrcp.so.patched /system/lib/libextavrcp.so
+    adb push output/libextavrcp.so.patched /system/lib/libextavrcp.so
     adb reboot
+    sdptool browse <Y1_BT_ADDR>  # verify: AV Remote Version: 0x0104
 """
 
 import argparse
@@ -34,7 +52,7 @@ OUTPUT_MD5 = "943d406bfbb7669fd62cf1c450d34c42"
 
 PATCHES = [
     {
-        "name": "AVRCP version 0x0103 (1.3) → 0x0104 (1.4)",
+        "name": "AVRCP version constant 0x0103 -> 0x0104  (.text @ 0x002E3B)",
         "offset": 0x002e3b,
         "before": bytes([0x03, 0x01]),
         "after":  bytes([0x04, 0x01]),
@@ -71,14 +89,9 @@ def main():
         description="Patch stock libextavrcp.so for AVRCP 1.4"
     )
     parser.add_argument("input", help="Path to stock libextavrcp.so")
-    parser.add_argument(
-        "--output", "-o", default=None,
-        help="Output path (default: libextavrcp.so.patched)"
-    )
-    parser.add_argument("--verify-only", action="store_true",
-                        help="Check patch sites only, no output")
-    parser.add_argument("--skip-md5", action="store_true",
-                        help="Skip stock md5 check")
+    parser.add_argument("--output", "-o", default=None)
+    parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--skip-md5", action="store_true")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -92,7 +105,7 @@ def main():
     print(f"Input:  {input_path}  ({len(data):,} bytes)")
     print(f"MD5:    {input_md5}")
 
-    if not args.skip_md5 and STOCK_MD5 and input_md5 != STOCK_MD5:
+    if not args.skip_md5 and input_md5 != STOCK_MD5:
         print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
         print("       Use --skip-md5 to bypass.")
         sys.exit(1)

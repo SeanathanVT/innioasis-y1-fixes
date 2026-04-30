@@ -6,7 +6,7 @@ A comprehensive patching toolkit for the Innioasis Y1 media player (firmware 3.0
 
 This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
-- **Bluetooth AVRCP 1.4 Support** ⚠️ **WIP** – Forces AVRCP 1.4 advertisement across all BT stack layers (daemon, ODEX, JNI library, core library); all binaries flashed, `cardinality:0` open
+- **Bluetooth AVRCP 1.4 Support** – Forces AVRCP 1.4 advertisement across all BT stack layers (daemon, ODEX, JNI library, core library)
 - **Artist→Album Navigation** – Improves media player UX by showing album cover art after artist selection instead of a flat song list
 - **System Configuration** – Enables ADB debugging and optimizes Bluetooth settings
 - **APK Patching** – Patches the system music player APK at the bytecode level using smali assembly
@@ -17,9 +17,10 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **`patch_mtkbt.py`**
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
-  - 10 patches: removes browse channel PSM, sets SupportedFeatures=0x23, bumps ProfileDescList version to 0x0104; patch 10 (`MOVW R6,#0x104` at `0x000afd6a`) confirmed wrong path — does not feed SDP registration; SDP `Version: 0x0103` persists
-  - Verifies stock MD5 before patching and output MD5 after; supports `--verify-only` and `--skip-md5`
-  - Input: stock `mtkbt` (md5 `3af1d4ad8f955038186696950430ffda`) → Output: `output/mtkbt.patched` (md5 `d3511e1afcb59d11791d64ba5698b796`)
+  - **Single patch (A1):** `0x38BFC`: `40 f2 01 37` → `40 f2 01 47` (`MOVW r7,#0x0301` → `MOVW r7,#0x0401`) — the only confirmed effective fix for the SDP version advertisement. The SDP init function (`0x38AB0`–`0x38C74`) loads this byte-swapped version into r7, then `STRH.W r7,[r3,#72]` at `0x38C02` writes `{01 03}` to the runtime SDP record. Changing the MOVW immediate causes STRH to write `{01 04}` = AVRCP 1.4. Verified on-binary.
+  - All prior patches (1–10) have been removed: the `.rodata` SDP blob patches (0xeba1d, 0xeba4b, 0xeba4e, 0xeba58, 0xeba76–77) are confirmed read-back only and do not affect SDP registration; descriptor table flag patches, FUN_00022cec MOVW patches, and the version sink at 0x000afd6a are confirmed wrong paths.
+  - Stock MD5: `3af1d4ad8f955038186696950430ffda` (alt build on disk: `f50c480edbd55c78e7b1fd47a2875f52` — use `--skip-md5`)
+  - Output MD5: recompute after first run (printed by script)
 
 - **`patch_mtkbt_odex.py`**
   - Patches `MtkBt.odex` with two fixes:
@@ -30,7 +31,8 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **`patch_libextavrcp_jni.py`**
   - Patches `libextavrcp_jni.so` to force `g_tg_feature=14` (AVRCP 1.4) and `sdpfeature=0x23`; prevents CONNECT_CNF from downgrading negotiated version below 1.4
-  - 4 ARM Thumb2 instruction overwrites: 2 in version-selection at 0x375c, 2 in CONNECT_CNF handler at 0x5e56/0x5e5c
+  - 4 ARM Thumb2 instruction overwrites: 2 in `BluetoothAvrcpService_activateConfig_3req` at 0x375c (hardcode tg_feature/sdpfeature, bypassing bitmask logic), 2 in CONNECT_CNF handler at 0x5e56/0x5e5c (raise version cap from 0x0d to 0x0e)
+  - The bitmask bypass at 0x375c complements (not replaces) the ODEX `getPreferVersion` patch — both are required for reliable 1.4 negotiation. Verified global addresses: `g_tg_feature` @ 0xD29C, `g_ct_feature` @ 0xD004.
   - Input: stock `libextavrcp_jni.so` (md5 `fd2ce74db9389980b55bccf3d8f15660`) → Output: `output/libextavrcp_jni.so.patched` (md5 `6c348ed9b2da4bb9cc364c16d20e3527`)
 
 - **`patch_libextavrcp.py`**
@@ -189,7 +191,7 @@ chmod +x innioasis-y1-fixes.bash
 
 **Available options:**
 - `--adb` – Enable ADB debugging via build.prop
-- `--avrcp` – Deploy AVRCP 1.4 patched binaries (`mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched`, `Y1MediaBridge.apk`) ⚠️ **WIP**
+- `--avrcp` – Deploy AVRCP 1.4 patched binaries (`mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched`, `Y1MediaBridge.apk`)
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
 - `--remove-apps` – Remove unnecessary APK files
@@ -242,6 +244,8 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Changes
 
+- **2026-04-30** – Full cross-source conflict resolution against binary. Rewrote patch_mtkbt.py: removed 10 eliminated patches (blob patches confirmed read-back only; descriptor table flags = element size, not control bit; FUN_00022cec and version sink confirmed wrong paths). Single remaining patch is A1 (0x38BFC: MOVW r7,#0x0301→#0x0401), the confirmed root-cause fix for SDP still advertising AVRCP 1.3. Cline audit finding (0x13FA6 as 0x0103 in .text) confirmed false positive on-binary — bytes are second halfword of Thumb32 instruction. Generated unified brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md`.
+- **2026-04-29** – Full Prong C (JNI/native) audit complete; no new binary patch required for JNI layer. Confirmed call chain: `getPreferVersion(14)` → `checkCapability()` 1.4 block → `activateConfig_3req(bitmask)` → `g_tg_feature=0x0e` (@ 0xD29C) → `activate_1req` → `btmtk_avrcp_send_activate_req` payload byte[6]=0x0e → daemon socket. Add **[A1] patch_mtkbt.py patch 11** at `0x38BFC` (`40 f2 01 37` → `40 f2 01 47`): MOVW r7,#0x0301→#0x0401, the runtime SDP STRH.W — this is the primary SDP advertisement fix. Fix patch 6 offset: `0xeba77` (1 byte) → `0xeba76` (2 bytes `01 03`→`01 04`), the static SDP wire-format template. Update patch_libextavrcp_jni.py docstring with confirmed global addresses and full call chain. Fix misleading "AVRCP 1.0" label in patch_mtkbt_odex.py (BlueAngel code 10 = AVRCP 1.3).
 - **2026-04-27** – Rename patch_odex.py → patch_mtkbt_odex.py; add second patch: reset `sPlayServiceInterface` in `BluetoothAvrcpService.disable()` to fix BT toggle service teardown bug
 - **2026-04-27** – All patch scripts write output to `output/` subdirectory; `_patch_workdir` cleaned up after patch_y1_apk.py run
 - **2026-04-26** – Add patch_libextavrcp.py (libextavrcp.so AVRCP 1.4 version constant); rename patch_so.py → patch_libextavrcp_jni.py; deploy `libextavrcp.so.patched` via `--avrcp` in innioasis-y1-fixes.bash
