@@ -90,7 +90,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "37ddc966760312b1360743434637ff2d"
+OUTPUT_MD5 = "e9e9fbbbadcfe50e5695759862f002a3"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -139,6 +139,29 @@ PATCHES = [
         "offset": 0x038BFC,
         "before": bytes([0x40, 0xf2, 0x01, 0x37]),
         "after":  bytes([0x40, 0xf2, 0x01, 0x47]),
+    },
+    # D1: NOP the runtime registration guard.
+    #
+    # The SDP init function (0x38AB0-0x38C74) builds the AVRCP TG SDP struct in r3,
+    # then checks CMP r0, r5 (r5=0x111F) before executing the three writes that
+    # complete registration:
+    #
+    #   0x38C6E: STR r3, [r1]    — links the struct into mtkbt's live SDP registry
+    #   0x38C70: MOVS r0, #8     — success return value
+    #   0x38C72: STRB r7, [r2]   — writes version status byte
+    #
+    # r0 is never 0x111F in normal operation, so BNE always branches to the skip
+    # path (0x38C76: MOV r0, r4 / POP), leaving the AVRCP TG record unregistered.
+    # Result: mtkbt returns tg_feature:0 ct_feature:0 in every CONNECT_CNF, and
+    # peers never send REGISTER_NOTIFICATION (cardinality stays 0), regardless of
+    # what the SDP blob advertises.
+    #
+    # Fix: replace BNE with NOP — the struct is always registered.
+    {
+        "name":   "0x38C6C: BNE 0x38C76 -> NOP  registration guard bypass  [D1]",
+        "offset": 0x038C6C,
+        "before": bytes([0x03, 0xd1]),
+        "after":  bytes([0x00, 0xbf]),
     },
 ]
 

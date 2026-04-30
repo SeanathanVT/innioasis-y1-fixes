@@ -17,7 +17,7 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 
 - **`patch_mtkbt.py`**
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
-  - **Seven patches applied:**
+  - **Eight patches applied:**
     - **B1** `0x0eba6d`: `0x00` → `0x03` — AVCTP 1.0 → 1.3 LSB in Groups 1 & 2 shared ProtocolDescList (TG control channel — what `sdptool` sees)
     - **B2** `0x0eba37`: `0x00` → `0x03` — AVCTP 1.0 → 1.3 LSB in Group 3 CT ProtocolDescList
     - **B3** `0x0eba25`: `0x00` → `0x03` — AVCTP 1.0 → 1.3 LSB in Group 1 AdditionalProtocol (browsing channel descriptor)
@@ -25,8 +25,10 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
     - **C2** `0x0eba58`: `0x00` → `0x04` — AVRCP 1.0 → 1.4 LSB in ProfileDescList entry[18] (served by SDP last-wins)
     - **C3** `0x0eba77`: `0x03` → `0x04` — AVRCP 1.3 → 1.4 LSB in ProfileDescList entry[13]
     - **A1** `0x38BFC`: `40 f2 01 37` → `40 f2 01 47` — `MOVW r7,#0x0301` → `MOVW r7,#0x0401` (runtime SDP struct, belt-and-suspenders)
+    - **D1** `0x38C6C`: `03 d1` → `00 bf` — `BNE 0x38C76` → `NOP` — bypasses registration guard so the AVRCP TG SDP struct is always linked into mtkbt's live registry (see note below)
   - The descriptor table contains three service record groups. Groups 1 & 2 are TG (AV Remote Target 0x110c); Group 3 is CT (AV Remote 0x110e). All AVCTP version bytes were stock 1.0; AVRCP 1.4 requires AVCTP 1.3. All three ProfileDescList entries are patched to AVRCP 1.4 (last-wins semantics). `AttrID=0x0311` (SupportedFeatures) IS present in all three groups in the descriptor table (values 0x0021, 0x0001, 0x000f).
-  - Stock MD5: `3af1d4ad8f955038186696950430ffda` — Output MD5: `37ddc966760312b1360743434637ff2d`
+  - **D1 note:** The SDP init function at `0x38AB0` builds the TG struct, then gates the final `STR r3,[r1]` registration write (which links the struct into the live registry) behind `CMP r0,r5 / BNE` where r5=`0x111F`. r0 is never `0x111F`, so the registration never completes. Result without D1: mtkbt returns `tg_feature:0 ct_feature:0` in every `CONNECT_CNF` regardless of SDP blob contents, and peers never send `REGISTER_NOTIFICATION` (cardinality stays 0). Confirmed against Sonos Roam and Samsung The Frame Pro TV (both known-good AVRCP CTs, fresh pairs).
+  - Stock MD5: `3af1d4ad8f955038186696950430ffda` — Output MD5: `e9e9fbbbadcfe50e5695759862f002a3`
 
 - **`patch_mtkbt_odex.py`**
   - Patches `MtkBt.odex` with two fixes:
@@ -250,6 +252,7 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 ## Changes
 
+- **2026-04-30** – Add D1 patch to patch_mtkbt.py: NOP the `BNE 0x38C76` at `0x38C6C` to bypass the runtime registration guard in the SDP init function. Without this patch, the AVRCP TG struct is built correctly but never linked into mtkbt's live registry — every `CONNECT_CNF` returns `tg_feature:0 ct_feature:0` and no peer sends `REGISTER_NOTIFICATION`. Confirmed root cause by fresh-pairing Sonos Roam and Samsung The Frame Pro TV (both known-good AVRCP CTs). Updated patched MD5: `e9e9fbbbadcfe50e5695759862f002a3`.
 - **2026-04-30** – Add three AVCTP version patches (B1-B3) to patch_mtkbt.py. Stock mtkbt advertises AVCTP 1.0 (0x0100) in all three AVCTP-bearing SDP blobs; AVRCP 1.4 requires AVCTP 1.3. Patched: `0x0eba6d` (Groups 1&2 TG ProtocolDescList), `0x0eba37` (Group 3 CT ProtocolDescList), `0x0eba25` (Group 1 AdditionalProtocol). Corrected incorrect prior note claiming `AttrID=0x0311` (SupportedFeatures) was not registered — it IS in all three groups. Updated patched MD5: `37ddc966760312b1360743434637ff2d`. Rename existing ProfileDescList patches: B0→C1, B1→C2, B2→C3.
 - **2026-04-30** – Regression analysis and SDP confirmation. Discovered descriptor table contains THREE `AttrID=0x0009` (ProfileDescList) entries (records [13], [18], [23]). Old patches #2 (0xeba4b) and #3 (0xeba58) incorrectly eliminated as "read-back only"; regression from 0x0103 → 0x0100 on removal proved both were live. Restored and upgraded all three to 0x04 (AVRCP 1.4). A1 (0x38BFC MOVW) retained as belt-and-suspenders. Confirmed: `sdptool browse` → `AV Remote Version: 0x0104`. Generated unified brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md`.
 - **2026-04-29** – Full Prong C (JNI/native) audit complete; no new binary patch required for JNI layer. Confirmed call chain: `getPreferVersion(14)` → `checkCapability()` 1.4 block → `activateConfig_3req(bitmask)` → `g_tg_feature=0x0e` (@ 0xD29C) → `activate_1req` → `btmtk_avrcp_send_activate_req` payload byte[6]=0x0e → daemon socket. Add **[A1] patch_mtkbt.py patch 11** at `0x38BFC` (`40 f2 01 37` → `40 f2 01 47`): MOVW r7,#0x0301→#0x0401, the runtime SDP STRH.W — this is the primary SDP advertisement fix. Fix patch 6 offset: `0xeba77` (1 byte) → `0xeba76` (2 bytes `01 03`→`01 04`), the static SDP wire-format template. Update patch_libextavrcp_jni.py docstring with confirmed global addresses and full call chain. Fix misleading "AVRCP 1.0" label in patch_mtkbt_odex.py (BlueAngel code 10 = AVRCP 1.3).
