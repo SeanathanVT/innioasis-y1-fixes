@@ -2,22 +2,74 @@
 """
 patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
-Stock binary md5: 3af1d4ad8f955038186696950430ffda
+Stock md5:  3af1d4ad8f955038186696950430ffda
+Output md5: (regenerated on each build — see script output)
 
-Patches applied:
-  1. 0xeba1d  Browse channel PSM 0x1b → 0x00 (remove browse advertisement)
-  2. 0xeba4b  AVRCP version byte 0x00 → 0x03
-  3. 0xeba58  MTK vendor version byte 0x00 → 0x03
-  4. 0xeba4e  SupportedFeatures Uint16 value 0x21 → 0x23
-  5. 0x0f97b2 Descriptor table flags for AttrID 0x0311: 0x03 → 0x05
-  6. 0xeba77  ProfileDescList AVRCP version 0x03 → 0x04 (1.3 → 1.4)
+--- Descriptor table structure (key finding) ---
 
-Patch 6 changes the registered SDP record from:
-  "AV Remote" (0x110e)  Version: 0x0103
-to:
-  "AV Remote" (0x110e)  Version: 0x0104
+The mtkbt descriptor table at file offset 0x0f9774 has three AVRCP service record
+groups, each a contiguous run of 5-6 entries (attrID LE16, len LE16, ptr LE32,
+zeros LE32). The groups are:
 
-Verify with: sdptool browse <Y1_BT_ADDR>
+  Group 1 (entries [0]-[5], TG record A):
+    ServiceClassIDList ptr=0x0eba38 → {UUID(AV Remote Target 0x110c)}
+    ProtocolDescList   ptr=0x0eba5c → L2CAP(PSM=23) + AVCTP(1.0→1.3)  [shared w/ Group 2]
+    AdditionalProtocol ptr=0x0eba12 → L2CAP(PSM=23) + AVCTP(1.0→1.3)  [browsing descriptor]
+    ProfileDescList    ptr=0x0eba6e → AV Remote(0x110e) v1.3→1.4        [entry index 13]
+    SupportedFeatures  ptr=0x0eba4c → 0x0021 (Category1 + GroupNavigation)
+
+  Group 2 (entries [6]-[10], TG record B — LAST WINS for TG):
+    ServiceClassIDList ptr=0x0eba38 → {UUID(AV Remote Target 0x110c)}   [same blob as Group 1]
+    ProtocolDescList   ptr=0x0eba5c → L2CAP(PSM=23) + AVCTP(1.0→1.3)   [same blob as Group 1]
+    ProfileDescList    ptr=0x0eba4f → AV Remote(0x110e) v1.0→1.4        [entry index 18, served by sdptool]
+    SupportedFeatures  ptr=0x0eba59 → 0x0001 (Category1 only)
+
+  Group 3 (entries [11]-[15], CT record):
+    ServiceClassIDList ptr=0x0eba78 → {UUID(AV Remote 0x110e)}
+    ProtocolDescList   ptr=0x0eba26 → L2CAP(PSM=23) + AVCTP(1.0→1.3)
+    ProfileDescList    ptr=0x0eba42 → AV Remote(0x110e) v1.0→1.4        [entry index 23]
+    SupportedFeatures  ptr=0x0eba0f → 0x000f (Category1-4)
+
+Note: AttrID=0x0311 (SupportedFeatures) IS registered in all three groups. The
+earlier "ELIMINATED" note claiming "AttrID 0x0311 not registered" was incorrect —
+it was based on a false negative from testing a non-live patch site. All three
+0x0311 entries have non-zero values in the descriptor table.
+
+--- Eliminated patches (do not restore) ---
+
+  ELIMINATED — old #1 (0xeba1d): PSM byte — unrelated to version.
+  ELIMINATED — old #5 (0x0f97b2): descriptor table flags = element size, not control.
+  ELIMINATED — old #7, #8 (0x00012d7c, 0x00012d84): FUN_00022cec, not on SDP path.
+  ELIMINATED — old #9 (0x0000ead4): FUN_000108d0 ignores r1 parameter.
+  ELIMINATED — old #10 (0x000afd6a): version sink downstream of SDP construction.
+
+--- Patches in this script ---
+
+  B1-B3 — AVCTP version in ProtocolDescList / AdditionalProtocol blobs:
+    Stock mtkbt advertises AVCTP 1.0 (0x0100) in all three AVCTP-bearing blobs.
+    AVRCP 1.4 requires AVCTP 1.3 (0x0103). Three LSBs are patched 0x00 → 0x03:
+
+      0x0eba6d  Groups 1 & 2 shared ProtocolDescList (TG control channel)
+      0x0eba37  Group 3 ProtocolDescList (CT control channel)
+      0x0eba25  Group 1 AdditionalProtocol (browsing channel descriptor)
+
+  C1-C3 — AVRCP profile version in ProfileDescList blobs (all three groups):
+    The SDP stack uses last-wins semantics across entries; all three are patched
+    to 1.4 to guarantee the correct value regardless of which entry is served:
+
+      entry[23] ptr=0x0eba42  minor version at 0x0eba4b  stock: 0x00  -> 0x04
+      entry[18] ptr=0x0eba4f  minor version at 0x0eba58  stock: 0x00  -> 0x04
+      entry[13] ptr=0x0eba6e  minor version at 0x0eba77  stock: 0x03  -> 0x04
+
+    Old patches #2 (0xeba4b: 00->03) and #3 (0xeba58: 00->03) covered entries
+    [23] and [18] respectively; both were previously mislabelled "eliminated."
+    Both are now set to 1.4.
+
+  A1 — Runtime SDP MOVW at 0x38BFC: runtime struct version
+    The SDP init function at 0x38AB0-0x38C74 also writes the version to a
+    runtime SDP struct via STRH.W r7,[r3,#72] at 0x38C02. MOVW r7,#0x0301
+    (bytes: 40 f2 01 37) is patched to MOVW r7,#0x0401 (40 f2 01 47).
+    Belt-and-suspenders alongside the blob patches.
 
 Usage:
     python3 patch_mtkbt.py mtkbt
@@ -25,9 +77,11 @@ Usage:
     python3 patch_mtkbt.py mtkbt --verify-only
 
 Deploy:
-    adb push mtkbt.patched /system/bin/mtkbt
+    adb push output/mtkbt.patched /system/bin/mtkbt
     adb shell chmod 755 /system/bin/mtkbt
     adb reboot
+    sdptool browse <Y1_BT_ADDR>   # expect: AVCTP uint16: 0x0103, AV Remote Version: 0x0104
+    logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'
 """
 
 import argparse
@@ -35,44 +89,56 @@ import hashlib
 import sys
 from pathlib import Path
 
-STOCK_MD5 = "3af1d4ad8f955038186696950430ffda"
+STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
+OUTPUT_MD5 = "37ddc966760312b1360743434637ff2d"
 
 PATCHES = [
+    # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
+    # AVRCP 1.4 requires AVCTP 1.3; the LSB byte at each offset is the minor version.
     {
-        "name": "Browse channel PSM 0x1b → 0x00",
-        "offset": 0xeba1d,
-        "before": bytes([0x1b]),
-        "after":  bytes([0x00]),
-    },
-    {
-        "name": "AVRCP version byte 0x00 → 0x03",
-        "offset": 0xeba4b,
+        "name":   "0x0eba6d: AVCTP 1.0->1.3 LSB  Groups 1&2 ProtocolDescList  [B1]",
+        "offset": 0x0eba6d,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name": "MTK vendor version byte 0x00 → 0x03",
-        "offset": 0xeba58,
+        "name":   "0x0eba37: AVCTP 1.0->1.3 LSB  Group 3 CT ProtocolDescList  [B2]",
+        "offset": 0x0eba37,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name": "SupportedFeatures value 0x21 → 0x23",
-        "offset": 0xeba4e,
-        "before": bytes([0x21]),
-        "after":  bytes([0x23]),
+        "name":   "0x0eba25: AVCTP 1.0->1.3 LSB  Group 1 AdditionalProtocol   [B3]",
+        "offset": 0x0eba25,
+        "before": bytes([0x00]),
+        "after":  bytes([0x03]),
+    },
+    # C1-C3: AVRCP profile version in ProfileDescList blobs, all three groups.
+    # All patched to 1.4 — last-wins entry wins regardless of which is served.
+    {
+        "name":   "0x0eba4b: AVRCP 1.x->1.4 LSB  entry[23] ProfileDescList  [C1]",
+        "offset": 0x0eba4b,
+        "before": bytes([0x00]),
+        "after":  bytes([0x04]),
     },
     {
-        "name": "AttrID 0x0311 descriptor table flags 0x03 → 0x05",
-        "offset": 0x0f97b2,
-        "before": bytes([0x03]),
-        "after":  bytes([0x05]),
+        "name":   "0x0eba58: AVRCP 1.x->1.4 LSB  entry[18] ProfileDescList  [C2 — served]",
+        "offset": 0x0eba58,
+        "before": bytes([0x00]),
+        "after":  bytes([0x04]),
     },
     {
-        "name": "ProfileDescList AVRCP version 0x03 → 0x04 (1.3 → 1.4)",
-        "offset": 0xeba77,
+        "name":   "0x0eba77: AVRCP 1.3->1.4 LSB  entry[13] ProfileDescList  [C3]",
+        "offset": 0x0eba77,
         "before": bytes([0x03]),
         "after":  bytes([0x04]),
+    },
+    # A1: Runtime SDP struct version patched via MOVW instruction.
+    {
+        "name":   "0x38BFC: MOVW r7,#0x0301 -> #0x0401  [A1 — runtime SDP struct]",
+        "offset": 0x038BFC,
+        "before": bytes([0x40, 0xf2, 0x01, 0x37]),
+        "after":  bytes([0x40, 0xf2, 0x01, 0x47]),
     },
 ]
 
@@ -85,28 +151,31 @@ def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
     results = []
     for p in PATCHES:
         expected = p[mode]
-        actual = data[p["offset"]: p["offset"] + len(expected)]
+        actual = bytes(data[p["offset"]: p["offset"] + len(expected)])
         results.append({**p, "actual": actual, "ok": actual == expected})
     return all(r["ok"] for r in results), results
 
 
-def print_results(label: str, results: list[dict]) -> None:
+def print_results(label: str, results: list[dict], mode: str) -> None:
     print(f"\n{label}")
     print("-" * 72)
     for r in results:
+        n = len(r["before"])
+        fmt = lambda b: b.hex(" ") if n <= 8 else b[:8].hex(" ") + " ..."
         print(f"  [{'OK' if r['ok'] else 'FAIL'}] 0x{r['offset']:06x}  {r['name']}")
         if not r["ok"]:
-            print(f"          expected: {r['before'].hex(' ')}")
-            print(f"          actual:   {r['actual'].hex(' ')}")
+            print(f"          expected ({mode}): {fmt(r[mode])}")
+            print(f"          actual:            {fmt(r['actual'])}")
     print("-" * 72)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Patch stock mtkbt → mtkbt.patched")
+    parser = argparse.ArgumentParser(description="Patch stock mtkbt -> mtkbt.patched")
     parser.add_argument("input", help="Path to stock mtkbt binary")
-    parser.add_argument("--output", "-o", default=None, help="Output path (default: mtkbt.patched)")
-    parser.add_argument("--verify-only", action="store_true", help="Check patch sites only, no output")
-    parser.add_argument("--skip-md5", action="store_true", help="Skip stock md5 check")
+    parser.add_argument("--output", "-o", default=None)
+    parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--skip-md5", action="store_true",
+                        help="Skip stock MD5 check (use for alternate stock builds)")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -122,19 +191,19 @@ def main():
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
         print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
-        print("       Use --skip-md5 to override.")
+        print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
     pre_ok, pre_results = verify(data, "before")
-    print_results("Pre-patch verification", pre_results)
+    print_results("Pre-patch verification (stock)", pre_results, "before")
 
     if not pre_ok:
         post_ok, post_results = verify(data, "after")
-        print_results("Already-patched check", post_results)
+        print_results("Already-patched check", post_results, "after")
         if post_ok:
             print("\nBinary is already patched. Nothing to do.")
             sys.exit(0)
-        print("\nERROR: patch sites match neither stock nor patched.")
+        print("\nERROR: patch site matches neither stock nor patched.")
         sys.exit(1)
 
     if args.verify_only:
@@ -145,23 +214,33 @@ def main():
         data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
     post_ok, post_results = verify(data, "after")
-    print_results("Post-patch verification", post_results)
+    print_results("Post-patch verification", post_results, "after")
 
     if not post_ok:
         print("\nERROR: post-patch verification failed — output not written.")
         sys.exit(1)
 
-    output_path = Path(args.output) if args.output else Path("mtkbt.patched")
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / "mtkbt.patched"
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
     print(f"\nOutput: {output_path}")
     print(f"MD5:    {output_md5}")
+    if OUTPUT_MD5:
+        print(f"        ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
+    else:
+        print(f"        (set OUTPUT_MD5 = \"{output_md5}\" in script)")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")
     print(f"  adb reboot")
-    print(f"  sdptool browse <Y1_BT_ADDR>  # verify: AV Remote Version: 0x0104")
+    print(f"  sdptool browse <Y1_BT_ADDR>   # expect: AVCTP 0x0103, AV Remote Version: 0x0104")
+    print(f"  logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'")
 
 
 if __name__ == "__main__":

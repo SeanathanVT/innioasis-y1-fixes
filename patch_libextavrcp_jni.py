@@ -1,32 +1,71 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni.py — Patch stock libextavrcp_jni.so → libextavrcp_jni.so.patched
+patch_libextavrcp_jni.py — Patch stock libextavrcp_jni.so -> libextavrcp_jni.so.patched
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        485a632e799e0cd9ed44455238a8340e
+Output md5:        6c348ed9b2da4bb9cc364c16d20e3527
 
-Context (ARM Thumb2 function at 0x375c):
-  The function selects an AVRCP version (r4) and sdpfeature (r5) based on
-  capability bits, then stores both to globals before calling _activate_1req.
+--- Full verified call chain (Java -> daemon socket) ---
 
-  Version selection logic (stock):
-    0x379a: movne r4, #0xa   → version 10 (AVRCP 1.0, fallback)
-    0x379e: movs  r4, #0xd   → version 13 (AVRCP 1.3)
-    0x37a2: movs  r4, #0xe   → version 14 (AVRCP 1.4)
-  ...followed by:
-    0x37b2: strb r4, [lr]    → stores version to g_tg_feature global
-    0x37b6: strb r5, [ip]    → stores sdpfeature to sdpfeature global
+  Java BTAvrcpMusicAdapter.checkCapability()
+    -> native activateConfig_3req(tg_feature_bits, ct_feature_bits, ...)
+  [BluetoothAvrcpService_activateConfig_3req @ 0x375C, 120 bytes]:
+    Feature bitmask decision tree:
+      bits & 0x00104010 (bits 4,14,20) -> tg_feature_code = 0x0e (AVRCP 1.4)
+      bits & 0x00082008 (bits 3,13,19) -> tg_feature_code = 0x0d (intermediate)
+      else                             -> tg_feature_code = 0x0a (AVRCP 1.3)
+    Stores tg_feature_code -> g_tg_feature global @ 0xD29C (verified)
+    Stores ct_feature_code -> g_ct_feature global @ 0xD004 (verified)
+    -> native activate_1req(conn_handle)
+  [BluetoothAvrcpService_activate_1req @ 0x3E3C, 180 bytes]:
+    Reads g_tg_feature (0xD29C) -> r3
+    Reads g_ct_feature (0xD004) -> stack[0]
+    -> btmtk_avrcp_send_activate_req(conn+8, 0, 0, tg_feature_code, ct_feature_code)
+  [libextavrcp.so: btmtk_avrcp_send_activate_req @ 0x19CC]:
+    8-byte socket payload: [0..3]=0x00000000, [4]=0, [5]=0, [6]=tg_code, [7]=ct_code
+    -> AVRCP_SendMessage(conn, 0x1bfe, &payload, 8)
+    -> send() -> abstract socket bt.ext.adp.avrcp (ANDROID_SOCKET_NAMESPACE_ABSTRACT)
 
-Patches applied:
-  1. 0x3764  mov r5, r3  → movs r5, #0x23
-             Forces sdpfeature = 0x23 (SupportedFeatures bitmask, correct for 1.3 and 1.4)
+  Global address derivation (activateConfig_3req writer):
+    ADD r14, r15 at 0x37ae: 0x9aea + PC(0x37b2) = 0xD29C  (g_tg_feature)
+    ADD r12, r15 at 0x37b0: 0x9850 + PC(0x37b4) = 0xD004  (g_ct_feature)
+    STRB.W r4, [r14, #0] at 0x37b2 -> writes tg_feature_code to 0xD29C
+    STRB.W r5, [r12, #0] at 0x37b6 -> writes ct_feature_code to 0xD004
 
-  2. 0x37a8  movs r0, #1 → movs r4, #0x0e
-             Overwrites version selection result with 0x0e = 14 (AVRCP 1.4)
-             Was 0x0d = 13 (AVRCP 1.3) in prior patch
+--- Patches 1+2 (activateConfig_3req @ 0x375C) — defense-in-depth ---
 
-  These override whatever the capability-bit logic selected, ensuring
-  activate_config always receives version=14 and sdpfeature=0x23.
+  These bypass the bitmask decision tree, hardcoding the outputs regardless of
+  what checkCapability() computed. They complement (do not replace) the ODEX
+  patch: the ODEX patch enables the 1.4 capability block so the bitmask reaches
+  activateConfig_3req with the right bits; these patches guarantee g_tg_feature=0x0e
+  even if the bitmask produces a wrong result.
+
+  Patch 1: sdpfeature = 0x23 (Cat1+Cat2+PlayerAppSettings)
+    At 0x3764, r5 holds sdpfeature sourced from r3 (a capability register that
+    may be zero before the 1.4 block initializes). mov r5,r3 -> movs r5,#0x23.
+
+  Patch 2: g_tg_feature = 0x0e (AVRCP 1.4)
+    At 0x37a8 the else-branch has set r4=0x0a (1.3). This instruction
+    (movs r0,#1, unrelated setup) is repurposed to overwrite r4=0x0e before
+    the STRB.W to g_tg_feature at 0x37b2.
+
+--- Patches 3+4 (CONNECT_CNF handler, FUN_005de8) ---
+
+  Stock code after every CONNECT_CNF caps the negotiated AVRCP version at 0x0d
+  (sub-1.4 intermediate):
+    0x5e56: cmp r4, #0xd   ; if negotiated version > 0x0d...
+    0x5e5a: bls +4
+    0x5e5c: movs r4, #0xd  ; ...cap to 0x0d
+
+  This silently downgrades any 1.4 negotiation back to sub-1.4 on every connection.
+  The car CT reads the post-CONNECT_CNF version to decide whether to send
+  REGISTER_NOTIFICATION; a capped version prevents cardinality > 0.
+  Patches raise the cap from 0x0d to 0x0e (AVRCP 1.4).
+
+  Note: this cap was confirmed as NOT the root cause of cardinality:0 in isolation
+  (patched + flashed without the SDP fix, cardinality remained 0 because the car
+  was negotiating 1.3 from the SDP advertisement). These patches become meaningful
+  once the SDP shows Version: 0x0104 via patch_mtkbt.py.
 
 Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so
@@ -34,7 +73,7 @@ Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so --verify-only
 
 Deploy:
-    adb push libextavrcp_jni.so.patched /system/lib/libextavrcp_jni.so
+    adb push output/libextavrcp_jni.so.patched /system/lib/libextavrcp_jni.so
     adb reboot
 """
 
@@ -44,20 +83,32 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "485a632e799e0cd9ed44455238a8340e"
+OUTPUT_MD5 = "6c348ed9b2da4bb9cc364c16d20e3527"
 
 PATCHES = [
     {
-        "name": "sdpfeature: mov r5,r3 → movs r5,#0x23",
+        "name": "sdpfeature: mov r5,r3 -> movs r5,#0x23  [defense-in-depth]",
         "offset": 0x3764,
-        "before": bytes([0x1d, 0x46]),   # mov r5, r3
-        "after":  bytes([0x23, 0x25]),   # movs r5, #0x23
+        "before": bytes([0x1d, 0x46]),
+        "after":  bytes([0x23, 0x25]),
     },
     {
-        "name": "g_tg_feature: movs r0,#1 → movs r4,#0x0e  (AVRCP 1.4)",
+        "name": "g_tg_feature: movs r0,#1 -> movs r4,#0x0e  [force AVRCP 1.4, defense-in-depth]",
         "offset": 0x37a8,
-        "before": bytes([0x01, 0x20]),   # movs r0, #1
-        "after":  bytes([0x0e, 0x24]),   # movs r4, #0x0e
+        "before": bytes([0x01, 0x20]),
+        "after":  bytes([0x0e, 0x24]),
+    },
+    {
+        "name": "CONNECT_CNF version cap: cmp r4,#0xd -> cmp r4,#0xe",
+        "offset": 0x5e56,
+        "before": bytes([0x0d, 0x2c]),
+        "after":  bytes([0x0e, 0x2c]),
+    },
+    {
+        "name": "CONNECT_CNF version cap: movs r4,#0xd -> movs r4,#0xe",
+        "offset": 0x5e5c,
+        "before": bytes([0x0d, 0x24]),
+        "after":  bytes([0x0e, 0x24]),
     },
 ]
 
@@ -91,14 +142,9 @@ def main():
         description="Patch stock libextavrcp_jni.so for AVRCP 1.4"
     )
     parser.add_argument("input", help="Path to stock libextavrcp_jni.so")
-    parser.add_argument(
-        "--output", "-o", default=None,
-        help="Output path (default: libextavrcp_jni.so.patched)"
-    )
-    parser.add_argument("--verify-only", action="store_true",
-                        help="Check patch sites only, no output")
-    parser.add_argument("--skip-md5", action="store_true",
-                        help="Skip stock md5 check")
+    parser.add_argument("--output", "-o", default=None)
+    parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--skip-md5", action="store_true")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -143,15 +189,17 @@ def main():
         print("\nERROR: post-patch verification failed — output not written.")
         sys.exit(1)
 
-    output_path = (
-        Path(args.output) if args.output
-        else Path("libextavrcp_jni.so.patched")
-    )
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / "libextavrcp_jni.so.patched"
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
     print(f"\nOutput: {output_path}")
-    print(f"MD5:    {output_md5}", end="")
+    print(f"MD5:    {output_md5}",  end="")
     print(f"  ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/lib/libextavrcp_jni.so")

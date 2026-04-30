@@ -1,2 +1,7 @@
-*.apk
 _patch_workdir
+.DS_Store
+hwparam.json
+output
+*.apk
+*.patched
+.state

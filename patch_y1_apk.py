@@ -194,16 +194,18 @@ if not os.path.exists(ORIGINAL_APK):
     sys.exit(f"ERROR: '{ORIGINAL_APK}' not found.")
 
 pkg_name, version = get_apk_info(ORIGINAL_APK)
-OUTPUT_APK = f"{pkg_name}_{version}-patched.apk"
+os.makedirs("output", exist_ok=True)
+OUTPUT_APK = os.path.join("output", f"{pkg_name}_{version}-patched.apk")
 print(f"  Package:  {pkg_name}")
 print(f"  Version:  {version}")
 print(f"  Output:   {OUTPUT_APK}")
 
 java = find_java()
 print(f"  Java:     {java}")
-os.makedirs(WORK_DIR, exist_ok=True)
 
 # -- Step 1: Locate or download apktool ---------------------------------------
+os.makedirs(WORK_DIR, exist_ok=True)
+
 if APKTOOL_JAR == _NPM_APKTOOL:
     print(f"\n[1/4] Using bundled apktool ({os.path.getsize(APKTOOL_JAR):,} bytes)")
 elif not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
@@ -702,3 +704,5 @@ Do NOT use `adb install` -- PackageManager will reject the APK
 due to signature mismatch (com.innioasis.y1 is a system app).
 {'=' * 60}
 """)
+
+shutil.rmtree(WORK_DIR, ignore_errors=True)
