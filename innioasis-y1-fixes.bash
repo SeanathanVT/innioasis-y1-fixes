@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.2.1
+# Version: 1.2.2
 # History:
+# 2026-04-30 (1.2.2): No functional changes — reflects patch_mtkbt.py update to include AVCTP 1.0→1.3 patches (B1-B3).
 # 2026-04-26 (1.2.1): Add libextavrcp.so.patched deployment to --avrcp.
 # 2026-04-26 (1.2.0): Remove --root flag and boot.img handling (broken).
 # 2026-04-26 (1.1.3): Prompt for sudo credentials upfront to prevent mid-execution prompt.
