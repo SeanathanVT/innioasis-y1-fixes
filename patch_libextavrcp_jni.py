@@ -49,18 +49,25 @@ Output md5:        6c348ed9b2da4bb9cc364c16d20e3527
     (movs r0,#1, unrelated setup) is repurposed to overwrite r4=0x0e before
     the STRB.W to g_tg_feature at 0x37b2.
 
---- Patches 3+4 (CONNECT_CNF handler, FUN_005de8) ---
+--- Patches 3+4 (getCapabilitiesRspNative, FUN_005de8) ---
 
-  Stock code after every CONNECT_CNF caps the negotiated AVRCP version at 0x0d
-  (sub-1.4 intermediate):
-    0x5e56: cmp r4, #0xd   ; if negotiated version > 0x0d...
+  NOTE: FUN_005de8 is getCapabilitiesRspNative, NOT the CONNECT_CNF handler.
+  The actual CONNECT_CNF handler is at 0x62EA (TBH dispatch table at 0x60B8,
+  msg_id=505, TBH index=4, entry=0x0117). The CONNECT_CNF handler reads and
+  logs tg_feature but does not gate on it; it is unrelated to cardinality.
+
+  getCapabilitiesRspNative runs when the car CT sends a GetCapabilities(EventList)
+  request (CapabilityId=2). Stock code caps the event count at 13 (0x0d — the
+  AVRCP 1.3 maximum):
+    0x5e56: cmp r4, #0xd   ; if event count > 13...
     0x5e5a: bls +4
-    0x5e5c: movs r4, #0xd  ; ...cap to 0x0d
+    0x5e5c: movs r4, #0xd  ; ...cap to 13
 
-  This silently downgrades any 1.4 negotiation back to sub-1.4 on every connection.
-  The car CT reads the post-CONNECT_CNF version to decide whether to send
-  REGISTER_NOTIFICATION; a capped version prevents cardinality > 0.
-  Patches raise the cap from 0x0d to 0x0e (AVRCP 1.4).
+  This prevents Y1 from reporting event 14 (0x0e in MTK's numbering), which is
+  the signal that unlocks AVRCP 1.4 on the car CT. Without event 14 in the
+  GetCapabilities response, the car treats Y1 as AVRCP 1.3 and never sends
+  REGISTER_NOTIFICATION — cardinality stays 0.
+  Patches raise the cap from 13 (0x0d) to 14 (0x0e).
 
   Note: this cap was confirmed as NOT the root cause of cardinality:0 in isolation
   (patched + flashed without the SDP fix, cardinality remained 0 because the car
