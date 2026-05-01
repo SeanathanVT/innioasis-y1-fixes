@@ -77,33 +77,33 @@ import sys
 import zlib
 from pathlib import Path
 
-STOCK_MD5   = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5  = "acc578ada5e41e27475340f4df6afa59"
+STOCK_MD5  = "11566bc23001e78de64b5db355238175"
+OUTPUT_MD5 = "acc578ada5e41e27475340f4df6afa59"
 
 DEX_OFFSET     = 0x28
 ADLER_FILE_OFF = 0x30
 
 PATCHES = [
-    (
-        "getPreferVersion return  (BlueAngel code 10=AVRCP1.3 -> 14=AVRCP1.4)",
-        0x3e0ea,
-        bytes([0x0a]),
-        bytes([0x0e]),
-    ),
-    (
-        "disable() reset sPlayServiceInterface = false",
-        0x03f21a,
-        bytes([0x1a, 0x01, 0x02, 0x03,   # const-string v1, "EXT_AVRCP"
-               0x1a, 0x02, 0x21, 0x0b,   # const-string v2, "[BT][AVRCP] -disable"
-               0x71, 0x20, 0x86, 0x01,   # invoke-static Log::i
-               0x21, 0x00]),             #   {v1, v2}
-        bytes([0x12, 0x10,               # const/4 v1, #0
-               0x6a, 0x01, 0xf3, 0x04,  # sput-byte v1, sPlayServiceInterface
-               0x00, 0x00,               # nop
-               0x00, 0x00,               # nop
-               0x00, 0x00,               # nop
-               0x00, 0x00]),             # nop
-    ),
+    {
+        "name":   "[F1] getPreferVersion return  (BlueAngel 10=AVRCP1.3 -> 14=AVRCP1.4)",
+        "offset": 0x3e0ea,
+        "before": bytes([0x0a]),
+        "after":  bytes([0x0e]),
+    },
+    {
+        "name":   "[F2] disable() reset sPlayServiceInterface = false",
+        "offset": 0x03f21a,
+        "before": bytes([0x1a, 0x01, 0x02, 0x03,   # const-string v1, "EXT_AVRCP"
+                         0x1a, 0x02, 0x21, 0x0b,   # const-string v2, "[BT][AVRCP] -disable"
+                         0x71, 0x20, 0x86, 0x01,   # invoke-static Log::i
+                         0x21, 0x00]),             #   {v1, v2}
+        "after":  bytes([0x12, 0x10,               # const/4 v1, #0
+                         0x6a, 0x01, 0xf3, 0x04,   # sput-byte v1, sPlayServiceInterface
+                         0x00, 0x00,               # nop
+                         0x00, 0x00,               # nop
+                         0x00, 0x00,               # nop
+                         0x00, 0x00]),             # nop
+    },
 ]
 
 
@@ -116,25 +116,25 @@ def compute_adler32(data: bytes) -> int:
     return zlib.adler32(data[DEX_OFFSET + 12: DEX_OFFSET + dex_len]) & 0xFFFFFFFF
 
 
-def verify_patches(data: bytes, mode: str) -> tuple[bool, list[dict]]:
+def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
     results = []
-    for label, offset, before, after in PATCHES:
-        expected = before if mode == "before" else after
-        actual = bytes(data[offset: offset + len(expected)])
-        results.append({"label": label, "offset": offset,
-                        "expected": expected, "actual": actual,
-                        "ok": actual == expected})
+    for p in PATCHES:
+        expected = p[mode]
+        actual = bytes(data[p["offset"]: p["offset"] + len(expected)])
+        results.append({**p, "actual": actual, "ok": actual == expected})
     return all(r["ok"] for r in results), results
 
 
-def print_results(heading: str, results: list[dict]) -> None:
-    print(f"\n{heading}")
+def print_results(label: str, results: list[dict], mode: str) -> None:
+    print(f"\n{label}")
     print("-" * 72)
     for r in results:
-        print(f"  [{'OK' if r['ok'] else 'FAIL'}] 0x{r['offset']:06x}  {r['label']}")
+        n = len(r["before"])
+        fmt = lambda b: b.hex(" ") if n <= 8 else b[:8].hex(" ") + " ..."
+        print(f"  [{'OK' if r['ok'] else 'FAIL'}] 0x{r['offset']:06x}  {r['name']}")
         if not r["ok"]:
-            print(f"          expected: {r['expected'].hex(' ')}")
-            print(f"          actual:   {r['actual'].hex(' ')}")
+            print(f"          expected ({mode}): {fmt(r[mode])}")
+            print(f"          actual:            {fmt(r['actual'])}")
     print("-" * 72)
 
 
@@ -146,9 +146,9 @@ def main() -> None:
     parser.add_argument("--output", "-o", default=None,
                         help="Output path (default: output/MtkBt.odex.patched)")
     parser.add_argument("--verify-only", action="store_true",
-                        help="Check patch sites only, no output")
+                        help="Check patch sites only, do not write output")
     parser.add_argument("--skip-md5", action="store_true",
-                        help="Skip stock MD5 check")
+                        help="Skip stock MD5 check (use for alternate stock builds)")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -159,24 +159,31 @@ def main() -> None:
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    if args.skip_md5:
+        md5_tag = "(stock check skipped)"
+    elif input_md5 == STOCK_MD5:
+        md5_tag = "[OK — matches stock]"
+    else:
+        md5_tag = f"[MISMATCH — expected {STOCK_MD5}]"
+
     print(f"Input:  {input_path}  ({len(data):,} bytes)")
-    print(f"MD5:    {input_md5}")
+    print(f"MD5:    {input_md5}  {md5_tag}")
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
-        print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
-        print("       Use --skip-md5 to override.")
+        print("ERROR: input is not the expected stock build.")
+        print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
     if data[:4] != b"dey\n":
         print("ERROR: not an ODEX file (missing 'dey\\n' magic)")
         sys.exit(1)
 
-    pre_ok, pre_results = verify_patches(data, "before")
-    print_results("Pre-patch verification", pre_results)
+    pre_ok, pre_results = verify(data, "before")
+    print_results("Pre-patch verification (stock)", pre_results, "before")
 
     if not pre_ok:
-        post_ok, post_results = verify_patches(data, "after")
-        print_results("Already-patched check", post_results)
+        post_ok, post_results = verify(data, "after")
+        print_results("Already-patched check", post_results, "after")
         if post_ok:
             print("\nBinary is already fully patched. Nothing to do.")
             sys.exit(0)
@@ -195,14 +202,14 @@ def main() -> None:
         print("\nVerify-only — no output written.")
         sys.exit(0)
 
-    for _label, offset, _before, after in PATCHES:
-        data[offset: offset + len(after)] = after
+    for p in PATCHES:
+        data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
     new_adler = compute_adler32(data)
     struct.pack_into("<I", data, ADLER_FILE_OFF, new_adler)
 
-    post_ok, post_results = verify_patches(data, "after")
-    print_results("Post-patch verification", post_results)
+    post_ok, post_results = verify(data, "after")
+    print_results("Post-patch verification", post_results, "after")
 
     stored_after   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
     computed_after = compute_adler32(data)
@@ -224,11 +231,18 @@ def main() -> None:
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
-    print(f"\nOutput: {output_path}")
-    print(f"MD5:    {output_md5}", end="")
-    print(f"  ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
+    if OUTPUT_MD5 is None:
+        out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
+    elif output_md5 == OUTPUT_MD5:
+        out_tag = "[OK — matches expected]"
+    else:
+        out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
+
+    print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
+    print(f"MD5:    {output_md5}  {out_tag}")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/app/MtkBt.odex")
+    print(f"  adb shell chmod 644 /system/app/MtkBt.odex")
     print(f"  adb reboot")
 
 

@@ -115,19 +115,19 @@ PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
     # AVRCP 1.4 requires AVCTP 1.3; the LSB byte at each offset is the minor version.
     {
-        "name":   "0x0eba6d: AVCTP 1.0->1.3 LSB  Groups 1&2 ProtocolDescList  [B1]",
+        "name":   "[B1] AVCTP 1.0->1.3 LSB  Groups 1&2 ProtocolDescList",
         "offset": 0x0eba6d,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name":   "0x0eba37: AVCTP 1.0->1.3 LSB  Group 3 CT ProtocolDescList  [B2]",
+        "name":   "[B2] AVCTP 1.0->1.3 LSB  Group 3 CT ProtocolDescList",
         "offset": 0x0eba37,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name":   "0x0eba25: AVCTP 1.0->1.3 LSB  Group 1 AdditionalProtocol   [B3]",
+        "name":   "[B3] AVCTP 1.0->1.3 LSB  Group 1 AdditionalProtocol",
         "offset": 0x0eba25,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
@@ -135,26 +135,26 @@ PATCHES = [
     # C1-C3: AVRCP profile version in ProfileDescList blobs, all three groups.
     # All patched to 1.4 — last-wins entry wins regardless of which is served.
     {
-        "name":   "0x0eba4b: AVRCP 1.x->1.4 LSB  entry[23] ProfileDescList  [C1]",
+        "name":   "[C1] AVRCP 1.x->1.4 LSB  entry[23] ProfileDescList",
         "offset": 0x0eba4b,
         "before": bytes([0x00]),
         "after":  bytes([0x04]),
     },
     {
-        "name":   "0x0eba58: AVRCP 1.x->1.4 LSB  entry[18] ProfileDescList  [C2 — served]",
+        "name":   "[C2] AVRCP 1.x->1.4 LSB  entry[18] ProfileDescList (served)",
         "offset": 0x0eba58,
         "before": bytes([0x00]),
         "after":  bytes([0x04]),
     },
     {
-        "name":   "0x0eba77: AVRCP 1.3->1.4 LSB  entry[13] ProfileDescList  [C3]",
+        "name":   "[C3] AVRCP 1.3->1.4 LSB  entry[13] ProfileDescList",
         "offset": 0x0eba77,
         "before": bytes([0x03]),
         "after":  bytes([0x04]),
     },
     # A1: Runtime SDP struct version patched via MOVW instruction.
     {
-        "name":   "0x38BFC: MOVW r7,#0x0301 -> #0x0401  [A1 — runtime SDP struct]",
+        "name":   "[A1] MOVW r7,#0x0301 -> #0x0401  runtime SDP struct",
         "offset": 0x038BFC,
         "before": bytes([0x40, 0xf2, 0x01, 0x37]),
         "after":  bytes([0x40, 0xf2, 0x01, 0x47]),
@@ -177,7 +177,7 @@ PATCHES = [
     #
     # Fix: replace BNE with NOP — the struct is always registered.
     {
-        "name":   "0x38C6C: BNE 0x38C76 -> NOP  registration guard bypass  [D1]",
+        "name":   "[D1] BNE 0x38C76 -> NOP  registration guard bypass",
         "offset": 0x038C6C,
         "before": bytes([0x03, 0xd1]),
         "after":  bytes([0x00, 0xbf]),
@@ -191,13 +191,13 @@ PATCHES = [
     # because AdditionalProtocolDescriptorList isn't served on the wire
     # (Group 1 has it, Group 2 wins the merge).
     {
-        "name":   "0x0eba5b: SupportedFeatures 0x0001->0x0033  Group 2 TG (served)  [E3]",
+        "name":   "[E3] SupportedFeatures 0x0001->0x0033  Group 2 TG (served)",
         "offset": 0x0eba5b,
         "before": bytes([0x01]),
         "after":  bytes([0x33]),
     },
     {
-        "name":   "0x0eba4e: SupportedFeatures 0x0021->0x0033  Group 1 TG (defense)  [E4]",
+        "name":   "[E4] SupportedFeatures 0x0021->0x0033  Group 1 TG (defense)",
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x33]),
@@ -232,10 +232,14 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Patch stock mtkbt -> mtkbt.patched")
+    parser = argparse.ArgumentParser(
+        description="Patch stock mtkbt for AVRCP 1.4"
+    )
     parser.add_argument("input", help="Path to stock mtkbt binary")
-    parser.add_argument("--output", "-o", default=None)
-    parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Output path (default: output/mtkbt.patched)")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="Check patch sites only, do not write output")
     parser.add_argument("--skip-md5", action="store_true",
                         help="Skip stock MD5 check (use for alternate stock builds)")
     args = parser.parse_args()
