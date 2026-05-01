@@ -75,6 +75,21 @@ it was based on a false negative from testing a non-live patch site. All three
     Forces the SDP init function to always register the AVRCP TG record
     (CMP r0, r5 guard was never true, leaving the record unregistered).
 
+  E3-E4 — AVRCP TG SupportedFeatures bitmask (the served value on the wire).
+    sdptool browse against post-D1 mtkbt confirms AttrID=0x0311 IS on the wire
+    inside the AVRCP TG record (UUID 0x110c), but the served value is 0x0001
+    (Cat1 only). 1.4 controllers see ProfileVersion=1.4 with a feature bitmask
+    consistent with 1.0, treat the advertiser as inconsistent, and skip
+    REGISTER_NOTIFICATION. AVRCP 1.4 TG baseline (matching AOSP Bluedroid) is
+    0x0033 = bits {0,1,4,5} = Cat1 + Cat2 + PlayerApplicationSettings +
+    GroupNavigation. Browsing (bit 6) is deliberately omitted — the
+    AdditionalProtocolDescriptorList isn't on the wire (Group 1 only, Group 2
+    wins the merge), so claiming Browsing without serving the descriptor would
+    re-introduce inconsistency.
+
+      0x0eba5b  Group 2 TG SupportedFeatures LSB  0x01 -> 0x33  [served]
+      0x0eba4e  Group 1 TG SupportedFeatures LSB  0x21 -> 0x33  [defense-in-depth]
+
 Usage:
     python3 patch_mtkbt.py mtkbt
     python3 patch_mtkbt.py mtkbt --output /tmp/mtkbt.patched
@@ -94,7 +109,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "e9e9fbbbadcfe50e5695759862f002a3"
+OUTPUT_MD5 = "b17bdf5448fdae68c1d477626190e63e"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -167,6 +182,26 @@ PATCHES = [
         "before": bytes([0x03, 0xd1]),
         "after":  bytes([0x00, 0xbf]),
     },
+    # E3-E4: AVRCP TG SupportedFeatures bitmask in the served SDP record.
+    # Wire-confirmed: post-D1 sdptool browse shows AttrID=0x0311 = 0x0001 (Cat1
+    # only) in the AVRCP TG record. 1.4 controllers see ProfileVersion=1.4 + a
+    # 1.0-shape bitmask, treat the advertiser as inconsistent, and skip
+    # REGISTER_NOTIFICATION. 0x0033 = Cat1 + Cat2 + PAS + GroupNav — the AVRCP
+    # 1.4 TG baseline matching AOSP Bluedroid. Browsing bit (6) is omitted
+    # because AdditionalProtocolDescriptorList isn't served on the wire
+    # (Group 1 has it, Group 2 wins the merge).
+    {
+        "name":   "0x0eba5b: SupportedFeatures 0x0001->0x0033  Group 2 TG (served)  [E3]",
+        "offset": 0x0eba5b,
+        "before": bytes([0x01]),
+        "after":  bytes([0x33]),
+    },
+    {
+        "name":   "0x0eba4e: SupportedFeatures 0x0021->0x0033  Group 1 TG (defense)  [E4]",
+        "offset": 0x0eba4e,
+        "before": bytes([0x21]),
+        "after":  bytes([0x33]),
+    },
 ]
 
 
@@ -213,11 +248,18 @@ def main():
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    if args.skip_md5:
+        md5_tag = "(stock check skipped)"
+    elif input_md5 == STOCK_MD5:
+        md5_tag = "[OK — matches stock]"
+    else:
+        md5_tag = f"[MISMATCH — expected {STOCK_MD5}]"
+
     print(f"Input:  {input_path}  ({len(data):,} bytes)")
-    print(f"MD5:    {input_md5}")
+    print(f"MD5:    {input_md5}  {md5_tag}")
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
-        print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
+        print("ERROR: input is not the expected stock build.")
         print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
@@ -256,12 +298,15 @@ def main():
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
-    print(f"\nOutput: {output_path}")
-    print(f"MD5:    {output_md5}")
-    if OUTPUT_MD5:
-        print(f"        ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
+    if OUTPUT_MD5 is None:
+        out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
+    elif output_md5 == OUTPUT_MD5:
+        out_tag = "[OK — matches expected]"
     else:
-        print(f"        (set OUTPUT_MD5 = \"{output_md5}\" in script)")
+        out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
+
+    print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
+    print(f"MD5:    {output_md5}  {out_tag}")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")
