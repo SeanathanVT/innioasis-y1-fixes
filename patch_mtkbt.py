@@ -71,6 +71,22 @@ it was based on a false negative from testing a non-live patch site. All three
     (bytes: 40 f2 01 37) is patched to MOVW r7,#0x0401 (40 f2 01 47).
     Belt-and-suspenders alongside the blob patches.
 
+  D1 — Registration guard NOP at 0x38C6C: BNE 0x38C76 → NOP
+    Forces the SDP init function to always register the AVRCP TG record
+    (CMP r0, r5 guard was never true, leaving the record unregistered).
+
+  E1 — State gate NOP at 0x29be4: BNE.W 0x29de4 → NOP×2
+    In 0x299fc GetCapabilities/REGISTER_NOTIFICATION dispatcher, the state
+    check [cb+0xe99]=={3,5} was dropping responses when state was neither.
+    NOP forces fall-through to the state==5 send path (0x2b25e).
+
+  E2 — Version check NOP at 0x0309ec: BNE 0x030aca → NOP
+    In the GetCapabilities operation dispatcher (0x3096C, op_code=4), the
+    version test CMP r3,#0x10 / BNE fired for all AVRCP 1.3/1.4 cars,
+    routing them to 0x02fd34 which sends AVAILABLE_PLAYERS (sb=0x0a) instead
+    of GetCapabilities (sb=2). NOP falls through to the count=8 callback
+    path → 0x299fc(conn, 2) → (with E1) sends proper GetCapabilities response.
+
 Usage:
     python3 patch_mtkbt.py mtkbt
     python3 patch_mtkbt.py mtkbt --output /tmp/mtkbt.patched
@@ -90,7 +106,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "e9e9fbbbadcfe50e5695759862f002a3"
+OUTPUT_MD5 = "8e8785a89df1554d299c222a561559f9"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -139,6 +155,47 @@ PATCHES = [
         "offset": 0x038BFC,
         "before": bytes([0x40, 0xf2, 0x01, 0x37]),
         "after":  bytes([0x40, 0xf2, 0x01, 0x47]),
+    },
+    # E1: Bypass state gate in 0x299fc that silently drops GetCapabilities response.
+    #
+    # Function 0x299fc handles REGISTER_NOTIFICATION and GetCapabilities dispatch.
+    # For CapabilityId=2 (sb=2), it checks [cb+0xe99]:
+    #   state==3 → send response via 0x2b200 (path A)
+    #   state==5 → send response via 0x2b25e (path B)
+    #   else     → BNE.W → 0x29de4 (exit, NO response sent)
+    #
+    # During an incoming GetCapabilities PDU the state is not guaranteed to be 3 or 5,
+    # so the response is silently dropped and the car never sends REGISTER_NOTIFICATION.
+    #
+    # Fix: NOP the BNE.W so execution always falls through to path B (state==5 send).
+    {
+        "name":   "0x29be4: BNE.W state gate -> NOP  GetCapabilities response unblocked  [E1]",
+        "offset": 0x029be4,
+        "before": bytes([0x40, 0xf0, 0xfe, 0x80]),
+        "after":  bytes([0x00, 0xbf, 0x00, 0xbf]),
+    },
+    # E2: Bypass AVRCP version check that routes 1.3/1.4 cars to wrong dispatch path.
+    #
+    # In the GetCapabilities operation dispatcher (0x3096C), op_code=4 leads to a
+    # version check at 0x0309d4-0x0309ec:
+    #   r3 = [cb+0x149] & 0x7f  (negotiated AVRCP version)
+    #   CMP r3, #0x20 → BNE → 0x0309ea    (skip AVRCP 2.0 path)
+    #   CMP r3, #0x10 → BNE → 0x030aca    (BUG: if not 1.0, jump to wrong path)
+    #
+    # AVRCP 1.3/1.4 cars have version byte 0x13/0x14 (neither 0x10 nor 0x20), so the
+    # BNE fires and sends them to 0x030aca → 0x02fd34 which calls 0x299fc with sb=0x0a
+    # (AVAILABLE_PLAYERS) instead of sb=2 (GetCapabilities) — wrong PDU, car gets no
+    # capability list and never sends REGISTER_NOTIFICATION.
+    #
+    # Fix: NOP the BNE so all versions fall through to the count=8 callback path:
+    #   0x0309ee: CMP r2, #0x20  (r2=[cb+0x5d0], packet state — ≠0x20 for incoming)
+    #   0x0309f0: BNE → 0x030a74 → count=8 stored at [?+0x1b8], callback(count=8)
+    #   → 0x29e98 → dispatch → 0x299fc(conn, 2) → (with E1) GetCapabilities response sent
+    {
+        "name":   "0x0309ec: BNE 0x030aca -> NOP  AVRCP 1.3/1.4 count=8 path  [E2]",
+        "offset": 0x0309ec,
+        "before": bytes([0x6d, 0xd1]),
+        "after":  bytes([0x00, 0xbf]),
     },
     # D1: NOP the runtime registration guard.
     #
