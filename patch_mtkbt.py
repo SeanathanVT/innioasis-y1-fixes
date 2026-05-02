@@ -75,55 +75,6 @@ it was based on a false negative from testing a non-live patch site. All three
     Forces the SDP init function to always register the AVRCP TG record
     (CMP r0, r5 guard was never true, leaving the record unregistered).
 
-  E7 — Force AVRCP 1.4 classification when remote has no CT-side SDP record.
-
-    mtkbt stores per-connection AVRCP version at `[conn+0x5d9]` (later copied to
-    `[conn+0x149]`). Two nearly identical fallback sites at 0x033dec and 0x034100
-    both write `0x90` (which AND'd with 0x7f decodes as AVRCP 1.0) when the SDP
-    query of the remote returned no match (`[conn+0x5dc] == 0`). Most car
-    infotainment systems don't advertise themselves as AVRCP CT (UUID 0x110e),
-    so this fallback fires for them and the connection gets classified as 1.0.
-    mtkbt then processes inbound AVRCP commands through an internal 1.0 handler
-    that never forwards to the JNI — explaining why even with E5 in place, no
-    msg_ids beyond connect/disconnect ever reach the JNI dispatcher.
-
-    Patch both `0x90` immediates to `0x94`, so the fallback decodes to 0x14
-    (AVRCP 1.4) instead of 0x10 (AVRCP 1.0). The dispatcher then falls into the
-    "anything else = 1.3/1.4" branch, mtkbt initializes the connection as 1.4,
-    and inbound commands route to the JNI dispatch socket.
-
-  E5 — Force 1.3/1.4 init path in op_code=4 (GetCapabilities) dispatcher.
-
-    Function 0x3096C dispatches inbound AVRCP commands by op_code. For op_code=4
-    (GetCapabilities setup), it reads `[conn+0x149] & 0x7f` and routes:
-
-      0x309ea: cmp r3, #0x10        ; is remote version 1.0?
-      0x309ec: bne #0x30aca         ; ★ if NOT 1.0, branch to 1.3/1.4 init
-                                    ; (0x02fd34 → count=4 → 5-slot init + AVAILABLE_PLAYERS)
-      0x309ee: <1.0 path follows>   ; bypasses 1.4 slot init entirely
-
-    Empirically (post-D1 + E3/E4), our car connects, mtkbt classifies the
-    connection as 1.0 (likely because the car's CT-side SDP doesn't advertise
-    1.4 — only TG-side does), and the GetCapabilities setup falls into the 1.0
-    path. The 1.0 path never initializes notification slots, never emits
-    AVAILABLE_PLAYERS, and never invites the car to send REGISTER_NOTIFICATION
-    — cardinality stays 0 forever, even though SDP is textbook 1.4 on the wire.
-
-    Fix: convert the conditional BNE to an unconditional B with the same target.
-    This routes ALL op_code=4 dispatches through the 1.3/1.4 init path
-    regardless of `[conn+0x149]` value. Cars already classified as 1.3/1.4 are
-    unaffected (they branch the same way). Cars classified as 1.0 now get
-    treated as 1.4 — matching what we advertised on the wire.
-
-    Encoding miracle: T1 BNE `bne #+218` is `6d d1` (cond=NE, imm8=0x6d).
-    T2 narrow B `b.n #+218` is `6d e0` (imm11=0x06D — same numeric offset).
-    The offset value is small enough to fit in both encodings, so the patch
-    is a single byte: `0x309ed: 0xd1 -> 0xe0`.
-
-    NOT to be confused with the brief's eliminated E2 (`bne -> nop` at the
-    same site), which was the WRONG direction: NOP made everything fall
-    through to the 1.0 path. E5 goes the opposite direction.
-
   E3-E4 — AVRCP TG SupportedFeatures bitmask (the served value on the wire).
     sdptool browse against post-D1 mtkbt confirms AttrID=0x0311 IS on the wire
     inside the AVRCP TG record (UUID 0x110c), but the served value is 0x0001
@@ -158,7 +109,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "ff50024bc851395408353ba52d140790"
+OUTPUT_MD5 = "b17bdf5448fdae68c1d477626190e63e"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -250,57 +201,6 @@ PATCHES = [
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x33]),
-    },
-    # E5: force 1.3/1.4 init path in op_code=4 (GetCapabilities) dispatcher
-    # at 0x3096C. Wire-confirmed assumption: post-flash car connects but mtkbt
-    # internally classifies it as AVRCP 1.0 (likely from a missing/incomplete
-    # CT-side SDP record on the car), routing op_code=4 through the 1.0 path
-    # which skips 5-slot init + AVAILABLE_PLAYERS. The car never sees the
-    # 1.4-style capability response, never registers for notifications.
-    # `bne #0x30aca` (`6d d1`, T1 cond, imm8=0x6d) → `b.n #0x30aca` (`6d e0`,
-    # T2 narrow, imm11=0x06D — same numeric offset, just unconditional).
-    # Single-byte change at 0x309ed: 0xd1 → 0xe0.
-    {
-        "name":   "[E5] BNE 0x30aca -> B (unconditional)  force 1.3/1.4 init in 0x3096C",
-        "offset": 0x309ed,
-        "before": bytes([0xd1]),
-        "after":  bytes([0xe0]),
-    },
-    # E7: force AVRCP 1.4 classification when remote has no CT-side SDP record.
-    # mtkbt's connection-setup code stores a "negotiated AVRCP version" byte at
-    # `[conn+0x5d9]`, later copied to `[conn+0x149]` (the field the dispatcher
-    # at 0x3096C reads as `& 0x7f` and compares against 0x10/0x20). Pattern-search
-    # of all immediate writes to +0x5d9 reveals two near-identical fallback sites:
-    #
-    #     ldrb.w r3, [r4, #0x5dc]    ; r3 = SDP-result-found flag
-    #     cbnz r3, +N                 ; if non-zero, skip
-    #     movs r0, #0x90              ; ★ default = 0x90 (& 0x7f = 0x10 = AVRCP 1.0)
-    #     strb.w r0, [r4, #0x5d9]
-    #
-    # Both at 0x033dec and 0x034100. Most car infotainment systems don't advertise
-    # themselves as AVRCP CT (UUID 0x110e), so mtkbt's SDP query of the remote
-    # finds nothing, [+0x5dc] stays zero, and the fallback fires — connection
-    # classified as 1.0. From there mtkbt processes inbound commands via an
-    # internal 1.0 handler that never reaches the JNI dispatch socket, which is
-    # why no `Recv AVRCP indication` msg_ids beyond connect/disconnect ever
-    # arrive at the JNI.
-    #
-    # Patch the two fallback immediates from 0x90 → 0x94. After `& 0x7f`, that
-    # becomes 0x14 instead of 0x10, falling out of the 1.0 branch and into the
-    # generic "anything else = 1.3/1.4" path. Other immediate writes to +0x5d9
-    # (0xa0 / 0xc0 / 0xd0 etc.) are deliberately left alone — they fire for
-    # specific peer states that aren't on the no-SDP-fallback path.
-    {
-        "name":   "[E7] no-SDP fallback: movs r0,#0x90 -> #0x94 @ 0x033dec",
-        "offset": 0x033dec,
-        "before": bytes([0x90]),
-        "after":  bytes([0x94]),
-    },
-    {
-        "name":   "[E7] no-SDP fallback: movs r0,#0x90 -> #0x94 @ 0x034100",
-        "offset": 0x034100,
-        "before": bytes([0x90]),
-        "after":  bytes([0x94]),
     },
 ]
 
