@@ -75,6 +75,38 @@ it was based on a false negative from testing a non-live patch site. All three
     Forces the SDP init function to always register the AVRCP TG record
     (CMP r0, r5 guard was never true, leaving the record unregistered).
 
+  E5 — Force 1.3/1.4 init path in op_code=4 (GetCapabilities) dispatcher.
+
+    Function 0x3096C dispatches inbound AVRCP commands by op_code. For op_code=4
+    (GetCapabilities setup), it reads `[conn+0x149] & 0x7f` and routes:
+
+      0x309ea: cmp r3, #0x10        ; is remote version 1.0?
+      0x309ec: bne #0x30aca         ; ★ if NOT 1.0, branch to 1.3/1.4 init
+                                    ; (0x02fd34 → count=4 → 5-slot init + AVAILABLE_PLAYERS)
+      0x309ee: <1.0 path follows>   ; bypasses 1.4 slot init entirely
+
+    Empirically (post-D1 + E3/E4), our car connects, mtkbt classifies the
+    connection as 1.0 (likely because the car's CT-side SDP doesn't advertise
+    1.4 — only TG-side does), and the GetCapabilities setup falls into the 1.0
+    path. The 1.0 path never initializes notification slots, never emits
+    AVAILABLE_PLAYERS, and never invites the car to send REGISTER_NOTIFICATION
+    — cardinality stays 0 forever, even though SDP is textbook 1.4 on the wire.
+
+    Fix: convert the conditional BNE to an unconditional B with the same target.
+    This routes ALL op_code=4 dispatches through the 1.3/1.4 init path
+    regardless of `[conn+0x149]` value. Cars already classified as 1.3/1.4 are
+    unaffected (they branch the same way). Cars classified as 1.0 now get
+    treated as 1.4 — matching what we advertised on the wire.
+
+    Encoding miracle: T1 BNE `bne #+218` is `6d d1` (cond=NE, imm8=0x6d).
+    T2 narrow B `b.n #+218` is `6d e0` (imm11=0x06D — same numeric offset).
+    The offset value is small enough to fit in both encodings, so the patch
+    is a single byte: `0x309ed: 0xd1 -> 0xe0`.
+
+    NOT to be confused with the brief's eliminated E2 (`bne -> nop` at the
+    same site), which was the WRONG direction: NOP made everything fall
+    through to the 1.0 path. E5 goes the opposite direction.
+
   E3-E4 — AVRCP TG SupportedFeatures bitmask (the served value on the wire).
     sdptool browse against post-D1 mtkbt confirms AttrID=0x0311 IS on the wire
     inside the AVRCP TG record (UUID 0x110c), but the served value is 0x0001
@@ -109,7 +141,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "b17bdf5448fdae68c1d477626190e63e"
+OUTPUT_MD5 = "40ee04945f5fba9754cc1bc20bb323e9"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -201,6 +233,21 @@ PATCHES = [
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x33]),
+    },
+    # E5: force 1.3/1.4 init path in op_code=4 (GetCapabilities) dispatcher
+    # at 0x3096C. Wire-confirmed assumption: post-flash car connects but mtkbt
+    # internally classifies it as AVRCP 1.0 (likely from a missing/incomplete
+    # CT-side SDP record on the car), routing op_code=4 through the 1.0 path
+    # which skips 5-slot init + AVAILABLE_PLAYERS. The car never sees the
+    # 1.4-style capability response, never registers for notifications.
+    # `bne #0x30aca` (`6d d1`, T1 cond, imm8=0x6d) → `b.n #0x30aca` (`6d e0`,
+    # T2 narrow, imm11=0x06D — same numeric offset, just unconditional).
+    # Single-byte change at 0x309ed: 0xd1 → 0xe0.
+    {
+        "name":   "[E5] BNE 0x30aca -> B (unconditional)  force 1.3/1.4 init in 0x3096C",
+        "offset": 0x309ed,
+        "before": bytes([0xd1]),
+        "after":  bytes([0xe0]),
     },
 ]
 
