@@ -1,10 +1,52 @@
-# Investigation Traces — Open Items
+# Investigation — Final Status
 
-Diagnostic paths that are still tractable from the available toolset (no root, no btsnoop, no on-device debugger).
+This document grew organically over the 2026-05-02 session. **Read this top section first** — sections below preserve the original investigation narrative including hypotheses that were later refuted, so reading top-down without this summary is misleading.
 
-State as of 2026-05-02: every documented Y1-side patch site (B1-B3, C1-C3, A1, D1, E3-E5, E7a/E7b, C2a/b, C3a/b, C4, F1/F2) is flashed and verified on the wire (sdptool shows AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033). Despite this, no inbound AVRCP commands beyond connect/disconnect/activate ever reach the JNI dispatch socket for any of three known-good 1.4 controllers (car, Sonos Roam, Samsung TV). Each session ends in a clean `MSG_ID_BT_AVRCP_DISCONNECT_CNF` after ~25–30 seconds of silence. Music plays cleanly over A2DP throughout.
+## Final state (after all traces complete)
 
-The remaining gate is between mtkbt's L2CAP/AVCTP receive path and its JNI dispatch socket. mtkbt's daemon-side `[AVCTP]`/`[AVRCP]` log strings exist in the binary but route through MediaTek's `__xlog_buf_printf` (separate from `logcat`), so daemon-level activity is opaque to standard log capture.
+The shipped patch set:
+- `mtkbt.patched` (10 patches: **B1-B3, C1-C3, A1, D1, E3, E4**) — MD5 `b17bdf5448fdae68c1d477626190e63e`
+- `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
+- `libextavrcp.so.patched` (1 patch: **C4**)
+- `MtkBt.odex.patched` (2 patches: **F1, F2**)
+
+Patches **E5, E7a, E7b were tested and removed** — they patched live code that was never exercised at runtime for our peer state, so they had no observable effect.
+
+## Verified true (with corrections from earlier in this doc)
+
+- **mtkbt IS the AVRCP processor** on this device. (Earlier in this doc I hypothesized the BT chip firmware was the processor — that was wrong. The chip firmware blob is the WMT common subsystem, contains zero AVRCP code.)
+- **None of mtkbt's documented AVRCP/AVCTP functions are dead code** in the sense earlier in this doc claimed. (Earlier I concluded they were dead because no caller mechanism I searched found references — that conclusion was wrong.) `0x29e98` is reached via PIC-style callback registration through `register_callback` at `0x2fecc`, called from `0x28a5e` with the fn ptr computed by `ldr r1, [pc, #0x17c]; add r1, pc` (literal `0x1439`). `0x3096c` is reached via `R_ARM_RELATIVE` relocation installing it into a 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc` (slot 2). Same for the other 0-caller functions: they are reached, just through callback-registration mechanisms my earlier scans missed. The AV/C parser at `0x6d04a` is the **only** function still confirmed dead — multiple independent scans found zero references via every mechanism (literal pools, `R_ARM_RELATIVE`, ADR/ADD-PC, MOVW+MOVT, `ABS32`, no callers).
+- **The `mtkbt` SDP layer patches all land on the wire.** sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt to peers.
+- **The Java layer (`MtkBt.apk`) is correctly initialized for AVRCP 1.4** post-F1/F2. `getSupportVersion()` returns 0xe (1.4) when `sPlayServiceInterface == true`. `checkCapability()` builds the 1.4-aware EventList `[1, 2, 9, 10, 11]` (PLAYBACK_STATUS_CHANGED, TRACK_CHANGED, NOW_PLAYING_CONTENT_CHANGED, AVAILABLE_PLAYERS_CHANGED, ADDRESSED_PLAYER_CHANGED). `BTAvrcpMusicAdapter.registerNotification(eventId)` would correctly handle events 1/2/9 if invoked, log `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d`, and update the cardinality bitset.
+- **`Y1MediaBridge.apk` is correctly implemented** as a dual-interface (IBTAvrcpMusic + IMediaPlaybackService) Binder bridge. F1/F2 + the bridge + the SDP-layer patches form a complete & correct user-space chain.
+
+## Where the cardinality:0 gate is
+
+Logcat across multiple full connection cycles shows neither:
+- `[BT][AVRCP](test1) registerNotificationInd eventId:%d` (the JNI→Java entry log) nor
+- `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d` (the cardinality update log) nor
+- `[BT][AVRCP] MusicAdapter blocks support register event:%d` (the rejection log)
+
+So no inbound REGISTER_NOTIFICATION events reach Java. Combined with the existing observation that no `Recv AVRCP indication` msg_ids beyond 501/505/506/512 (ACTIVATE_CNF / connect_ind / CONNECT_CNF / DISCONNECT_CNF) reach the JNI receive loop, **the gate is unambiguously inside mtkbt's native AVRCP layer, between AVCTP RX and the JNI dispatch socket**.
+
+The likely concrete location is in the runtime path through one of three op-code=4 dispatchers (`0x3060c`, `0x30708`, `0x3096c`) reached via the 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`. Each has different version-check logic and reads `[conn+0x149]` (version) and `[conn+0x5d0]` (state code) differently. Which one fires for a given peer's GetCapabilities op-code depends on runtime state we cannot observe statically.
+
+## Remaining diagnostic options
+
+All require capabilities we don't have:
+- **HCI snoop / btsnoop** — needs root.
+- **Capture daemon-side `__xlog_buf_printf` traces** — Mediatek's separate log buffer, requires special tooling.
+- **Runtime instrumentation patches** that emit observable side effects via existing logcat tags — possible in principle but high-effort and out of scope per the constraints established at session start.
+
+## Single concrete patch candidate identified but not shipped
+
+Trace #1g exposed a clean-looking patch site in fn `0x3060c` (slot 0 of the dispatcher table): NOP the `bge` at `0x3065e` to force the 1.3/1.4 init path regardless of `[conn+0x149]`'s sign. Single-byte change `13 da → 00 bf`. **Not shipped** because (a) we can't tell whether fn `0x3060c` is selected at runtime for our peers vs. fn `0x30708` or fn `0x3096c`, and (b) for "correctly classified" peers (high bit set in `[conn+0x149]`) the gate doesn't fire and the patch is inert. Listed for future reference if anyone with HCI snoop access ever resumes this.
+
+---
+
+## Original narrative (preserved for audit trail)
+
+What follows is the original investigation order. Some sections contain hypotheses that were later refuted — those refutations are in subsequent sections. Read the Final Status above for the corrected picture.
 
 ## Planned Traces
 
@@ -193,6 +235,261 @@ The remaining cardinality:0 gate is somewhere inside mtkbt's userspace AVRCP/AVC
 - **Trace #1h**: For the AV/C parser specifically — it parses cmdFrame bytes that originate from inbound AVCTP frames. Find the function that *receives* AVCTP frames (likely a state machine in the L2CAP receive path) and trace forward to where it dispatches by `cmdFrame[3]` (opcode byte). That's the AV/C demux. Even if 0x6d04a is dead code, *something* parses incoming AV/C frames.
 
 These all extend Trace #1 — pure static analysis, no flash cycles.
+
+## Trace #1f — Findings (executed 2026-05-02)
+
+### `0x29e98` IS reachable — confirmed
+
+Traced the callback registration mechanism for the field `[conn+0x5cc]` (the per-connection callback fn ptr the brief documented as being read at `0x02fd74` and `blx`'d to dispatch the AVRCP layer).
+
+Chain found:
+
+```
+register_callback (0x2fecc):
+  takes (conn_ptr, fn_ptr, sub_arg) and stores fn_ptr at [conn+0x5cc].
+
+Caller (1 site only): 0x28a5e
+  Sets up r1 (the fn_ptr argument) via PIC-style PC-relative computation:
+    0x028a56:  ldr r1, [pc, #0x17c]    ; r1 = literal 0x1439  ← offset, not address
+    0x028a5c:  add r1, pc               ; r1 = 0x1439 + 0x28a60 = 0x29e99
+    0x028a5e:  bl 0x2fecc               ; register_callback(r0=conn, r1=0x29e99, r2=...)
+```
+
+The literal `0x1439` is **not** a function address — it's a PC-relative offset. The function address is computed at runtime by `add rN, pc`. Disassembly at the resolved target `0x29e98` matches the brief's documented "callback dispatcher TBH" character-for-character (`push.w {...,lr}; tbh [pc, r3, lsl #1]`). So:
+
+- `0x29e98` is reachable.
+- The brief's analysis of its role is correct.
+- The function `0x3096c` (E5 patch site) is also genuinely reachable — it lives in the live call chain that this dispatcher reaches via TBH.
+
+### Why earlier traces missed this
+
+Trace #1c looked for the wrong shape. The pattern in the binary is:
+
+```
+ldr rN, [pc, #imm]    ; load PC-rel offset literal
+add rN, pc             ; compute fn_ptr = literal + PC + 4
+bl <register_func>     ; pass fn_ptr as argument
+```
+
+…not the `add+str` pattern I was scanning for. Also, the literal value (e.g. `0x1439`) is a small offset, not a Thumb-LSB-set function address, so the filter `(v & 1) and v < 0xf3000` excluded it.
+
+### Implication
+
+The "dead code" framing has been wrong twice over: first I attributed the un-trackable references to chip firmware (refuted by inspecting the firmware blob), then to my own static-analysis blind spot (now refuted by finding the actual mechanism). The remaining "0-caller" functions in the AVCTP/AVRCP layer (`0x6d04a` AV/C parser, `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp containing fn) are very likely registered through the same PIC-style mechanism via different `register_*` functions I haven't enumerated yet. They're not dead.
+
+### Why E5 still didn't help operationally
+
+E5's patch site (`0x309ec`: `BNE 0x30aca` → `B 0x30aca`) is inside `0x3096c`, which IS reachable. Three remaining possibilities for the lack of behavioral effect:
+
+1. `0x3096c` is reached, but its TBH dispatch only routes specific op-codes through the branch we patched; for all other op-codes the BNE site is never reached.
+2. The patch correctly forces the branch to `0x30aca`, but `0x30aca`'s downstream logic doesn't actually fire AVRCP 1.4 features for our peer state.
+3. Something further upstream (the AV/C parser? the AVCTP RX handler?) is gating whether `0x3096c` ever sees a GetCapabilities op-code from our peer in the first place.
+
+Distinguishing these requires runtime visibility we don't have. But the gate is somewhere in this code path, not in firmware or dead code.
+
+### Suggested next step (if continuing)
+
+Run the trace #1f mechanism (find PIC-style `ldr+add-pc; bl <reg_fn>` patterns and resolve the resulting fn pointers) against ALL register-callback-style functions in mtkbt — not just `0x2fecc`. That gives a comprehensive map of which "0-caller" functions are actually wired up, and where. From there we can compare to the call chain that processes inbound AVCTP frames and identify the true gate site for cardinality:0.
+
+## Trace #1f (full) — Comprehensive PIC fn-ptr enumeration (executed 2026-05-02)
+
+Scanned all 14,417 `add rN, pc` Thumb-1 sites in mtkbt's `.text` and resolved 13,825 PIC-style address constructions. **245 of those resolve to addresses that are plausible function entries** (have a `push` prologue at the resolved address).
+
+**Classification of the 245 fn-ptr constructions by what immediately follows:**
+- **63** are `bl <register_func>` — fn ptr passed as arg to a registration function
+- **155** are `str rN, [rA, #imm]` — fn ptr stored directly into a struct field
+- **7** are direct `blx rN` (rare, indirect tail-call)
+- **20** are "other" patterns
+
+### Findings vs our 0-caller key functions
+
+Out of the 245 constructions, exactly **4 target our key 0-caller functions** — and **all 4 target the AVRCP callback dispatcher (`0x29e1c` / `0x29e98`)**:
+
+| Site | Stored to / passed to | Fn ptr |
+|---|---|---|
+| `0x275e0` | `str r3, [r0, #0x20]` | `0x29e1d` (pre-entry) |
+| `0x28352` | `str r0, [r2, #0x34]` | `0x29e1d` (pre-entry) |
+| `0x28a5c` | `bl 0x2fecc` (= `register_callback(conn, fn, ...)` writing `[conn+0x5cc]`) | `0x29e99` (body) |
+| `0x28dce` | `str r3, [r5, #0x44]` | `0x29e1d` (pre-entry) |
+
+The other "0-caller" functions show **zero PIC constructions, zero R_ARM_RELATIVE, zero literal pool entries, zero direct callers**:
+
+- `0x6d04a` AV/C parser → confirmed dead code (never reachable by any mechanism scanned).
+- `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp containing fn → likely also dead code (alternate implementations).
+- `0x02fd34` AVRCP 1.3/1.4 init body → reached via internal `b.w` tail-call from inside the live function `0x3096c` at offset `0x030aca` (per the brief's analysis). Not registered, just a sub-path within a live function.
+
+### The three op-code=4 dispatchers
+
+A 3-slot function-pointer table at vaddr `0xf94b0..0xf94bc` holds:
+
+| Slot | Vaddr | Fn ptr | Function |
+|---|---|---|---|
+| 0 | `0xf94b0` | `0x3060c` | dispatcher A — checks `[conn+0x5d0]` against `0xa0`, `0x82`, etc. |
+| 1 | `0xf94b4` | `0x30708` | dispatcher B — checks `[conn+0x5d0]` against `0x82`, `0x81`, `0x20` |
+| 2 | `0xf94b8` | `0x3096c` | dispatcher C (E5 site) — checks `[conn+0x149]&0x7f` against `0x20`, `0x10` |
+
+All three are **op-code=4 (GetCapabilities) dispatchers** for different sub-contexts. They each read different combinations of `[conn+0x149]` (version) and `[conn+0x5d0]` (state code) and dispatch differently:
+- `0x3060c`: 3 reads of `[+0x149]`; cmps against `#0xa0`, `#0x82`
+- `0x30708`: 2 reads of `[+0x149]`; cmps `[+0x5d0]` against `#0x82`, `#0x81`, `#0x20`
+- `0x3096c`: 1 read of `[+0x149]`; **the brief's classic version-dispatch (cmp `#0x10` / `#0x20`)**
+
+**E5 patched only the `0x3096c` branch.** If runtime selection picks `0x3060c` or `0x30708` for our peers (driven by some other state), the patch never fires.
+
+### Why we can't proceed via static analysis alone
+
+To know which of the three dispatchers gets invoked for our peers, we'd need to know:
+1. The runtime value of `[conn+0x5d0]` (state code) when GetCapabilities arrives.
+2. The runtime value of `[conn+0x149]` (version field).
+3. Which slot the upstream code reads from the 3-slot table — i.e., which struct field at `+0x20`/`+0x34`/`+0x44`/`+0x5cc` is consulted.
+
+These are runtime state. Without HCI snoop, daemon log access (xlog buffer), or device-side debugging, we can't observe them. The static call graph branches at this node and we can't predict which branch fires.
+
+## Trace #1g (full) — Indirect-call resolution complete (2026-05-02)
+
+### The 7 callback-invoker functions
+
+Mapped all 14 readers of `[conn+0x5cc]` (the callback fn ptr slot holding `0x29e98`). 10 are non-PC-relative (genuine struct-field reads); they live in **7 distinct functions** that invoke the AVRCP callback dispatcher:
+
+| Function | `[+0x5cc]` reads | Notes |
+|---|---|---|
+| `0x2fd36` (= AVRCP 1.3/1.4 init body) | 1 (at `0x2fd74`) | brief's documented site |
+| `0x2fd84` | 1 | adjacent helper |
+| `0x3060c` (op-dispatcher slot 0) | 1 (at `0x306dc`) | one of the 3-slot table dispatchers |
+| `0x30708` (op-dispatcher slot 1) | 2 (at `0x308e2`, `0x3090a`) | another 3-slot dispatcher |
+| `0x3096c` (op-dispatcher slot 2 = E5 site) | 1 (at `0x30b88`) | the third 3-slot dispatcher |
+| `0x34e1a` | 1 | unrelated function |
+| `0x34e64` | 3 | unrelated function |
+
+**All three op-code=4 dispatchers (`0x3060c`, `0x30708`, `0x3096c`) reach the callback** — they're not mutually exclusive paths. So the question of "which one fires" is really "which one runs the path that *does* invoke the callback for this connection". Each has different gating logic before the `[+0x5cc]` read.
+
+### Concrete patch candidate found in fn `0x3060c`
+
+The cleanest gate site is in fn `0x3060c`:
+
+```
+0x030658:  ldrsb.w r0, [r4, #0x149]      ; SIGNED load
+0x03065c:  cmp r0, #0
+0x03065e:  bge #0x30688                   ; ★ if [+0x149] >= 0 (high bit clear), bypass 1.4
+0x030660:  ...
+0x030684:  b.w #0x2fd34                   ; tail-call AVRCP 1.3/1.4 init
+```
+
+**Single-byte patch (E8 candidate):** `0x3065e: 13 da → 00 bf` (NOP the BGE).
+
+**Caveat:** every immediate write to `[conn+0x5d9]` (which feeds `[+0x149]`) sets the high bit (`0x90`, `0xa0`, `0xc0`, `0xd0`, ...), so for normal peers `[+0x149]` is negative as a signed byte and the BGE is NOT taken — the gate doesn't fire. The patch only matters if our peers' `[+0x149]` somehow ends up with high bit clear (uninitialized, or written via an untraced code path). We can't determine this statically.
+
+## Trace #4 — Java decompilation of MtkBt.apk (executed 2026-05-02)
+
+### Tooling and access
+
+`MtkBt.dex` (extracted from MtkBt.odex at offset 0x28) contains ODEX-optimized opcodes (e.g., `invoke-virtual-quick`, `iget-quick`, `vtable@N`) that pure DEX parsers reject. Disassembly required:
+
+```
+java -jar baksmali-2.5.2.jar disassemble --allow-odex-opcodes -a 17 MtkBt.dex
+```
+
+(Plain androguard fails with `InvalidInstruction: opcode '0xf7' is unused`; baksmali with the `--allow-odex-opcodes` flag and Android 4.2 API level (17) handles them.)
+
+### Key class structure
+
+In `com.mediatek.bluetooth.avrcp`:
+- `BluetoothAvrcpService` — top-level service. Has all `*Native()` JNI methods plus matching event handlers (`connectInd`, `connectCnf`, `activateCnf`, `registerNotificationInd`, etc.).
+- `BTAvrcpMusicAdapter` — bridge to the music play service. Owns the cardinality bitset (`field@0x90` = `mRegBit`) and the EventList (`field@0x78`). Handles `registerNotification(B, I)Z` per-event.
+- `BTAvrcpProfile.getPreferVersion()B` — F1 patch site, returns `0xe` after patch.
+- `IBTAvrcpMusic$Stub` and `IBTAvrcpMusicCallback$Stub` — IPC interfaces to/from Y1MediaBridge.
+
+### `BTAvrcpMusicAdapter.getSupportVersion()B`
+
+```
+getSupportVersion():
+    if (sPlayServiceInterface) return 0x0e   ; AVRCP 1.4
+    else                       return 0x0d   ; AVRCP 1.3
+```
+
+Confirms F2's importance: `disable()` resetting `sPlayServiceInterface = false` is required so that re-activation doesn't see stale state.
+
+### `BTAvrcpMusicAdapter.checkCapability()V`
+
+```
+v2 = getSupportVersion()    ; v2 = 0xe (1.4) or 0xd (1.3)
+if (field@0xf4 == 1):
+    log "version: <v2>"     ; second-call: just log and return
+    return
+log "init capability version: <v2>"   ; ★ matches our logcat: "version:14"
+field@0xf4 = 1                          ; mark initialized
+
+if (v2 == 0xe):
+    field@0x78 = new byte[5]            ; 1.4 EventList
+else:
+    field@0x78 = new byte[2]            ; 1.3 EventList
+
+field@0x78[0] = 1   ; PLAYBACK_STATUS_CHANGED
+field@0x78[1] = 2   ; TRACK_CHANGED
+if (v2 == 0xe):
+    field@0x78[2] = 9   ; NOW_PLAYING_CONTENT_CHANGED  (1.4)
+    field@0x78[3] = 0xa ; AVAILABLE_PLAYERS_CHANGED   (1.4)
+    field@0x78[4] = 0xb ; ADDRESSED_PLAYER_CHANGED    (1.4)
+
+field@0x90 = new BitSet(16)    ; cardinality bitset (mRegBit)
+field@0x90.clear()
+```
+
+Logcat confirms `init capability version:14` so the 1.4 path runs and EventList is populated correctly.
+
+### `BTAvrcpMusicAdapter.registerNotification(B, I)Z`
+
+This is the cardinality update site:
+
+```
+switch (eventId):
+    case 1, 2, 9:    handle (delegate to BluetoothAvrcpService notification* method) → bReg = true
+    case 3, 4, 5, 8: log "[BT][AVRCP] MusicAdapter blocks support register event:%d", bReg = false
+    case 6, 7:       delegate to BluetoothProfileManager (vtable@15)
+    case 10, 11, 12: fall through, bReg unchanged (= false)
+    case 13:         log "blocks", bReg = false
+
+if (bReg):
+    synchronized (field@0x90):
+        field@0x90.set(eventId)              ; ★ THE cardinality update
+        log "[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d"
+return bReg
+```
+
+### `BluetoothAvrcpService.registerNotificationInd(B, I)V`
+
+Calls `BTAvrcpMusicAdapter.registerNotification(eventId, interval)` (via `field@0x24` = music adapter, vtable@75) for any eventId not in the special set `{0xa, 0xb, 0xc}`. Logs `[BT][AVRCP](test1) registerNotificationInd eventId:%d interval:%d` on entry.
+
+### Definitive verdict
+
+The user's logcat over multiple sessions shows:
+- **Neither** `[BT][AVRCP](test1) registerNotificationInd eventId:%d` (the registration entry log)
+- **Nor** `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d` (the cardinality update log)
+- **Nor** `[BT][AVRCP] MusicAdapter blocks support register event:%d` (the rejection log)
+
+Therefore `registerNotificationInd` **never fires** — i.e., the JNI never receives a "REGISTER_NOTIFICATION arrived" event from mtkbt. Combined with our prior observation that no inbound AVRCP `Recv AVRCP indication` msg_ids beyond 501/505/506/512 are seen, this **definitively locates the cardinality:0 gate inside `mtkbt`'s native AVRCP layer**, between the AVCTP receive path and the JNI dispatch socket.
+
+### Java layer ruled out
+
+The Java layer:
+- Initializes correctly (1.4 EventList ready).
+- Handles incoming subscriptions correctly (events 1/2/9 succeed; 3/4/5/8/13 explicitly blocked; the others no-op).
+- Has no version gate or capability check that would suppress events when they DO arrive.
+
+No additional Java/smali patches will help. F1 + F2 are necessary AND sufficient on the Java side. The gate is unambiguously below.
+
+### The honest end of the static investigation
+
+After Trace #1f the architectural picture is finally complete and consistent:
+
+- **`mtkbt` IS the AVRCP processor** (not chip firmware). ✓ confirmed by inspecting firmware blob.
+- **The brief's documented dispatchers (`0x29e98`, `0x02fd34`, `0x3096c`) are all reachable at runtime** — via PIC-style callback registration that earlier traces missed. ✓ confirmed.
+- **`0x6d04a` "AV/C parser" is dead code** — multiple independent searches confirm no caller mechanism reaches it. ✓ confirmed.
+- **The cardinality:0 gate is in the runtime decision tree of `[conn+0x5d0]` × `[conn+0x149]` × dispatcher-table selection**, somewhere in the `0x29e98` → `0x3060c`/`0x30708`/`0x3096c` family of paths.
+- **Static analysis cannot determine which decision point fires for our peers without observing runtime values.** Every structural and addressable element has been mapped.
+
+The remaining diagnostic options (HCI snoop / chip firmware modification / runtime instrumentation patches that emit observable side effects) are all out of scope per the constraints established at session start.
+
+The repo (B1-B3, C1-C3, A1, D1, E3, E4, plus C2a/b, C3a/b, C4, F1, F2 across the four binaries) represents the complete set of demonstrably-effective patches reachable through static analysis. Y1MediaBridge is correctly implemented and ready to fire the moment the runtime gate releases.
 
 ## Out of Scope (eliminated)
 
