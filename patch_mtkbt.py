@@ -102,6 +102,48 @@ it was based on a false negative from testing a non-live patch site. All three
     Forces the SDP init function to always register the AVRCP TG record
     (CMP r0, r5 guard was never true, leaving the record unregistered).
 
+  G1, G2 — DIAGNOSTIC INSTRUMENTATION: redirect mtkbt's __xlog_buf_printf to
+  __android_log_print so daemon-side [AVRCP]/[AVCTP] log strings become visible
+  in logcat.
+
+    Why: mtkbt routes its `[AVRCP][...]` / `[AVCTP][...]` log strings through
+    MediaTek's __xlog_buf_printf, whose output goes to a separate buffer not
+    accessible without root. This blinds us to runtime classification decisions,
+    AVCTP receive failures, and silent-drop sites — exactly the gate area for
+    the cardinality:0 bug. Both __xlog_buf_printf and __android_log_print are
+    already imported (NEEDED: liblog.so), so a simple thunk-style PLT/wrapper
+    rewrite is enough to redirect the output.
+
+    Calling-convention translation:
+      __xlog_buf_printf(int buf_id, int code, const char *fmt, ...)
+      __android_log_print(int prio, const char *tag, const char *fmt, ...)
+
+    The 3rd arg (fmt) and all variadic args (r3 + stack) match exactly. We
+    overwrite r0 with LOG_INFO (4) and r1 with the original r2 (fmt string,
+    used as tag for diagnostics). The buf_id and code from the original call
+    are dropped — they're metadata we don't care about. Logcat will tag each
+    line with the format string itself (truncated to ~23 chars by the kernel
+    logger), so `[AVRCP]`/`[AVCTP]` prefixes survive and can be grepped.
+
+    Two patch sites cover all 4079 callsites in mtkbt:
+
+      G1 — 0x675c0 (Thumb mode, 12 bytes): wrapper at fn 0x675c0 is the
+        consolidated [AVRCP]/[AVCTP] log entry point (2988 direct callers).
+        Stock prologue is replaced with a Thumb thunk that tail-calls into
+        the __android_log_print PLT.
+
+      G2 — 0xb408 (ARM mode, 12 bytes): direct __xlog_buf_printf PLT entry
+        (1091 callers that bypass the wrapper). Stock PLT stub is replaced
+        with an ARM thunk that branches into the __android_log_print PLT
+        (entry at 0xaef8, also ARM mode).
+
+    Verify post-flash: `logcat -s '*:V' | grep -E '\\[AVRCP\\]|\\[AVCTP\\]'`
+    Expected new lines that were never visible before — entry/exit logs from
+    the dispatcher, AVCTP RX path, version-classification messages, etc.
+
+    These are diagnostic patches and may be removed once the cardinality:0 root
+    cause is identified and fixed via a behavioural patch.
+
   E8 — Force op_code=4 dispatcher fn 0x3060c onto the 1.3/1.4 init path.
     fn 0x3060c is one of three op_code=4 dispatchers reached via the 3-slot
     fn-ptr table at vaddr 0xf94b0..0xf94bc (slot 0). After logging the entry
@@ -147,6 +189,7 @@ Deploy:
     adb reboot
     sdptool browse <Y1_BT_ADDR>   # expect: AVCTP uint16: 0x0103, AV Remote Version: 0x0104
     logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'
+    logcat -s '*:V' | grep -E '\\[AVRCP\\]|\\[AVCTP\\]'   # G1+G2: daemon-side trace
 """
 
 import argparse
@@ -155,7 +198,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "d47c904063e7d201f626cf2cc3ebd50b"
+OUTPUT_MD5 = "18c34b11a0a27c17c318c6de2a7b3fd0"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -247,6 +290,29 @@ PATCHES = [
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x33]),
+    },
+    # G1: Replace the [AVRCP]/[AVCTP] xlog wrapper prologue at 0x675c0 (Thumb)
+    # with a 3-instruction thunk that tail-calls __android_log_print.
+    #   movs r0, #4         ; LOG_INFO
+    #   mov  r1, r2         ; tag = original fmt string ptr
+    #   ldr.w pc, [pc]      ; tail-jump via literal (loads 0xaef8 = __android_log_print PLT)
+    #   .word 0xaef8        ; literal pool entry; bit 0 clear -> switches to ARM
+    {
+        "name":   "[G1] xlog wrapper -> __android_log_print thunk (Thumb)",
+        "offset": 0x0675c0,
+        "before": bytes([0x0c, 0xb4, 0x55, 0x4b, 0x2d, 0xe9, 0xf0, 0x4f, 0x83, 0x46, 0x54, 0x48]),
+        "after":  bytes([0x04, 0x20, 0x11, 0x46, 0xdf, 0xf8, 0x00, 0xf0, 0xf8, 0xae, 0x00, 0x00]),
+    },
+    # G2: Replace the __xlog_buf_printf PLT entry at 0xb408 (ARM mode) with a
+    # 3-instruction thunk that branches into __android_log_print's PLT (0xaef8).
+    #   mov r0, #4          ; LOG_INFO
+    #   mov r1, r2          ; tag = original fmt string ptr
+    #   b   0xaef8          ; branch to __android_log_print PLT (ARM->ARM, range OK)
+    {
+        "name":   "[G2] __xlog_buf_printf PLT -> __android_log_print thunk (ARM)",
+        "offset": 0x00b408,
+        "before": bytes([0x00, 0xc6, 0x8f, 0xe2, 0xee, 0xca, 0x8c, 0xe2, 0x80, 0xfb, 0xbc, 0xe5]),
+        "after":  bytes([0x04, 0x00, 0xa0, 0xe3, 0x02, 0x10, 0xa0, 0xe1, 0xb8, 0xfe, 0xff, 0xea]),
     },
     # E8: NOP the bge at 0x3065e in fn 0x3060c (op_code=4 dispatcher slot 0).
     # `bge #0x30688` (13 da) skips the 1.3/1.4 init path (b.w 0x2fd34) when

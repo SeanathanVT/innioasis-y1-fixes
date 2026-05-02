@@ -5,14 +5,16 @@ This document grew organically over the 2026-05-02 session. **Read this top sect
 ## Final state (after all traces complete)
 
 The shipped patch set:
-- `mtkbt.patched` (11 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8**) — MD5 `d47c904063e7d201f626cf2cc3ebd50b`
+- `mtkbt.patched` (13 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8, G1, G2**) — MD5 `18c34b11a0a27c17c318c6de2a7b3fd0`
 - `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
 - `libextavrcp.so.patched` (1 patch: **C4**)
 - `MtkBt.odex.patched` (2 patches: **F1, F2**)
 
 Patches **E5, E7a, E7b were tested and removed** — they patched live code that was never exercised at runtime for our peer state, so they had no observable effect.
 
-**E8 added 2026-05-02 as a single-instruction probe** on the cleanest of three op_code=4 dispatcher candidates (fn `0x3060c`, slot 0 of the 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`). NOPs `bge #0x30688` at `0x3065e` to force every classification through the 1.3/1.4 init path. The other two dispatchers were considered for brute-force treatment and rejected: fn `0x30708` does an *unsigned* `ldrb [conn+0x149]` masked `&0x7f`, so no high-bit gate exists to NOP — failure exits depend on a state-machine over `[conn+0x5d0]` ∈ {0x20, 0x82, 0x81} that would need a multi-instruction patch. fn `0x3096c`'s analogous gate (BNE at `0x309ec`) is the OLD E5 patch already tested-inert in earlier sessions. If E8 doesn't release cardinality:0, the runtime path is not fn `0x3060c` — almost certainly fn `0x30708`, and Option B (static-patch `__xlog_buf_printf` redirect) becomes the next move.
+**E8 added 2026-05-02 and tested same-day as inert.** NOPing `bge #0x30688` at `0x3065e` in fn `0x3060c` (op_code=4 dispatcher slot 0) had no observable effect on cardinality:0. Inspection of the test logcat showed only msg_ids 505 and 506 received — **no GetCapabilities (`op_code=4`) ever arrives at any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`). The gate is upstream of the dispatcher table itself — somewhere in mtkbt's AVCTP receive path between L2CAP and the dispatcher. E8 left in place as a verified-correct patch even though inert.
+
+**G1/G2 added 2026-05-02 as diagnostic instrumentation.** mtkbt routes its `[AVRCP]/[AVCTP]` log strings through `__xlog_buf_printf` (separate buffer, not in logcat without root). Both xlog and `__android_log_print` are already imported (`NEEDED: liblog.so`), so a 3-instruction thunk redirects xlog calls to logcat: `mov r0,#4; mov r1,r2; b __android_log_print_PLT`. The signatures differ only in the first two args (xlog: `buf_id, code, fmt, ...`; android_log: `prio, tag, fmt, ...`); fmt at r2 and all varargs at r3+stack pass through unchanged. We overwrite r0=LOG_INFO and r1=fmt_str (so the format string itself becomes the logcat tag, preserving `[AVRCP]/[AVCTP]` prefixes for grep). G1 at `0x675c0` patches the Thumb wrapper (2988 callsites); G2 at `0xb408` patches the ARM PLT entry (1091 direct callsites). Verify post-flash with `logcat -s '*:V' | grep -E '\[AVRCP\]|\[AVCTP\]'`. **These are diagnostic patches and should be removed once the upstream gate is identified.**
 
 ## Verified true (with corrections from earlier in this doc)
 
