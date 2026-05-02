@@ -5,6 +5,33 @@ patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 Stock md5:  3af1d4ad8f955038186696950430ffda
 Output md5: (regenerated on each build — see script output)
 
+--- Status (2026-05-02) ---
+
+The patch set below has been verified to land on the wire (sdptool shows AVRCP
+1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt) and to satisfy the
+Java-side initialisation chain. Despite that, three known-good 1.4 controllers
+(car / Sonos Roam / Samsung TV) still see cardinality:0 — no inbound
+REGISTER_NOTIFICATION reaches the JNI. The remaining gate is inside mtkbt's
+native AVCTP→JNI dispatch, between the chip-side AVCTP receive and the abstract
+socket. mtkbt's daemon-side `[AVCTP]`/`[AVRCP]` logs go through MediaTek's
+`__xlog_buf_printf` and are not visible in logcat.
+
+Trace #1g identified one concrete patch candidate inside fn 0x3060c (one of three
+op_code=4 dispatchers reached via the 3-slot fn-ptr table at vaddr 0xf94b0):
+NOP the `bge` at 0x3065e to force every classification through the AVRCP 1.3/1.4
+init path (`b.w 0x2fd34`) regardless of the sign bit of [conn+0x149]. Shipped
+below as **E8**.
+
+The other two dispatchers were considered for the same brute-force treatment
+and rejected:
+  - fn 0x30708 reads [conn+0x149] *unsigned* and masks `& 0x7f` — there is no
+    high-bit gate to NOP. Failure exits depend on a multi-byte state-machine
+    check on [conn+0x5d0] ∈ {0x20, 0x82, 0x81}; no clean single-instruction
+    patch site.
+  - fn 0x3096c was previously patched (old E5 at 0x309ec, BNE→B) and removed
+    after empirical testing showed no behavioural change. Re-adding would not
+    surface new information.
+
 --- Descriptor table structure (key finding) ---
 
 The mtkbt descriptor table at file offset 0x0f9774 has three AVRCP service record
@@ -75,6 +102,25 @@ it was based on a false negative from testing a non-live patch site. All three
     Forces the SDP init function to always register the AVRCP TG record
     (CMP r0, r5 guard was never true, leaving the record unregistered).
 
+  E8 — Force op_code=4 dispatcher fn 0x3060c onto the 1.3/1.4 init path.
+    fn 0x3060c is one of three op_code=4 dispatchers reached via the 3-slot
+    fn-ptr table at vaddr 0xf94b0..0xf94bc (slot 0). After logging the entry
+    and confirming op_code=4, it does:
+
+      0x30658:  ldrsb.w r0, [r4, #0x149]   ; signed byte: peer version classification
+      0x3065c:  cmp     r0, #0
+      0x3065e:  bge     #0x30688            ; if non-negative → log error & return
+                                            ; if negative (high bit set) → fall through
+                                            ; to b.w 0x2fd34 (1.3/1.4 init)
+
+    NOPing the bge (`13 da` → `00 bf`) routes every classification through init,
+    irrespective of how the connection's version byte is set. If the runtime path
+    for the user's peers goes through fn 0x3060c, this releases the gate.
+
+    Caveat: untested empirically; ships as a low-risk single-instruction probe.
+    If cardinality:0 persists after E8 lands, the runtime path is not fn 0x3060c
+    and either fn 0x30708 (no clean patch) or upstream classification is the gate.
+
   E3-E4 — AVRCP TG SupportedFeatures bitmask (the served value on the wire).
     sdptool browse against post-D1 mtkbt confirms AttrID=0x0311 IS on the wire
     inside the AVRCP TG record (UUID 0x110c), but the served value is 0x0001
@@ -109,7 +155,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "b17bdf5448fdae68c1d477626190e63e"
+OUTPUT_MD5 = "d47c904063e7d201f626cf2cc3ebd50b"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -201,6 +247,16 @@ PATCHES = [
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x33]),
+    },
+    # E8: NOP the bge at 0x3065e in fn 0x3060c (op_code=4 dispatcher slot 0).
+    # `bge #0x30688` (13 da) skips the 1.3/1.4 init path (b.w 0x2fd34) when
+    # ldrsb.w [conn+0x149] is non-negative. NOP forces all classifications
+    # through init.
+    {
+        "name":   "[E8] bge #0x30688 -> NOP  force op4 dispatcher to 1.3/1.4 init",
+        "offset": 0x03065e,
+        "before": bytes([0x13, 0xda]),
+        "after":  bytes([0x00, 0xbf]),
     },
 ]
 

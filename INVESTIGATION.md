@@ -5,12 +5,14 @@ This document grew organically over the 2026-05-02 session. **Read this top sect
 ## Final state (after all traces complete)
 
 The shipped patch set:
-- `mtkbt.patched` (10 patches: **B1-B3, C1-C3, A1, D1, E3, E4**) — MD5 `b17bdf5448fdae68c1d477626190e63e`
+- `mtkbt.patched` (11 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8**) — MD5 `d47c904063e7d201f626cf2cc3ebd50b`
 - `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
 - `libextavrcp.so.patched` (1 patch: **C4**)
 - `MtkBt.odex.patched` (2 patches: **F1, F2**)
 
 Patches **E5, E7a, E7b were tested and removed** — they patched live code that was never exercised at runtime for our peer state, so they had no observable effect.
+
+**E8 added 2026-05-02 as a single-instruction probe** on the cleanest of three op_code=4 dispatcher candidates (fn `0x3060c`, slot 0 of the 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`). NOPs `bge #0x30688` at `0x3065e` to force every classification through the 1.3/1.4 init path. The other two dispatchers were considered for brute-force treatment and rejected: fn `0x30708` does an *unsigned* `ldrb [conn+0x149]` masked `&0x7f`, so no high-bit gate exists to NOP — failure exits depend on a state-machine over `[conn+0x5d0]` ∈ {0x20, 0x82, 0x81} that would need a multi-instruction patch. fn `0x3096c`'s analogous gate (BNE at `0x309ec`) is the OLD E5 patch already tested-inert in earlier sessions. If E8 doesn't release cardinality:0, the runtime path is not fn `0x3060c` — almost certainly fn `0x30708`, and Option B (static-patch `__xlog_buf_printf` redirect) becomes the next move.
 
 ## Verified true (with corrections from earlier in this doc)
 
@@ -38,9 +40,13 @@ All require capabilities we don't have:
 - **Capture daemon-side `__xlog_buf_printf` traces** — Mediatek's separate log buffer, requires special tooling.
 - **Runtime instrumentation patches** that emit observable side effects via existing logcat tags — possible in principle but high-effort and out of scope per the constraints established at session start.
 
-## Single concrete patch candidate identified but not shipped
+## Single concrete patch candidate identified but not shipped — UPDATE: shipped
 
-Trace #1g exposed a clean-looking patch site in fn `0x3060c` (slot 0 of the dispatcher table): NOP the `bge` at `0x3065e` to force the 1.3/1.4 init path regardless of `[conn+0x149]`'s sign. Single-byte change `13 da → 00 bf`. **Not shipped** because (a) we can't tell whether fn `0x3060c` is selected at runtime for our peers vs. fn `0x30708` or fn `0x3096c`, and (b) for "correctly classified" peers (high bit set in `[conn+0x149]`) the gate doesn't fire and the patch is inert. Listed for future reference if anyone with HCI snoop access ever resumes this.
+Trace #1g exposed a clean-looking patch site in fn `0x3060c` (slot 0 of the dispatcher table): NOP the `bge` at `0x3065e` to force the 1.3/1.4 init path regardless of `[conn+0x149]`'s sign. Single-byte change `13 da → 00 bf`.
+
+**Originally not shipped** because (a) we can't tell whether fn `0x3060c` is selected at runtime for our peers vs. fn `0x30708` or fn `0x3096c`, and (b) for "correctly classified" peers (high bit set in `[conn+0x149]`) the gate doesn't fire and the patch is inert.
+
+**Reversed 2026-05-02 — now shipped as E8.** Re-examination of the brute-force "patch all three" plan showed the other two dispatcher candidates do not have analogous clean patch sites (see Final state above), so the cost calculus changed: E8 is the only viable single-instruction probe of the three, it's a one-byte change to a code path that's either the runtime gate (fix) or unexercised for our peers (no-op), and shipping it is strictly more informative than not. If E8 does not change cardinality:0, runtime selection is not fn `0x3060c` and the only remaining static analysis option is Option B — redirecting `__xlog_buf_printf` to `__android_log_print` to make mtkbt's daemon-side decisions visible in logcat.
 
 ---
 
