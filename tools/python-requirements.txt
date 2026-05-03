@@ -1,0 +1,7 @@
+# Python deps used by the patcher scripts in src/patches/.
+# Installed into tools/python-venv/ by tools/setup.sh.
+
+# patch_y1_apk.py: DEX-level analysis of the Y1 music player APK.
+# Range allows 3.x and 4.x; the imports we use (androguard.core.apk.APK)
+# are stable across both. Pin tighter if a release breaks something.
+androguard>=3.3.0,<5

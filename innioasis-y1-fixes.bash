@@ -6,17 +6,18 @@
 # Add a row to support a new build.
 #
 # Author:    Sean Halpin (github.com/SeanathanVT)
-# Version:   1.9.1
+# Version:   1.10.0
 # Changelog: see CHANGELOG.md
 # Patches:   see docs/PATCHES.md
 #
 
 show_help() {
   cat <<EOF
-Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [FLAGS]
+Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [FLAGS] [TOOLING]
 
 Stage rom.zip in --artifacts-dir (validated against KNOWN_FIRMWARES MD5
-manifest), then pick one or more of the flags below.
+manifest), then pick one or more of the flags below. Run tools/setup.sh
+once first to clone MTKClient and create the patcher venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable / debuggable in build.prop
@@ -29,6 +30,13 @@ FLAGS:
                  cd src/su && make
   --all          All of the above
   -h, --help     This help
+
+TOOLING (override tools/ defaults; useful if you have these installed
+elsewhere or are testing alternate builds):
+  --mtkclient-dir <path>   Path to a MTKClient checkout (with venv/ inside).
+                            Default: tools/mtkclient/. Or set MTKCLIENT_DIR.
+  --python-venv <path>     Path to a Python venv with patcher deps
+                            (androguard). Default: tools/python-venv/.
 
 Quick example:
   ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
@@ -46,6 +54,10 @@ FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
 FLAG_ROOT=false
 PATH_ARTIFACTS=""
+
+# Tooling overrides — explicit flag wins over the tools/ default.
+OVERRIDE_MTKCLIENT_DIR=""
+OVERRIDE_PYTHON_VENV=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -93,6 +105,14 @@ while [[ $# -gt 0 ]]; do
       FLAG_ROOT=true
       FLAG_ANY_SPECIFIED=true
       shift
+      ;;
+    --mtkclient-dir)
+      OVERRIDE_MTKCLIENT_DIR="$2"
+      shift 2
+      ;;
+    --python-venv)
+      OVERRIDE_PYTHON_VENV="$2"
+      shift 2
       ;;
     -h|--help)
       show_help
@@ -155,8 +175,51 @@ KNOWN_FIRMWARES=(
 PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PATH_MOUNT="/mnt/y1-devel"
-PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
-PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
+
+# resolve_mtkclient_dir — echoes the path to the MTKClient checkout to use.
+# Precedence: --mtkclient-dir flag > MTKCLIENT_DIR env var > tools/mtkclient/.
+# Bails the script if none resolve to a real directory.
+resolve_mtkclient_dir() {
+  local p
+  if [[ -n "$OVERRIDE_MTKCLIENT_DIR" ]]; then
+    p="$OVERRIDE_MTKCLIENT_DIR"
+  elif [[ -n "${MTKCLIENT_DIR:-}" ]]; then
+    p="$MTKCLIENT_DIR"
+  elif [[ -d "${PATH_SCRIPT_DIR}/tools/mtkclient" ]]; then
+    p="${PATH_SCRIPT_DIR}/tools/mtkclient"
+  else
+    cat >&2 <<EOM
+ERROR: MTKClient not found.
+       Run:  ${PATH_SCRIPT_DIR}/tools/setup.sh
+       Or:   --mtkclient-dir <path> / MTKCLIENT_DIR env var
+EOM
+    exit 1
+  fi
+  if [[ ! -d "$p" || ! -f "$p/mtk.py" ]]; then
+    echo "ERROR: ${p} doesn't look like a MTKClient checkout (no mtk.py)" >&2
+    exit 1
+  fi
+  echo "$p"
+}
+
+# resolve_python_venv — echoes the path to the venv to source for patcher
+# invocations that need androguard, or empty string if none is configured
+# (in which case the bash falls through to system python3, which is fine
+# if the user has androguard pip-installed globally).
+# Precedence: --python-venv flag > tools/python-venv/.
+resolve_python_venv() {
+  if [[ -n "$OVERRIDE_PYTHON_VENV" ]]; then
+    if [[ ! -f "${OVERRIDE_PYTHON_VENV}/bin/activate" ]]; then
+      echo "ERROR: --python-venv ${OVERRIDE_PYTHON_VENV} not a valid venv (missing bin/activate)" >&2
+      exit 1
+    fi
+    echo "$OVERRIDE_PYTHON_VENV"
+  elif [[ -f "${PATH_SCRIPT_DIR}/tools/python-venv/bin/activate" ]]; then
+    echo "${PATH_SCRIPT_DIR}/tools/python-venv"
+  else
+    echo ""
+  fi
+}
 
 # Cross-platform MD5: md5sum on Linux, md5 -q on macOS.
 md5_of() {
@@ -278,7 +341,13 @@ patch_in_place_y1_apk() {
   sudo cp "${PATH_MOUNT}/${mount_rel}" "${stock}"
   sudo chown "$(id -u):$(id -g)" "${stock}"
 
-  if ! ( cd "${PATH_SCRIPT_DIR}/src/patches" && python3 patch_y1_apk.py "${stock}" ); then
+  local pyvenv
+  pyvenv="$(resolve_python_venv)"
+  if ! (
+    cd "${PATH_SCRIPT_DIR}/src/patches"
+    [[ -n "$pyvenv" ]] && source "${pyvenv}/bin/activate"
+    python3 patch_y1_apk.py "${stock}"
+  ); then
     echo "ERROR: patch_y1_apk.py failed for ${mount_rel}" >&2
     exit 1
   fi
@@ -473,17 +542,26 @@ fi
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "Unmounting development system.img.."
   sudo umount "${PATH_MOUNT}"
-fi
 
-echo "Activating MTKClient venv.."
-cd "${PATH_MTKCLIENT}"
-source "${PATH_VENV_MTKCLIENT}/bin/activate"
+  # Flash via MTKClient. Resolve location + venv only now (no point checking
+  # earlier — the patch steps don't need MTKClient).
+  PATH_MTKCLIENT="$(resolve_mtkclient_dir)"
+  PATH_VENV_MTKCLIENT="${PATH_MTKCLIENT}/venv"
+  if [[ ! -f "${PATH_VENV_MTKCLIENT}/bin/activate" ]]; then
+    echo "ERROR: MTKClient venv missing at ${PATH_VENV_MTKCLIENT}." >&2
+    echo "       Run: ${PATH_SCRIPT_DIR}/tools/setup.sh" >&2
+    exit 1
+  fi
 
-if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  echo "Activating MTKClient venv (${PATH_MTKCLIENT}).."
+  cd "${PATH_MTKCLIENT}"
+  # shellcheck disable=SC1091
+  source "${PATH_VENV_MTKCLIENT}/bin/activate"
+
   echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
   python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
-fi
 
-echo "Deactivating MTKClient venv.."
-deactivate
+  echo "Deactivating MTKClient venv.."
+  deactivate
+fi
 echo "Done!"

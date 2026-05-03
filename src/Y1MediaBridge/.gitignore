@@ -22,7 +22,5 @@ gradle-app.setting
 
 *.DS_Store
 
-# Post-build artifacts
-gradle/wrapper/gradle-wrapper.jar
-gradlew
-gradlew.bat
+# Per-machine SDK location (set ANDROID_HOME or sdk.dir here)
+local.properties
