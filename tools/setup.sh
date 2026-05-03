@@ -11,10 +11,11 @@
 
 set -euo pipefail
 
-# Pinned MTKClient version. Last verified working: 2.1.4.1.
+# Pinned MTKClient version. Last verified working: v2.1.4.1.
 # Bump after verifying compatibility against this repo's flash flow.
+# (List upstream tags: git ls-remote --tags https://github.com/bkerler/mtkclient.git)
 MTKCLIENT_REPO="https://github.com/bkerler/mtkclient.git"
-MTKCLIENT_REF="2.1.4.1"
+MTKCLIENT_REF="v2.1.4.1"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 TOOLS_DIR="$(pwd)"
@@ -38,15 +39,32 @@ if ! python3 -c "import venv" >/dev/null 2>&1; then
 fi
 
 # --- 1. Clone MTKClient at the pinned ref ----------------------------------
+# Idempotent: clone if missing, always ensure HEAD is at MTKCLIENT_REF
+# (so a re-run heals a partial state where the clone succeeded but the
+# checkout failed, e.g. a wrong tag name on the previous run).
 
-if [[ -d mtkclient ]]; then
-    echo "[setup] tools/mtkclient/ exists — skipping clone."
-    echo "        To refresh: rm -rf tools/mtkclient && $0"
-else
-    echo "[setup] Cloning MTKClient at ${MTKCLIENT_REF}.."
-    git clone "${MTKCLIENT_REPO}" mtkclient
-    ( cd mtkclient && git checkout "${MTKCLIENT_REF}" )
+if [[ ! -d mtkclient ]]; then
+    echo "[setup] Cloning MTKClient.."
+    git clone --quiet "${MTKCLIENT_REPO}" mtkclient
+elif [[ ! -d mtkclient/.git ]]; then
+    echo "ERROR: tools/mtkclient/ exists but isn't a git checkout." >&2
+    echo "       Remove it (rm -rf tools/mtkclient) and re-run." >&2
+    exit 1
 fi
+
+# Ensure mtkclient is at MTKCLIENT_REF. git checkout to the current ref
+# is a no-op; if the ref doesn't exist locally, fetch tags first.
+if ! ( cd mtkclient && git checkout --quiet "${MTKCLIENT_REF}" 2>/dev/null ); then
+    echo "[setup] Fetching tags from origin to find ${MTKCLIENT_REF}.."
+    ( cd mtkclient && git fetch --quiet --tags )
+    if ! ( cd mtkclient && git checkout --quiet "${MTKCLIENT_REF}" 2>/dev/null ); then
+        echo "ERROR: ${MTKCLIENT_REF} not found in ${MTKCLIENT_REPO}." >&2
+        echo "       List upstream tags: git ls-remote --tags ${MTKCLIENT_REPO}" >&2
+        echo "       Update MTKCLIENT_REF at the top of $0." >&2
+        exit 1
+    fi
+fi
+echo "[setup] tools/mtkclient/ at ${MTKCLIENT_REF}."
 
 # --- 2. mtkclient venv + deps ----------------------------------------------
 
