@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.4.1
+# Version: 1.5.0
 # History:
+# 2026-05-03 (1.5.0): Replace hardcoded VERSION_FIRMWARE="3.0.2" with stock-firmware MD5 validation. A KNOWN_FIRMWARES manifest holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK filename) tuples; staged inputs are MD5-validated against it post-staging (i.e. after any simg2img conversion, since the canonical comparison is against the raw image). VERSION_FIRMWARE is derived from the lookup. If both system.img and boot.img are processed, both must resolve to the same version. On unknown input the script bails and prints the manifest. Currently only v3.0.2 is enrolled. Cross-platform MD5: prefers `md5sum` (Linux), falls back to `md5 -q` (macOS).
 # 2026-05-03 (1.4.1): Auto-handle sparse system.img — detect via `file` (or sparse magic 0xed26ff3a) and run simg2img automatically into the working copy. Previously the user had to manually convert sparse → raw before staging, since `mount -o loop` rejects sparse format. simg2img is required when the input is sparse; if it's missing the script bails with install instructions for Debian/Ubuntu, Arch, and macOS.
 # 2026-05-03 (1.4.0): Drop the pre-staged-artifacts requirement. --avrcp and --music-apk now extract the stock binaries directly from the mounted system.img, run the corresponding patch_*.py against them, and write the patched bytes back in-place. Previously the user had to run each patch_*.py manually beforehand and stage mtkbt.patched / MtkBt.odex.patched / libextavrcp.so.patched / libextavrcp_jni.so.patched / com.innioasis.y1_3.0.2-patched.apk in --artifacts-dir. Only Y1MediaBridge.apk (externally-built, not derived from system.img) and boot.img (for --root) need to be staged now; everything else is extracted from system.img and patched on the fly. New helpers `patch_in_place_bytes` and `patch_in_place_y1_apk` wrap the extract → patch → write-back cycle. Idempotent: re-running detects already-patched files and is a no-op.
 # 2026-05-03 (1.3.2): No functional changes to the bash itself — reflects patch_bootimg.py absorbing patch_adbd.py (H1/H2/H3 NOP the three blx setgroups/setgid/setuid calls in adbd's drop_privileges block). With the adbd binary patched, `adb shell` returns uid 0 directly at boot, and `adb root` is no longer needed (it returns "already running as root" without triggering the USB-rebind cycle). --root help text updated accordingly — the v1.3.1 "do not run adb root" warning was correct only against the v1.3.1 patcher (which relied on inert default.prop edits).
@@ -41,18 +42,25 @@ firmware images and any externally-built artifacts.
 
 Required artifacts (depending on flags):
   system.img             — mandatory if any of --adb/--avrcp/--bluetooth/
-                            --music-apk/--remove-apps is set. Mounted as a loop
-                            device; stock binaries are extracted from the mount,
-                            patched in-place by the corresponding patch_*.py
-                            (mtkbt, MtkBt.odex, libextavrcp.so,
-                            libextavrcp_jni.so, com.innioasis.y1_X.Y.Z.apk),
-                            and written back. No pre-staged .patched files are
-                            required.
-  boot.img               — mandatory if --root is set. Patched in-place by
-                            patch_bootimg.py (which embeds patch_adbd.py).
+                            --music-apk/--remove-apps is set. MD5 is validated
+                            (post-simg2img if sparse) against the KNOWN_FIRMWARES
+                            manifest in this script; the matched firmware
+                            version drives all version-dependent filenames
+                            (working-copy basename, music-APK lookup). Mounted
+                            as a loop device; stock binaries are extracted from
+                            the mount, patched in-place by the corresponding
+                            patch_*.py (mtkbt, MtkBt.odex, libextavrcp.so,
+                            libextavrcp_jni.so, the music APK), and written
+                            back. No pre-staged .patched files are required.
+  boot.img               — mandatory if --root is set. MD5 is validated against
+                            the same manifest; if both system.img and boot.img
+                            are processed they must resolve to the same
+                            firmware version. Patched in-place by patch_bootimg.py
+                            (which embeds patch_adbd.py).
   Y1MediaBridge.apk      — mandatory if --avrcp is set. This is an
                             externally-built artifact (not derived from
-                            system.img) so it must be staged separately.
+                            system.img) so it must be staged separately and is
+                            not MD5-validated.
 
 If only --artifacts-dir is specified, this help message is displayed.
 If any patching option is specified, the script will mount the system.img, apply the selected
@@ -194,21 +202,101 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   # trap; see _cleanup below.
 fi
 
-VERSION_FIRMWARE="3.0.2"
-
+# Version-independent constants
 FILENAME_BOOT_IMAGE_SOURCE="boot.img"
-FILENAME_BOOT_IMAGE_TARGET="boot-${VERSION_FIRMWARE}-devel.img"
 FILENAME_BUILD_PROP="build.prop"
-FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
-FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
+
+# Version-dependent constants (set after stock MD5 validation)
+VERSION_FIRMWARE=""
+FILENAME_BOOT_IMAGE_TARGET=""
+FILENAME_SYSTEM_IMAGE_TARGET=""
+FILENAME_MUSIC_APK=""
+
+# Manifest of known stock firmware builds. Each row has five pipe-delimited
+# fields: <version>|<system.img md5>|<boot.img md5>|<rom.zip md5>|<music APK filename>.
+# system.img md5 is the RAW (post-simg2img) hash — sparse inputs are
+# de-sparsed into a working copy first and the working copy is what's matched.
+# rom.zip md5 is documentation-only (the bash does not consume rom.zip).
+KNOWN_FIRMWARES=(
+  "3.0.2|473991dadeb1a8c4d25902dee9ee362b|1f7920228a20c01ad274c61c94a8cf36|82657db82578a38c6f1877e02407127a|com.innioasis.y1_3.0.2.apk"
+)
 
 PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PATH_MOUNT="/mnt/y1-devel"
 PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
 PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
+
+# Cross-platform MD5: md5sum on Linux, md5 -q on macOS.
+md5_of() {
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$1" | awk '{print $1}'
+  elif command -v md5 >/dev/null 2>&1; then
+    md5 -q "$1"
+  else
+    echo "ERROR: neither md5sum nor md5 in PATH — cannot validate stock images" >&2
+    exit 1
+  fi
+}
+
+# resolve_version <kind: system|boot|rom> <md5> — echos matching firmware
+# version on stdout, returns 1 on no match.
+resolve_version() {
+  local kind="$1" md5="$2" idx
+  case "$kind" in
+    system) idx=1 ;;
+    boot)   idx=2 ;;
+    rom)    idx=3 ;;
+    *) return 2 ;;
+  esac
+  local row parts
+  for row in "${KNOWN_FIRMWARES[@]}"; do
+    IFS='|' read -ra parts <<< "$row"
+    if [[ "${parts[$idx]}" == "$md5" ]]; then
+      echo "${parts[0]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# firmware_field <version> <field: system_md5|boot_md5|rom_md5|music_apk>
+# — echos the requested field for the given version, or returns 1 if version
+# is unknown.
+firmware_field() {
+  local version="$1" field="$2" idx
+  case "$field" in
+    system_md5) idx=1 ;;
+    boot_md5)   idx=2 ;;
+    rom_md5)    idx=3 ;;
+    music_apk)  idx=4 ;;
+    *) return 2 ;;
+  esac
+  local row parts
+  for row in "${KNOWN_FIRMWARES[@]}"; do
+    IFS='|' read -ra parts <<< "$row"
+    if [[ "${parts[0]}" == "$version" ]]; then
+      echo "${parts[$idx]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_known_firmwares() {
+  echo "Known stock firmware MD5s (manifest in innioasis-y1-fixes.bash):" >&2
+  local row parts
+  for row in "${KNOWN_FIRMWARES[@]}"; do
+    IFS='|' read -ra parts <<< "$row"
+    echo "  v${parts[0]}:" >&2
+    echo "    system.img:  ${parts[1]}  (raw / post-simg2img)" >&2
+    echo "    boot.img:    ${parts[2]}" >&2
+    echo "    rom.zip:     ${parts[3]}  (reference only, not consumed)" >&2
+    echo "    music APK:   app/${parts[4]}" >&2
+  done
+}
 
 # Tempdir for staging stock binaries extracted from the mount and the
 # corresponding patched output before writing back.
@@ -293,26 +381,24 @@ patch_in_place_y1_apk() {
   sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
 }
 
-# Patch boot.img ramdisk for ADB root access
-if [[ "$FLAG_ROOT" == true ]]; then
-  if [[ ! -f "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" ]]; then
-    echo "Error: --root requires ${FILENAME_BOOT_IMAGE_SOURCE} in ${PATH_ARTIFACTS}"
-    exit 1
-  fi
-  echo "Patching boot.img ramdisk for ADB root access.."
-  python3 "${PATH_SCRIPT_DIR}/patch_bootimg.py" \
-    --in  "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" \
-    --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
-fi
+# --- Stock-firmware validation -----------------------------------------------
+#
+# Validate the staged input(s) against the KNOWN_FIRMWARES manifest, derive
+# VERSION_FIRMWARE, and only then construct the version-dependent filenames
+# (output image names, music-APK basename, etc.). All MD5 comparisons are
+# against the canonical *raw* representation; sparse system.img inputs are
+# de-sparsed first, then the working copy is hashed.
 
-# Copy and mount system.img only if a system-affecting flag is set. If the
-# input is sparse (Android sparse format, magic 0xed26ff3a — the format OTAs
-# ship), de-sparse via simg2img into the working copy. `mount -o loop` rejects
-# sparse images, and the working copy will also be re-flashed at the end so it
-# needs to be raw end-to-end.
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   src="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}"
-  dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+  if [[ ! -f "$src" ]]; then
+    echo "ERROR: ${FILENAME_SYSTEM_IMAGE_SOURCE} not found in ${PATH_ARTIFACTS}" >&2
+    exit 1
+  fi
+
+  # Stage to a temp working copy first; we don't know the target filename
+  # (which embeds VERSION_FIRMWARE) until after MD5 validation.
+  staged_system="${PATH_TMP_STAGE}/system-raw.img"
 
   # Detect sparse format. Prefer `file` for clarity; fall back to magic-byte
   # check for environments where `file` is unavailable or its output differs.
@@ -339,12 +425,63 @@ EOF
       exit 1
     fi
     echo "system.img is sparse — converting to raw via simg2img.."
-    simg2img "$src" "$dst"
+    simg2img "$src" "$staged_system"
   else
     echo "Copying clean system.img.."
-    cp "$src" "$dst"
+    cp "$src" "$staged_system"
   fi
 
+  echo "Validating system.img against stock-firmware manifest.."
+  sys_md5=$(md5_of "$staged_system")
+  if VERSION_FIRMWARE=$(resolve_version system "$sys_md5"); then
+    echo "  → matched v${VERSION_FIRMWARE} (system.img md5 ${sys_md5})"
+  else
+    echo "ERROR: staged system.img md5 ${sys_md5} does not match any known stock firmware." >&2
+    print_known_firmwares
+    exit 1
+  fi
+fi
+
+if [[ "$FLAG_ROOT" == true ]]; then
+  src="${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}"
+  if [[ ! -f "$src" ]]; then
+    echo "ERROR: --root requires ${FILENAME_BOOT_IMAGE_SOURCE} in ${PATH_ARTIFACTS}" >&2
+    exit 1
+  fi
+  echo "Validating boot.img against stock-firmware manifest.."
+  boot_md5=$(md5_of "$src")
+  if boot_version=$(resolve_version boot "$boot_md5"); then
+    echo "  → matched v${boot_version} (boot.img md5 ${boot_md5})"
+  else
+    echo "ERROR: ${FILENAME_BOOT_IMAGE_SOURCE} md5 ${boot_md5} does not match any known stock firmware." >&2
+    print_known_firmwares
+    exit 1
+  fi
+  if [[ -n "$VERSION_FIRMWARE" && "$VERSION_FIRMWARE" != "$boot_version" ]]; then
+    echo "ERROR: system.img matched v${VERSION_FIRMWARE} but boot.img matched v${boot_version}" >&2
+    echo "       The two images must be from the same firmware build." >&2
+    exit 1
+  fi
+  VERSION_FIRMWARE="$boot_version"
+fi
+
+# Now we know the version — populate version-dependent filename constants.
+FILENAME_BOOT_IMAGE_TARGET="boot-${VERSION_FIRMWARE}-devel.img"
+FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
+FILENAME_MUSIC_APK="$(firmware_field "$VERSION_FIRMWARE" music_apk)"
+
+# Patch boot.img ramdisk for ADB root access (now that we know the target name)
+if [[ "$FLAG_ROOT" == true ]]; then
+  echo "Patching boot.img ramdisk for ADB root access.."
+  python3 "${PATH_SCRIPT_DIR}/patch_bootimg.py" \
+    --in  "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" \
+    --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
+fi
+
+# Move the validated raw system.img into its versioned working copy and mount.
+if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+  mv "$staged_system" "$dst"
   echo "Mounting working copy of system.img.."
   sudo mount -o loop "$dst" "${PATH_MOUNT}/"
 fi
