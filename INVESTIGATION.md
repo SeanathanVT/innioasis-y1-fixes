@@ -46,6 +46,8 @@ So no inbound REGISTER_NOTIFICATION events reach Java. Combined with the existin
 
 Which one is the real gate cannot be determined statically without observing runtime decisions, and runtime visibility into mtkbt is the chronic blind spot — it logs only via `__xlog_buf_printf` (separate buffer, invisible without root or daemon-side tooling).
 
+**Strengthened 2026-05-03 (post Trace #7):** the four `libbluetooth*.so` libs were inspected end-to-end and confirmed HCI/transport-only — zero AVRCP/AVCTP code anywhere outside `mtkbt`. The gate has no other place it could live. See "Trace #7 — Findings" for full details.
+
 ## Remaining diagnostic options
 
 All require capabilities we don't have:
@@ -104,6 +106,8 @@ The mediabridge service is what supplies metadata to the AVRCP service. Confirm 
 ### 7. Inspect `libbluetoothdrv.so`
 
 mtkbt links against this. It almost certainly contains the actual L2CAP send/receive primitives. The `[AVCTP] register psm` call from mtkbt resolves into this library. If the bug lives there, mtkbt is innocent and we've been chasing the wrong binary.
+
+**Findings (2026-05-03):** see "Trace #7 — Findings" below. All four `libbluetooth*` libs are HCI/transport-only — zero AVRCP/AVCTP code. The hypothesis was wrong; mtkbt is not innocent.
 
 ### 8. Verify `/system/etc/bluetooth/` config end-state on device
 
@@ -510,6 +514,23 @@ After Trace #1f the architectural picture is finally complete and consistent:
 The remaining diagnostic options (HCI snoop / chip firmware modification / runtime instrumentation patches that emit observable side effects) are all out of scope per the constraints established at session start.
 
 The repo (B1-B3, C1-C3, A1, D1, E3, E4, plus C2a/b, C3a/b, C4, F1, F2 across the four binaries) represents the complete set of demonstrably-effective patches reachable through static analysis. Y1MediaBridge is correctly implemented and ready to fire the moment the runtime gate releases.
+
+## Trace #7 — Findings (2026-05-03): MT6572 BT lib stack is HCI-only
+
+The four `libbluetooth*` shared objects in `/system/lib` were inspected end-to-end (sizes, dynsyms, full `strings`):
+
+| Library | Size | MD5 | Role |
+|---|---:|---|---|
+| `libbluetoothdrv.so` | 9,280 | `32f1af87e46acaf1efa3f083340495cb` | Thin shim. Exports `mtk_bt_enable/disable/write/read/op` plus 8 fn-ptr objects in `.bss`. `mtk_bt_enable` does `dlopen("libbluetooth_mtk.so")` + dlsym on `bt_send_data`, `bt_receive_data`, `bt_read_nvram`, `bt_get_combo_id`, `bt_restore`, `read_comm_port`, `write_comm_port`. `mtk_bt_op` handles two opcodes only: `BT_COLD_OP_GET_ADDR` and `BT_HOT_OP_SET_FWASSERT`. |
+| `libbluetooth_mtk.so` | 13,452 | — | Real driver. Exports `BT_InitDevice`, `BT_DeinitDevice`, `BT_SendHciCommand`, `BT_ReadExpectedEvent`, `GORM_Init`, `bt_send/receive_data`, `bt_read_nvram`, `bt_get_combo_id`, `bt_restore`, `read/write_comm_port`. Strings reveal it as UART transport + GORM/HCC chip-bringup commands (`Set_Local_BD_Addr`, `Set_Sleep_Timeout`, `Set_TX_Power_Offset`, `RESET`, `Set_Radio`) + NVRAM BD-address management + chip combo-id detection. Contains `bt_init_script_6572`. |
+| `libbluetoothem_mtk.so` | 5,156 | — | Engineer Mode test surface (`EM_BT_read/write/init/deinit`). |
+| `libbluetooth_relayer.so` | 9,252 | — | EM↔BT relayer (`bt_rx_monitor`, `bt_tx_monitor`, `RELAYER_start/exit`). |
+
+**Combined `strings` search across all four libraries returned ZERO hits** for `avrcp`, `avctp`, `profile`, `capability`, `notif`, `metadata`, `cardinal`. They are exclusively HCI/transport — UART connection to the MT6627 chip, BD-address management from NVRAM, and chip-bringup HCC commands. Nothing above HCI.
+
+**Implication.** The cardinality:0 gate cannot live in any userland library other than `mtkbt`. `mtkbt` does not call back through any of these libraries for AVCTP/AVRCP processing — it uses them only for HCI transport via `bt_send_data`/`bt_receive_data`. AVCTP framing, L2CAP demux, and AVRCP command dispatch all happen inside `mtkbt`'s own code segment. This narrows the search space conclusively to `mtkbt`.
+
+This trace was deferred during 2026-05-02 work as low-priority ("almost certainly a thin shim"). Confirmed 2026-05-03; the deferral was correct but the verification was cheap and worth doing before considering root.
 
 ## Out of Scope (eliminated)
 
