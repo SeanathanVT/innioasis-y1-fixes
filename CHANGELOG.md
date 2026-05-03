@@ -10,6 +10,11 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-05-03
+
+### Fixed
+- Switch the Y1MediaBridge build invocation from `assembleRelease` to `assembleDebug`. AGP 8.7.3 wires `lintVitalReportRelease` into the release-assembly chain, and that task fails with `SDK location not found` unless `local.properties` (`sdk.dir=...`) is configured. `assembleDebug` skips it. The two APKs are structurally identical here (`minifyEnabled false` on both; both signed with the debug keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug also leaves `debuggable=true` in the manifest, which is useful for a research device. Bash now references `app/build/outputs/apk/debug/app-debug.apk`; `--avrcp` help text and the missing-prebuilt error point at `assembleDebug`. README Quick start, flag table, and `src/Y1MediaBridge/README.md` Build section updated to match.
+
 ## [1.9.0] - 2026-05-03
 
 ### Changed

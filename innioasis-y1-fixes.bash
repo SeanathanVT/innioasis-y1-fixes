@@ -6,7 +6,7 @@
 # Add a row to support a new build.
 #
 # Author:    Sean Halpin (github.com/SeanathanVT)
-# Version:   1.9.0
+# Version:   1.9.1
 # Changelog: see CHANGELOG.md
 # Patches:   see docs/PATCHES.md
 #
@@ -21,7 +21,7 @@ manifest), then pick one or more of the flags below.
 FLAGS:
   --adb          Set persist.service.adb.enable / debuggable in build.prop
   --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk.
-                 Build first: cd src/Y1MediaBridge && ./gradlew assembleRelease
+                 Build first: cd src/Y1MediaBridge && ./gradlew assembleDebug
   --bluetooth    Configure audio.conf / build.prop Bluetooth entries
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
@@ -399,10 +399,10 @@ fi
 if [[ "$FLAG_AVRCP" == true ]]; then
   echo "Enabling AVRCP 1.4 support (WIP).."
 
-  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk"
+  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
   if [[ ! -f "$src_y1mb" ]]; then
     echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew assembleRelease" >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew assembleDebug" >&2
     exit 1
   fi
 

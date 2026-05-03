@@ -16,7 +16,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 
 - [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleRelease`.
+- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleDebug`.
 - `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
 - `reference/` — manually-extracted reference files for v3.0.2
 
@@ -43,7 +43,7 @@ mkdir -p ~/y1-patches
 cp /path/to/rom.zip ~/y1-patches/
 
 # Build src/Y1MediaBridge/ once if using --avrcp:
-( cd src/Y1MediaBridge && ./gradlew assembleRelease )
+( cd src/Y1MediaBridge && ./gradlew assembleDebug )
 
 # Build src/su/ once if using --root:
 ( cd src/su && make )
@@ -60,7 +60,7 @@ The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, appli
 | Flag | Effect |
 |---|---|
 | `--adb` | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleRelease`). |
+| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleDebug`). |
 | `--bluetooth` | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
 | `--music-apk` | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
