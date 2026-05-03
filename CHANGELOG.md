@@ -1,0 +1,187 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The version reflects `innioasis-y1-fixes.bash`'s `# Version:` header; patch-script-only
+changes are grouped under the bash version that was current at the time. For full
+prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
+
+## [Unreleased]
+
+## [1.8.3] - 2026-05-03
+
+### Changed
+- Drop the in-file version-history block from `innioasis-y1-fixes.bash` (~30 lines); `git log` and `CHANGELOG.md` are authoritative.
+- `show_help()` reduced from 63 lines to 20 (single-screen output): one-line description per flag, one example, pointer to README.md / docs/PATCHES.md for details.
+- Trim function-doc and inline rationale comments throughout (110 comment lines → 45). Comments now retained only where the *why* is non-obvious from the code (e.g., `FLAG_ANY_SYSTEM_PATCH` separateness for future flag flexibility).
+- No functional change.
+
+### Documentation
+- README.md restructured as a quick-start with monorepo layout, flag table, and pointers to the docs files. 439 → 126 lines.
+- Add `CHANGELOG.md` (this file, Keep a Changelog format).
+- Move per-patch byte-level reference into `docs/PATCHES.md`.
+- Move DEX-level analysis for `patch_y1_apk.py` into `docs/DEX.md`.
+
+## [1.8.2] - 2026-05-03
+
+### Changed
+- Move the seven `patch_*.py` scripts (`patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp.py`, `patch_libextavrcp_jni.py`, `patch_y1_apk.py`, `patch_adbd.py`, `patch_bootimg.py`) into `src/patches/`.
+- Bash dispatch updated: `patch_in_place_bytes` and `patch_in_place_y1_apk` now reference `src/patches/...`; `patch_y1_apk.py` runs from `src/patches/` so its `output/` and `_patch_workdir/` land there.
+
+### Added
+- Y1MediaBridge imported as `src/Y1MediaBridge/` via `git subtree add` (full Y1MediaBridge history grafted under that prefix). Source tree only — `Y1MediaBridge.apk` is still externally-built and staged in `--artifacts-dir` for `--avrcp`.
+
+## [1.8.1] - 2026-05-03
+
+### Changed
+- Move `su/` → `src/su/` in anticipation of the monorepo layout. Bash references `${PATH_SCRIPT_DIR}/src/su/build/su`; build instruction in `--root` help and missing-prebuilt error become `cd src/su && make`.
+
+## [1.8.0] - 2026-05-03
+
+### Added
+- `--root` flag (replaces v1.3.x–v1.6.0 approach): installs a minimal setuid-root `su` binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` stays untouched, so the ADB protocol handshake comes up cleanly; root is obtained post-flash by `adb shell /system/xbin/su`.
+- `su/su.c` (~80 lines) and `su/start.S` (~10 lines) — direct ARM-EABI syscalls, no libc, no manager APK. Output is a ~900-byte statically-linked ARMv7 ELF with no dynamic dependencies.
+- `su/Makefile` for the `arm-linux-gnu-gcc` cross-build (EPEL `gcc-arm-linux-gnu` toolchain).
+
+### Changed
+- `--root` is now system.img-only (no boot.img extraction, no ramdisk repack). Re-added to `--all`.
+
+## [1.7.0] - 2026-05-03
+
+### Removed
+- `--root` flag entirely. The H1/H2/H3 byte patches in `/sbin/adbd` (both NOP-the-blx and arg-zero revisions) caused "device offline" on hardware in flash testing — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. Static analysis found no `getuid()` gate, no uid==2000 compare, no obvious capability check; failure mode invisible without on-device visibility (which we lose the moment we ship a broken adbd).
+- Boot.img extraction, `patch_bootimg` invocation, and boot.img mtkclient flash dropped from the bash. `patch_adbd.py` and `patch_bootimg.py` kept in the tree as historical record.
+
+### Notes
+- Revised H1/H2/H3 from "NOP the blx calls" to "change argument values from 2000 to 0" (kept all syscalls + bionic wrappers intact). Stock adbd MD5 unchanged; new patched MD5 `9eeb6b3bef1bef19b132936cc3b0b230` (was `ccebb66b25200f7e154ec23eb79ea9b4`). Both revisions broke ADB on hardware; arg-zero diagnosis preserved in `patch_adbd.py` docstring.
+- Fresh test log (peer `38:42:0B:38:A3:3E`) flagged a new finding: `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`). Non-zero result on a successfully-connected channel suggests mtkbt is reporting "accepted-but-degraded" — strongest static lead for the post-root pass.
+- Trace #7 (libbluetooth_*.so audit): all four `libbluetooth*.so` libs are HCI/transport-only. Combined `strings` search returned zero hits for AVRCP/AVCTP/profile/capability/notif/metadata/cardinal. Cardinality:0 gate is unambiguously inside `mtkbt`.
+
+## [1.6.0] - 2026-05-03
+
+### Changed
+- Take the official OTA `rom.zip` as the primary firmware input (replaces v1.5.0 separately-staged `boot.img`/`system.img`). Users now stage just `rom.zip` + `Y1MediaBridge.apk`. Bash MD5-validates `rom.zip` against `KNOWN_FIRMWARES`, derives the firmware version from the match, then `unzip -j -o`'s only the inner files needed by the active flags.
+- `unzip` is now a hard dependency.
+
+## [1.5.0] - 2026-05-03
+
+### Changed
+- Replace the hardcoded `VERSION_FIRMWARE="3.0.2"` constant with stock-firmware MD5 validation. New `KNOWN_FIRMWARES` manifest holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK basename) tuples. Staged `system.img` (post-simg2img if sparse) and `boot.img` (when `--root`) are MD5-validated against the manifest before any patch step runs. Cross-platform MD5 helper prefers `md5sum` (Linux), falls back to `md5 -q` (macOS).
+- v3.0.2 enrolled as the only known build (system.img raw `473991dadeb1a8c4d25902dee9ee362b`, boot.img `1f7920228a20c01ad274c61c94a8cf36`, rom.zip `82657db82578a38c6f1877e02407127a`).
+
+## [1.4.1] - 2026-05-03
+
+### Added
+- Auto-handle sparse `system.img` via `simg2img` (detected by `file` output or sparse magic `0xed26ff3a`). Bails with install instructions for Debian/Ubuntu, Arch, Fedora, RHEL/Rocky/Alma 8+, and macOS if `simg2img` is missing.
+
+## [1.4.0] - 2026-05-03
+
+### Changed
+- Drop the pre-staged-artifacts requirement. `--avrcp` and `--music-apk` now extract stock binaries from the mounted `system.img`, run the corresponding `patch_*.py`, and write back in-place. Only `Y1MediaBridge.apk` (externally-built) and `boot.img` (for `--root`) need staging.
+- New helpers `patch_in_place_bytes <mount-rel> <patch-script> [mode]` and `patch_in_place_y1_apk <mount-rel>`.
+- Idempotent: re-running detects already-patched binaries and skips write-back.
+
+### Added
+- `patch_adbd.py` — H1/H2/H3 NOP patches for adbd's drop_privileges block (later revised to arg-zero in 1.7.0; both ultimately abandoned).
+- `patch_bootimg.py` extracts `/sbin/adbd` from the cpio, applies `patch_adbd.patch_bytes()`, and writes back in-place.
+
+## [1.3.2] - 2026-05-03
+
+### Changed
+- No functional bash changes; reflects `patch_bootimg.py` absorbing `patch_adbd.py`.
+- `--root` help text: `adb root` no longer flagged as harmful (the v1.3.1 warning was specific to the property-only patcher).
+
+## [1.3.1] - 2026-05-03
+
+### Changed
+- `--root` no longer touches `system.img` (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is also set). Previous v1.3.0 flow re-flashed an unmodified `system.img` for `--root`-only invocations — pure cycle waste.
+- Drop `service.adb.root=1` from `patch_bootimg.py`'s `_DEFAULT_PROP_EDITS` based on the (incorrect, same-day-disproven) hypothesis that `ro.secure=0` would make adbd skip the privilege drop.
+
+## [1.3.0] - 2026-05-03
+
+### Added
+- Reintroduce `--root` flag, backed by a new `patch_bootimg.py` (pure-Python in-place cpio mutation; no shell-side `dd`/`cpio`/`mkbootimg`). Patches `default.prop` in-place inside the gzipped cpio; repacks Android boot.img header with recomputed SHA1 and original load addresses. Default.prop edits: `ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`, `service.adb.root=1`.
+
+### Notes (during 1.3.0 lifetime, before 1.4.0)
+- 2026-05-02 — Add E8 to `patch_mtkbt.py` (NOP `bge #0x30688` at `0x3065e` in fn `0x3060c`, op_code=4 dispatcher slot 0). Forces classification through the AVRCP 1.3/1.4 init path. Tested 2026-05-02 and observed inert (gate is upstream of the dispatcher table); kept as a verified-correct probe.
+- 2026-05-02 — Remove E5 / E7a / E7b from `patch_mtkbt.py` (empirically inert across car / Sonos Roam / Samsung TV).
+- 2026-05-02 — Add G1/G2 diagnostic instrumentation patches (xlog→logcat redirect at `0x675c0` / `0xb408`). Reverted same-day after hardware test: SIGSEGV at NULL fmt pointer; bionic API 17 doesn't NULL-check tag arg.
+- 2026-05-02 — Re-add G1 with NULL guard. Reverted: BT framework couldn't enable (`bt_sendmsg` ENOENT — abstract socket missing). Blanket xlog→logcat redirect closed as too fragile.
+- 2026-05-02 — Audit pass over all in-repo patch script documentation. End state: cardinality:0 persists across three 1.4 controllers despite all SDP/feature/dispatcher patches being on-wire.
+
+## [1.2.2] - 2026-04-30
+
+### Changed
+- No functional bash changes; reflects `patch_mtkbt.py` update to include AVCTP 1.0→1.3 patches (B1-B3).
+
+### Notes (during 1.2.x lifetime)
+- 2026-05-01 — Add E5 patch to `patch_mtkbt.py` (1-byte `BNE → B` at `0x309ed`). Forces all op_code=4 dispatch through the 1.3/1.4 init path.
+- 2026-05-01 — Harmonize all four byte-patch scripts onto a single `PATCHES = [{name, offset, before, after}, ...]` template with shared `verify`/`print_results` helpers and uniform MD5 status output.
+- 2026-05-01 — Add E3/E4 SupportedFeatures patches: TG SupportedFeatures bitmask `0x01 → 0x33` at `0x0eba5b` (Group 2 served), `0x21 → 0x33` at `0x0eba4e` (Group 1 defense-in-depth) — Cat1 + Cat2 + PAS + GroupNav.
+- 2026-05-01 — Reverted E1 and E2 (added and removed same session). Both were incorrect: E1 bypassed a legitimate state guard; E2 routed 1.3/1.4 cars to the AVRCP 1.0 path.
+- 2026-04-30 — Investigate persistent `tg_feature:0 ct_feature:0` post-D1. Confirmed `tg_feature` is logged but not used for functional gating. Root cause of cardinality:0: C3a/C3b in `patch_libextavrcp_jni.py` (GetCapabilities event count cap 13→14).
+- 2026-04-30 — Add D1 patch: NOP the `BNE 0x38C76` at `0x38C6C`. Without this, the AVRCP TG SDP struct is built but never linked into mtkbt's live registry.
+- 2026-04-30 — Add B1-B3 (AVCTP 1.0→1.3) patches to `patch_mtkbt.py`.
+- 2026-04-30 — Regression analysis confirms three `AttrID=0x0009` (ProfileDescList) entries; restored and upgraded all to AVRCP 1.4.
+- 2026-04-29 — Full Prong C (JNI/native) audit; no new binary patch required for JNI layer. Add A1 (`MOVW r7,#0x0301→#0x0401` at `0x38BFC`).
+- 2026-04-27 — Rename `patch_odex.py` → `patch_mtkbt_odex.py`; add F2 (reset `sPlayServiceInterface` in `BluetoothAvrcpService.disable()`).
+- 2026-04-27 — All patch scripts write output to `output/` subdirectory; `_patch_workdir` cleaned up after `patch_y1_apk.py` run.
+
+## [1.2.1] - 2026-04-26
+
+### Added
+- Deploy `libextavrcp.so.patched` via `--avrcp`.
+- New `patch_libextavrcp.py` (libextavrcp.so AVRCP 1.4 version constant). Renamed `patch_so.py` → `patch_libextavrcp_jni.py`.
+
+## [1.2.0] - 2026-04-26
+
+### Removed
+- `--root` flag and boot.img handling (broken).
+
+## [1.1.3] - 2026-04-26
+
+### Changed
+- Prompt for sudo credentials upfront; keep ticket alive for script duration to prevent mid-execution prompts.
+
+## [1.1.2] - 2026-04-26
+
+### Fixed
+- `--root`: use `sudo cpio` to preserve device nodes; add `ro.adb.secure=0` and `service.adb.root=1` to ramdisk `default.prop`; remove size mismatch failure.
+
+## [1.1.1] - 2026-04-26
+
+### Fixed
+- macOS compatibility: replace `stat -c%s` with `wc -c` for file size.
+
+## [1.1.0] - 2026-04-26
+
+### Added
+- `--root` flag to patch boot.img ramdisk for ADB root access.
+- `patch_mtkbt.py`, `patch_odex.py`, `patch_so.py` — all three BT binaries patched for AVRCP 1.4.
+
+## [1.0.10] - 2026-04-25
+
+### Changed
+- Split build.prop configuration; sorting and cleanup.
+
+## [1.0.8] - 2026-04-25
+
+### Added
+- Bash parameter handling for selective patching.
+
+## [1.0.7] - 2026-04-24
+
+### Added
+- Install patched Y1 music player APK.
+
+## [1.0.6] - 2026-04-24
+
+### Added
+- Install patched `MtkBt.odex` for AVRCP 1.3 Java selector fix.
+
+## [1.0.0] - 2026-04-23
+
+### Added
+- Initial release.
