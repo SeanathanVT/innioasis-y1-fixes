@@ -97,9 +97,10 @@ Mode `644`, owner `root:root`. See `innioasis-y1-fixes.bash` for the full
 system.img patch + flash flow.
 
 Ship alongside:
-- Patched `/system/bin/mtkbt` (AVRCP 1.4 SDP record; 6 patches: browse PSM zeroed, version/feature bytes set, ProfileDescList version `0x03→0x04`, descriptor table flags)
-- Patched `/system/lib/libextavrcp_jni.so` (forces `g_tg_feature = 0x0e` (1.4), `sdpfeature = 0x23`; 2 byte patches at `0x3764`, `0x37a8`)
-- Patched `/system/app/MtkBt.odex` (`getPreferVersion()` returns `0x0e` (1.4); DEX adler32 recomputed)
+- Patched `/system/bin/mtkbt` (AVRCP 1.4 SDP record + runtime fixes; **11 patches**: B1-B3 AVCTP version 1.0→1.3 in three SDP groups, C1-C3 AVRCP version 1.0/1.3→1.4 in three ProfileDescList entries, A1 runtime SDP MOVW immediate, D1 NOP the registration guard so the TG struct is linked into mtkbt's live registry, E3/E4 SupportedFeatures `0x0001/0x0021 → 0x0033`, E8 NOP the op_code=4 dispatcher slot-0 sign gate)
+- Patched `/system/lib/libextavrcp_jni.so` (**4 patches**: 2 in `BluetoothAvrcpService_activateConfig_3req` at `0x375c` to hardcode `g_tg_feature = 0x0e` (1.4) and `sdpfeature = 0x23` bypassing bitmask logic, plus 2 in `getCapabilitiesRspNative` at `0x5e56`/`0x5e5c` raising the EventList cap from 13 to 14)
+- Patched `/system/lib/libextavrcp.so` (1 patch: AVRCP version constant at `0x002e3b`, `0x0103 → 0x0104`)
+- Patched `/system/app/MtkBt.odex` (**2 patches**: F1 `getPreferVersion()` returns `0x0e` (1.4) instead of BlueAngel's internal `10` (= 1.3); F2 resets `sPlayServiceInterface = false` in `BluetoothAvrcpService.disable()` so re-activation doesn't see stale state. DEX adler32 recomputed)
 
 ## Verify install
 
