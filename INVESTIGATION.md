@@ -48,6 +48,8 @@ Which one is the real gate cannot be determined statically without observing run
 
 **Strengthened 2026-05-03 (post Trace #7):** the four `libbluetooth*.so` libs were inspected end-to-end and confirmed HCI/transport-only — zero AVRCP/AVCTP code anywhere outside `mtkbt`. The gate has no other place it could live. See "Trace #7 — Findings" for full details.
 
+**New observation 2026-05-03 (test.log, peer `38:42:0B:38:A3:3E`):** `MSG_ID_BT_AVRCP_CONNECT_CNF conn_id:1  result:4096`. The `result` field on a successful AVRCP connect should be `0`. **`4096 = 0x1000` is non-zero**, suggesting mtkbt is reporting the connection as accepted-but-degraded (encryption pending, version downgrade flag, or feature-mismatch indicator). This pairs with the `bws:0 tg_feature:0 ct_featuer:0` line — both fields read straight off the message mtkbt sends over the JNI socket. The non-zero `result` is consistent with the peer never escalating to GetCapabilities and is now the most concrete static-investigation target. Strings present in mtkbt that would name the relevant branch under root + xlog visibility: `AVRCP register activeVersion:%d`, `[AVRCP] AVRCP activate version:%d`, `[AVRCP] avctpCB state:%d retryCount:%d retryFlag:%d`. This had not been called out in prior log analyses.
+
 ## Remaining diagnostic options
 
 All require capabilities we don't have:
