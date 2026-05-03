@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# innioasis-y1-fixes.bash — Innioasis Y1 (firmware 3.0.2) system.img patcher.
+# innioasis-y1-fixes.bash — Innioasis Y1 system.img patcher.
+#
+# Compatibility is defined by the KNOWN_FIRMWARES manifest (rom.zip MD5).
+# Add a row to support a new build.
 #
 # Author:    Sean Halpin (github.com/SeanathanVT)
-# Version:   1.8.3
+# Version:   1.9.0
 # Changelog: see CHANGELOG.md
 # Patches:   see docs/PATCHES.md
 #
@@ -12,17 +15,18 @@ show_help() {
   cat <<EOF
 Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [FLAGS]
 
-Stage rom.zip (and Y1MediaBridge.apk for --avrcp) in --artifacts-dir,
-then pick one or more of the flags below.
+Stage rom.zip in --artifacts-dir (validated against KNOWN_FIRMWARES MD5
+manifest), then pick one or more of the flags below.
 
 FLAGS:
-  --adb           Set persist.service.adb.enable / debuggable in build.prop
-  --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk
+  --adb          Set persist.service.adb.enable / debuggable in build.prop
+  --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk.
+                 Build first: cd src/Y1MediaBridge && ./gradlew assembleRelease
   --bluetooth    Configure audio.conf / build.prop Bluetooth entries
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
-                  cd src/su && make
+                 cd src/su && make
   --all          All of the above
   -h, --help     This help
 
@@ -395,15 +399,15 @@ fi
 if [[ "$FLAG_AVRCP" == true ]]; then
   echo "Enabling AVRCP 1.4 support (WIP).."
 
-  if [[ ! -f "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" ]]; then
-    echo "ERROR: --avrcp requires ${FILENAME_Y1_MEDIA_BRIDGE_APK} in ${PATH_ARTIFACTS}" >&2
+  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk"
+  if [[ ! -f "$src_y1mb" ]]; then
+    echo "ERROR: ${src_y1mb} not found." >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew assembleRelease" >&2
     exit 1
   fi
 
-  echo "  Installing Y1MediaBridge.apk (externally built — copied from artifacts).."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
-  sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
-  sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
+  echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
+  sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
 
   patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755

@@ -10,6 +10,12 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Documentation
+- `src/Y1MediaBridge/` is now the canonical source for the Y1MediaBridge subproject; the standalone external repo it was originally subtree-imported from is being deleted. Top-level README's Layout entry no longer mentions the subtree import; Quick start now describes building `Y1MediaBridge.apk` from in-tree source via Gradle. Bash echo no longer says "externally built".
+- Harmonize subproject READMEs to follow the root README's formatting conventions:
+  - `src/Y1MediaBridge/README.md`: drop `(on macOS host)` from the Build header (Gradle is cross-platform); soften the all-caps `(MUST be system app for READ_LOGS)` header to `Install as system app` with the rationale in the body; rename `Test — end-to-end` → `End-to-end test`; relocate the `Changes` section from top (between Architecture and Build) to bottom (after Reverse engineering notes), with sentence-case version subheadings; add a `See also` section pointing at top-level docs.
+  - `src/su/README.md` and `src/patches/README.md`: promote inline closing-paragraph cross-references to a dedicated `See also` section for parity with the Y1MediaBridge structure.
+
 ## [1.8.3] - 2026-05-03
 
 ### Changed
