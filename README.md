@@ -260,35 +260,6 @@ See [CHANGELOG.md](CHANGELOG.md) for the version history. The format follows [Ke
 
 Sean Halpin ([github.com/SeanathanVT](https://github.com/SeanathanVT))
 
-## Technical References
-
-### DEX Analysis (ArtistsActivity.confirm)
-
-```
-registers_size=5; p0=this=v4
-Artist-tap branch: instructions 53-79 (isShowArtists==true, isMultiSelect==false)
-switchSongSortType() call: instructions 72-73 (replaced with Intent launch)
-Selected artist stored in: ArtistsActivity.artist (Ljava/lang/String;)
-```
-
-### DEX Analysis (AlbumsActivity.initView)
-
-```
-registers_size=3; p0=this=v2; locals=2 (patched to 8)
-UI Resource ID: 2131820833 (0x7f110121)
-getAlbumListBySort() launches async coroutine (safe to bypass with early return)
-```
-
-### Song Database Query
-
-```sql
-SELECT * FROM song
-WHERE isAudiobook = 0 AND artist = ?
-ORDER BY lower(pinyinAlbum)
-```
-
-Song data accessed via: `SongDao.getSongsByArtistSortByAlbum(String)`
-
 ## License
 
 This project is licensed under the **GNU General Public License v3.0** (GPLv3).
