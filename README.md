@@ -54,13 +54,26 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - Single patch: version constant at 0x002e3b changed from `0x0103` (1.3) to `0x0104` (1.4)
   - Input: stock `libextavrcp.so` → Output: `output/libextavrcp.so.patched`
 
-- **`innioasis-y1-fixes.bash`** (v1.2.0)
+- **`innioasis-y1-fixes.bash`** (v1.3.0)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
-  - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`
+  - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts and patches the system.img firmware image
   - Copies patched APKs, libraries, and binaries into the filesystem
   - Configures build.prop and Bluetooth settings
   - Removes unnecessary bloatware APKs
+  - With `--root`, delegates to `patch_bootimg.py` to produce `boot-3.0.2-devel.img`, then writes it to the device's `boot` partition via mtkclient
+
+- **`patch_bootimg.py`**
+  - Patches stock `boot.img` ramdisk so adbd does not self-demote to uid `shell` after boot. After flashing, `adb root && adb shell` yields a uid 0 shell.
+  - **Edits applied to ramdisk `default.prop`:**
+    - `ro.secure=0` (was 1)
+    - `ro.debuggable=1` (was 0)
+    - `ro.adb.secure=0` (appended)
+    - `service.adb.root=1` (appended)
+  - **Format-aware:** parses the Android boot.img header, strips/repacks the MTK 512-byte `ROOTFS` ramdisk wrapper, and patches `default.prop` *in-place* inside the gzipped cpio stream — no extract/repack step, so device nodes and entry order are preserved byte-for-byte.
+  - Pure-Python; no `dd` / `cpio` / `mkbootimg` / `abootimg` shell dependency. The previous bash-based `--root` (removed in v1.2.0) drifted on MTK header byte counts; this implementation removes that failure mode.
+  - Input: stock `boot.img` (in `--artifacts-dir`) → Output: `boot-3.0.2-devel.img` (in `--artifacts-dir`)
+  - **Purpose (2026-05-03):** unblock visibility into mtkbt's `__xlog_buf_printf` ring buffer, btsnoop, and live `gdbserver` attach — required to pin down which branch sets `result=0x1000` in `MSG_ID_BT_AVRCP_CONNECT_CNF`. App-level root (`su` in `/system`) is intentionally not provided; flag-flip on adbd is sufficient for the AVRCP investigation and has the smaller blast radius.
 
 - **`patch_y1_apk.py`**
   - Unpacks, decompiles, and patches the Y1 music player APK at the smali level
@@ -140,6 +153,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - `sudo` access (for mounting and modifying system.img)
 - `--artifacts-dir` parameter pointing to a directory containing:
   - `system.img` – Original firmware system image
+  - `boot.img` – Original firmware boot image (required for `--root` flag)
   - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player APK (from patch_y1_apk.py)
   - `Y1MediaBridge.apk`, `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched` – Patched BT binaries (from patch scripts, for `--avrcp` flag)
 - mtkclient 2.1.4.1 installed at `/opt/mtkclient-2.1.4.1`
@@ -209,6 +223,7 @@ chmod +x innioasis-y1-fixes.bash
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
 - `--remove-apps` – Remove unnecessary APK files
+- `--root` – Patch ramdisk `default.prop` (`ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`, `service.adb.root=1`) and write the patched boot image to the device. Requires `boot.img` in `--artifacts-dir`.
 - `--all` – Apply all patches
 
 **Example:**
@@ -271,6 +286,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – Reintroduce `--root` flag in `innioasis-y1-fixes.bash` (v1.3.0) backed by a new `patch_bootimg.py`. The previous v1.1.x `--root` was bash + `dd`/`cpio`/`mkbootimg` and drifted on MTK ramdisk header byte counts; the rewrite is pure-Python and patches `default.prop` *in-place* inside the gzipped cpio (no extract/repack — device nodes preserved byte-for-byte), then repacks the Android boot.img header with a recomputed SHA1 ID and the original load addresses. Edits: `ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`, `service.adb.root=1`. Round-tripped against the stock 3.0.2 ramdisk (37 cpio records, all post-`default.prop` offsets shifted by exactly the +35-byte delta from the larger prop file). After flashing the patched boot.img via mtkclient, `adb root && adb shell` yields uid 0 — unblocks `__xlog_buf_printf`/btsnoop/`gdbserver` visibility into mtkbt for the `result=0x1000` investigation.
 - **2026-05-03** – Trace #7 (libbluetooth_*.so audit): all four `libbluetooth*.so` libs (`libbluetoothdrv.so`, `libbluetooth_mtk.so`, `libbluetoothem_mtk.so`, `libbluetooth_relayer.so`) inspected end-to-end. They are exclusively HCI/transport: UART link to MT6627, GORM/HCC chip-bringup, NVRAM BD-address management, Engineer Mode test plumbing. Combined `strings` search returned zero hits for `avrcp`, `avctp`, `profile`, `capability`, `notif`, `metadata`, `cardinal`. Conclusion: the cardinality:0 gate cannot live anywhere except inside `mtkbt`. The "we might be patching the wrong binary" doubt is closed.
 - **2026-05-03** – Fresh test log (`/work/logs/test.log`, peer `38:42:0B:38:A3:3E`) shows the same gate pattern as prior runs (only msg_ids 506/505/512 reach JNI; no `op_code=4`; no `registerNotificationInd`). New observation: `MSG_ID_BT_AVRCP_CONNECT_CNF conn_id:1  result:4096` — the `result` field is non-zero (`0x1000`). This had not been called out in earlier log analyses and is now flagged as the most concrete static-investigation lead for the post-root pass.
 - **2026-05-03** – Test G1-with-NULL-guard on hardware, **BT does not turn on**. Log shows BT framework attempts to enable: `bt_sendmsg(cmd=100, ...)` returns ENOENT — mtkbt's abstract socket isn't there. Either mtkbt crashed on a non-NULL but invalid pointer in r2 (small int, stack pointer, etc.), or the volume of redirected log calls flooding through logd slowed mtkbt's init past the BT framework's timeout. G1 reverted; back to 11-patch build at MD5 `d47c904063e7d201f626cf2cc3ebd50b`. **Conclusion: blanket xlog→logcat redirect is too fragile.** Future diagnostic instrumentation needs to be surgical — add explicit `bl __android_log_print` calls at a small number of high-value sites (dispatcher entries, AVCTP RX handler) with hardcoded tag/fmt strings, instead of trying to hijack the consolidated wrapper.
