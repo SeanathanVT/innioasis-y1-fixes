@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.7.0
+# Version: 1.8.0
 # History:
+# 2026-05-03 (1.8.0): Reintroduce --root flag with a fundamentally different mechanism — install a minimal setuid-root `su` binary at /system/xbin/su (mode 06755, root:root) instead of patching /sbin/adbd in the ramdisk. The H1/H2/H3 adbd byte patches (v1.3.x–v1.6.0) all caused "device offline" on hardware because something in the OEM adbd's startup sequence depends on the syscalls actually changing the uid (we couldn't see what without on-device visibility, which we lost the moment we shipped a broken adbd). The new approach leaves /sbin/adbd untouched: stock adbd starts at uid 2000 (shell) as normal, ADB protocol comes up cleanly, and root is obtained by running /system/xbin/su from the adb shell. The su binary is a ~900-byte direct-syscall ARM-EABI ELF compiled from su/ in this repo (no libc, no manager APK, no whitelist) — every byte traces to GCC + the local source. See su/su.c and su/start.S; the bash references the prebuilt artifact at ${PATH_SCRIPT_DIR}/su/build/su (run `cd su && make` to build). The --root flag is a system.img-only operation now (no boot.img extraction, no ramdisk repack); it copies the prebuilt binary into the mount and chmods 06755. Re-added to --all. patch_adbd.py and patch_bootimg.py remain in the tree as historical record (still unwired).
 # 2026-05-03 (1.7.0): Remove --root flag entirely. The H1/H2/H3 byte patches in /sbin/adbd (both the NOP-the-blx and arg-zero revisions) caused "device offline" on hardware — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. Without on-device visibility (logcat / dmesg / strace, all of which require ADB), we can't diagnose what about adbd-at-uid-0 breaks the protocol on this OEM build. The standalone patch_adbd.py and patch_bootimg.py scripts are kept in the tree as historical record (with warning notes in their docstrings); their analysis of the drop_privileges block, bionic syscall wrappers, and cgroup-migration helper is preserved for whoever picks the root pass back up. Re-introducing --root is straightforward (re-add the boot.img extraction + patch_bootimg invocation + boot.img flash) once a working approach is found.
 # 2026-05-03 (1.6.0): Take the official OTA `rom.zip` as the primary firmware input. The bash now MD5-validates rom.zip against the KNOWN_FIRMWARES manifest, then `unzip -j -o` extracts only the files needed by the active flags (system.img for system-affecting flags, boot.img for --root) into the tempdir. Each extracted file's MD5 is cross-verified against the manifest as a defensive check (rom.zip MD5 is collision-resistant so this is essentially redundant, but cheap). Replaces the v1.5.0 flow that took separately-staged boot.img and system.img — users now stage just rom.zip + Y1MediaBridge.apk. The sparse-detect / simg2img path still applies to the extracted system.img since future firmware versions might bundle a sparse one. `unzip` is now a hard dependency.
 # 2026-05-03 (1.5.0): Replace hardcoded VERSION_FIRMWARE="3.0.2" with stock-firmware MD5 validation. A KNOWN_FIRMWARES manifest holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK filename) tuples; staged inputs are MD5-validated against it post-staging (i.e. after any simg2img conversion, since the canonical comparison is against the raw image). VERSION_FIRMWARE is derived from the lookup. If both system.img and boot.img are processed, both must resolve to the same version. On unknown input the script bails and prints the manifest. Currently only v3.0.2 is enrolled. Cross-platform MD5: prefers `md5sum` (Linux), falls back to `md5 -q` (macOS).
@@ -74,15 +75,20 @@ OPTIONS:
   --bluetooth          Configure Bluetooth fixes
   --music-apk          Patch Y1 music player APK (Artist→Album navigation)
   --remove-apps        Remove unnecessary APK files from system
+  --root               Install /system/xbin/su (setuid-root escalator).
+                        Requires a prebuilt binary at su/build/su — run
+                        \`cd su && make\` once before using this flag.
+                        Stock /sbin/adbd is untouched; root is obtained
+                        post-flash by running \`adb shell /system/xbin/su\`.
   --all                Apply all patches (equivalent to all flags above)
   -h, --help           Display this help message
 
-NOTE: A --root flag existed in v1.3.0–v1.6.0 to patch /sbin/adbd in the
-boot.img ramdisk for adbd-as-uid-0. It was removed in v1.7.0 because every
-attempted approach (NOP the privilege-drop blx calls, change their argument
-values to 0) caused "device offline" on hardware. The standalone scripts
-patch_adbd.py and patch_bootimg.py are kept in the tree as historical
-record — see their docstrings for the analysis.
+NOTE: --root in v1.8.0 installs a setuid-root su binary, replacing the
+v1.3.0–v1.6.0 approach of patching /sbin/adbd in the boot.img ramdisk.
+The adbd byte patches (H1/H2/H3, both NOP-the-blx and arg-zero revisions)
+caused "device offline" on hardware. The standalone patch_adbd.py and
+patch_bootimg.py scripts are kept in the tree as historical record — see
+their docstrings for the analysis.
 
 EXAMPLES:
   # Apply all patches
@@ -101,6 +107,7 @@ FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
+FLAG_ROOT=false
 PATH_ARTIFACTS=""
 
 # Parse arguments
@@ -135,12 +142,18 @@ while [[ $# -gt 0 ]]; do
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
+    --root)
+      FLAG_ROOT=true
+      FLAG_ANY_SPECIFIED=true
+      shift
+      ;;
     --all)
       FLAG_AVRCP=true
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
+      FLAG_ROOT=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -171,11 +184,11 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   exit 0
 fi
 
-# All current flags affect system.img, so this is effectively redundant with
-# FLAG_ANY_SPECIFIED. Kept as a separate variable so that re-introducing a
-# boot.img-only flag (e.g. --root) is a one-line gate change.
+# All current flags affect system.img (--root installs into /system/xbin),
+# so this is effectively redundant with FLAG_ANY_SPECIFIED. Kept as a separate
+# variable so a future boot.img-only flag is a one-line gate change.
 FLAG_ANY_SYSTEM_PATCH=false
-if [[ "$FLAG_ADB" == true || "$FLAG_AVRCP" == true || "$FLAG_BLUETOOTH" == true || "$FLAG_MUSIC_APK" == true || "$FLAG_REMOVE_APPS" == true ]]; then
+if [[ "$FLAG_ADB" == true || "$FLAG_AVRCP" == true || "$FLAG_BLUETOOTH" == true || "$FLAG_MUSIC_APK" == true || "$FLAG_REMOVE_APPS" == true || "$FLAG_ROOT" == true ]]; then
   FLAG_ANY_SYSTEM_PATCH=true
 fi
 
@@ -466,6 +479,18 @@ if [[ "$FLAG_ADB" == true ]]; then
 persist.service.adb.enable=1
 persist.service.debuggable=1
 EOF
+fi
+
+# Install /system/xbin/su (setuid-root escalator)
+if [[ "$FLAG_ROOT" == true ]]; then
+  src_su="${PATH_SCRIPT_DIR}/su/build/su"
+  if [[ ! -f "$src_su" ]]; then
+    echo "ERROR: ${src_su} not found." >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/su && make" >&2
+    exit 1
+  fi
+  echo "Installing /system/xbin/su (setuid-root escalator).."
+  sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"
 fi
 
 # Enable AVRCP 1.4 support (WIP - pending flash verification)

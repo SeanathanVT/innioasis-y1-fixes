@@ -7,3 +7,4 @@ output
 *.apk
 *.patched
 .state
+su/build/
