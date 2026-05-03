@@ -8,3 +8,5 @@ output
 *.patched
 .state
 src/su/build/
+tools/mtkclient/
+tools/python-venv/
