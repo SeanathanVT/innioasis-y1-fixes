@@ -75,9 +75,9 @@ else
     python3 -m venv mtkclient/venv
     # shellcheck disable=SC1091
     source mtkclient/venv/bin/activate
-    pip install --quiet --upgrade pip
+    pip install --upgrade pip
     if [[ -f mtkclient/requirements.txt ]]; then
-        pip install --quiet -r mtkclient/requirements.txt
+        pip install -r mtkclient/requirements.txt
     else
         echo "WARNING: mtkclient/requirements.txt not found at this ref — venv created empty" >&2
     fi
@@ -93,8 +93,8 @@ else
     python3 -m venv python-venv
     # shellcheck disable=SC1091
     source python-venv/bin/activate
-    pip install --quiet --upgrade pip
-    pip install --quiet -r python-requirements.txt
+    pip install --upgrade pip
+    pip install -r python-requirements.txt
     deactivate
 fi
 
