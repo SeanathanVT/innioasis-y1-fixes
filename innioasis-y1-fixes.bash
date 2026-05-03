@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.3.0
+# Version: 1.3.1
 # History:
+# 2026-05-03 (1.3.1): --root no longer touches system.img (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is set). --root help text now warns against running `adb root` post-flash (stock MTK adbd's USB re-bind is flaky; with ro.secure=0 adbd is already uid 0).
 # 2026-05-03 (1.3.0): Reintroduce --root flag. Delegates to patch_bootimg.py (pure-Python in-place cpio mutation; no shell-side cpio/dd repack). Flashes patched boot.img via mtkclient after system.img write.
 # 2026-04-30 (1.2.2): No functional changes — reflects patch_mtkbt.py update to include AVCTP 1.0→1.3 patches (B1-B3).
 # 2026-04-26 (1.2.1): Add libextavrcp.so.patched deployment to --avrcp.
@@ -48,8 +49,12 @@ OPTIONS:
   --music-apk          Copy patched Y1 music player APK
   --remove-apps        Remove unnecessary APK files from system
   --root               Patch boot.img ramdisk for ADB root access (default.prop:
-                       ro.secure=0, ro.debuggable=1, ro.adb.secure=0,
-                       service.adb.root=1). Requires boot.img in --artifacts-dir.
+                       ro.secure=0, ro.debuggable=1, ro.adb.secure=0). Requires
+                       boot.img in --artifacts-dir. After flashing, 'adb shell'
+                       returns uid 0 directly — do NOT run 'adb root' (its
+                       restart triggers a stock MTK adbd USB re-bind that loses
+                       the connection on this firmware; reboot to recover).
+                       When --root is the only flag, system.img is left alone.
   --all                Apply all patches (equivalent to all flags above)
   -h, --help           Display this help message
 
@@ -147,12 +152,22 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   exit 0
 fi
 
-# Prompt for sudo credentials upfront and keep the ticket alive for the duration of the script
-echo "This script requires sudo for mounting and file operations."
-sudo -v
-while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
-SUDO_KEEPALIVE_PID=$!
-trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
+# Determine whether any system.img-affecting flag is set. --root only patches
+# boot.img and does not require mounting system.img.
+FLAG_ANY_SYSTEM_PATCH=false
+if [[ "$FLAG_ADB" == true || "$FLAG_AVRCP" == true || "$FLAG_BLUETOOTH" == true || "$FLAG_MUSIC_APK" == true || "$FLAG_REMOVE_APPS" == true ]]; then
+  FLAG_ANY_SYSTEM_PATCH=true
+fi
+
+# Prompt for sudo only if we'll need it (mounting system.img). --root alone
+# uses pure-Python boot.img patching + mtkclient and does not need sudo.
+if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  echo "This script requires sudo for mounting and file operations."
+  sudo -v
+  while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
+fi
 
 VERSION_FIRMWARE="3.0.2"
 
@@ -191,12 +206,14 @@ if [[ "$FLAG_ROOT" == true ]]; then
     --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 fi
 
-# Copy and mount system.img
-echo "Copying clean system.img.."
-cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+# Copy and mount system.img only if a system-affecting flag is set.
+if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  echo "Copying clean system.img.."
+  cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
 
-echo "Mounting working copy of system.img.."
-sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
+  echo "Mounting working copy of system.img.."
+  sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
+fi
 
 # Enable ADB debugging
 if [[ "$FLAG_ADB" == true ]]; then
@@ -295,9 +312,11 @@ if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   done
 fi
 
-# Unmount patched system.img
-echo "Unmounting development system.img.."
-sudo umount "${PATH_MOUNT}"
+# Unmount patched system.img (only if we mounted it).
+if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  echo "Unmounting development system.img.."
+  sudo umount "${PATH_MOUNT}"
+fi
 
 # Change directories to MTK Client root directory
 echo "Changing directories to MTK Client root directory.."
@@ -307,9 +326,11 @@ cd "${PATH_MTKCLIENT}"
 echo "Activating MTKClient Python virtual environment.."
 source "${PATH_VENV_MTKCLIENT}/bin/activate"
 
-# Write patched system.img
-echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
-python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+# Write patched system.img only if we patched one.
+if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
+  python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+fi
 
 # Write patched boot.img
 if [[ "$FLAG_ROOT" == true ]]; then

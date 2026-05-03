@@ -6,7 +6,14 @@ Modifies the ramdisk's `default.prop` so adbd does not self-demote to uid `shell
     ro.secure        = 0
     ro.debuggable    = 1
     ro.adb.secure    = 0
-    service.adb.root = 1
+
+With `ro.secure=0` adbd's `should_drop_privileges()` returns 0 at startup, so
+adbd is already running as uid 0 after boot — `adb shell` returns root directly.
+**Do not run `adb root`** afterwards: it sets `service.adb.root=1` and forces an
+adbd self-restart, which the stock MTK adbd's USB re-bind handles poorly on this
+firmware (host loses the device). Reboot to recover. `service.adb.root=1` was
+historically appended here as belt-and-suspenders but is unreachable when
+`ro.secure=0` short-circuits the privilege-drop check, so it has been removed.
 
 Format-aware: handles the Android boot.img wrapper *and* the MTK 512-byte
 "ROOTFS" header that wraps the gzipped cpio ramdisk on MT65xx devices.
@@ -222,7 +229,6 @@ _DEFAULT_PROP_EDITS = [
     ("ro.secure", "0"),
     ("ro.debuggable", "1"),
     ("ro.adb.secure", "0"),
-    ("service.adb.root", "1"),
 ]
 
 
