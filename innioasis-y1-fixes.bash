@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.2.2
+# Version: 1.3.0
 # History:
+# 2026-05-03 (1.3.0): Reintroduce --root flag. Delegates to patch_bootimg.py (pure-Python in-place cpio mutation; no shell-side cpio/dd repack). Flashes patched boot.img via mtkclient after system.img write.
 # 2026-04-30 (1.2.2): No functional changes — reflects patch_mtkbt.py update to include AVCTP 1.0→1.3 patches (B1-B3).
 # 2026-04-26 (1.2.1): Add libextavrcp.so.patched deployment to --avrcp.
 # 2026-04-26 (1.2.0): Remove --root flag and boot.img handling (broken).
@@ -46,6 +47,9 @@ OPTIONS:
   --bluetooth          Configure Bluetooth fixes
   --music-apk          Copy patched Y1 music player APK
   --remove-apps        Remove unnecessary APK files from system
+  --root               Patch boot.img ramdisk for ADB root access (default.prop:
+                       ro.secure=0, ro.debuggable=1, ro.adb.secure=0,
+                       service.adb.root=1). Requires boot.img in --artifacts-dir.
   --all                Apply all patches (equivalent to all flags above)
   -h, --help           Display this help message
 
@@ -66,6 +70,7 @@ FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
+FLAG_ROOT=false
 PATH_ARTIFACTS=""
 
 # Parse arguments
@@ -100,12 +105,18 @@ while [[ $# -gt 0 ]]; do
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
+    --root)
+      FLAG_ROOT=true
+      FLAG_ANY_SPECIFIED=true
+      shift
+      ;;
     --all)
       FLAG_AVRCP=true
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
+      FLAG_ROOT=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -147,6 +158,8 @@ VERSION_FIRMWARE="3.0.2"
 
 FILENAME_BIN_MTKBT="mtkbt"
 FILENAME_BIN_MTKBT_PATCHED="mtkbt.patched"
+FILENAME_BOOT_IMAGE_SOURCE="boot.img"
+FILENAME_BOOT_IMAGE_TARGET="boot-${VERSION_FIRMWARE}-devel.img"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_LIBRARY_LIBEXTAVRCP="libextavrcp.so"
 FILENAME_LIBRARY_LIBEXTAVRCP_PATCHED="libextavrcp.so.patched"
@@ -160,9 +173,23 @@ FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
 
+PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PATH_MOUNT="/mnt/y1-devel"
 PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
 PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
+
+# Patch boot.img ramdisk for ADB root access
+if [[ "$FLAG_ROOT" == true ]]; then
+  if [[ ! -f "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" ]]; then
+    echo "Error: --root requires ${FILENAME_BOOT_IMAGE_SOURCE} in ${PATH_ARTIFACTS}"
+    exit 1
+  fi
+  echo "Patching boot.img ramdisk for ADB root access.."
+  python3 "${PATH_SCRIPT_DIR}/patch_bootimg.py" \
+    --in  "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_SOURCE}" \
+    --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
+fi
 
 # Copy and mount system.img
 echo "Copying clean system.img.."
@@ -283,6 +310,12 @@ source "${PATH_VENV_MTKCLIENT}/bin/activate"
 # Write patched system.img
 echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
 python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+
+# Write patched boot.img
+if [[ "$FLAG_ROOT" == true ]]; then
+  echo "Writing new boot.img (plug in and reset Y1 device using button near USB-C port).."
+  python3 "${PATH_MTKCLIENT}/mtk.py" w boot "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
+fi
 
 echo "Deactivating MTKClient Python virtual environment.."
 deactivate

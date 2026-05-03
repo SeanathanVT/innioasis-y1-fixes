@@ -5,6 +5,64 @@ patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 Stock md5:  3af1d4ad8f955038186696950430ffda
 Output md5: (regenerated on each build — see script output)
 
+--- Status (2026-05-03) ---
+
+The patch set below has been verified to land on the wire (sdptool shows AVRCP
+1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt) and to satisfy the
+Java-side initialisation chain. Despite that, three known-good 1.4 controllers
+(car / Sonos Roam / Samsung TV) still see cardinality:0 — no inbound
+REGISTER_NOTIFICATION reaches the JNI. mtkbt's daemon-side `[AVCTP]`/`[AVRCP]`
+logs go through MediaTek's `__xlog_buf_printf` and are not visible in logcat.
+
+Post-E8 hardware testing (2026-05-02) refined the gate location: only msg_ids
+505 (CONNECT_CNF) and 506 (connect_ind) ever arrive at the JNI; no `op_code=4`
+GetCapabilities ever reaches any of the three op_code=4 dispatchers
+(0x3060c / 0x30708 / 0x3096c). The cardinality:0 gate is therefore upstream of
+the dispatcher table itself — somewhere in mtkbt's L2CAP→AVCTP RX path or the
+per-connection feature-negotiation logic ('bws:0 tg_feature:0 ct_featuer:0' in
+CONNECT_CNF suggests negotiation fails on the daemon side).
+
+Trace #1g had identified a clean single-instruction patch candidate inside fn
+0x3060c: NOP the `bge` at 0x3065e to force every classification through the
+AVRCP 1.3/1.4 init path (`b.w 0x2fd34`) regardless of the sign bit of
+[conn+0x149]. Shipped below as **E8**. Tested 2026-05-02 and observed inert
+because no GetCapabilities reaches the dispatcher in the first place; left in
+place as a verified-correct patch.
+
+The other two dispatchers were considered for the same brute-force treatment
+and rejected:
+  - fn 0x30708 reads [conn+0x149] *unsigned* and masks `& 0x7f` — there is no
+    high-bit gate to NOP. Failure exits depend on a multi-byte state-machine
+    check on [conn+0x5d0] ∈ {0x20, 0x82, 0x81}; no clean single-instruction
+    patch site.
+  - fn 0x3096c was previously patched (old E5 at 0x309ec, BNE→B) and removed
+    after empirical testing showed no behavioural change. Re-adding would not
+    surface new information.
+
+--- G1 attempts (both reverted, 2026-05-02 / 2026-05-03) ---
+
+Two attempts to redirect __xlog_buf_printf to __android_log_print were made
+and both broke Bluetooth.
+
+  Attempt 1 (G1+G2, 12-byte thunks): `mov r0,#4; mov r1,r2; b __android_log_print`.
+    mtkbt SIGSEGV at addr 0x00000000 immediately at startup. At least one xlog
+    callsite passes NULL in r2; bionic's __android_log_print at API 17 doesn't
+    NULL-check tag, so strlen(NULL) faulted.
+
+  Attempt 2 (G1 only, 20-byte thunk with cbz r2 NULL guard): NULL guard didn't
+    help. mtkbt failed to bind its abstract socket — BT framework reports
+    `bt_sendmsg fail: No such file or directory` (ENOENT) when trying to send
+    cmd=100 to the daemon. Either mtkbt crashed on a non-NULL but invalid
+    r2 (small integer, stack pointer, etc.), or the volume of redirected log
+    calls flooding through logd slowed mtkbt's init past the timeout window.
+
+Conclusion: blanket xlog→logcat redirect at the consolidated wrapper is too
+fragile. Future diagnostic instrumentation should be SURGICAL — pick a small
+number of specific high-value sites (e.g., dispatcher entries, AVCTP RX
+handler) and add explicit `bl __android_log_print` calls there with
+hardcoded tag/fmt string arguments, not relying on the wrapper's varying
+calling convention or volume-flooding logd.
+
 --- Descriptor table structure (key finding) ---
 
 The mtkbt descriptor table at file offset 0x0f9774 has three AVRCP service record
@@ -71,6 +129,44 @@ it was based on a false negative from testing a non-live patch site. All three
     (bytes: 40 f2 01 37) is patched to MOVW r7,#0x0401 (40 f2 01 47).
     Belt-and-suspenders alongside the blob patches.
 
+  D1 — Registration guard NOP at 0x38C6C: BNE 0x38C76 → NOP
+    Forces the SDP init function to always register the AVRCP TG record
+    (CMP r0, r5 guard was never true, leaving the record unregistered).
+
+  E8 — Force op_code=4 dispatcher fn 0x3060c onto the 1.3/1.4 init path.
+    fn 0x3060c is one of three op_code=4 dispatchers reached via the 3-slot
+    fn-ptr table at vaddr 0xf94b0..0xf94bc (slot 0). After logging the entry
+    and confirming op_code=4, it does:
+
+      0x30658:  ldrsb.w r0, [r4, #0x149]   ; signed byte: peer version classification
+      0x3065c:  cmp     r0, #0
+      0x3065e:  bge     #0x30688            ; if non-negative → log error & return
+                                            ; if negative (high bit set) → fall through
+                                            ; to b.w 0x2fd34 (1.3/1.4 init)
+
+    NOPing the bge (`13 da` → `00 bf`) routes every classification through init,
+    irrespective of how the connection's version byte is set. If the runtime path
+    for the user's peers goes through fn 0x3060c, this releases the gate.
+
+    Caveat: untested empirically; ships as a low-risk single-instruction probe.
+    If cardinality:0 persists after E8 lands, the runtime path is not fn 0x3060c
+    and either fn 0x30708 (no clean patch) or upstream classification is the gate.
+
+  E3-E4 — AVRCP TG SupportedFeatures bitmask (the served value on the wire).
+    sdptool browse against post-D1 mtkbt confirms AttrID=0x0311 IS on the wire
+    inside the AVRCP TG record (UUID 0x110c), but the served value is 0x0001
+    (Cat1 only). 1.4 controllers see ProfileVersion=1.4 with a feature bitmask
+    consistent with 1.0, treat the advertiser as inconsistent, and skip
+    REGISTER_NOTIFICATION. AVRCP 1.4 TG baseline (matching AOSP Bluedroid) is
+    0x0033 = bits {0,1,4,5} = Cat1 + Cat2 + PlayerApplicationSettings +
+    GroupNavigation. Browsing (bit 6) is deliberately omitted — the
+    AdditionalProtocolDescriptorList isn't on the wire (Group 1 only, Group 2
+    wins the merge), so claiming Browsing without serving the descriptor would
+    re-introduce inconsistency.
+
+      0x0eba5b  Group 2 TG SupportedFeatures LSB  0x01 -> 0x33  [served]
+      0x0eba4e  Group 1 TG SupportedFeatures LSB  0x21 -> 0x33  [defense-in-depth]
+
 Usage:
     python3 patch_mtkbt.py mtkbt
     python3 patch_mtkbt.py mtkbt --output /tmp/mtkbt.patched
@@ -82,6 +178,7 @@ Deploy:
     adb reboot
     sdptool browse <Y1_BT_ADDR>   # expect: AVCTP uint16: 0x0103, AV Remote Version: 0x0104
     logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'
+    logcat -s '*:V' | grep -E '\\[AVRCP\\]|\\[AVCTP\\]'   # G1+G2: daemon-side trace
 """
 
 import argparse
@@ -90,25 +187,25 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "37ddc966760312b1360743434637ff2d"
+OUTPUT_MD5 = "d47c904063e7d201f626cf2cc3ebd50b"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
     # AVRCP 1.4 requires AVCTP 1.3; the LSB byte at each offset is the minor version.
     {
-        "name":   "0x0eba6d: AVCTP 1.0->1.3 LSB  Groups 1&2 ProtocolDescList  [B1]",
+        "name":   "[B1] AVCTP 1.0->1.3 LSB  Groups 1&2 ProtocolDescList",
         "offset": 0x0eba6d,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name":   "0x0eba37: AVCTP 1.0->1.3 LSB  Group 3 CT ProtocolDescList  [B2]",
+        "name":   "[B2] AVCTP 1.0->1.3 LSB  Group 3 CT ProtocolDescList",
         "offset": 0x0eba37,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
     },
     {
-        "name":   "0x0eba25: AVCTP 1.0->1.3 LSB  Group 1 AdditionalProtocol   [B3]",
+        "name":   "[B3] AVCTP 1.0->1.3 LSB  Group 1 AdditionalProtocol",
         "offset": 0x0eba25,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
@@ -116,29 +213,82 @@ PATCHES = [
     # C1-C3: AVRCP profile version in ProfileDescList blobs, all three groups.
     # All patched to 1.4 — last-wins entry wins regardless of which is served.
     {
-        "name":   "0x0eba4b: AVRCP 1.x->1.4 LSB  entry[23] ProfileDescList  [C1]",
+        "name":   "[C1] AVRCP 1.x->1.4 LSB  entry[23] ProfileDescList",
         "offset": 0x0eba4b,
         "before": bytes([0x00]),
         "after":  bytes([0x04]),
     },
     {
-        "name":   "0x0eba58: AVRCP 1.x->1.4 LSB  entry[18] ProfileDescList  [C2 — served]",
+        "name":   "[C2] AVRCP 1.x->1.4 LSB  entry[18] ProfileDescList (served)",
         "offset": 0x0eba58,
         "before": bytes([0x00]),
         "after":  bytes([0x04]),
     },
     {
-        "name":   "0x0eba77: AVRCP 1.3->1.4 LSB  entry[13] ProfileDescList  [C3]",
+        "name":   "[C3] AVRCP 1.3->1.4 LSB  entry[13] ProfileDescList",
         "offset": 0x0eba77,
         "before": bytes([0x03]),
         "after":  bytes([0x04]),
     },
     # A1: Runtime SDP struct version patched via MOVW instruction.
     {
-        "name":   "0x38BFC: MOVW r7,#0x0301 -> #0x0401  [A1 — runtime SDP struct]",
+        "name":   "[A1] MOVW r7,#0x0301 -> #0x0401  runtime SDP struct",
         "offset": 0x038BFC,
         "before": bytes([0x40, 0xf2, 0x01, 0x37]),
         "after":  bytes([0x40, 0xf2, 0x01, 0x47]),
+    },
+    # D1: NOP the runtime registration guard.
+    #
+    # The SDP init function (0x38AB0-0x38C74) builds the AVRCP TG SDP struct in r3,
+    # then checks CMP r0, r5 (r5=0x111F) before executing the three writes that
+    # complete registration:
+    #
+    #   0x38C6E: STR r3, [r1]    — links the struct into mtkbt's live SDP registry
+    #   0x38C70: MOVS r0, #8     — success return value
+    #   0x38C72: STRB r7, [r2]   — writes version status byte
+    #
+    # r0 is never 0x111F in normal operation, so BNE always branches to the skip
+    # path (0x38C76: MOV r0, r4 / POP), leaving the AVRCP TG record unregistered.
+    # Result: mtkbt returns tg_feature:0 ct_feature:0 in every CONNECT_CNF, and
+    # peers never send REGISTER_NOTIFICATION (cardinality stays 0), regardless of
+    # what the SDP blob advertises.
+    #
+    # Fix: replace BNE with NOP — the struct is always registered.
+    {
+        "name":   "[D1] BNE 0x38C76 -> NOP  registration guard bypass",
+        "offset": 0x038C6C,
+        "before": bytes([0x03, 0xd1]),
+        "after":  bytes([0x00, 0xbf]),
+    },
+    # E3-E4: AVRCP TG SupportedFeatures bitmask in the served SDP record.
+    # Wire-confirmed: post-D1 sdptool browse shows AttrID=0x0311 = 0x0001 (Cat1
+    # only) in the AVRCP TG record. 1.4 controllers see ProfileVersion=1.4 + a
+    # 1.0-shape bitmask, treat the advertiser as inconsistent, and skip
+    # REGISTER_NOTIFICATION. 0x0033 = Cat1 + Cat2 + PAS + GroupNav — the AVRCP
+    # 1.4 TG baseline matching AOSP Bluedroid. Browsing bit (6) is omitted
+    # because AdditionalProtocolDescriptorList isn't served on the wire
+    # (Group 1 has it, Group 2 wins the merge).
+    {
+        "name":   "[E3] SupportedFeatures 0x0001->0x0033  Group 2 TG (served)",
+        "offset": 0x0eba5b,
+        "before": bytes([0x01]),
+        "after":  bytes([0x33]),
+    },
+    {
+        "name":   "[E4] SupportedFeatures 0x0021->0x0033  Group 1 TG (defense)",
+        "offset": 0x0eba4e,
+        "before": bytes([0x21]),
+        "after":  bytes([0x33]),
+    },
+    # E8: NOP the bge at 0x3065e in fn 0x3060c (op_code=4 dispatcher slot 0).
+    # `bge #0x30688` (13 da) skips the 1.3/1.4 init path (b.w 0x2fd34) when
+    # ldrsb.w [conn+0x149] is non-negative. NOP forces all classifications
+    # through init.
+    {
+        "name":   "[E8] bge #0x30688 -> NOP  force op4 dispatcher to 1.3/1.4 init",
+        "offset": 0x03065e,
+        "before": bytes([0x13, 0xda]),
+        "after":  bytes([0x00, 0xbf]),
     },
 ]
 
@@ -170,10 +320,14 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Patch stock mtkbt -> mtkbt.patched")
+    parser = argparse.ArgumentParser(
+        description="Patch stock mtkbt for AVRCP 1.4"
+    )
     parser.add_argument("input", help="Path to stock mtkbt binary")
-    parser.add_argument("--output", "-o", default=None)
-    parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Output path (default: output/mtkbt.patched)")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="Check patch sites only, do not write output")
     parser.add_argument("--skip-md5", action="store_true",
                         help="Skip stock MD5 check (use for alternate stock builds)")
     args = parser.parse_args()
@@ -186,11 +340,18 @@ def main():
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    if args.skip_md5:
+        md5_tag = "(stock check skipped)"
+    elif input_md5 == STOCK_MD5:
+        md5_tag = "[OK — matches stock]"
+    else:
+        md5_tag = f"[MISMATCH — expected {STOCK_MD5}]"
+
     print(f"Input:  {input_path}  ({len(data):,} bytes)")
-    print(f"MD5:    {input_md5}")
+    print(f"MD5:    {input_md5}  {md5_tag}")
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
-        print(f"ERROR: MD5 mismatch. Expected stock {STOCK_MD5}")
+        print("ERROR: input is not the expected stock build.")
         print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
@@ -229,12 +390,15 @@ def main():
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
-    print(f"\nOutput: {output_path}")
-    print(f"MD5:    {output_md5}")
-    if OUTPUT_MD5:
-        print(f"        ({'OK' if output_md5 == OUTPUT_MD5 else 'MISMATCH — expected ' + OUTPUT_MD5})")
+    if OUTPUT_MD5 is None:
+        out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
+    elif output_md5 == OUTPUT_MD5:
+        out_tag = "[OK — matches expected]"
     else:
-        print(f"        (set OUTPUT_MD5 = \"{output_md5}\" in script)")
+        out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
+
+    print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
+    print(f"MD5:    {output_md5}  {out_tag}")
     print(f"\nDeploy:")
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")

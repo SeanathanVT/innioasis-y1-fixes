@@ -1,5 +1,6 @@
 _patch_workdir
 .DS_Store
+androguard.db
 hwparam.json
 output
 *.apk
