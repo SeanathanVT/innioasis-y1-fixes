@@ -400,7 +400,7 @@ if [[ "$FLAG_AVRCP" == true ]]; then
     exit 1
   fi
 
-  echo "  Installing Y1MediaBridge.apk (externally built — copied from artifacts).."
+  echo "  Installing Y1MediaBridge.apk from artifacts.."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
   sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"

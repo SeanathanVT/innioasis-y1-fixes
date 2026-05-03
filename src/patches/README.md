@@ -59,4 +59,10 @@ Active patchers (wired into the bash, on hardware-verified output):
 Historical / unwired (kept for reference, *do not ship their output*):
 - `patch_adbd.py`, `patch_bootimg.py` — both broke ADB protocol on hardware in every revision tried. Superseded by [`../su/`](../su/) (setuid `/system/xbin/su`) for the root-access goal.
 
-See [`../../CHANGELOG.md`](../../CHANGELOG.md) for the per-patcher version history.
+## See also
+
+- [`../../README.md`](../../README.md) — project overview
+- [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
+- [`../../docs/DEX.md`](../../docs/DEX.md) — DEX-level analysis backing `patch_y1_apk.py`'s smali patches
+- [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — full AVRCP investigation narrative
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — per-patcher version history

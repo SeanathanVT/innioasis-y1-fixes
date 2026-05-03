@@ -61,4 +61,9 @@ adb shell /system/xbin/su                # interactive root shell
 - **Any process that can exec `/system/xbin/su` becomes root.** Acceptable for a single-user research device. Not appropriate for a consumer ROM.
 - The binary is intentionally tiny and direct so every byte is auditable.
 
-See [`../../docs/PATCHES.md`](../../docs/PATCHES.md) for how this fits into the broader patch set, and [`../../INVESTIGATION.md`](../../INVESTIGATION.md) for the AVRCP-debugging context that motivated needing root.
+## See also
+
+- [`../../README.md`](../../README.md) — project overview
+- [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — how this fits into the broader patch set
+- [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — the AVRCP-debugging context that motivated needing root
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog

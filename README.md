@@ -16,7 +16,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 
 - [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app (`Y1MediaBridge.apk` consumed by `--avrcp`); imported via `git subtree`, history preserved
+- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleRelease`.
 - `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
 - `reference/` — manually-extracted reference files for v3.0.2
 
@@ -36,12 +36,17 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA, MD5-validated) and `Y1MediaBridge.apk` (only required for `--avrcp`) in a directory:
+Stage `rom.zip` (the official OTA, MD5-validated) in a directory. If using `--avrcp`, build `Y1MediaBridge.apk` from `src/Y1MediaBridge/` and stage it too. If using `--root`, build `src/su/` once.
 
 ```bash
 mkdir -p ~/y1-patches
 cp /path/to/rom.zip ~/y1-patches/
-cp /path/to/Y1MediaBridge.apk ~/y1-patches/    # optional, --avrcp only
+
+# Build Y1MediaBridge.apk from in-tree source if using --avrcp:
+( cd src/Y1MediaBridge && ./gradlew assembleRelease )
+cp src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk \
+   ~/y1-patches/Y1MediaBridge.apk
+
 # Build su once if using --root:
 ( cd src/su && make )
 
