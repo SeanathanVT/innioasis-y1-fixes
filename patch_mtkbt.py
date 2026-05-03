@@ -5,22 +5,29 @@ patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 Stock md5:  3af1d4ad8f955038186696950430ffda
 Output md5: (regenerated on each build — see script output)
 
---- Status (2026-05-02) ---
+--- Status (2026-05-03) ---
 
 The patch set below has been verified to land on the wire (sdptool shows AVRCP
 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt) and to satisfy the
 Java-side initialisation chain. Despite that, three known-good 1.4 controllers
 (car / Sonos Roam / Samsung TV) still see cardinality:0 — no inbound
-REGISTER_NOTIFICATION reaches the JNI. The remaining gate is inside mtkbt's
-native AVCTP→JNI dispatch, between the chip-side AVCTP receive and the abstract
-socket. mtkbt's daemon-side `[AVCTP]`/`[AVRCP]` logs go through MediaTek's
-`__xlog_buf_printf` and are not visible in logcat.
+REGISTER_NOTIFICATION reaches the JNI. mtkbt's daemon-side `[AVCTP]`/`[AVRCP]`
+logs go through MediaTek's `__xlog_buf_printf` and are not visible in logcat.
 
-Trace #1g identified one concrete patch candidate inside fn 0x3060c (one of three
-op_code=4 dispatchers reached via the 3-slot fn-ptr table at vaddr 0xf94b0):
-NOP the `bge` at 0x3065e to force every classification through the AVRCP 1.3/1.4
-init path (`b.w 0x2fd34`) regardless of the sign bit of [conn+0x149]. Shipped
-below as **E8**.
+Post-E8 hardware testing (2026-05-02) refined the gate location: only msg_ids
+505 (CONNECT_CNF) and 506 (connect_ind) ever arrive at the JNI; no `op_code=4`
+GetCapabilities ever reaches any of the three op_code=4 dispatchers
+(0x3060c / 0x30708 / 0x3096c). The cardinality:0 gate is therefore upstream of
+the dispatcher table itself — somewhere in mtkbt's L2CAP→AVCTP RX path or the
+per-connection feature-negotiation logic ('bws:0 tg_feature:0 ct_featuer:0' in
+CONNECT_CNF suggests negotiation fails on the daemon side).
+
+Trace #1g had identified a clean single-instruction patch candidate inside fn
+0x3060c: NOP the `bge` at 0x3065e to force every classification through the
+AVRCP 1.3/1.4 init path (`b.w 0x2fd34`) regardless of the sign bit of
+[conn+0x149]. Shipped below as **E8**. Tested 2026-05-02 and observed inert
+because no GetCapabilities reaches the dispatcher in the first place; left in
+place as a verified-correct patch.
 
 The other two dispatchers were considered for the same brute-force treatment
 and rejected:

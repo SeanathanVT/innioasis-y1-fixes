@@ -1,6 +1,6 @@
 # Investigation — Final Status
 
-This document grew organically over the 2026-05-02 session. **Read this top section first** — sections below preserve the original investigation narrative including hypotheses that were later refuted, so reading top-down without this summary is misleading.
+This document grew organically over the 2026-05-02 / 2026-05-03 sessions. **Read this top section first** — sections below preserve the original investigation narrative including hypotheses that were later refuted, so reading top-down without this summary is misleading.
 
 ## Final state (after all traces complete)
 
@@ -37,14 +37,22 @@ Logcat across multiple full connection cycles shows neither:
 
 So no inbound REGISTER_NOTIFICATION events reach Java. Combined with the existing observation that no `Recv AVRCP indication` msg_ids beyond 501/505/506/512 (ACTIVATE_CNF / connect_ind / CONNECT_CNF / DISCONNECT_CNF) reach the JNI receive loop, **the gate is unambiguously inside mtkbt's native AVRCP layer, between AVCTP RX and the JNI dispatch socket**.
 
-The likely concrete location is in the runtime path through one of three op-code=4 dispatchers (`0x3060c`, `0x30708`, `0x3096c`) reached via the 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`. Each has different version-check logic and reads `[conn+0x149]` (version) and `[conn+0x5d0]` (state code) differently. Which one fires for a given peer's GetCapabilities op-code depends on runtime state we cannot observe statically.
+**Refined 2026-05-02 (post-E8 test):** Logcat over the E8 test cycle confirms only msg_ids 505 and 506 ever arrive. **No `op_code=4` (GetCapabilities) message ever reaches any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`) — verified because E8 NOP'd the gate at `0x3065e` in fn `0x3060c` and the patch had zero observable effect, AND the post-dispatcher init path at `0x2fd34` is never logged either. **The gate is upstream of the dispatcher table itself.** The most plausible upstream points are:
+
+- mtkbt's AVCTP receive handler at fn `0x6d9ba` — silently drops the inbound L2CAP frame before dispatch.
+- The silent-drop site at `0x0513a4` (`[AVRCP][WRN] AVRCP receive too many data. Throw it!`) — sized check that may reject GetCapabilities under unknown conditions.
+- The L2CAP→AVCTP demux logic upstream of `0x6d9ba` — wrong PSM routing, missing peer-state guard, etc.
+- The `bws:0 tg_feature:0 ct_featuer:0` in the CONNECT_CNF log line suggests mtkbt's per-connection feature negotiation is failing on the daemon side — peers may be classified as "no AVRCP capability" before any GetCapabilities even gets a chance to arrive.
+
+Which one is the real gate cannot be determined statically without observing runtime decisions, and runtime visibility into mtkbt is the chronic blind spot — it logs only via `__xlog_buf_printf` (separate buffer, invisible without root or daemon-side tooling).
 
 ## Remaining diagnostic options
 
 All require capabilities we don't have:
 - **HCI snoop / btsnoop** — needs root.
 - **Capture daemon-side `__xlog_buf_printf` traces** — Mediatek's separate log buffer, requires special tooling.
-- **Runtime instrumentation patches** that emit observable side effects via existing logcat tags — possible in principle but high-effort and out of scope per the constraints established at session start.
+- **Runtime instrumentation patches that redirect xlog → logcat** — attempted twice (G1/G2 with NULL guard) and broke Bluetooth both times. The wrapper at `0x675c0` is hit ~3000 times across mtkbt's lifecycle, including very early init when bionic's logd may not be ready, and the calling-convention assumption (r2 = valid fmt pointer) doesn't hold uniformly. Path now considered closed within current constraints.
+- **Surgical instrumentation at specific high-value sites** (dispatcher entries, AVCTP RX handler, silent-drop site) with hardcoded tag/fmt strings via a trampoline. Doable in principle but each site is its own potential crash vector and requires finding free space in the binary for tag/fmt strings.
 
 ## Single concrete patch candidate identified but not shipped — UPDATE: shipped
 
