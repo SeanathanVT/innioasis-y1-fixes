@@ -10,6 +10,10 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Fixed
+- `tools/install-android-sdk.sh`: previously short-circuited the **entire** script (including the `local.properties` write) when `tools/android-sdk/` was already populated from a prior run. Net effect: a re-run or recovery from a partial first run never wired Gradle to the SDK, so `./gradlew assembleDebug` kept failing with `SDK location not found`. Restructured: download/install is the only step gated by the existing-SDK check; `local.properties` and the new env-file write **always** run, healing missing config.
+- `tools/install-android-sdk.sh`: also generate `tools/android-sdk-env.sh` — a sourceable file that exports `ANDROID_HOME` and adds `cmdline-tools/latest/bin` + `platform-tools` to `PATH`. Lets users run `adb` / `sdkmanager` from their shell with `source tools/android-sdk-env.sh` (Gradle itself doesn't need this — it reads `local.properties`). Fixes the user-reported "script doesn't export ANDROID_HOME" gap. `.gitignore` updated to exclude the env file (per-machine, contains absolute paths).
+
 ### Added
 - `tools/install-android-sdk.sh` — auto-installer for the Android SDK (Linux/macOS only). Detects existing `$ANDROID_HOME` and short-circuits; otherwise downloads Google's pinned commandline-tools archive (build `11076708`), accepts licenses (`yes | sdkmanager --licenses`), installs `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`, and writes `sdk.dir=…` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell. Bails clearly if JDK 17+ is missing. Disk ~1.5–2 GB, network ~1.7 GB. Idempotent: re-runnable, pin-bumpable via `CMDLINE_TOOLS_BUILD` at the top.
 

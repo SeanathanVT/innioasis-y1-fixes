@@ -14,13 +14,22 @@ For Linux and macOS, the repo provides an idempotent installer that downloads an
 
 It will:
 
-1. Detect an existing SDK at `$ANDROID_HOME` or `tools/android-sdk/` and short-circuit if found.
-2. Download Google's `commandlinetools-{linux,mac}-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`.
-3. Pipe `yes` to `sdkmanager --licenses` to accept Google's terms (running this script is your acceptance — see the script header).
-4. Install `platforms;android-34`, `build-tools;34.0.0`, and `platform-tools`.
-5. Write `sdk.dir=…` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
+1. Detect an existing SDK at `$ANDROID_HOME` or `tools/android-sdk/` — if either is usable (has `platforms/android-34/`), reuse it without re-downloading.
+2. Otherwise: download Google's `commandlinetools-{linux,mac}-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`, accept licenses (`yes | sdkmanager --licenses` — running this script is your acceptance, see the script header), install `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`.
+3. **Always** (re-runnable / heals partial-state from prior runs):
+   - Write `sdk.dir=<path>` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
+   - Write `tools/android-sdk-env.sh` (sourceable). Contains `export ANDROID_HOME=…; export PATH=…:cmdline-tools/latest/bin:platform-tools`. Source it (`source tools/android-sdk-env.sh`) when you want `adb` / `sdkmanager` on PATH for interactive shell use. Gradle doesn't need this — it reads `local.properties` directly.
 
 Disk: ~1.5–2 GB. Network: ~1.7 GB total. JDK 17+ is a prereq (the script bails early with install instructions if it's missing).
+
+The two outputs serve different consumers:
+
+| File | Read by | Required for |
+|---|---|---|
+| `src/Y1MediaBridge/local.properties` | Gradle (build time) | `./gradlew assembleDebug` |
+| `tools/android-sdk-env.sh` | Your interactive shell (after `source …`) | `adb shell …`, `sdkmanager --list_installed`, etc. |
+
+If you want `ANDROID_HOME` persisted across shells, append the contents of `tools/android-sdk-env.sh` to your `~/.bashrc` / `~/.zshrc`.
 
 Bumping the pinned cmdline-tools build: edit `CMDLINE_TOOLS_BUILD` at the top of `tools/install-android-sdk.sh`, `rm -rf tools/android-sdk/`, re-run.
 

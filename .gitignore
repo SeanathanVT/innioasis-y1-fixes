@@ -11,3 +11,4 @@ src/su/build/
 tools/mtkclient/
 tools/python-venv/
 tools/android-sdk/
+tools/android-sdk-env.sh
