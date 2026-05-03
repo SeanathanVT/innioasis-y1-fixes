@@ -10,6 +10,14 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Added
+- `tools/install-android-sdk.sh` — auto-installer for the Android SDK (Linux/macOS only). Detects existing `$ANDROID_HOME` and short-circuits; otherwise downloads Google's pinned commandline-tools archive (build `11076708`), accepts licenses (`yes | sdkmanager --licenses`), installs `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`, and writes `sdk.dir=…` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell. Bails clearly if JDK 17+ is missing. Disk ~1.5–2 GB, network ~1.7 GB. Idempotent: re-runnable, pin-bumpable via `CMDLINE_TOOLS_BUILD` at the top.
+
+### Changed
+- `tools/setup.sh` post-completion message now points at `install-android-sdk.sh` for users who'll use `--avrcp`.
+- `docs/ANDROID-SDK.md` rewritten to lead with the auto-installer; the per-platform manual recipes remain as the fallback (for Windows, supply-chain-restricted environments, or users who'd rather configure a system-wide install).
+- README Quick start now includes `./tools/install-android-sdk.sh` as a sibling step to `./tools/setup.sh`. Requirements bullet for `--avrcp` updated.
+
 ### Documentation
 - Add `docs/ANDROID-SDK.md` — platform-specific Android SDK install instructions for Linux (Rocky/Alma/RHEL/Fedora/Debian/Ubuntu/Arch), macOS (Homebrew + manual), and Windows (Android Studio + cmdline-tools + WSL2 note). Covers verifying an existing install, JDK 17+ requirement, license acceptance, and how to bump the SDK pins if `compileSdk`/AGP change. README Requirements bullet for `--avrcp` now points there; Documentation section indexes it alongside `docs/PATCHES.md` / `docs/DEX.md`.
 

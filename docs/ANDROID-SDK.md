@@ -2,7 +2,29 @@
 
 The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1MediaBridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1MediaBridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt`/`d8`/etc.
 
-There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). On macOS Homebrew has a cask; on Windows there's an installer. Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it.
+There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). On macOS Homebrew has a cask; on Windows there's an installer. Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
+
+## Easy path: `tools/install-android-sdk.sh` (Linux + macOS)
+
+For Linux and macOS, the repo provides an idempotent installer that downloads and provisions everything:
+
+```bash
+./tools/install-android-sdk.sh
+```
+
+It will:
+
+1. Detect an existing SDK at `$ANDROID_HOME` or `tools/android-sdk/` and short-circuit if found.
+2. Download Google's `commandlinetools-{linux,mac}-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`.
+3. Pipe `yes` to `sdkmanager --licenses` to accept Google's terms (running this script is your acceptance — see the script header).
+4. Install `platforms;android-34`, `build-tools;34.0.0`, and `platform-tools`.
+5. Write `sdk.dir=…` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
+
+Disk: ~1.5–2 GB. Network: ~1.7 GB total. JDK 17+ is a prereq (the script bails early with install instructions if it's missing).
+
+Bumping the pinned cmdline-tools build: edit `CMDLINE_TOOLS_BUILD` at the top of `tools/install-android-sdk.sh`, `rm -rf tools/android-sdk/`, re-run.
+
+Everything below is the **manual fallback**: how to install the SDK by hand if the script doesn't fit your situation (Windows, an existing system-wide install you'd rather configure, supply-chain policy that doesn't allow scripted downloads, etc.).
 
 ## Components needed for this project
 

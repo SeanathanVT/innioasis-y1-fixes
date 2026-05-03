@@ -45,6 +45,10 @@ cp /path/to/rom.zip ~/y1-patches/
 # One-time tooling setup (clones MTKClient, creates Python venvs):
 ./tools/setup.sh
 
+# One-time Android SDK install if using --avrcp (Linux/macOS only;
+# see docs/ANDROID-SDK.md for Windows or manual setup):
+./tools/install-android-sdk.sh
+
 # Build src/Y1MediaBridge/ once if using --avrcp:
 ( cd src/Y1MediaBridge && ./gradlew assembleDebug )
 
@@ -103,7 +107,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
 - `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch), `brew install simg2img` (macOS).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
-- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`. There is no DNF/APT package for the SDK (Google licensing); see [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md) for platform-specific install instructions on Linux / macOS / Windows.
+- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK on Linux/macOS into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install per platform — and the Windows path — in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 
 ## Documentation
 

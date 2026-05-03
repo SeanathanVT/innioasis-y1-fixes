@@ -10,3 +10,4 @@ output
 src/su/build/
 tools/mtkclient/
 tools/python-venv/
+tools/android-sdk/
