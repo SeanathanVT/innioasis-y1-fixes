@@ -314,7 +314,7 @@ python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTE
 # Write patched boot.img
 if [[ "$FLAG_ROOT" == true ]]; then
   echo "Writing new boot.img (plug in and reset Y1 device using button near USB-C port).."
-  python3 "${PATH_MTKCLIENT}/mtk.py" w boot "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
+  python3 "${PATH_MTKCLIENT}/mtk.py" w bootimg "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 fi
 
 echo "Deactivating MTKClient Python virtual environment.."
