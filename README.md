@@ -77,7 +77,7 @@ The "Final state" in `INVESTIGATION.md` and the "Status (2026-05-03)" section be
   - Single patch: version constant at 0x002e3b changed from `0x0103` (1.3) to `0x0104` (1.4)
   - Input: stock `libextavrcp.so` → Output: `output/libextavrcp.so.patched`
 
-- **`innioasis-y1-fixes.bash`** (v1.4.0)
+- **`innioasis-y1-fixes.bash`** (v1.4.1)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts the `system.img` firmware image, applies the selected patches, unmounts, and flashes via mtkclient
@@ -204,11 +204,14 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
     adb shell "dd if=/dev/block/<partition> bs=4096" > system.img
     ```
     (Replace `<partition>` with the correct block device node for your device.)
-  - **Important:** If the image is sparse (output of `file` shows "Android sparse image"), convert it to raw format using simg2img:
-    ```bash
-    simg2img system.img system-raw.img
-    mv system-raw.img system.img
-    ```
+  - **Sparse images are handled automatically** as of v1.4.1 — if the input is in Android sparse format (e.g., from an OTA), the bash detects it (via `file` or the sparse magic `0xed26ff3a`) and runs `simg2img` into the working copy. `simg2img` must be in `PATH`; install via:
+    - Debian/Ubuntu: `sudo apt install android-sdk-libsparse-utils`
+    - Arch: `sudo pacman -S android-tools`
+    - Fedora: `sudo dnf install android-tools`
+    - RHEL/Rocky/Alma 8+: `sudo dnf install epel-release && sudo dnf install android-tools`
+    - macOS (Homebrew): `brew install simg2img`
+
+    Raw images are copied as-is.
 - `boot.img` (required for `--root`). Used by `patch_bootimg.py` to apply default.prop edits + the H1/H2/H3 byte patches to `/sbin/adbd` in the ramdisk.
 - `Y1MediaBridge.apk` (required for `--avrcp`). This is the only patched-style artifact the user has to supply — it's an externally-built integration APK from the [Y1MediaBridge](../Y1MediaBridge/) project, not derived from stock system.img.
 
@@ -309,6 +312,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – `innioasis-y1-fixes.bash` v1.4.1: auto-handle sparse `system.img`. The bash now detects Android sparse format (via `file` output or the sparse magic `0xed26ff3a` LE-stored as bytes `3a ff 26 ed`) and runs `simg2img` into the working copy automatically. OTA-supplied `system.img` files are sparse, so this drops a manual prereq step. `simg2img` must be in PATH when the input is sparse; if missing, the script bails with install instructions for Debian/Ubuntu (`android-sdk-libsparse-utils`), Arch (`android-tools`), Fedora (`android-tools`), RHEL/Rocky/Alma 8+ (`android-tools` via EPEL), and macOS (`brew install simg2img`). Raw input images are still `cp`'d through unchanged. The working copy was already required to be raw end-to-end (mount + flash both expect raw), so this is purely a UX improvement — no behavioural change against already-raw inputs.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.4.0: drop the pre-staged-artifacts requirement. `--avrcp` and `--music-apk` now extract the stock binaries directly from the mounted `system.img`, run the corresponding `patch_*.py` against them, and write the patched bytes back in-place. Previously the user had to run each `patch_*.py` manually beforehand and stage `mtkbt.patched`/`MtkBt.odex.patched`/`libextavrcp.so.patched`/`libextavrcp_jni.so.patched`/`com.innioasis.y1_3.0.2-patched.apk` in `--artifacts-dir`. Only `Y1MediaBridge.apk` (externally-built integration APK, not derived from system.img) and `boot.img` (for `--root`) need to be staged now; everything else is extracted from `system.img` and patched on the fly. Two new helpers wrap the cycle: `patch_in_place_bytes <mount-rel> <patch-script> [mode]` for the four byte patchers (which all share `--output` semantics), and `patch_in_place_y1_apk <mount-rel>` for the smali patcher (which is script-style and lands its output in `${PATH_SCRIPT_DIR}/output/`). Idempotent — re-running `--avrcp` detects already-patched binaries (the `patch_*.py` scripts return exit 0 with no output file) and skips the write-back step. Sudo is still only requested when a system-affecting flag is set; `--root` alone runs sudo-less. Same in-place pattern that `patch_bootimg.py` already uses for `default.prop` + `/sbin/adbd`, applied to system.img.
 - **2026-05-03** – Add `patch_adbd.py` and wire it into `patch_bootimg.py`. Three Thumb-2 NOP patches (H1/H2/H3) at `0x14bc`/`0x14ca`/`0x14d8` neutralise adbd's drop_privileges block by replacing each `blx setgroups/setgid/setuid` (4 bytes) with `movs r0, #0; nop` so the following `cmp r0, #0; bne.w fail` falls through. Required because empirical confirmation 2026-05-03 (`adb shell id` returning `uid=2000(shell)` with `ro.secure=0`/`ro.debuggable=1`/`ro.adb.secure=0` correctly set per `getprop`) showed this OEM adbd has stripped the standard `should_drop_privileges()` gating — `strings adbd` returns ZERO references to `ro.secure` and the drop block at `0x94b8` runs unconditionally on every adbd startup. The default.prop edits remain in place as belt-and-suspenders for other Android subsystems but are not load-bearing for the adbd-as-root question. `patch_bootimg.py` now extracts `/sbin/adbd` from the cpio, applies the H1/H2/H3 patches via `patch_adbd.patch_bytes()`, and writes it back in-place; the patched adbd has the same file size (223,132 bytes) so cpio record offsets are unchanged. Stock adbd MD5 `9e7091f1699f89dc905dee3d9d5b23d8` → patched MD5 `ccebb66b25200f7e154ec23eb79ea9b4`. Round-trip verified end-to-end against the stock 3.0.2 ramdisk.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.3.2: no functional changes to the bash itself — reflects `patch_bootimg.py` absorbing `patch_adbd.py` (see entry above). `--root` help text updated: `adb root` is no longer flagged as harmful (the v1.3.1 warning was correct against the property-only patcher but is moot now that adbd is binary-patched).
