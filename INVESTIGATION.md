@@ -5,7 +5,7 @@ This document grew organically over the 2026-05-02 session. **Read this top sect
 ## Final state (after all traces complete)
 
 The shipped patch set:
-- `mtkbt.patched` (13 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8, G1, G2**) — MD5 `18c34b11a0a27c17c318c6de2a7b3fd0`
+- `mtkbt.patched` (12 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8, G1**) — MD5 `e2f9033eb50f10d2fc274726edb3ca75`
 - `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
 - `libextavrcp.so.patched` (1 patch: **C4**)
 - `MtkBt.odex.patched` (2 patches: **F1, F2**)
@@ -14,7 +14,21 @@ Patches **E5, E7a, E7b were tested and removed** — they patched live code that
 
 **E8 added 2026-05-02 and tested same-day as inert.** NOPing `bge #0x30688` at `0x3065e` in fn `0x3060c` (op_code=4 dispatcher slot 0) had no observable effect on cardinality:0. Inspection of the test logcat showed only msg_ids 505 and 506 received — **no GetCapabilities (`op_code=4`) ever arrives at any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`). The gate is upstream of the dispatcher table itself — somewhere in mtkbt's AVCTP receive path between L2CAP and the dispatcher. E8 left in place as a verified-correct patch even though inert.
 
-**G1/G2 added 2026-05-02 as diagnostic instrumentation.** mtkbt routes its `[AVRCP]/[AVCTP]` log strings through `__xlog_buf_printf` (separate buffer, not in logcat without root). Both xlog and `__android_log_print` are already imported (`NEEDED: liblog.so`), so a 3-instruction thunk redirects xlog calls to logcat: `mov r0,#4; mov r1,r2; b __android_log_print_PLT`. The signatures differ only in the first two args (xlog: `buf_id, code, fmt, ...`; android_log: `prio, tag, fmt, ...`); fmt at r2 and all varargs at r3+stack pass through unchanged. We overwrite r0=LOG_INFO and r1=fmt_str (so the format string itself becomes the logcat tag, preserving `[AVRCP]/[AVCTP]` prefixes for grep). G1 at `0x675c0` patches the Thumb wrapper (2988 callsites); G2 at `0xb408` patches the ARM PLT entry (1091 direct callsites). Verify post-flash with `logcat -s '*:V' | grep -E '\[AVRCP\]|\[AVCTP\]'`. **These are diagnostic patches and should be removed once the upstream gate is identified.**
+**G1/G2 first attempt 2026-05-02 — reverted (mtkbt SIGSEGV at NULL).** Diagnostic instrumentation pair (G1 = Thumb wrapper hijack at `0x675c0`; G2 = ARM PLT hijack at `0xb408`) redirected `__xlog_buf_printf` → `__android_log_print`. The 12-byte thunk forwarded r2 (fmt) as both tag and fmt for android_log_print. mtkbt crashed at startup because at least one xlog callsite passes NULL in r2; bionic's `__android_log_print` at API 17 doesn't NULL-check the tag arg, so `strlen(NULL)` faulted at addr 0.
+
+**G1 second attempt 2026-05-02 — re-shipped with NULL guard.** 20-byte Thumb thunk at `0x675c0`:
+
+```
+0x675c0:  cbz r2, .L_null     ; NULL fmt -> return, don't log
+0x675c2:  movs r0, #4         ; LOG_INFO
+0x675c4:  mov r1, r2          ; tag = fmt
+0x675c6:  ldr.w pc, [pc, #4]  ; tail-jump via literal
+0x675ca:  nop                  ; align literal at 0x675cc
+0x675cc:  .word 0xaef8         ; PLT addr (ARM, bit 0 clear -> mode switch)
+0x675d0:  .L_null: movs r0,#0; bx lr
+```
+
+G2 (PLT redirect at `0xb408`) was deliberately dropped this time. G1 alone covers the 2988 wrapper callsites where the `[AVRCP]/[AVCTP]` diagnostic surface lives; the 1091 direct PLT callers are lower-level kernel-side BT stack housekeeping (likely the source of the NULL-passing offenders that crashed the first attempt). If G1 also crashes (e.g., from non-NULL invalid pointers like small ints), the next iteration adds a low-memory range check (`cmp r2, #0xff; blo .L_null`).
 
 ## Verified true (with corrections from earlier in this doc)
 
