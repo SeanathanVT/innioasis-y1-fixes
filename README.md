@@ -36,11 +36,14 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. If using `--avrcp` build `src/Y1MediaBridge/` once; if using `--root` build `src/su/` once. The bash picks up both build outputs directly — no need to stage the artifacts.
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. Run `tools/setup.sh` once to clone MTKClient and create the patcher Python venv. Build `src/Y1MediaBridge/` once if using `--avrcp`, and `src/su/` once if using `--root` — the bash picks up both build outputs directly.
 
 ```bash
 mkdir -p ~/y1-patches
 cp /path/to/rom.zip ~/y1-patches/
+
+# One-time tooling setup (clones MTKClient, creates Python venvs):
+./tools/setup.sh
 
 # Build src/Y1MediaBridge/ once if using --avrcp:
 ( cd src/Y1MediaBridge && ./gradlew assembleDebug )
@@ -51,7 +54,9 @@ cp /path/to/rom.zip ~/y1-patches/
 ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
 ```
 
-`rom.zip` is the only required artifact. Both `src/Y1MediaBridge/` and `src/su/` only need to be rebuilt when their sources change.
+`rom.zip` is the only required artifact. Subdirectory build outputs (`src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk`, `src/su/build/su`) and the contents of `tools/` are picked up automatically; rebuild any of them only when their sources change.
+
+If you have MTKClient installed elsewhere (or want to test against an alternate checkout), pass `--mtkclient-dir <path>` to the bash, or set `MTKCLIENT_DIR` in your environment. Same for the patcher Python venv via `--python-venv <path>`.
 
 The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, applies the selected patches in-place, unmounts, and flashes the patched image via mtkclient.
 
@@ -93,12 +98,12 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 ## Requirements
 
-- Bash 4+, `sudo` (loop-mount + chown), `unzip`, `md5sum` (Linux) or `md5 -q` (macOS).
-- `mtkclient` 2.1.4.1 at `/opt/mtkclient-2.1.4.1`.
-- Python 3.8+ (all patchers; stdlib only except `patch_y1_apk.py`).
-- Java 11+ and `androguard` (`pip install androguard`) — only for `--music-apk`. apktool is downloaded by `patch_y1_apk.py` on first invocation.
+- Bash 4+, `sudo` (loop-mount + chown), `git`, `unzip`, `md5sum` (Linux) or `md5 -q` (macOS).
+- Python 3.8+ with `venv` module. Patcher byte-level scripts are stdlib-only; `patch_y1_apk.py` needs `androguard`, which `tools/setup.sh` installs into `tools/python-venv/`. Java 11+ also required for `--music-apk` (apktool's smali assembler; apktool itself is downloaded by `patch_y1_apk.py` on first invocation).
+- `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
 - `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch), `brew install simg2img` (macOS).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
+- For `--avrcp` only: Android SDK (set `ANDROID_HOME` to point at it). Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`.
 
 ## Documentation
 

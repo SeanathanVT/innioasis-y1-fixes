@@ -10,11 +10,26 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-05-03
+
+### Added
+- `tools/setup.sh` — idempotent: clones MTKClient at a pinned ref (currently 2.1.4.1) into `tools/mtkclient/`, creates `tools/mtkclient/venv/` with its `requirements.txt`, and creates `tools/python-venv/` with the patcher Python deps from `tools/python-requirements.txt` (currently `androguard>=3.3.0,<5`). Re-runnable; skips already-done work.
+- `tools/python-requirements.txt` — pinned patcher Python deps. Update + bump versions deliberately.
+- `--mtkclient-dir <path>` flag on the bash. Override the default `tools/mtkclient/` location. Also honoured via the `MTKCLIENT_DIR` env var.
+- `--python-venv <path>` flag on the bash. Override the default `tools/python-venv/` location.
+
+### Changed
+- **Bash no longer assumes `/opt/mtkclient-2.1.4.1` and `/opt/venv/mtkclient` exist.** The previous hardcoded paths were specific to one developer's machine. New `resolve_mtkclient_dir` and `resolve_python_venv` helpers do precedence-ordered lookup: explicit flag → env var → `tools/` default. If nothing resolves, the bash bails with a clear "run `tools/setup.sh`" pointer.
+- MTKClient venv is now expected at `${PATH_MTKCLIENT}/venv/` (consistent with `tools/setup.sh`'s output). Previous `/opt/venv/mtkclient/` sibling layout dropped.
+- `patch_in_place_y1_apk` activates the patcher venv inside its subshell so the activation is scoped to that single invocation. The other byte patchers (stdlib-only) continue to run against whatever `python3` is on PATH.
+
 ### Fixed
 - Add `local.properties` to `src/Y1MediaBridge/.gitignore`. AGP looks for `sdk.dir=...` in this file as one of two ways to locate the Android SDK (the other being the `ANDROID_HOME` env var); it's per-machine and conventionally untracked. The original `.gitignore` was missing it.
 - Commit the Gradle wrapper into `src/Y1MediaBridge/` (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`). The standalone Y1MediaBridge repo's `.gitignore` had explicit ignore rules for these files (overriding its own earlier `!gradle-wrapper.jar` exception), so they never landed in the subtree merge — `./gradlew assembleDebug` was failing with `No such file or directory`. Wrapper now in place; pinned to Gradle 9.5.0 per `gradle-wrapper.properties`. Y1MediaBridge `.gitignore` cleaned up to remove the bad ignore rules.
 
 ### Documentation
+- README Quick start: now opens with `./tools/setup.sh` for one-time tooling provisioning, then walks through the per-component build steps. Notes that `rom.zip` is the only required artifact and that `--mtkclient-dir` / `--python-venv` / `MTKCLIENT_DIR` are available for users with their own toolchain installs.
+- README Requirements: dropped the "mtkclient 2.1.4.1 at /opt/..." line (now covered by `tools/setup.sh`); added a line about the Android SDK being needed only for `--avrcp`.
 - Y1MediaBridge README's Toolchain note: "Gradle 8.11.1 wrapper" → "Gradle 9.5.0 wrapper" (was stale; the upstream had bumped to 9.5.0 just before the subtree import).
 
 ## [1.9.1] - 2026-05-03
