@@ -11,6 +11,28 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
 - **System Configuration** – Enables ADB debugging and optimizes Bluetooth settings
 - **APK Patching** – Patches the system music player APK at the bytecode level using smali assembly
 
+## Patch ID Legend
+
+Patches are referenced throughout this README, in `INVESTIGATION.md`, and in the changelog by short IDs. The full mapping:
+
+| ID(s) | Binary | Site / effect |
+|---|---|---|
+| **B1, B2, B3** | `mtkbt` | AVCTP version `0x00 → 0x03` (1.0 → 1.3) in three SDP descriptor groups: Groups 1&2 TG ProtocolDescList (`0x0eba6d`), Group 3 CT ProtocolDescList (`0x0eba37`), Group 1 AdditionalProtocol/browsing (`0x0eba25`). AVRCP 1.4 requires AVCTP 1.3. |
+| **C1, C2, C3** | `mtkbt` | AVRCP version → 1.4 in three ProfileDescList entries: `0x0eba4b` (entry[23], 1.0→1.4), `0x0eba58` (entry[18], 1.0→1.4), `0x0eba77` (entry[13], 1.3→1.4). |
+| **A1** | `mtkbt` | Runtime SDP MOVW immediate at `0x38BFC`: `MOVW r7,#0x0301 → MOVW r7,#0x0401` — belt-and-suspenders against the static SDP template. |
+| **D1** | `mtkbt` | NOP the registration guard at `0x38C6C` (`BNE → NOP`). Without this, the AVRCP TG SDP struct is built but never linked into mtkbt's live registry; mtkbt silently discards inbound GetCapabilities. |
+| **E3, E4** | `mtkbt` | TG SupportedFeatures bitmask: Group 2 (served) `0x0001 → 0x0033` at `0x0eba5b`; Group 1 (defense-in-depth) `0x0021 → 0x0033` at `0x0eba4e`. `0x33` = Cat1 + Cat2 + PAS + GroupNav (AVRCP 1.4 baseline). |
+| **E8** | `mtkbt` | NOP the `bge #0x30688` at `0x3065e` in fn `0x3060c` (op_code=4 dispatcher slot 0). Forces classification through the AVRCP 1.3/1.4 init path regardless of `[conn+0x149]`'s sign bit. **Empirically inert** for our peers (gate is upstream of the dispatcher table); kept as a verified-correct probe. |
+| **E5, E7a, E7b** | `mtkbt` | **Removed 2026-05-02.** Tested across three known-good 1.4 controllers, no observable behavioural change — code paths not exercised at runtime for our peer state. |
+| **C2a, C2b** | `libextavrcp_jni.so` | In `BluetoothAvrcpService_activateConfig_3req` at `0x375c`: hardcode `g_tg_feature = 0x0e` and `sdpfeature = 0x23`, bypassing the bitmask negotiation logic. |
+| **C3a, C3b** | `libextavrcp_jni.so` | In `getCapabilitiesRspNative` (`FUN_005de8`) at `0x5e56`/`0x5e5c`: raise the GetCapabilities EventList cap from `13 → 14` so a 1.4-capable response can be served if the JNI ever receives an inbound GetCapabilities. |
+| **C4** | `libextavrcp.so` | Single AVRCP version constant at `0x002e3b`: `0x0103 → 0x0104` (1.3 → 1.4). |
+| **F1** | `MtkBt.odex` | At `0x3e0ea`: `getPreferVersion()` returns `14` (AVRCP 1.4) instead of `10` (BlueAngel internal code for AVRCP 1.3). |
+| **F2** | `MtkBt.odex` | At `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false`. Fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts. |
+| **G1, G2** | `mtkbt` | **Attempted and reverted 2026-05-02 / 2026-05-03.** Diagnostic `__xlog_buf_printf → __android_log_print` redirect (Thumb thunk at `0x675c0`, ARM PLT at `0xb408`). Crashed mtkbt at NULL fmt; even with NULL guard, BT framework couldn't enable. Path closed without root or daemon-side tooling. |
+
+The "Final state" in `INVESTIGATION.md` and the "Status (2026-05-03)" section below summarise which IDs ship in the current build.
+
 ## Contents
 
 ### Main Scripts
@@ -64,12 +86,12 @@ This project provides tools to patch and enhance the Innioasis Y1 firmware with:
   - With `--root`, delegates to `patch_bootimg.py` to produce `boot-3.0.2-devel.img`, then writes it to the device's `boot` partition via mtkclient
 
 - **`patch_bootimg.py`**
-  - Patches stock `boot.img` ramdisk so adbd does not self-demote to uid `shell` after boot. After flashing, `adb root && adb shell` yields a uid 0 shell.
+  - Patches stock `boot.img` ramdisk so adbd does not self-demote to uid `shell` after boot. After flashing, `adb shell` yields a uid 0 shell directly — `adb root` is unnecessary and should not be invoked (see warning below).
   - **Edits applied to ramdisk `default.prop`:**
     - `ro.secure=0` (was 1)
     - `ro.debuggable=1` (was 0)
     - `ro.adb.secure=0` (appended)
-    - `service.adb.root=1` (appended)
+  - **Do not run `adb root` after flashing.** With `ro.secure=0`, adbd's `should_drop_privileges()` short-circuits at startup and adbd already runs as uid 0 — `adb shell` returns root directly. Running `adb root` triggers an adbd self-restart which the stock MTK adbd's USB re-bind handles poorly on this firmware: the host loses the device and `adb shell` stops working until reboot. `service.adb.root=1` was previously appended here as belt-and-suspenders but is unreachable when `ro.secure=0` short-circuits the privilege-drop check, and was removed in v1.3.1.
   - **Format-aware:** parses the Android boot.img header, strips/repacks the MTK 512-byte `ROOTFS` ramdisk wrapper, and patches `default.prop` *in-place* inside the gzipped cpio stream — no extract/repack step, so device nodes and entry order are preserved byte-for-byte.
   - Pure-Python; no `dd` / `cpio` / `mkbootimg` / `abootimg` shell dependency. The previous bash-based `--root` (removed in v1.2.0) drifted on MTK header byte counts; this implementation removes that failure mode.
   - Input: stock `boot.img` (in `--artifacts-dir`) → Output: `boot-3.0.2-devel.img` (in `--artifacts-dir`)
@@ -112,7 +134,7 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 **Files Deployed:**
 - `mtkbt.patched` – Patched Bluetooth daemon (AVRCP 1.4 SDP advertisement)
 - `MtkBt.odex.patched` – Patched ODEX (`getPreferVersion()` returns 14)
-- `libextavrcp_jni.so.patched` – Patched JNI library (`g_tg_feature=14`, `sdpfeature=0x23`)
+- `libextavrcp_jni.so.patched` – Patched JNI library: **C2a/C2b** hardcode `g_tg_feature=14` and `sdpfeature=0x23` in `activateConfig_3req` (bypass bitmask logic); **C3a/C3b** raise the GetCapabilities EventList cap from 13 → 14 in `getCapabilitiesRspNative` so a 1.4-capable response can be served
 - `libextavrcp.so.patched` – Patched AVRCP library (version constant `0x0103` → `0x0104`)
 - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player
 - `Y1MediaBridge.apk` – Additional media integration
@@ -223,7 +245,7 @@ chmod +x innioasis-y1-fixes.bash
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
 - `--music-apk` – Install patched Y1 music player APK
 - `--remove-apps` – Remove unnecessary APK files
-- `--root` – Patch ramdisk `default.prop` (`ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`, `service.adb.root=1`) and write the patched boot image to the device. Requires `boot.img` in `--artifacts-dir`.
+- `--root` – Patch ramdisk `default.prop` (`ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`) and write the patched boot image to the device. Requires `boot.img` in `--artifacts-dir`. When `--root` is the only flag specified, `system.img` is left alone (no copy/mount/flash). After flashing, `adb shell` returns uid 0 directly — **do not run `adb root`** (its restart triggers a stock MTK adbd USB re-bind that drops the connection on this firmware; reboot to recover).
 - `--all` – Apply all patches
 
 **Example:**
@@ -286,6 +308,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – `innioasis-y1-fixes.bash` v1.3.1: `--root` no longer touches `system.img` (skip copy / mount / patch / unmount / flash and the sudo prompt unless one of `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps` is also set). The previous v1.3.0 flow re-flashed an unmodified `system.img` for `--root`-only invocations — pure cycle waste and a non-trivial flash risk. Also: drop `service.adb.root=1` from `patch_bootimg.py`'s `_DEFAULT_PROP_EDITS`. With `ro.secure=0` already in `default.prop`, adbd's `should_drop_privileges()` short-circuits at startup and never reaches the `service.adb.root` check, so the entry was inert; removing it eliminates one variable from any future `adb root`-triggered restart. `--root` help text and README warn against running `adb root` post-flash on this firmware: the stock MTK adbd's USB re-bind on self-restart loses the host connection until reboot, and with `ro.secure=0` the user already has uid 0 in `adb shell` without needing it.
 - **2026-05-03** – Reintroduce `--root` flag in `innioasis-y1-fixes.bash` (v1.3.0) backed by a new `patch_bootimg.py`. The previous v1.1.x `--root` was bash + `dd`/`cpio`/`mkbootimg` and drifted on MTK ramdisk header byte counts; the rewrite is pure-Python and patches `default.prop` *in-place* inside the gzipped cpio (no extract/repack — device nodes preserved byte-for-byte), then repacks the Android boot.img header with a recomputed SHA1 ID and the original load addresses. Edits: `ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`, `service.adb.root=1`. Round-tripped against the stock 3.0.2 ramdisk (37 cpio records, all post-`default.prop` offsets shifted by exactly the +35-byte delta from the larger prop file). After flashing the patched boot.img via mtkclient, `adb root && adb shell` yields uid 0 — unblocks `__xlog_buf_printf`/btsnoop/`gdbserver` visibility into mtkbt for the `result=0x1000` investigation.
 - **2026-05-03** – Trace #7 (libbluetooth_*.so audit): all four `libbluetooth*.so` libs (`libbluetoothdrv.so`, `libbluetooth_mtk.so`, `libbluetoothem_mtk.so`, `libbluetooth_relayer.so`) inspected end-to-end. They are exclusively HCI/transport: UART link to MT6627, GORM/HCC chip-bringup, NVRAM BD-address management, Engineer Mode test plumbing. Combined `strings` search returned zero hits for `avrcp`, `avctp`, `profile`, `capability`, `notif`, `metadata`, `cardinal`. Conclusion: the cardinality:0 gate cannot live anywhere except inside `mtkbt`. The "we might be patching the wrong binary" doubt is closed.
 - **2026-05-03** – Fresh test log (`/work/logs/test.log`, peer `38:42:0B:38:A3:3E`) shows the same gate pattern as prior runs (only msg_ids 506/505/512 reach JNI; no `op_code=4`; no `registerNotificationInd`). New observation: `MSG_ID_BT_AVRCP_CONNECT_CNF conn_id:1  result:4096` — the `result` field is non-zero (`0x1000`). This had not been called out in earlier log analyses and is now flagged as the most concrete static-investigation lead for the post-root pass.
