@@ -77,12 +77,13 @@ The "Final state" in `INVESTIGATION.md` and the "Status (2026-05-03)" section be
   - Single patch: version constant at 0x002e3b changed from `0x0103` (1.3) to `0x0104` (1.4)
   - Input: stock `libextavrcp.so` → Output: `output/libextavrcp.so.patched`
 
-- **`innioasis-y1-fixes.bash`** (v1.5.0)
+- **`innioasis-y1-fixes.bash`** (v1.6.0)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
   - Mounts the `system.img` firmware image, applies the selected patches, unmounts, and flashes via mtkclient
   - **Auto-extract / auto-patch (v1.4.0)**: for `--avrcp` and `--music-apk`, stock binaries (`mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so`, the music APK) are extracted from the mounted system.img, fed through their respective `patch_*.py`, and written back in-place. No pre-staged `*.patched` files are required. Uses two helpers (`patch_in_place_bytes` and `patch_in_place_y1_apk`) and is idempotent (re-running detects already-patched files and skips the write-back).
-- **Stock-firmware MD5 validation (v1.5.0)**: a `KNOWN_FIRMWARES` manifest near the top of the script holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK basename) tuples. The staged `system.img` (post-simg2img if sparse) and `boot.img` (when `--root`) are MD5-validated against the manifest; the matched version is what drives all version-dependent filenames in the rest of the run. If both are processed they must resolve to the same version. Unknown input bails the script with the manifest dump.
+- **Stock-firmware MD5 validation (v1.5.0)**: a `KNOWN_FIRMWARES` manifest near the top of the script holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK basename) tuples. The matched version is what drives all version-dependent filenames in the rest of the run.
+- **rom.zip is the firmware input (v1.6.0)**: the user stages just the official OTA `rom.zip` (not the unpacked `boot.img` / `system.img`). The bash MD5-validates `rom.zip` against the manifest, then `unzip -j -o`'s only the inner files needed by the active flags (system.img for system-affecting flags, boot.img for `--root`) into the tempdir. Each extracted file's MD5 is cross-verified against the manifest as a defensive check (rom.zip MD5 is collision-resistant so the extra checks are essentially redundant, but cheap). System.img sparse detection + simg2img still applies to the extracted file in case a future firmware bundles a sparse system.img.
   - Configures `build.prop` and Bluetooth settings (`--adb`, `--bluetooth`)
   - Removes unnecessary bloatware APKs (`--remove-apps`)
   - With `--root`, delegates to `patch_bootimg.py` to produce `boot-3.0.2-devel.img` (which embeds the H1/H2/H3 adbd byte patches), then writes it to the device's `boot` partition via mtkclient. `--root` does not touch `system.img`.
@@ -187,35 +188,29 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 - `sudo` access (for mounting and modifying system.img — only needed if a system-affecting flag is set; `--root` alone runs sudo-less)
 - `md5sum` (Linux) or `md5 -q` (macOS) for stock-firmware validation — both come pre-installed on the respective OSes
 - `--artifacts-dir` parameter pointing to a directory containing:
-  - `system.img` – Original firmware system image (required if any of `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps` is set). Stock binaries are extracted from this image, patched in-place by the bash via `patch_in_place_bytes`/`patch_in_place_y1_apk`, and written back into the mount. **No pre-staged `*.patched` files are required as of v1.4.0.**
-  - `boot.img` – Original firmware boot image (required for `--root` flag)
-  - `Y1MediaBridge.apk` – Externally-built integration APK (required for `--avrcp` flag — this is *not* derived from the stock system.img, so it must be staged separately)
+  - `rom.zip` – Official Innioasis Y1 OTA archive (required for any patch flag). MD5-validated against the `KNOWN_FIRMWARES` manifest. The bash extracts `boot.img` and/or `system.img` from this zip on demand.
+  - `Y1MediaBridge.apk` – Externally-built integration APK (required for `--avrcp` flag — this is *not* derived from the OTA, so it must be staged separately and is not MD5-validated)
+- `unzip` for extracting `boot.img`/`system.img` from `rom.zip` (pre-installed on virtually all Linux distros and macOS)
 - Python 3.8+, Java 11+ (only if `--music-apk` is set — apktool is downloaded by `patch_y1_apk.py` on first invocation)
 - androguard: `pip install androguard` (only if `--music-apk` is set)
 - mtkclient 2.1.4.1 installed at `/opt/mtkclient-2.1.4.1`
+- `simg2img` (only if a future firmware bundles a sparse `system.img` inside its `rom.zip` — v3.0.2 bundles a raw one, so this is currently unused; install instructions in [Step 1](#step-1-stage-artifacts))
 
 ## Usage
 
 ### Step 1: Stage artifacts
 
-Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`). As of v1.4.0 of `innioasis-y1-fixes.bash`, no pre-patched `*.patched` files are required — the bash extracts stock binaries from the mounted `system.img`, applies the byte/smali patches in-place, and writes them back.
+Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`). As of v1.6.0 of `innioasis-y1-fixes.bash`, the firmware input is the official OTA `rom.zip` directly — the bash extracts `boot.img` and `system.img` from it on demand. No pre-patched `*.patched` files are required either; stock binaries are extracted from the mounted `system.img`, patched in-place, and written back.
 
-- `system.img` (required for any system-affecting flag — `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps`).
-  - Obtained from an OTA update package, or dumped from the device block device via ADB:
-    ```bash
-    adb shell "dd if=/dev/block/<partition> bs=4096" > system.img
-    ```
-    (Replace `<partition>` with the correct block device node for your device.)
-  - **Sparse images are handled automatically** as of v1.4.1 — if the input is in Android sparse format (e.g., from an OTA), the bash detects it (via `file` or the sparse magic `0xed26ff3a`) and runs `simg2img` into the working copy. `simg2img` must be in `PATH`; install via:
-    - Debian/Ubuntu: `sudo apt install android-sdk-libsparse-utils`
-    - Arch: `sudo pacman -S android-tools`
-    - Fedora: `sudo dnf install android-tools`
-    - RHEL/Rocky/Alma 8+: `sudo dnf install epel-release && sudo dnf install android-tools`
-    - macOS (Homebrew): `brew install simg2img`
+- `rom.zip` (required for any patch flag). The official Innioasis Y1 OTA archive. The bash MD5-validates it against the `KNOWN_FIRMWARES` manifest (see "[Stock Firmware Manifest](#stock-firmware-manifest)" below), then extracts `boot.img` and/or `system.img` into a tempdir as needed by the active flags and cross-verifies each extracted file against the manifest.
+- `Y1MediaBridge.apk` (required for `--avrcp`). The only patched-style artifact the user has to supply — an externally-built integration APK from the [Y1MediaBridge](../Y1MediaBridge/) project, not derived from the OTA. Not MD5-validated.
 
-    Raw images are copied as-is.
-- `boot.img` (required for `--root`). Used by `patch_bootimg.py` to apply default.prop edits + the H1/H2/H3 byte patches to `/sbin/adbd` in the ramdisk.
-- `Y1MediaBridge.apk` (required for `--avrcp`). This is the only patched-style artifact the user has to supply — it's an externally-built integration APK from the [Y1MediaBridge](../Y1MediaBridge/) project, not derived from stock system.img.
+**System.img sparse handling.** If a future firmware bundles a sparse `system.img` inside its `rom.zip`, the bash auto-de-sparses via `simg2img` after extraction (the manifest hash is always for the raw representation). v3.0.2's bundled `system.img` is raw, so `simg2img` is not invoked for that build. If you do need it, install via:
+- Debian/Ubuntu: `sudo apt install android-sdk-libsparse-utils`
+- Arch: `sudo pacman -S android-tools`
+- Fedora: `sudo dnf install android-tools`
+- RHEL/Rocky/Alma 8+: `sudo dnf install epel-release && sudo dnf install android-tools`
+- macOS (Homebrew): `brew install simg2img`
 
 ### Step 2 (optional): Run patch scripts manually for inspection
 
@@ -302,11 +297,11 @@ Replace the APK inside the firmware image using this toolkit's bash script.
 
 Known stock-firmware MD5s recognised by `innioasis-y1-fixes.bash`'s `KNOWN_FIRMWARES` manifest. The bash validates the staged inputs against this table and uses the matched entry for all version-dependent filename construction. To enrol a new firmware build, add a new row to the array (same five-field schema).
 
-| Version | system.img (raw) | boot.img | rom.zip | Music APK basename in `app/` |
+| Version | rom.zip (input) | system.img (raw, extracted) | boot.img (extracted) | Music APK basename in `app/` |
 |---|---|---|---|---|
-| **3.0.2** | `473991dadeb1a8c4d25902dee9ee362b` | `1f7920228a20c01ad274c61c94a8cf36` | `82657db82578a38c6f1877e02407127a` | `com.innioasis.y1_3.0.2.apk` |
+| **3.0.2** | `82657db82578a38c6f1877e02407127a` | `473991dadeb1a8c4d25902dee9ee362b` | `1f7920228a20c01ad274c61c94a8cf36` | `com.innioasis.y1_3.0.2.apk` |
 
-Stock file sizes for reference: `system.img` 681,574,400 bytes (raw ext4), `boot.img` 4,706,304 bytes, `rom.zip` 259,502,414 bytes (the official OTA package — included for documentation; not consumed by the bash). Note that the v3.0.2 `system.img` from the firmware archive is *raw* ext4; an OTA-supplied `system.img` may be in Android sparse format, in which case the bash's auto-simg2img step de-sparses it before MD5 validation (the manifest hash is always the raw representation).
+Stock file sizes for reference: `rom.zip` 259,502,414 bytes (the official OTA, **the only firmware artifact the user stages** as of v1.6.0), `system.img` 681,574,400 bytes (raw ext4 — extracted from rom.zip), `boot.img` 4,706,304 bytes (extracted from rom.zip). Note that v3.0.2's bundled `system.img` is raw ext4; if a future firmware bundles a sparse `system.img` instead, the bash's auto-simg2img step will de-sparse it before the cross-check MD5 (the manifest hash is always the raw representation).
 
 ## Status (2026-05-03)
 
@@ -324,6 +319,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – `innioasis-y1-fixes.bash` v1.6.0: take the official OTA `rom.zip` as the primary firmware input. Users now stage just `rom.zip` + `Y1MediaBridge.apk` (no separate `boot.img`/`system.img` extraction needed). The bash MD5-validates `rom.zip` against the `KNOWN_FIRMWARES` manifest, derives the firmware version from the match, then `unzip -j -o`'s only the inner files needed by the active flags (system.img for system-affecting flags, boot.img for `--root`) into the tempdir. Each extracted file's MD5 is cross-verified against the manifest as a defensive check (rom.zip MD5 is collision-resistant so this is essentially redundant, but cheap and catches zip-extraction bugs). The sparse-detect / simg2img path still applies to the extracted system.img — v3.0.2's bundled system.img is raw, but a future firmware could bundle a sparse one. `unzip` is now a hard dependency. Help text and README updated; "Stock Firmware Manifest" table reordered to show `rom.zip` as the input and `system.img`/`boot.img` as derived. The v1.5.0 manifest format is unchanged (rom.zip md5 was already a field there); the only schema change is which field is the primary lookup key.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.5.0: replace the hardcoded `VERSION_FIRMWARE="3.0.2"` constant with stock-firmware MD5 validation. New `KNOWN_FIRMWARES` manifest holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK basename) tuples. Staged `system.img` (post-simg2img if sparse) and `boot.img` (when `--root`) are MD5-validated against the manifest before any patch step runs. The matched version drives all version-dependent filenames (working-copy basenames, music-APK lookup, `patch_in_place_y1_apk`'s output path). If both system.img and boot.img are processed they must resolve to the same firmware version; mismatched versions exit with a clear error. Unknown input bails the script and dumps the full manifest. v3.0.2 enrolled as the only known build (system.img raw md5 `473991dadeb1a8c4d25902dee9ee362b`, boot.img md5 `1f7920228a20c01ad274c61c94a8cf36`, rom.zip md5 `82657db82578a38c6f1877e02407127a`). Cross-platform MD5 helper prefers `md5sum` (Linux) and falls back to `md5 -q` (macOS). Help text and README updated; new "Stock Firmware Manifest" section in the README documents the table and how to enrol additional builds.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.4.1: auto-handle sparse `system.img`. The bash now detects Android sparse format (via `file` output or the sparse magic `0xed26ff3a` LE-stored as bytes `3a ff 26 ed`) and runs `simg2img` into the working copy automatically. OTA-supplied `system.img` files are sparse, so this drops a manual prereq step. `simg2img` must be in PATH when the input is sparse; if missing, the script bails with install instructions for Debian/Ubuntu (`android-sdk-libsparse-utils`), Arch (`android-tools`), Fedora (`android-tools`), RHEL/Rocky/Alma 8+ (`android-tools` via EPEL), and macOS (`brew install simg2img`). Raw input images are still `cp`'d through unchanged. The working copy was already required to be raw end-to-end (mount + flash both expect raw), so this is purely a UX improvement — no behavioural change against already-raw inputs.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.4.0: drop the pre-staged-artifacts requirement. `--avrcp` and `--music-apk` now extract the stock binaries directly from the mounted `system.img`, run the corresponding `patch_*.py` against them, and write the patched bytes back in-place. Previously the user had to run each `patch_*.py` manually beforehand and stage `mtkbt.patched`/`MtkBt.odex.patched`/`libextavrcp.so.patched`/`libextavrcp_jni.so.patched`/`com.innioasis.y1_3.0.2-patched.apk` in `--artifacts-dir`. Only `Y1MediaBridge.apk` (externally-built integration APK, not derived from system.img) and `boot.img` (for `--root`) need to be staged now; everything else is extracted from `system.img` and patched on the fly. Two new helpers wrap the cycle: `patch_in_place_bytes <mount-rel> <patch-script> [mode]` for the four byte patchers (which all share `--output` semantics), and `patch_in_place_y1_apk <mount-rel>` for the smali patcher (which is script-style and lands its output in `${PATH_SCRIPT_DIR}/output/`). Idempotent — re-running `--avrcp` detects already-patched binaries (the `patch_*.py` scripts return exit 0 with no output file) and skips the write-back step. Sudo is still only requested when a system-affecting flag is set; `--root` alone runs sudo-less. Same in-place pattern that `patch_bootimg.py` already uses for `default.prop` + `/sbin/adbd`, applied to system.img.
