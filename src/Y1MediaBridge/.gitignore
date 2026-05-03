@@ -21,8 +21,3 @@ gradle-app.setting
 .classpath
 
 *.DS_Store
-
-# Post-build artifacts
-gradle/wrapper/gradle-wrapper.jar
-gradlew
-gradlew.bat

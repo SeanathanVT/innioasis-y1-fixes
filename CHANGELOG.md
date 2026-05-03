@@ -10,6 +10,12 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Fixed
+- Commit the Gradle wrapper into `src/Y1MediaBridge/` (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`). The standalone Y1MediaBridge repo's `.gitignore` had explicit ignore rules for these files (overriding its own earlier `!gradle-wrapper.jar` exception), so they never landed in the subtree merge — `./gradlew assembleDebug` was failing with `No such file or directory`. Wrapper now in place; pinned to Gradle 9.5.0 per `gradle-wrapper.properties`. Y1MediaBridge `.gitignore` cleaned up to remove the bad ignore rules.
+
+### Documentation
+- Y1MediaBridge README's Toolchain note: "Gradle 8.11.1 wrapper" → "Gradle 9.5.0 wrapper" (was stale; the upstream had bumped to 9.5.0 just before the subtree import).
+
 ## [1.9.1] - 2026-05-03
 
 ### Fixed

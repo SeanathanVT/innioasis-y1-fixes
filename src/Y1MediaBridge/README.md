@@ -38,7 +38,7 @@ keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug
 also leaves `debuggable=true` in the manifest, which is useful for a research
 device — you can JDWP-attach to the running service.
 
-Toolchain pinned in the tree: Gradle 8.11.1 wrapper, AGP 8.7.3, `compileSdk 34`,
+Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 8.7.3, `compileSdk 34`,
 `minSdk 17`, `targetSdk 17`, Java 8 bytecode. A manual `javac --release 8 -cp
 android-34.jar` type-check of the source passes cleanly with zero errors (only
 the expected "--release 8 is obsolete" note from JDK 21 and a `RemoteControlClient`
