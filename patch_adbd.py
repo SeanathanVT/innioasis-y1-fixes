@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """
 patch_adbd.py — Patch stock /sbin/adbd → adbd.patched so adbd does not drop
-privileges to AID_SHELL on startup. After flashing the patched ramdisk,
-`adb shell` returns uid 0 directly.
+privileges to AID_SHELL on startup. After flashing the patched ramdisk, the
+*intent* is that `adb shell` returns uid 0 directly.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ⚠  THIS PATCH HAS BEEN UNWIRED FROM innioasis-y1-fixes.bash (v1.7.0)     ║
+║                                                                          ║
+║  Both attempted approaches (NOP-the-blx and arg-zero) caused "device     ║
+║  offline" on hardware: adbd starts and the USB endpoint enumerates,      ║
+║  but the ADB protocol handshake never completes. Without on-device       ║
+║  visibility (logcat / dmesg / strace, all of which require working      ║
+║  ADB), we couldn't diagnose what about adbd-at-uid-0 breaks the          ║
+║  protocol on this OEM build. The script and its analysis are kept here   ║
+║  as historical record — do not ship the output of this patcher into a    ║
+║  flashed boot.img unless you have first identified and addressed the     ║
+║  root cause of the protocol-handshake failure (likely something in       ║
+║  adbd's USB FFS init or a vendor-added uid check we missed statically).  ║
+║                                                                          ║
+║  Recovery if you accidentally flashed an adbd patched by this script:    ║
+║  re-flash boot.img with the stock /sbin/adbd via mtkclient (BROM is      ║
+║  independent of adbd, so the device is still flashable).                 ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
 Stock binary md5:  9e7091f1699f89dc905dee3d9d5b23d8  (size: 223,132 bytes)
-Output md5:        9eeb6b3bef1bef19b132936cc3b0b230
+Output md5:        9eeb6b3bef1bef19b132936cc3b0b230  (arg-zero, current — broken)
+Earlier output md5: ccebb66b25200f7e154ec23eb79ea9b4 (NOP-the-blx, superseded — also broken)
 
 Binary: ARM32 ELF EXEC, statically linked, stripped.
         RX segment: file_off 0x0, vaddr 0x8000, size 0x34594.

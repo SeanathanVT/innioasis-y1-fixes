@@ -2,6 +2,22 @@
 """
 patch_bootimg.py — Patch stock boot.img → boot.img.patched for ADB root access.
 
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ⚠  THIS SCRIPT IS NO LONGER WIRED INTO innioasis-y1-fixes.bash (v1.7.0). ║
+║                                                                          ║
+║  The /sbin/adbd binary patches it embeds (via patch_adbd.patch_bytes)    ║
+║  caused "device offline" on hardware in every revision tried.            ║
+║  See the warning header in patch_adbd.py for details. The boot.img       ║
+║  format-aware cpio patcher itself works correctly (default.prop edits    ║
+║  + in-place adbd replacement, cpio round-trip verified end-to-end);      ║
+║  the issue is purely with the adbd byte patches it applies.              ║
+║                                                                          ║
+║  Kept as historical record. To re-wire: re-add the boot.img extraction   ║
+║  block + patch_bootimg invocation + boot.img mtkclient flash to          ║
+║  innioasis-y1-fixes.bash, AND fix the underlying adbd-at-uid-0           ║
+║  protocol failure first (don't ship this patcher's output otherwise).    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
 Two changes are applied to the ramdisk:
 
 1. Edit `default.prop` so the standard rooted-ROM properties are set:

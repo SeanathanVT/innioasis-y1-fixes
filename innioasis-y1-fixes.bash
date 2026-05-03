@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.6.0
+# Version: 1.7.0
 # History:
+# 2026-05-03 (1.7.0): Remove --root flag entirely. The H1/H2/H3 byte patches in /sbin/adbd (both the NOP-the-blx and arg-zero revisions) caused "device offline" on hardware — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. Without on-device visibility (logcat / dmesg / strace, all of which require ADB), we can't diagnose what about adbd-at-uid-0 breaks the protocol on this OEM build. The standalone patch_adbd.py and patch_bootimg.py scripts are kept in the tree as historical record (with warning notes in their docstrings); their analysis of the drop_privileges block, bionic syscall wrappers, and cgroup-migration helper is preserved for whoever picks the root pass back up. Re-introducing --root is straightforward (re-add the boot.img extraction + patch_bootimg invocation + boot.img flash) once a working approach is found.
 # 2026-05-03 (1.6.0): Take the official OTA `rom.zip` as the primary firmware input. The bash now MD5-validates rom.zip against the KNOWN_FIRMWARES manifest, then `unzip -j -o` extracts only the files needed by the active flags (system.img for system-affecting flags, boot.img for --root) into the tempdir. Each extracted file's MD5 is cross-verified against the manifest as a defensive check (rom.zip MD5 is collision-resistant so this is essentially redundant, but cheap). Replaces the v1.5.0 flow that took separately-staged boot.img and system.img — users now stage just rom.zip + Y1MediaBridge.apk. The sparse-detect / simg2img path still applies to the extracted system.img since future firmware versions might bundle a sparse one. `unzip` is now a hard dependency.
 # 2026-05-03 (1.5.0): Replace hardcoded VERSION_FIRMWARE="3.0.2" with stock-firmware MD5 validation. A KNOWN_FIRMWARES manifest holds (version, system.img md5, boot.img md5, rom.zip md5, music-APK filename) tuples; staged inputs are MD5-validated against it post-staging (i.e. after any simg2img conversion, since the canonical comparison is against the raw image). VERSION_FIRMWARE is derived from the lookup. If both system.img and boot.img are processed, both must resolve to the same version. On unknown input the script bails and prints the manifest. Currently only v3.0.2 is enrolled. Cross-platform MD5: prefers `md5sum` (Linux), falls back to `md5 -q` (macOS).
 # 2026-05-03 (1.4.1): Auto-handle sparse system.img — detect via `file` (or sparse magic 0xed26ff3a) and run simg2img automatically into the working copy. Previously the user had to manually convert sparse → raw before staging, since `mount -o loop` rejects sparse format. simg2img is required when the input is sparse; if it's missing the script bails with install instructions for Debian/Ubuntu, Arch, and macOS.
@@ -46,17 +47,14 @@ Required artifacts (depending on flags):
                             Innioasis Y1 OTA package. MD5 is validated against
                             the KNOWN_FIRMWARES manifest in this script; the
                             matched firmware version drives all version-
-                            dependent filenames. The bash extracts boot.img
-                            and/or system.img from the zip into a tempdir as
-                            needed by the active flags, then cross-verifies
-                            each extracted file's MD5 against the manifest as
-                            a defensive check. system.img is auto-de-sparsed
-                            via simg2img if needed, mounted as a loop device,
-                            and the four BT binaries + music APK are
-                            extracted, patched in-place by the corresponding
-                            patch_*.py, and written back. boot.img is patched
-                            by patch_bootimg.py (which embeds patch_adbd.py).
-                            No pre-staged .patched files are required.
+                            dependent filenames. The bash extracts system.img
+                            from the zip into a tempdir, cross-verifies its
+                            MD5 against the manifest as a defensive check,
+                            auto-de-sparses via simg2img if needed, mounts
+                            it as a loop device, and the four BT binaries +
+                            music APK are extracted, patched in-place by the
+                            corresponding patch_*.py, and written back. No
+                            pre-staged .patched files are required.
   Y1MediaBridge.apk      — mandatory if --avrcp is set. This is an externally-
                             built artifact (not derived from the OTA), so it
                             must be staged separately and is not MD5-validated.
@@ -74,20 +72,17 @@ OPTIONS:
   --adb                Enable ADB debugging
   --avrcp              Enable AVRCP 1.4 support (WIP - pending flash verification)
   --bluetooth          Configure Bluetooth fixes
-  --music-apk          Copy patched Y1 music player APK
+  --music-apk          Patch Y1 music player APK (Artist→Album navigation)
   --remove-apps        Remove unnecessary APK files from system
-  --root               Patch boot.img ramdisk for ADB root access. Two changes:
-                       (1) default.prop edits (ro.secure=0, ro.debuggable=1,
-                       ro.adb.secure=0); (2) /sbin/adbd byte patches H1/H2/H3
-                       — NOP the three blx setgroups/setgid/setuid calls in
-                       adbd's drop_privileges block at vaddr 0x94b8. After
-                       flashing, 'adb shell' returns uid 0 directly. 'adb root'
-                       is unnecessary (adbd is already root) but no longer
-                       harmful — it returns "already running as root" without
-                       restarting. Requires boot.img in --artifacts-dir.
-                       When --root is the only flag, system.img is left alone.
   --all                Apply all patches (equivalent to all flags above)
   -h, --help           Display this help message
+
+NOTE: A --root flag existed in v1.3.0–v1.6.0 to patch /sbin/adbd in the
+boot.img ramdisk for adbd-as-uid-0. It was removed in v1.7.0 because every
+attempted approach (NOP the privilege-drop blx calls, change their argument
+values to 0) caused "device offline" on hardware. The standalone scripts
+patch_adbd.py and patch_bootimg.py are kept in the tree as historical
+record — see their docstrings for the analysis.
 
 EXAMPLES:
   # Apply all patches
@@ -106,7 +101,6 @@ FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
-FLAG_ROOT=false
 PATH_ARTIFACTS=""
 
 # Parse arguments
@@ -141,18 +135,12 @@ while [[ $# -gt 0 ]]; do
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
-    --root)
-      FLAG_ROOT=true
-      FLAG_ANY_SPECIFIED=true
-      shift
-      ;;
     --all)
       FLAG_AVRCP=true
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
-      FLAG_ROOT=true
       FLAG_ANY_SPECIFIED=true
       shift
       ;;
@@ -183,15 +171,15 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   exit 0
 fi
 
-# Determine whether any system.img-affecting flag is set. --root only patches
-# boot.img and does not require mounting system.img.
+# All current flags affect system.img, so this is effectively redundant with
+# FLAG_ANY_SPECIFIED. Kept as a separate variable so that re-introducing a
+# boot.img-only flag (e.g. --root) is a one-line gate change.
 FLAG_ANY_SYSTEM_PATCH=false
 if [[ "$FLAG_ADB" == true || "$FLAG_AVRCP" == true || "$FLAG_BLUETOOTH" == true || "$FLAG_MUSIC_APK" == true || "$FLAG_REMOVE_APPS" == true ]]; then
   FLAG_ANY_SYSTEM_PATCH=true
 fi
 
-# Prompt for sudo only if we'll need it (mounting system.img). --root alone
-# uses pure-Python boot.img patching + mtkclient and does not need sudo.
+# Prompt for sudo only if we'll need it (mounting system.img).
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "This script requires sudo for mounting and file operations."
   sudo -v
@@ -203,14 +191,12 @@ fi
 
 # Version-independent constants
 FILENAME_ROM_ZIP="rom.zip"
-FILENAME_BOOT_IMAGE_BASENAME="boot.img"
 FILENAME_SYSTEM_IMAGE_BASENAME="system.img"
 FILENAME_BUILD_PROP="build.prop"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
 
 # Version-dependent constants (set after stock MD5 validation)
 VERSION_FIRMWARE=""
-FILENAME_BOOT_IMAGE_TARGET=""
 FILENAME_SYSTEM_IMAGE_TARGET=""
 FILENAME_MUSIC_APK=""
 
@@ -412,30 +398,14 @@ else
   exit 1
 fi
 
-# Decide which inner files to extract based on active flags.
-files_to_extract=()
-[[ "$FLAG_ANY_SYSTEM_PATCH" == true ]] && files_to_extract+=("${FILENAME_SYSTEM_IMAGE_BASENAME}")
-[[ "$FLAG_ROOT" == true ]]              && files_to_extract+=("${FILENAME_BOOT_IMAGE_BASENAME}")
-
-echo "Extracting from ${FILENAME_ROM_ZIP}: ${files_to_extract[*]}"
-if ! unzip -j -o "$rom" "${files_to_extract[@]}" -d "$PATH_TMP_STAGE" >/dev/null; then
+# Extract system.img from rom.zip (only file currently needed by any flag).
+echo "Extracting from ${FILENAME_ROM_ZIP}: ${FILENAME_SYSTEM_IMAGE_BASENAME}"
+if ! unzip -j -o "$rom" "${FILENAME_SYSTEM_IMAGE_BASENAME}" -d "$PATH_TMP_STAGE" >/dev/null; then
   echo "ERROR: extraction from ${FILENAME_ROM_ZIP} failed" >&2
   exit 1
 fi
 
-PATH_BOOT_IMG="${PATH_TMP_STAGE}/${FILENAME_BOOT_IMAGE_BASENAME}"
 PATH_SYSTEM_IMG="${PATH_TMP_STAGE}/${FILENAME_SYSTEM_IMAGE_BASENAME}"
-
-# Cross-verify extracted files against manifest (defensive — catches zip
-# corruption / extraction bugs).
-if [[ "$FLAG_ROOT" == true ]]; then
-  boot_md5=$(md5_of "$PATH_BOOT_IMG")
-  expected=$(firmware_field "$VERSION_FIRMWARE" boot_md5)
-  if [[ "$boot_md5" != "$expected" ]]; then
-    echo "ERROR: extracted boot.img md5 ${boot_md5} differs from manifest v${VERSION_FIRMWARE} (expected ${expected})" >&2
-    exit 1
-  fi
-fi
 
 # system.img: extracted, then sparse-checked. If sparse, simg2img into a
 # `system-raw.img` companion in the tempdir; the raw bytes are what we
@@ -476,17 +446,8 @@ EOF
 fi
 
 # Now we know the version — populate version-dependent filename constants.
-FILENAME_BOOT_IMAGE_TARGET="boot-${VERSION_FIRMWARE}-devel.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_MUSIC_APK="$(firmware_field "$VERSION_FIRMWARE" music_apk)"
-
-# Patch boot.img ramdisk for ADB root access (now that we know the target name)
-if [[ "$FLAG_ROOT" == true ]]; then
-  echo "Patching boot.img ramdisk for ADB root access.."
-  python3 "${PATH_SCRIPT_DIR}/patch_bootimg.py" \
-    --in  "$PATH_BOOT_IMG" \
-    --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
-fi
 
 # Stage the validated raw system.img into its versioned working copy in the
 # artifacts dir (so mtkclient can flash it later) and mount it.
@@ -600,12 +561,6 @@ source "${PATH_VENV_MTKCLIENT}/bin/activate"
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
   python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
-fi
-
-# Write patched boot.img
-if [[ "$FLAG_ROOT" == true ]]; then
-  echo "Writing new boot.img (plug in and reset Y1 device using button near USB-C port).."
-  python3 "${PATH_MTKCLIENT}/mtk.py" w bootimg "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 fi
 
 echo "Deactivating MTKClient Python virtual environment.."
