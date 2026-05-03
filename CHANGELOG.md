@@ -10,6 +10,9 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Documentation
+- Add `docs/ANDROID-SDK.md` — platform-specific Android SDK install instructions for Linux (Rocky/Alma/RHEL/Fedora/Debian/Ubuntu/Arch), macOS (Homebrew + manual), and Windows (Android Studio + cmdline-tools + WSL2 note). Covers verifying an existing install, JDK 17+ requirement, license acceptance, and how to bump the SDK pins if `compileSdk`/AGP change. README Requirements bullet for `--avrcp` now points there; Documentation section indexes it alongside `docs/PATCHES.md` / `docs/DEX.md`.
+
 ## [1.10.0] - 2026-05-03
 
 ### Added
