@@ -16,13 +16,13 @@ Stage rom.zip (and Y1MediaBridge.apk for --avrcp) in --artifacts-dir,
 then pick one or more of the flags below.
 
 FLAGS:
-  --adb           Set persist.service.adb.enable / debuggable in build.prop
+  --adb          Set persist.service.adb.enable / debuggable in build.prop
   --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk
   --bluetooth    Configure audio.conf / build.prop Bluetooth entries
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
-                  cd src/su && make
+                 cd src/su && make
   --all          All of the above
   -h, --help     This help
 
