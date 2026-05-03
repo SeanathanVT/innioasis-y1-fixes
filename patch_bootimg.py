@@ -9,14 +9,20 @@ Two changes are applied to the ramdisk:
        ro.debuggable    = 1
        ro.adb.secure    = 0
 
-2. Patch `/sbin/adbd` to skip its unconditional privilege-drop sequence.
-   See `patch_adbd.py` for the detailed analysis — short version: this OEM
-   adbd has stripped the `should_drop_privileges()` gating, so the
-   default.prop edits are inert for the adbd-as-root question. The only
-   reliable fix is to NOP the three `blx setgroups/setgid/setuid` calls in
-   adbd's drop_privileges block (vaddr 0x94b8, file_off 0x14b8). After this
-   patch + flash, `adb shell` returns uid 0 directly and `adb root` is
-   neither needed nor harmful (adbd reports "already running as root").
+2. Patch `/sbin/adbd` to neutralize its unconditional privilege-drop
+   sequence. See `patch_adbd.py` for the detailed analysis — short version:
+   this OEM adbd has stripped the `should_drop_privileges()` gating, so the
+   default.prop edits are inert for the adbd-as-root question. The current
+   approach changes the *argument values* of the three calls in adbd's
+   drop_privileges block (vaddr 0x94b8, file_off 0x14b8) from 2000/11 to 0:
+   `setgroups(0, _)`, `setgid(0)`, `setuid(0)`. The syscalls still execute
+   so all bionic bookkeeping (capability bounding-set, thread-credential
+   sync) runs normally; the process just ends up at uid=0/gid=0 with no
+   supplementary groups. After this patch + flash, `adb shell` returns uid 0
+   directly and `adb root` is neither needed nor harmful (adbd reports
+   "already running as root"). An earlier attempt that NOPed the blx calls
+   outright caused "device offline" — the bionic setuid wrapper at 0x19418
+   does work that downstream adbd code depends on.
 
 Format-aware: handles the Android boot.img wrapper *and* the MTK 512-byte
 "ROOTFS" header that wraps the gzipped cpio ramdisk on MT65xx devices.
