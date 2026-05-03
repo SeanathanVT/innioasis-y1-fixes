@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """
 patch_adbd.py — Patch stock /sbin/adbd → adbd.patched so adbd does not drop
-privileges to AID_SHELL on startup. After flashing the patched ramdisk,
-`adb shell` returns uid 0 directly.
+privileges to AID_SHELL on startup. After flashing the patched ramdisk, the
+*intent* is that `adb shell` returns uid 0 directly.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ⚠  THIS PATCH HAS BEEN UNWIRED FROM innioasis-y1-fixes.bash (v1.7.0)     ║
+║                                                                          ║
+║  Both attempted approaches (NOP-the-blx and arg-zero) caused "device     ║
+║  offline" on hardware: adbd starts and the USB endpoint enumerates,      ║
+║  but the ADB protocol handshake never completes. Without on-device       ║
+║  visibility (logcat / dmesg / strace, all of which require working      ║
+║  ADB), we couldn't diagnose what about adbd-at-uid-0 breaks the          ║
+║  protocol on this OEM build. The script and its analysis are kept here   ║
+║  as historical record — do not ship the output of this patcher into a    ║
+║  flashed boot.img unless you have first identified and addressed the     ║
+║  root cause of the protocol-handshake failure (likely something in       ║
+║  adbd's USB FFS init or a vendor-added uid check we missed statically).  ║
+║                                                                          ║
+║  Recovery if you accidentally flashed an adbd patched by this script:    ║
+║  re-flash boot.img with the stock /sbin/adbd via mtkclient (BROM is      ║
+║  independent of adbd, so the device is still flashable).                 ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
 Stock binary md5:  9e7091f1699f89dc905dee3d9d5b23d8  (size: 223,132 bytes)
-Output md5:        ccebb66b25200f7e154ec23eb79ea9b4
+Output md5:        9eeb6b3bef1bef19b132936cc3b0b230  (arg-zero, current — broken)
+Earlier output md5: ccebb66b25200f7e154ec23eb79ea9b4 (NOP-the-blx, superseded — also broken)
 
 Binary: ARM32 ELF EXEC, statically linked, stripped.
         RX segment: file_off 0x0, vaddr 0x8000, size 0x34594.
@@ -28,16 +48,16 @@ Confirmed by:
   - `adb shell id` on a device with ro.secure=0/ro.debuggable=1/ro.adb.secure=0
     in default.prop still returns uid=2000(shell). Confirmed 2026-05-03.
 
-Running `adb root` is also actively harmful on this firmware: adbd accepts the
-request (ro.debuggable=1 passes the permission check), sets service.adb.root=1
-and exits to be respawned by init. The respawned adbd hits the same
-unconditional drop_privileges path and ends up at uid 2000 again — but the
-self-restart cycle requires a USB rebind that the stock MTK adbd handles
-poorly, and the host loses the device until reboot.
+Running `adb root` is also actively harmful on the un-patched firmware: adbd
+accepts the request (ro.debuggable=1 passes the permission check), sets
+service.adb.root=1 and exits to be respawned by init. The respawned adbd hits
+the same unconditional drop_privileges path and ends up at uid 2000 again —
+but the self-restart cycle requires a USB rebind that the stock MTK adbd
+handles poorly, and the host loses the device until reboot.
 
 The only reliable fix is to patch the drop_privileges sequence in adbd itself.
 
---- The patches ---
+--- The patches: arg-zero approach (revised 2026-05-03) ---
 
 The drop_privileges block at vaddr 0x94b8 (file_off 0x14b8) in this OEM adbd:
 
@@ -51,29 +71,53 @@ The drop_privileges block at vaddr 0x94b8 (file_off 0x14b8) in this OEM adbd:
     0x94ce:  cmp     r0, #0
     0x94d0:  bne.w   #0x97ea             ; on failure → exit(1)
     0x94d4:  mov.w   r0, #0x7d0          ; arg0 = AID_SHELL = 2000
-    0x94d8:  blx     #0x19418            ; setuid(2000)
+    0x94d8:  blx     #0x19418            ; setuid(2000) wrapper
     0x94dc:  mov     r3, r0              ; r3 = setuid return value (= 0 on success)
     0x94de:  cmp     r0, #0
     0x94e0:  bne.w   #0x97ea             ; on failure → exit(1)
     0x94e4:  ...                         ; continues with normal init
 
-Each blx is 4 bytes (Thumb-2 BLX immediate, T2 encoding). Replace each with
-`movs r0, #0; nop` (also 4 bytes total) — that clears r0 so the following
-`cmp r0, #0; bne.w fail` falls through cleanly. The result is that adbd never
-calls setgroups/setgid/setuid, never drops privileges, and continues running
-as uid 0 with full root capabilities. r3 captured after the (NOPed) setuid is
-0, which matches what stock would store on success.
+The current patches change the *argument loads* from "2000" / "11" to "0",
+leaving the syscall calls intact:
+
+    H1: movs r0, #0xb       → movs r0, #0       ; setgroups(0, _) — clears supp groups
+    H2: mov.w r0, #0x7d0    → mov.w r0, #0      ; setgid(0)       — succeeds at EUID=0
+    H3: mov.w r0, #0x7d0    → mov.w r0, #0      ; setuid(0)       — no-op at EUID=0
+
+Net effect: each syscall executes (so the kernel and bionic libc complete
+whatever bookkeeping they do — capability bounding-set adjustments, thread
+credential synchronization, etc.), but the process ends up as uid=0 / gid=0
+with no supplementary groups instead of uid=2000 / gid=2000 / shell groups.
+
+--- Why arg-zero, not NOP-the-blx (history) ---
+
+An earlier revision of this patch NOPed the three `blx` calls outright (each
+4-byte BLX replaced with `movs r0, #0; nop`). On hardware that left adbd in a
+broken state where the host saw "device offline" — adbd starts and the USB
+endpoint comes up, but the protocol handshake never completes. Most likely
+the bionic setuid wrapper at 0x19418 (which `bl`s 0x27b30 *before* reaching
+the actual `mov r7, #0xd5 ; svc 0` syscall stub at 0x31a70) is doing
+capability bounding-set work or thread-credential bookkeeping that downstream
+adbd code depends on. Skipping that wrapper entirely produces a process that
+is technically uid 0 but has inconsistent capabilities/credentials, and the
+USB ADB protocol layer never fully initializes.
+
+The arg-zero approach keeps every syscall and every bionic wrapper intact;
+the only thing that changes is the argument values. setuid(0) when EUID is
+already 0 is a no-op that runs all the same bookkeeping. Same for setgid(0).
+setgroups(0, _) clears supplementary groups, which is the desired end state
+anyway.
 
 Verified blx targets:
   - 0x17038 → ARM-mode `mov r7, #0xce ; svc 0`  (setgroups32 EABI #206)
   - 0x1701c → ARM-mode `mov r7, #0xd6 ; svc 0`  (setgid32 EABI #214)
   - 0x19418 → ARM wrapper that eventually reaches `mov r7, #0xd5 ; svc 0`
-              at 0x31a70 (setuid32 EABI #213)
+              at 0x31a70 (setuid32 EABI #213) via bl 0x27b30
 
-Patch IDs:
-  H1 = NOP blx setgroups
-  H2 = NOP blx setgid
-  H3 = NOP blx setuid
+Patch IDs (current set):
+  H1 = setgroups count 11 → 0  (movs r0 immediate at 0x14b8)
+  H2 = setgid arg 2000 → 0     (mov.w r0 immediate at 0x14c6)
+  H3 = setuid arg 2000 → 0     (mov.w r0 immediate at 0x14d4)
 
 Usage:
     python3 patch_adbd.py adbd
@@ -91,26 +135,26 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "9e7091f1699f89dc905dee3d9d5b23d8"
-OUTPUT_MD5 = "ccebb66b25200f7e154ec23eb79ea9b4"
+OUTPUT_MD5 = "9eeb6b3bef1bef19b132936cc3b0b230"
 
 PATCHES = [
     {
-        "name":   "[H1] NOP blx setgroups  (movs r0,#0; nop)",
-        "offset": 0x014bc,
-        "before": bytes([0x0d, 0xf0, 0xbc, 0xed]),
-        "after":  bytes([0x00, 0x20, 0x00, 0xbf]),
+        "name":   "[H1] setgroups count 11 -> 0  (movs r0,#0xb -> movs r0,#0)",
+        "offset": 0x014b8,
+        "before": bytes([0x0b, 0x20]),
+        "after":  bytes([0x00, 0x20]),
     },
     {
-        "name":   "[H2] NOP blx setgid     (movs r0,#0; nop)",
-        "offset": 0x014ca,
-        "before": bytes([0x0d, 0xf0, 0xa8, 0xed]),
-        "after":  bytes([0x00, 0x20, 0x00, 0xbf]),
+        "name":   "[H2] setgid arg 2000 -> 0    (mov.w r0,#0x7d0 -> mov.w r0,#0)",
+        "offset": 0x014c6,
+        "before": bytes([0x4f, 0xf4, 0xfa, 0x60]),
+        "after":  bytes([0x4f, 0xf0, 0x00, 0x00]),
     },
     {
-        "name":   "[H3] NOP blx setuid     (movs r0,#0; nop)",
-        "offset": 0x014d8,
-        "before": bytes([0x0f, 0xf0, 0x9e, 0xef]),
-        "after":  bytes([0x00, 0x20, 0x00, 0xbf]),
+        "name":   "[H3] setuid arg 2000 -> 0    (mov.w r0,#0x7d0 -> mov.w r0,#0)",
+        "offset": 0x014d4,
+        "before": bytes([0x4f, 0xf4, 0xfa, 0x60]),
+        "after":  bytes([0x4f, 0xf0, 0x00, 0x00]),
     },
 ]
 
