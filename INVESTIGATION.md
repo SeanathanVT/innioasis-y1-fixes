@@ -5,7 +5,7 @@ This document grew organically over the 2026-05-02 session. **Read this top sect
 ## Final state (after all traces complete)
 
 The shipped patch set:
-- `mtkbt.patched` (12 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8, G1**) — MD5 `e2f9033eb50f10d2fc274726edb3ca75`
+- `mtkbt.patched` (11 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8**) — MD5 `d47c904063e7d201f626cf2cc3ebd50b`
 - `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
 - `libextavrcp.so.patched` (1 patch: **C4**)
 - `MtkBt.odex.patched` (2 patches: **F1, F2**)
@@ -14,21 +14,11 @@ Patches **E5, E7a, E7b were tested and removed** — they patched live code that
 
 **E8 added 2026-05-02 and tested same-day as inert.** NOPing `bge #0x30688` at `0x3065e` in fn `0x3060c` (op_code=4 dispatcher slot 0) had no observable effect on cardinality:0. Inspection of the test logcat showed only msg_ids 505 and 506 received — **no GetCapabilities (`op_code=4`) ever arrives at any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`). The gate is upstream of the dispatcher table itself — somewhere in mtkbt's AVCTP receive path between L2CAP and the dispatcher. E8 left in place as a verified-correct patch even though inert.
 
-**G1/G2 first attempt 2026-05-02 — reverted (mtkbt SIGSEGV at NULL).** Diagnostic instrumentation pair (G1 = Thumb wrapper hijack at `0x675c0`; G2 = ARM PLT hijack at `0xb408`) redirected `__xlog_buf_printf` → `__android_log_print`. The 12-byte thunk forwarded r2 (fmt) as both tag and fmt for android_log_print. mtkbt crashed at startup because at least one xlog callsite passes NULL in r2; bionic's `__android_log_print` at API 17 doesn't NULL-check the tag arg, so `strlen(NULL)` faulted at addr 0.
+**G1/G2 attempt 1 (2026-05-02) — reverted (SIGSEGV at NULL).** 12-byte thunk forwarded r2 (fmt) as both tag and fmt for android_log_print. mtkbt SIGSEGV at addr 0 immediately at startup — at least one xlog callsite passes NULL in r2; bionic's `__android_log_print` at API 17 doesn't NULL-check the tag, so `strlen(NULL)` faulted.
 
-**G1 second attempt 2026-05-02 — re-shipped with NULL guard.** 20-byte Thumb thunk at `0x675c0`:
+**G1 attempt 2 (2026-05-03) — reverted (BT does not turn on).** 20-byte thunk added a `cbz r2, .L_null` guard. NULL guard didn't help. BT framework log shows `bt_sendmsg(cmd=100, ...)` returns ENOENT — mtkbt's abstract socket never came up. Either mtkbt crashed on a non-NULL but invalid pointer (small int, stack pointer), or the redirected log volume flooded logd and slowed mtkbt's init past the framework timeout.
 
-```
-0x675c0:  cbz r2, .L_null     ; NULL fmt -> return, don't log
-0x675c2:  movs r0, #4         ; LOG_INFO
-0x675c4:  mov r1, r2          ; tag = fmt
-0x675c6:  ldr.w pc, [pc, #4]  ; tail-jump via literal
-0x675ca:  nop                  ; align literal at 0x675cc
-0x675cc:  .word 0xaef8         ; PLT addr (ARM, bit 0 clear -> mode switch)
-0x675d0:  .L_null: movs r0,#0; bx lr
-```
-
-G2 (PLT redirect at `0xb408`) was deliberately dropped this time. G1 alone covers the 2988 wrapper callsites where the `[AVRCP]/[AVCTP]` diagnostic surface lives; the 1091 direct PLT callers are lower-level kernel-side BT stack housekeeping (likely the source of the NULL-passing offenders that crashed the first attempt). If G1 also crashes (e.g., from non-NULL invalid pointers like small ints), the next iteration adds a low-memory range check (`cmp r2, #0xff; blo .L_null`).
+**Conclusion: blanket xlog→logcat redirect at the consolidated wrapper is too fragile.** The wrapper at `0x675c0` is hit 2988 times across mtkbt's lifecycle including very early init when bionic's logd may not be ready, and the calling-convention assumption (r2 = valid fmt pointer) doesn't hold for every callsite. Future diagnostic instrumentation, if attempted, must be surgical: explicit `bl __android_log_print` calls at a small number of high-value sites (dispatcher entries, AVCTP RX handler at fn `0x6d9ba`, the silent-drop site at `0x0513a4`) with hardcoded tag/fmt string args. That requires finding free space in mtkbt for tag/fmt strings and either a trampoline or in-place call-site rewrite — significantly more complex than what was attempted.
 
 ## Verified true (with corrections from earlier in this doc)
 

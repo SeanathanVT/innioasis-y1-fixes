@@ -32,38 +32,29 @@ and rejected:
     after empirical testing showed no behavioural change. Re-adding would not
     surface new information.
 
---- G1 (with NULL guard) — second attempt 2026-05-02 ---
+--- G1 attempts (both reverted, 2026-05-02 / 2026-05-03) ---
 
-The first G1/G2 attempt (3-instruction `mov r0,#4; mov r1,r2; b __android_log_print`
-thunk) crashed mtkbt at startup because at least one xlog callsite passes NULL
-in r2; bionic's __android_log_print at API 17 doesn't NULL-check tag, so
-strlen(NULL) faulted at addr 0.
+Two attempts to redirect __xlog_buf_printf to __android_log_print were made
+and both broke Bluetooth.
 
-This second attempt:
-  - Adds a NULL guard via `cbz r2, .L_null` at the start of the thunk.
-  - Drops G2 (the PLT-level redirect at 0xb408) entirely. G1 alone covers 2988
-    of 4079 xlog callsites (~73%) — the wrapper at 0x675c0 is the consolidated
-    entry for [AVRCP]/[AVCTP] log macros, which is exactly the diagnostic
-    surface we want. The remaining 1091 direct PLT callers are lower-level
-    code (kernel-side BT stack housekeeping) that we don't need to see and
-    that may be the population of NULL-passing offenders.
-  - Lays out a 20-byte thunk at 0x675c0 (the wrapper is ~320 bytes long, so
-    there's plenty of room to overflow past the original 12-byte prologue):
+  Attempt 1 (G1+G2, 12-byte thunks): `mov r0,#4; mov r1,r2; b __android_log_print`.
+    mtkbt SIGSEGV at addr 0x00000000 immediately at startup. At least one xlog
+    callsite passes NULL in r2; bionic's __android_log_print at API 17 doesn't
+    NULL-check tag, so strlen(NULL) faulted.
 
-      0x675c0  cbz r2, .L_null     ; if fmt==NULL, return without logging
-      0x675c2  movs r0, #4          ; LOG_INFO
-      0x675c4  mov  r1, r2          ; tag = fmt
-      0x675c6  ldr.w pc, [pc, #4]   ; tail-jump via literal at 0x675cc
-      0x675ca  nop                   ; padding to align literal
-      0x675cc  .word 0xaef8          ; PLT addr (ARM mode, bit 0 clear -> mode switch)
-      0x675d0  .L_null:
-      0x675d0  movs r0, #0           ; return 0
-      0x675d2  bx lr                  ; return
+  Attempt 2 (G1 only, 20-byte thunk with cbz r2 NULL guard): NULL guard didn't
+    help. mtkbt failed to bind its abstract socket — BT framework reports
+    `bt_sendmsg fail: No such file or directory` (ENOENT) when trying to send
+    cmd=100 to the daemon. Either mtkbt crashed on a non-NULL but invalid
+    r2 (small integer, stack pointer, etc.), or the volume of redirected log
+    calls flooding through logd slowed mtkbt's init past the timeout window.
 
-  - Caveat: the guard catches NULL only. A non-NULL but invalid pointer
-    (e.g., a small integer) would still SIGSEGV. If the second attempt also
-    crashes, the next iteration should add a low-memory range check
-    (e.g., `cmp r2, #0xff; blo .L_null`).
+Conclusion: blanket xlog→logcat redirect at the consolidated wrapper is too
+fragile. Future diagnostic instrumentation should be SURGICAL — pick a small
+number of specific high-value sites (e.g., dispatcher entries, AVCTP RX
+handler) and add explicit `bl __android_log_print` calls there with
+hardcoded tag/fmt string arguments, not relying on the wrapper's varying
+calling convention or volume-flooding logd.
 
 --- Descriptor table structure (key finding) ---
 
@@ -189,7 +180,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "e2f9033eb50f10d2fc274726edb3ca75"
+OUTPUT_MD5 = "d47c904063e7d201f626cf2cc3ebd50b"
 
 PATCHES = [
     # B1-B3: AVCTP version 1.0 -> 1.3 in all registered AVCTP-bearing blobs.
@@ -291,25 +282,6 @@ PATCHES = [
         "offset": 0x03065e,
         "before": bytes([0x13, 0xda]),
         "after":  bytes([0x00, 0xbf]),
-    },
-    # G1: xlog wrapper hijack with NULL guard (Thumb mode, 20 bytes at 0x675c0).
-    # Replaces the wrapper's prologue with a thunk that translates xlog's
-    # (buf_id, code, fmt, ...) signature into __android_log_print's
-    # (prio, tag, fmt, ...) — fmt at r2 and varargs at r3+stack pass through.
-    # The cbz guards against the NULL-fmt callsites that crashed the first
-    # attempt. NULL case returns 0 without logging.
-    #
-    # See header docstring "G1 (with NULL guard) — second attempt" for full
-    # rationale and the laid-out instruction sequence.
-    {
-        "name":   "[G1] xlog wrapper -> __android_log_print thunk w/ NULL guard (Thumb)",
-        "offset": 0x0675c0,
-        "before": bytes([0x0c, 0xb4, 0x55, 0x4b, 0x2d, 0xe9, 0xf0, 0x4f,
-                         0x83, 0x46, 0x54, 0x48, 0xb5, 0xb0, 0x7b, 0x44,
-                         0x1b, 0x68, 0x01, 0x91]),
-        "after":  bytes([0x32, 0xb1, 0x04, 0x20, 0x11, 0x46, 0xdf, 0xf8,
-                         0x04, 0xf0, 0x00, 0xbf, 0xf8, 0xae, 0x00, 0x00,
-                         0x00, 0x20, 0x70, 0x47]),
     },
 ]
 
