@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.4.0
+# Version: 1.4.1
 # History:
+# 2026-05-03 (1.4.1): Auto-handle sparse system.img — detect via `file` (or sparse magic 0xed26ff3a) and run simg2img automatically into the working copy. Previously the user had to manually convert sparse → raw before staging, since `mount -o loop` rejects sparse format. simg2img is required when the input is sparse; if it's missing the script bails with install instructions for Debian/Ubuntu, Arch, and macOS.
 # 2026-05-03 (1.4.0): Drop the pre-staged-artifacts requirement. --avrcp and --music-apk now extract the stock binaries directly from the mounted system.img, run the corresponding patch_*.py against them, and write the patched bytes back in-place. Previously the user had to run each patch_*.py manually beforehand and stage mtkbt.patched / MtkBt.odex.patched / libextavrcp.so.patched / libextavrcp_jni.so.patched / com.innioasis.y1_3.0.2-patched.apk in --artifacts-dir. Only Y1MediaBridge.apk (externally-built, not derived from system.img) and boot.img (for --root) need to be staged now; everything else is extracted from system.img and patched on the fly. New helpers `patch_in_place_bytes` and `patch_in_place_y1_apk` wrap the extract → patch → write-back cycle. Idempotent: re-running detects already-patched files and is a no-op.
 # 2026-05-03 (1.3.2): No functional changes to the bash itself — reflects patch_bootimg.py absorbing patch_adbd.py (H1/H2/H3 NOP the three blx setgroups/setgid/setuid calls in adbd's drop_privileges block). With the adbd binary patched, `adb shell` returns uid 0 directly at boot, and `adb root` is no longer needed (it returns "already running as root" without triggering the USB-rebind cycle). --root help text updated accordingly — the v1.3.1 "do not run adb root" warning was correct only against the v1.3.1 patcher (which relied on inert default.prop edits).
 # 2026-05-03 (1.3.1): --root no longer touches system.img (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is set). --root help text initially warned against running `adb root` post-flash (the OEM adbd ignores ro.secure, so v1.3.1's default.prop edits left adbd at uid 2000 and `adb root` triggered a USB-rebind cycle that lost the host connection). Superseded by v1.3.2 which patches the adbd binary directly.
@@ -304,13 +305,48 @@ if [[ "$FLAG_ROOT" == true ]]; then
     --out "${PATH_ARTIFACTS}/${FILENAME_BOOT_IMAGE_TARGET}"
 fi
 
-# Copy and mount system.img only if a system-affecting flag is set.
+# Copy and mount system.img only if a system-affecting flag is set. If the
+# input is sparse (Android sparse format, magic 0xed26ff3a — the format OTAs
+# ship), de-sparse via simg2img into the working copy. `mount -o loop` rejects
+# sparse images, and the working copy will also be re-flashed at the end so it
+# needs to be raw end-to-end.
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
-  echo "Copying clean system.img.."
-  cp "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}" "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+  src="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_SOURCE}"
+  dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+
+  # Detect sparse format. Prefer `file` for clarity; fall back to magic-byte
+  # check for environments where `file` is unavailable or its output differs.
+  is_sparse=false
+  if command -v file >/dev/null 2>&1 && file "$src" | grep -q "Android sparse image"; then
+    is_sparse=true
+  else
+    magic=$(head -c 4 "$src" 2>/dev/null | od -An -v -t x1 | tr -d ' \n')
+    [[ "$magic" == "3aff26ed" ]] && is_sparse=true
+  fi
+
+  if [[ "$is_sparse" == true ]]; then
+    if ! command -v simg2img >/dev/null 2>&1; then
+      cat >&2 <<EOF
+ERROR: ${FILENAME_SYSTEM_IMAGE_SOURCE} is an Android sparse image, but simg2img
+is not in PATH. Install it and re-run:
+  Debian/Ubuntu:        sudo apt install android-sdk-libsparse-utils
+  Arch:                 sudo pacman -S android-tools
+  Fedora:               sudo dnf install android-tools
+  RHEL/Rocky/Alma 8+:   sudo dnf install epel-release && sudo dnf install android-tools
+  macOS (brew):         brew install simg2img
+Or convert manually before staging:  simg2img system.img system-raw.img
+EOF
+      exit 1
+    fi
+    echo "system.img is sparse — converting to raw via simg2img.."
+    simg2img "$src" "$dst"
+  else
+    echo "Copying clean system.img.."
+    cp "$src" "$dst"
+  fi
 
   echo "Mounting working copy of system.img.."
-  sudo mount -o loop "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}" "${PATH_MOUNT}/"
+  sudo mount -o loop "$dst" "${PATH_MOUNT}/"
 fi
 
 # Enable ADB debugging
