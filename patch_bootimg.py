@@ -2,18 +2,21 @@
 """
 patch_bootimg.py — Patch stock boot.img → boot.img.patched for ADB root access.
 
-Modifies the ramdisk's `default.prop` so adbd does not self-demote to uid `shell`:
-    ro.secure        = 0
-    ro.debuggable    = 1
-    ro.adb.secure    = 0
+Two changes are applied to the ramdisk:
 
-With `ro.secure=0` adbd's `should_drop_privileges()` returns 0 at startup, so
-adbd is already running as uid 0 after boot — `adb shell` returns root directly.
-**Do not run `adb root`** afterwards: it sets `service.adb.root=1` and forces an
-adbd self-restart, which the stock MTK adbd's USB re-bind handles poorly on this
-firmware (host loses the device). Reboot to recover. `service.adb.root=1` was
-historically appended here as belt-and-suspenders but is unreachable when
-`ro.secure=0` short-circuits the privilege-drop check, so it has been removed.
+1. Edit `default.prop` so the standard rooted-ROM properties are set:
+       ro.secure        = 0
+       ro.debuggable    = 1
+       ro.adb.secure    = 0
+
+2. Patch `/sbin/adbd` to skip its unconditional privilege-drop sequence.
+   See `patch_adbd.py` for the detailed analysis — short version: this OEM
+   adbd has stripped the `should_drop_privileges()` gating, so the
+   default.prop edits are inert for the adbd-as-root question. The only
+   reliable fix is to NOP the three `blx setgroups/setgid/setuid` calls in
+   adbd's drop_privileges block (vaddr 0x94b8, file_off 0x14b8). After this
+   patch + flash, `adb shell` returns uid 0 directly and `adb root` is
+   neither needed nor harmful (adbd reports "already running as root").
 
 Format-aware: handles the Android boot.img wrapper *and* the MTK 512-byte
 "ROOTFS" header that wraps the gzipped cpio ramdisk on MT65xx devices.
@@ -49,6 +52,8 @@ import re
 import struct
 import sys
 from pathlib import Path
+
+import patch_adbd
 
 
 ANDROID_BOOT_MAGIC = b"ANDROID!"
@@ -272,10 +277,17 @@ def patch_bootimg(src: bytes) -> bytes:
 
     gz_cpio = mtk_unwrap(boot.ramdisk)
     cpio = gunzip(gz_cpio)
+
     new_default_prop = patch_default_prop(cpio_extract_file(cpio, "default.prop"))
     print(f"  default.prop: {len(new_default_prop)} bytes after patch")
-    new_cpio = cpio_replace_file(cpio, "default.prop", new_default_prop)
-    new_gz = gzip_bytes(new_cpio)
+    cpio2 = cpio_replace_file(cpio, "default.prop", new_default_prop)
+
+    stock_adbd = cpio_extract_file(cpio2, "sbin/adbd")
+    new_adbd = patch_adbd.patch_bytes(stock_adbd)
+    print(f"  sbin/adbd:    {len(new_adbd)} bytes after patch (md5 {hashlib.md5(new_adbd).hexdigest()})")
+    cpio3 = cpio_replace_file(cpio2, "sbin/adbd", new_adbd)
+
+    new_gz = gzip_bytes(cpio3)
     new_ramdisk = mtk_wrap(new_gz) if boot.ramdisk[:4] == MTK_RAMDISK_MAGIC else new_gz
 
     out = boot.repack(boot.kernel, new_ramdisk)
