@@ -21,3 +21,6 @@ gradle-app.setting
 .classpath
 
 *.DS_Store
+
+# Per-machine SDK location (set ANDROID_HOME or sdk.dir here)
+local.properties

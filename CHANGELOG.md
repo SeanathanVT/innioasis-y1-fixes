@@ -11,6 +11,7 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 ## [Unreleased]
 
 ### Fixed
+- Add `local.properties` to `src/Y1MediaBridge/.gitignore`. AGP looks for `sdk.dir=...` in this file as one of two ways to locate the Android SDK (the other being the `ANDROID_HOME` env var); it's per-machine and conventionally untracked. The original `.gitignore` was missing it.
 - Commit the Gradle wrapper into `src/Y1MediaBridge/` (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`). The standalone Y1MediaBridge repo's `.gitignore` had explicit ignore rules for these files (overriding its own earlier `!gradle-wrapper.jar` exception), so they never landed in the subtree merge — `./gradlew assembleDebug` was failing with `No such file or directory`. Wrapper now in place; pinned to Gradle 9.5.0 per `gradle-wrapper.properties`. Y1MediaBridge `.gitignore` cleaned up to remove the bad ignore rules.
 
 ### Documentation
