@@ -1,6 +1,6 @@
 # Innioasis Y1 Firmware Fixes
 
-A patching toolkit for the Innioasis Y1 media player (firmware 3.0.2) that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging.
+A patching toolkit for the Innioasis Y1 media player that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `innioasis-y1-fixes.bash`; add a row to support a new build.
 
 ## Overview
 
@@ -16,7 +16,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 
 - [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleRelease`.
+- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleDebug`.
 - `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
 - `reference/` — manually-extracted reference files for v3.0.2
 
@@ -36,22 +36,22 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA, MD5-validated) in a directory. If using `--avrcp`, build `Y1MediaBridge.apk` from `src/Y1MediaBridge/` and stage it too. If using `--root`, build `src/su/` once.
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. If using `--avrcp` build `src/Y1MediaBridge/` once; if using `--root` build `src/su/` once. The bash picks up both build outputs directly — no need to stage the artifacts.
 
 ```bash
 mkdir -p ~/y1-patches
 cp /path/to/rom.zip ~/y1-patches/
 
-# Build Y1MediaBridge.apk from in-tree source if using --avrcp:
-( cd src/Y1MediaBridge && ./gradlew assembleRelease )
-cp src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk \
-   ~/y1-patches/Y1MediaBridge.apk
+# Build src/Y1MediaBridge/ once if using --avrcp:
+( cd src/Y1MediaBridge && ./gradlew assembleDebug )
 
-# Build su once if using --root:
+# Build src/su/ once if using --root:
 ( cd src/su && make )
 
 ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
 ```
+
+`rom.zip` is the only required artifact. Both `src/Y1MediaBridge/` and `src/su/` only need to be rebuilt when their sources change.
 
 The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, applies the selected patches in-place, unmounts, and flashes the patched image via mtkclient.
 
@@ -60,7 +60,7 @@ The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, appli
 | Flag | Effect |
 |---|---|
 | `--adb` | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `--artifacts-dir`. |
+| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleDebug`). |
 | `--bluetooth` | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
 | `--music-apk` | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
@@ -89,7 +89,7 @@ Known stock firmwares recognised by `KNOWN_FIRMWARES` in the bash. Add a row (sa
 |---|---|---|---|---|
 | **3.0.2** | `82657db82578a38c6f1877e02407127a` | `473991dadeb1a8c4d25902dee9ee362b` | `1f7920228a20c01ad274c61c94a8cf36` | `com.innioasis.y1_3.0.2.apk` |
 
-Stock sizes: `rom.zip` 259,502,414 bytes; `system.img` 681,574,400 bytes (raw ext4 in v3.0.2 — auto-de-sparsed via `simg2img` if a future firmware bundles a sparse one); `boot.img` 4,706,304 bytes.
+Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes; `system.img` 681,574,400 bytes (raw ext4 — auto-de-sparsed via `simg2img` if a build bundles a sparse one); `boot.img` 4,706,304 bytes.
 
 ## Requirements
 
@@ -97,7 +97,7 @@ Stock sizes: `rom.zip` 259,502,414 bytes; `system.img` 681,574,400 bytes (raw ex
 - `mtkclient` 2.1.4.1 at `/opt/mtkclient-2.1.4.1`.
 - Python 3.8+ (all patchers; stdlib only except `patch_y1_apk.py`).
 - Java 11+ and `androguard` (`pip install androguard`) — only for `--music-apk`. apktool is downloaded by `patch_y1_apk.py` on first invocation.
-- `simg2img` — only if a future firmware bundles a sparse `system.img` (v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch), `brew install simg2img` (macOS).
+- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch), `brew install simg2img` (macOS).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
 
 ## Documentation
@@ -113,14 +113,14 @@ The patched music-player APK must be deployed directly to `/system/app/` on the 
 
 ```bash
 adb root && adb remount
-adb push com.innioasis.y1_3.0.2-patched.apk /system/app/com.innioasis.y1/com.innioasis.y1.apk
+adb push com.innioasis.y1_<version>-patched.apk /system/app/com.innioasis.y1/com.innioasis.y1.apk
 adb shell chmod 644 /system/app/com.innioasis.y1/com.innioasis.y1.apk
 adb reboot
 ```
 
 ## Verified against
 
-Innioasis Y1 v3.0.2 firmware on the Innioasis Y1 media player — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17.
+Innioasis Y1 media player — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Currently enrolled in `KNOWN_FIRMWARES`: **v3.0.2** (the only build that's been hardware-verified against this toolkit). Adding a new build means dropping in its `rom.zip` MD5 row and re-running the patchers; if site offsets shifted they'll fail their stock-MD5 check and need re-locating.
 
 ## Author
 

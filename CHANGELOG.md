@@ -10,11 +10,23 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-05-03
+
+### Fixed
+- Switch the Y1MediaBridge build invocation from `assembleRelease` to `assembleDebug`. AGP 8.7.3 wires `lintVitalReportRelease` into the release-assembly chain, and that task fails with `SDK location not found` unless `local.properties` (`sdk.dir=...`) is configured. `assembleDebug` skips it. The two APKs are structurally identical here (`minifyEnabled false` on both; both signed with the debug keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug also leaves `debuggable=true` in the manifest, which is useful for a research device. Bash now references `app/build/outputs/apk/debug/app-debug.apk`; `--avrcp` help text and the missing-prebuilt error point at `assembleDebug`. README Quick start, flag table, and `src/Y1MediaBridge/README.md` Build section updated to match.
+
+## [1.9.0] - 2026-05-03
+
+### Changed
+- **`rom.zip` is now the only required artifact in `--artifacts-dir`.** `--avrcp` no longer expects a pre-staged `Y1MediaBridge.apk`; the bash references `src/Y1MediaBridge/app/build/outputs/apk/release/app-release.apk` (the gradle release-build output) directly and copies it into the system.img mount renamed to `Y1MediaBridge.apk` (mode 644, root:root). Build once via `cd src/Y1MediaBridge && ./gradlew assembleRelease` — symmetric with `--root`'s `cd src/su && make` requirement. If the prebuilt is missing, `--avrcp` bails with a clear instruction.
+- `app/build.gradle` uses `signingConfig signingConfigs.debug` for the release build, so `./gradlew assembleRelease` produces a signed APK out of the box (no keystore setup required).
+
 ### Documentation
 - `src/Y1MediaBridge/` is now the canonical source for the Y1MediaBridge subproject; the standalone external repo it was originally subtree-imported from is being deleted. Top-level README's Layout entry no longer mentions the subtree import; Quick start now describes building `Y1MediaBridge.apk` from in-tree source via Gradle. Bash echo no longer says "externally built".
 - Harmonize subproject READMEs to follow the root README's formatting conventions:
   - `src/Y1MediaBridge/README.md`: drop `(on macOS host)` from the Build header (Gradle is cross-platform); soften the all-caps `(MUST be system app for READ_LOGS)` header to `Install as system app` with the rationale in the body; rename `Test — end-to-end` → `End-to-end test`; relocate the `Changes` section from top (between Architecture and Build) to bottom (after Reverse engineering notes), with sentence-case version subheadings; add a `See also` section pointing at top-level docs.
   - `src/su/README.md` and `src/patches/README.md`: promote inline closing-paragraph cross-references to a dedicated `See also` section for parity with the Y1MediaBridge structure.
+- Decouple top-level docs from "v3.0.2 only" framing: README tagline now references the `KNOWN_FIRMWARES` manifest as the compatibility source-of-truth ("add a row to support a new build"); Quick start describes the rom.zip + two build trees workflow; the bash header comment was reframed the same way; Verified-against now distinguishes "the device this is for (Innioasis Y1 hardware)" from "the build that's currently enrolled and verified (v3.0.2)". Patcher script docstrings keep their "verified on 3.0.2" notes — those are factual development records.
 
 ## [1.8.3] - 2026-05-03
 

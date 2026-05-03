@@ -22,10 +22,21 @@ One system app. No separate daemon, no shared files, no IPC.
 ## Build
 
 ```bash
-./gradlew assembleRelease
+./gradlew assembleDebug
 ```
 
-Output: `app/build/outputs/apk/release/app-release.apk`.
+Output: `app/build/outputs/apk/debug/app-debug.apk`. The top-level
+[`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) reads from this
+path directly under `--avrcp` — no need to copy the APK anywhere.
+
+`assembleRelease` is intentionally avoided: AGP wires `lintVitalReportRelease`
+into the release-assembly chain, which fails with `SDK location not found`
+unless `local.properties` (`sdk.dir=...`) is configured. `assembleDebug` skips
+that lint step. The `release` and `debug` APKs are otherwise structurally
+identical here (`minifyEnabled false` on both; both signed with the debug
+keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug
+also leaves `debuggable=true` in the manifest, which is useful for a research
+device — you can JDWP-attach to the running service.
 
 Toolchain pinned in the tree: Gradle 8.11.1 wrapper, AGP 8.7.3, `compileSdk 34`,
 `minSdk 17`, `targetSdk 17`, Java 8 bytecode. A manual `javac --release 8 -cp
