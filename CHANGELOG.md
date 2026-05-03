@@ -10,6 +10,20 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-05-03
+
+### Changed
+- Drop the in-file version-history block from `innioasis-y1-fixes.bash` (~30 lines); `git log` and `CHANGELOG.md` are authoritative.
+- `show_help()` reduced from 63 lines to 20 (single-screen output): one-line description per flag, one example, pointer to README.md / docs/PATCHES.md for details.
+- Trim function-doc and inline rationale comments throughout (110 comment lines → 45). Comments now retained only where the *why* is non-obvious from the code (e.g., `FLAG_ANY_SYSTEM_PATCH` separateness for future flag flexibility).
+- No functional change.
+
+### Documentation
+- README.md restructured as a quick-start with monorepo layout, flag table, and pointers to the docs files. 439 → 126 lines.
+- Add `CHANGELOG.md` (this file, Keep a Changelog format).
+- Move per-patch byte-level reference into `docs/PATCHES.md`.
+- Move DEX-level analysis for `patch_y1_apk.py` into `docs/DEX.md`.
+
 ## [1.8.2] - 2026-05-03
 
 ### Changed
