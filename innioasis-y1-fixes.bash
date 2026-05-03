@@ -3,9 +3,10 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.3.1
+# Version: 1.3.2
 # History:
-# 2026-05-03 (1.3.1): --root no longer touches system.img (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is set). --root help text now warns against running `adb root` post-flash (stock MTK adbd's USB re-bind is flaky; with ro.secure=0 adbd is already uid 0).
+# 2026-05-03 (1.3.2): No functional changes to the bash itself — reflects patch_bootimg.py absorbing patch_adbd.py (H1/H2/H3 NOP the three blx setgroups/setgid/setuid calls in adbd's drop_privileges block). With the adbd binary patched, `adb shell` returns uid 0 directly at boot, and `adb root` is no longer needed (it returns "already running as root" without triggering the USB-rebind cycle). --root help text updated accordingly — the v1.3.1 "do not run adb root" warning was correct only against the v1.3.1 patcher (which relied on inert default.prop edits).
+# 2026-05-03 (1.3.1): --root no longer touches system.img (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is set). --root help text initially warned against running `adb root` post-flash (the OEM adbd ignores ro.secure, so v1.3.1's default.prop edits left adbd at uid 2000 and `adb root` triggered a USB-rebind cycle that lost the host connection). Superseded by v1.3.2 which patches the adbd binary directly.
 # 2026-05-03 (1.3.0): Reintroduce --root flag. Delegates to patch_bootimg.py (pure-Python in-place cpio mutation; no shell-side cpio/dd repack). Flashes patched boot.img via mtkclient after system.img write.
 # 2026-04-30 (1.2.2): No functional changes — reflects patch_mtkbt.py update to include AVCTP 1.0→1.3 patches (B1-B3).
 # 2026-04-26 (1.2.1): Add libextavrcp.so.patched deployment to --avrcp.
@@ -48,12 +49,15 @@ OPTIONS:
   --bluetooth          Configure Bluetooth fixes
   --music-apk          Copy patched Y1 music player APK
   --remove-apps        Remove unnecessary APK files from system
-  --root               Patch boot.img ramdisk for ADB root access (default.prop:
-                       ro.secure=0, ro.debuggable=1, ro.adb.secure=0). Requires
-                       boot.img in --artifacts-dir. After flashing, 'adb shell'
-                       returns uid 0 directly — do NOT run 'adb root' (its
-                       restart triggers a stock MTK adbd USB re-bind that loses
-                       the connection on this firmware; reboot to recover).
+  --root               Patch boot.img ramdisk for ADB root access. Two changes:
+                       (1) default.prop edits (ro.secure=0, ro.debuggable=1,
+                       ro.adb.secure=0); (2) /sbin/adbd byte patches H1/H2/H3
+                       — NOP the three blx setgroups/setgid/setuid calls in
+                       adbd's drop_privileges block at vaddr 0x94b8. After
+                       flashing, 'adb shell' returns uid 0 directly. 'adb root'
+                       is unnecessary (adbd is already root) but no longer
+                       harmful — it returns "already running as root" without
+                       restarting. Requires boot.img in --artifacts-dir.
                        When --root is the only flag, system.img is left alone.
   --all                Apply all patches (equivalent to all flags above)
   -h, --help           Display this help message
