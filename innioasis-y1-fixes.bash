@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.3.2
+# Version: 1.4.0
 # History:
+# 2026-05-03 (1.4.0): Drop the pre-staged-artifacts requirement. --avrcp and --music-apk now extract the stock binaries directly from the mounted system.img, run the corresponding patch_*.py against them, and write the patched bytes back in-place. Previously the user had to run each patch_*.py manually beforehand and stage mtkbt.patched / MtkBt.odex.patched / libextavrcp.so.patched / libextavrcp_jni.so.patched / com.innioasis.y1_3.0.2-patched.apk in --artifacts-dir. Only Y1MediaBridge.apk (externally-built, not derived from system.img) and boot.img (for --root) need to be staged now; everything else is extracted from system.img and patched on the fly. New helpers `patch_in_place_bytes` and `patch_in_place_y1_apk` wrap the extract → patch → write-back cycle. Idempotent: re-running detects already-patched files and is a no-op.
 # 2026-05-03 (1.3.2): No functional changes to the bash itself — reflects patch_bootimg.py absorbing patch_adbd.py (H1/H2/H3 NOP the three blx setgroups/setgid/setuid calls in adbd's drop_privileges block). With the adbd binary patched, `adb shell` returns uid 0 directly at boot, and `adb root` is no longer needed (it returns "already running as root" without triggering the USB-rebind cycle). --root help text updated accordingly — the v1.3.1 "do not run adb root" warning was correct only against the v1.3.1 patcher (which relied on inert default.prop edits).
 # 2026-05-03 (1.3.1): --root no longer touches system.img (skip copy/mount/patch/unmount/flash and the sudo prompt unless a system-affecting flag is set). --root help text initially warned against running `adb root` post-flash (the OEM adbd ignores ro.secure, so v1.3.1's default.prop edits left adbd at uid 2000 and `adb root` triggered a USB-rebind cycle that lost the host connection). Superseded by v1.3.2 which patches the adbd binary directly.
 # 2026-05-03 (1.3.0): Reintroduce --root flag. Delegates to patch_bootimg.py (pure-Python in-place cpio mutation; no shell-side cpio/dd repack). Flashes patched boot.img via mtkclient after system.img write.
@@ -34,14 +35,32 @@ show_help() {
   cat <<EOF
 Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [OPTIONS]
 
---artifacts-dir <path> is mandatory and specifies the directory containing binary files and artifacts.
+--artifacts-dir <path> is mandatory and specifies the directory containing the
+firmware images and any externally-built artifacts.
+
+Required artifacts (depending on flags):
+  system.img             — mandatory if any of --adb/--avrcp/--bluetooth/
+                            --music-apk/--remove-apps is set. Mounted as a loop
+                            device; stock binaries are extracted from the mount,
+                            patched in-place by the corresponding patch_*.py
+                            (mtkbt, MtkBt.odex, libextavrcp.so,
+                            libextavrcp_jni.so, com.innioasis.y1_X.Y.Z.apk),
+                            and written back. No pre-staged .patched files are
+                            required.
+  boot.img               — mandatory if --root is set. Patched in-place by
+                            patch_bootimg.py (which embeds patch_adbd.py).
+  Y1MediaBridge.apk      — mandatory if --avrcp is set. This is an
+                            externally-built artifact (not derived from
+                            system.img) so it must be staged separately.
 
 If only --artifacts-dir is specified, this help message is displayed.
 If any patching option is specified, the script will mount the system.img, apply the selected
-patches, and then write the patched system.img to the device.
+patches (auto-extract → patch → write-back where applicable), and then write the patched
+system.img to the device.
 
 MANDATORY:
-  --artifacts-dir <path> Directory containing binary files and APKs
+  --artifacts-dir <path> Directory containing system.img / boot.img /
+                          Y1MediaBridge.apk as listed above
 
 OPTIONS:
   --adb                Enable ADB debugging
@@ -170,24 +189,16 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   sudo -v
   while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
   SUDO_KEEPALIVE_PID=$!
-  trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null' EXIT
+  # Cleanup (sudo keepalive + tempdir) is registered later via a composite
+  # trap; see _cleanup below.
 fi
 
 VERSION_FIRMWARE="3.0.2"
 
-FILENAME_BIN_MTKBT="mtkbt"
-FILENAME_BIN_MTKBT_PATCHED="mtkbt.patched"
 FILENAME_BOOT_IMAGE_SOURCE="boot.img"
 FILENAME_BOOT_IMAGE_TARGET="boot-${VERSION_FIRMWARE}-devel.img"
 FILENAME_BUILD_PROP="build.prop"
-FILENAME_LIBRARY_LIBEXTAVRCP="libextavrcp.so"
-FILENAME_LIBRARY_LIBEXTAVRCP_PATCHED="libextavrcp.so.patched"
-FILENAME_LIBRARY_LIBEXTAVRCP_JNI="libextavrcp_jni.so"
-FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED="libextavrcp_jni.so.patched"
-FILENAME_MTKBT_ODEX="MtkBt.odex"
-FILENAME_MTKBT_ODEX_PATCHED="MtkBt.odex.patched"
 FILENAME_MUSIC_APK="com.innioasis.y1_${VERSION_FIRMWARE}.apk"
-FILENAME_MUSIC_APK_PATCHED="com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
 FILENAME_SYSTEM_IMAGE_SOURCE="system.img"
 FILENAME_SYSTEM_IMAGE_TARGET="system-${VERSION_FIRMWARE}-devel.img"
 FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
@@ -197,6 +208,89 @@ PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATH_MOUNT="/mnt/y1-devel"
 PATH_MTKCLIENT="/opt/mtkclient-2.1.4.1"
 PATH_VENV_MTKCLIENT="/opt/venv/mtkclient"
+
+# Tempdir for staging stock binaries extracted from the mount and the
+# corresponding patched output before writing back.
+PATH_TMP_STAGE="$(mktemp -d -t y1-fixes.XXXXXX)"
+
+# Composite cleanup trap: keep any existing SUDO_KEEPALIVE_PID kill plus
+# tempdir removal. Re-set after the sudo block above (which installed its
+# own trap) so both fire on exit.
+_cleanup() {
+  [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null
+  rm -rf "${PATH_TMP_STAGE}"
+}
+trap _cleanup EXIT
+
+# patch_in_place_bytes <mount-relative-path> <patch-script-name> [mode]
+#
+# Extract a stock binary from ${PATH_MOUNT}, run the named patch_*.py against
+# it (writing to a tempdir), and write the patched bytes back into the mount
+# with the requested mode and root:root ownership.
+#
+# If the patch script reports "already patched" (exit 0 with no output file),
+# this is a no-op — the mount already has the correct bytes.
+#
+# Bails the whole script on patcher failure (MD5 mismatch, missing patch
+# sites, etc.).
+patch_in_place_bytes() {
+  local mount_rel="$1"
+  local script="$2"
+  local mode="${3:-644}"
+  local stage_dir="${PATH_TMP_STAGE}/$(basename "${mount_rel}")"
+  local stock="${stage_dir}/stock"
+  local patched="${stage_dir}/patched"
+
+  mkdir -p "${stage_dir}"
+  echo "  ${mount_rel}: extract → ${script} → write-back"
+  sudo cp "${PATH_MOUNT}/${mount_rel}" "${stock}"
+  sudo chown "$(id -u):$(id -g)" "${stock}"
+
+  if ! python3 "${PATH_SCRIPT_DIR}/${script}" "${stock}" --output "${patched}"; then
+    echo "ERROR: ${script} failed for ${mount_rel}" >&2
+    exit 1
+  fi
+
+  if [[ -f "${patched}" ]]; then
+    sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+    sudo chmod "${mode}" "${PATH_MOUNT}/${mount_rel}"
+    sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
+  fi
+  # If patched isn't there, the script said "already patched" — mount is
+  # correct, no write-back needed.
+}
+
+# patch_in_place_y1_apk <mount-relative-path>
+#
+# Special-case wrapper for patch_y1_apk.py (script-style program, no --output
+# flag, output landing in CWD/output/). Runs the patcher from PATH_SCRIPT_DIR
+# so apktool.jar caches and the output APK end up there, then writes the
+# patched APK back into the mount.
+patch_in_place_y1_apk() {
+  local mount_rel="$1"
+  local stage_dir="${PATH_TMP_STAGE}/$(basename "${mount_rel}")"
+  local stock="${stage_dir}/stock.apk"
+  local patched="${PATH_SCRIPT_DIR}/output/com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
+
+  mkdir -p "${stage_dir}"
+  echo "  ${mount_rel}: extract → patch_y1_apk.py → write-back"
+  sudo cp "${PATH_MOUNT}/${mount_rel}" "${stock}"
+  sudo chown "$(id -u):$(id -g)" "${stock}"
+
+  if ! ( cd "${PATH_SCRIPT_DIR}" && python3 patch_y1_apk.py "${stock}" ); then
+    echo "ERROR: patch_y1_apk.py failed for ${mount_rel}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${patched}" ]]; then
+    echo "ERROR: patch_y1_apk.py did not produce ${patched}" >&2
+    exit 1
+  fi
+
+  sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+  sudo chmod 644 "${PATH_MOUNT}/${mount_rel}"
+  sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
+}
 
 # Patch boot.img ramdisk for ADB root access
 if [[ "$FLAG_ROOT" == true ]]; then
@@ -233,30 +327,20 @@ fi
 if [[ "$FLAG_AVRCP" == true ]]; then
   echo "Enabling AVRCP 1.4 support (WIP).."
 
-  echo "  Copying Y1 Media Bridge APK.."
+  if [[ ! -f "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" ]]; then
+    echo "ERROR: --avrcp requires ${FILENAME_Y1_MEDIA_BRIDGE_APK} in ${PATH_ARTIFACTS}" >&2
+    exit 1
+  fi
+
+  echo "  Installing Y1MediaBridge.apk (externally built — copied from artifacts).."
   sudo cp "${PATH_ARTIFACTS}/${FILENAME_Y1_MEDIA_BRIDGE_APK}" "${PATH_MOUNT}/app/"
   sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
   sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
 
-  echo "  Copying patched MtkBt odex.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MTKBT_ODEX_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
-  sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
-  sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MTKBT_ODEX}"
-
-  echo "  Copying patched mtkbt binary.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_BIN_MTKBT_PATCHED}" "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
-  sudo chmod 755 "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
-  sudo chown root:root "${PATH_MOUNT}/bin/${FILENAME_BIN_MTKBT}"
-
-  echo "  Copying patched AVRCP library.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_PATCHED}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
-  sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
-  sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP}"
-
-  echo "  Copying patched AVRCP JNI library.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI_PATCHED}" "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
-  sudo chmod 644 "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
-  sudo chown root:root "${PATH_MOUNT}/lib/${FILENAME_LIBRARY_LIBEXTAVRCP_JNI}"
+  patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
+  patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
+  patch_in_place_bytes "lib/libextavrcp.so"      "patch_libextavrcp.py"       644
+  patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni.py"   644
 fi
 
 # Configure Bluetooth fixes
@@ -279,12 +363,10 @@ ro.bluetooth.profiles.avrcp.target.enabled=true
 EOF
 fi
 
-# Copy patched Y1 music player APK
+# Patch Y1 music player APK (Artist→Album navigation)
 if [[ "$FLAG_MUSIC_APK" == true ]]; then
-  echo "Copying patched Y1 music player APK.."
-  sudo cp "${PATH_ARTIFACTS}/${FILENAME_MUSIC_APK_PATCHED}" "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
-  sudo chmod 644 "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
-  sudo chown root:root "${PATH_MOUNT}/app/${FILENAME_MUSIC_APK}"
+  echo "Patching Y1 music player APK.."
+  patch_in_place_y1_apk "app/${FILENAME_MUSIC_APK}"
 fi
 
 # Remove unnecessary APK files

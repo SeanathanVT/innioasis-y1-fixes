@@ -77,14 +77,14 @@ The "Final state" in `INVESTIGATION.md` and the "Status (2026-05-03)" section be
   - Single patch: version constant at 0x002e3b changed from `0x0103` (1.3) to `0x0104` (1.4)
   - Input: stock `libextavrcp.so` → Output: `output/libextavrcp.so.patched`
 
-- **`innioasis-y1-fixes.bash`** (v1.3.0)
+- **`innioasis-y1-fixes.bash`** (v1.4.0)
   - Accepts mandatory `--artifacts-dir` parameter for artifact location
   - Supports selective patching with individual flags: `--adb`, `--avrcp`, `--bluetooth`, `--music-apk`, `--remove-apps`, `--root`
-  - Mounts and patches the system.img firmware image
-  - Copies patched APKs, libraries, and binaries into the filesystem
-  - Configures build.prop and Bluetooth settings
-  - Removes unnecessary bloatware APKs
-  - With `--root`, delegates to `patch_bootimg.py` to produce `boot-3.0.2-devel.img`, then writes it to the device's `boot` partition via mtkclient
+  - Mounts the `system.img` firmware image, applies the selected patches, unmounts, and flashes via mtkclient
+  - **Auto-extract / auto-patch (v1.4.0)**: for `--avrcp` and `--music-apk`, stock binaries (`mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so`, `com.innioasis.y1_3.0.2.apk`) are extracted from the mounted system.img, fed through their respective `patch_*.py`, and written back in-place. No pre-staged `*.patched` files are required. Uses two helpers (`patch_in_place_bytes` and `patch_in_place_y1_apk`) and is idempotent (re-running detects already-patched files and skips the write-back).
+  - Configures `build.prop` and Bluetooth settings (`--adb`, `--bluetooth`)
+  - Removes unnecessary bloatware APKs (`--remove-apps`)
+  - With `--root`, delegates to `patch_bootimg.py` to produce `boot-3.0.2-devel.img` (which embeds the H1/H2/H3 adbd byte patches), then writes it to the device's `boot` partition via mtkclient. `--root` does not touch `system.img`.
 
 - **`patch_adbd.py`**
   - Patches stock `/sbin/adbd` (extracted from the boot.img ramdisk) so it does not drop privileges to AID_SHELL on startup. After flashing, `adb shell` returns a uid 0 shell directly.
@@ -183,52 +183,22 @@ Two bytecode patches and one scope-related patch are applied to the Y1 music pla
 
 - Bash 4+
 - macOS or Linux (file size calculations use `wc -c` for cross-platform compatibility)
-- `sudo` access (for mounting and modifying system.img)
+- `sudo` access (for mounting and modifying system.img — only needed if a system-affecting flag is set; `--root` alone runs sudo-less)
 - `--artifacts-dir` parameter pointing to a directory containing:
-  - `system.img` – Original firmware system image
+  - `system.img` – Original firmware system image (required if any of `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps` is set). Stock binaries are extracted from this image, patched in-place by the bash via `patch_in_place_bytes`/`patch_in_place_y1_apk`, and written back into the mount. **No pre-staged `*.patched` files are required as of v1.4.0.**
   - `boot.img` – Original firmware boot image (required for `--root` flag)
-  - `com.innioasis.y1_3.0.2-patched.apk` – Patched music player APK (from patch_y1_apk.py)
-  - `Y1MediaBridge.apk`, `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched` – Patched BT binaries (from patch scripts, for `--avrcp` flag)
+  - `Y1MediaBridge.apk` – Externally-built integration APK (required for `--avrcp` flag — this is *not* derived from the stock system.img, so it must be staged separately)
+- Python 3.8+, Java 11+ (only if `--music-apk` is set — apktool is downloaded by `patch_y1_apk.py` on first invocation)
+- androguard: `pip install androguard` (only if `--music-apk` is set)
 - mtkclient 2.1.4.1 installed at `/opt/mtkclient-2.1.4.1`
 
 ## Usage
 
-### Step 1: Patch the Music Player APK
+### Step 1: Stage artifacts
 
-```bash
-python3 patch_y1_apk.py path/to/com.innioasis.y1_3.0.2.apk
-```
+Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`). As of v1.4.0 of `innioasis-y1-fixes.bash`, no pre-patched `*.patched` files are required — the bash extracts stock binaries from the mounted `system.img`, applies the byte/smali patches in-place, and writes them back.
 
-Output: `output/com.innioasis.y1_3.0.2-patched.apk`
-
-Alternatively, if the APK is in the current directory:
-```bash
-python3 patch_y1_apk.py
-```
-
-### Step 2: Patch the Bluetooth Binaries (for `--avrcp`)
-
-Run each patch script against the corresponding stock binary extracted from the firmware:
-
-```bash
-python3 patch_mtkbt.py mtkbt
-python3 patch_mtkbt_odex.py MtkBt.odex
-python3 patch_libextavrcp_jni.py libextavrcp_jni.so
-python3 patch_libextavrcp.py libextavrcp.so
-```
-
-Outputs (all written to the `output/` directory):
-- `output/mtkbt.patched`
-- `output/MtkBt.odex.patched`
-- `output/libextavrcp_jni.so.patched`
-- `output/libextavrcp.so.patched`
-
-Each script verifies the input MD5, checks patch sites before and after, and refuses to write output if anything is unexpected.
-
-### Step 3: Prepare Patch Artifacts
-
-Gather the following files in a directory of your choice (e.g., `/home/user/y1-patches/`):
-- `system.img` (original firmware system image, required for any system flag)
+- `system.img` (required for any system-affecting flag — `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps`).
   - Obtained from an OTA update package, or dumped from the device block device via ADB:
     ```bash
     adb shell "dd if=/dev/block/<partition> bs=4096" > system.img
@@ -239,11 +209,30 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
     simg2img system.img system-raw.img
     mv system-raw.img system.img
     ```
-- `com.innioasis.y1_3.0.2-patched.apk` – copy from `output/` produced in Step 1
-- `Y1MediaBridge.apk` (required for `--avrcp` flag)
-- `mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched` – copy from `output/` produced in Step 2 (required for `--avrcp` flag)
+- `boot.img` (required for `--root`). Used by `patch_bootimg.py` to apply default.prop edits + the H1/H2/H3 byte patches to `/sbin/adbd` in the ramdisk.
+- `Y1MediaBridge.apk` (required for `--avrcp`). This is the only patched-style artifact the user has to supply — it's an externally-built integration APK from the [Y1MediaBridge](../Y1MediaBridge/) project, not derived from stock system.img.
 
-### Step 4: Apply Firmware Patches
+### Step 2 (optional): Run patch scripts manually for inspection
+
+The byte patchers and the smali patcher can be run standalone if you want to inspect the patched output before committing to a flash. Each script verifies the input MD5, checks patch sites before and after, and refuses to write output if anything is unexpected.
+
+```bash
+# Music player APK
+python3 patch_y1_apk.py path/to/com.innioasis.y1_3.0.2.apk        # → output/com.innioasis.y1_3.0.2-patched.apk
+
+# Bluetooth binaries (each takes the stock binary extracted from system.img)
+python3 patch_mtkbt.py            mtkbt                           # → output/mtkbt.patched
+python3 patch_mtkbt_odex.py       MtkBt.odex                      # → output/MtkBt.odex.patched
+python3 patch_libextavrcp_jni.py  libextavrcp_jni.so              # → output/libextavrcp_jni.so.patched
+python3 patch_libextavrcp.py      libextavrcp.so                  # → output/libextavrcp.so.patched
+
+# adbd (extract /sbin/adbd from boot.img ramdisk first)
+python3 patch_adbd.py             adbd                            # → output/adbd.patched
+```
+
+These artifacts are not consumed by `innioasis-y1-fixes.bash` — they're for manual inspection / development. The bash invokes the same patch scripts under the hood and discards the temp files.
+
+### Step 3: Apply Firmware Patches
 
 ```bash
 chmod +x innioasis-y1-fixes.bash
@@ -252,9 +241,9 @@ chmod +x innioasis-y1-fixes.bash
 
 **Available options:**
 - `--adb` – Enable ADB debugging via build.prop
-- `--avrcp` – Deploy AVRCP 1.4 patched binaries (`mtkbt.patched`, `MtkBt.odex.patched`, `libextavrcp_jni.so.patched`, `libextavrcp.so.patched`, `Y1MediaBridge.apk`)
+- `--avrcp` – Auto-extract and patch the AVRCP 1.4 binaries from system.img (`mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so`) via the corresponding `patch_*.py` scripts, write them back into the mount, and additionally install the externally-built `Y1MediaBridge.apk`. **Requires only `Y1MediaBridge.apk` in `--artifacts-dir`** — the four BT binaries are auto-extracted.
 - `--bluetooth` – Configure Bluetooth settings and build.prop Bluetooth entries
-- `--music-apk` – Install patched Y1 music player APK
+- `--music-apk` – Auto-extract and patch the Y1 music player APK from system.img (Artist→Album navigation via smali patches by `patch_y1_apk.py`), then write it back. **No pre-staged APK required** — extracted from the mount.
 - `--remove-apps` – Remove unnecessary APK files
 - `--root` – Patch ramdisk `default.prop` (`ro.secure=0`, `ro.debuggable=1`, `ro.adb.secure=0`) **and** patch `/sbin/adbd` (H1/H2/H3 — NOP the three `blx setgroups/setgid/setuid` calls in adbd's drop_privileges block) so adbd starts as uid 0 at boot. Writes the patched boot image to the device. Requires `boot.img` in `--artifacts-dir`. When `--root` is the only flag specified, `system.img` is left alone (no copy/mount/flash). After flashing, `adb shell` returns uid 0 directly. `adb root` is unnecessary (adbd is already root) but harmless on the patched binary — it returns "already running as root" without restarting.
 - `--all` – Apply all patches
@@ -272,7 +261,7 @@ The script will:
 **Output:**
 - `system-3.0.2-devel.img` – Patched system image
 
-### Step 5: Flash Firmware
+### Step 4: Flash Firmware
 
 Use mtkclient to flash the patched image back to the device.
 
@@ -320,6 +309,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – `innioasis-y1-fixes.bash` v1.4.0: drop the pre-staged-artifacts requirement. `--avrcp` and `--music-apk` now extract the stock binaries directly from the mounted `system.img`, run the corresponding `patch_*.py` against them, and write the patched bytes back in-place. Previously the user had to run each `patch_*.py` manually beforehand and stage `mtkbt.patched`/`MtkBt.odex.patched`/`libextavrcp.so.patched`/`libextavrcp_jni.so.patched`/`com.innioasis.y1_3.0.2-patched.apk` in `--artifacts-dir`. Only `Y1MediaBridge.apk` (externally-built integration APK, not derived from system.img) and `boot.img` (for `--root`) need to be staged now; everything else is extracted from `system.img` and patched on the fly. Two new helpers wrap the cycle: `patch_in_place_bytes <mount-rel> <patch-script> [mode]` for the four byte patchers (which all share `--output` semantics), and `patch_in_place_y1_apk <mount-rel>` for the smali patcher (which is script-style and lands its output in `${PATH_SCRIPT_DIR}/output/`). Idempotent — re-running `--avrcp` detects already-patched binaries (the `patch_*.py` scripts return exit 0 with no output file) and skips the write-back step. Sudo is still only requested when a system-affecting flag is set; `--root` alone runs sudo-less. Same in-place pattern that `patch_bootimg.py` already uses for `default.prop` + `/sbin/adbd`, applied to system.img.
 - **2026-05-03** – Add `patch_adbd.py` and wire it into `patch_bootimg.py`. Three Thumb-2 NOP patches (H1/H2/H3) at `0x14bc`/`0x14ca`/`0x14d8` neutralise adbd's drop_privileges block by replacing each `blx setgroups/setgid/setuid` (4 bytes) with `movs r0, #0; nop` so the following `cmp r0, #0; bne.w fail` falls through. Required because empirical confirmation 2026-05-03 (`adb shell id` returning `uid=2000(shell)` with `ro.secure=0`/`ro.debuggable=1`/`ro.adb.secure=0` correctly set per `getprop`) showed this OEM adbd has stripped the standard `should_drop_privileges()` gating — `strings adbd` returns ZERO references to `ro.secure` and the drop block at `0x94b8` runs unconditionally on every adbd startup. The default.prop edits remain in place as belt-and-suspenders for other Android subsystems but are not load-bearing for the adbd-as-root question. `patch_bootimg.py` now extracts `/sbin/adbd` from the cpio, applies the H1/H2/H3 patches via `patch_adbd.patch_bytes()`, and writes it back in-place; the patched adbd has the same file size (223,132 bytes) so cpio record offsets are unchanged. Stock adbd MD5 `9e7091f1699f89dc905dee3d9d5b23d8` → patched MD5 `ccebb66b25200f7e154ec23eb79ea9b4`. Round-trip verified end-to-end against the stock 3.0.2 ramdisk.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.3.2: no functional changes to the bash itself — reflects `patch_bootimg.py` absorbing `patch_adbd.py` (see entry above). `--root` help text updated: `adb root` is no longer flagged as harmful (the v1.3.1 warning was correct against the property-only patcher but is moot now that adbd is binary-patched).
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.3.1: `--root` no longer touches `system.img` (skip copy / mount / patch / unmount / flash and the sudo prompt unless one of `--adb`/`--avrcp`/`--bluetooth`/`--music-apk`/`--remove-apps` is also set). The previous v1.3.0 flow re-flashed an unmodified `system.img` for `--root`-only invocations — pure cycle waste and a non-trivial flash risk. Also: drop `service.adb.root=1` from `patch_bootimg.py`'s `_DEFAULT_PROP_EDITS` based on the (incorrect) hypothesis that `ro.secure=0` would make adbd skip the privilege drop — disproven same-day by `adb shell id` returning uid 2000 with all properties correctly set, leading to the v1.3.2 binary-patch approach above. `--root` help text and README initially warned against running `adb root` post-flash on this firmware: with the v1.3.1 patcher, adbd was still uid 2000, and `adb root` triggered a stock MTK adbd USB re-bind on self-restart that lost the host connection — that warning was superseded in v1.3.2.
