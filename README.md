@@ -39,6 +39,8 @@ The "Final state" in `INVESTIGATION.md` and the "Status (2026-05-03)" section be
 
 ### Main Scripts
 
+> **Layout note (v1.8.2):** the byte/smali patchers (`patch_*.py`) now live under [`src/patches/`](src/patches/). The bash entry-point (`innioasis-y1-fixes.bash`) stays at the repo root; it dispatches into `src/patches/` and `src/su/` as needed. See the v1.8.2 entry under [Changes](#changes) for the full path mapping.
+
 - **`patch_mtkbt.py`**
   - Patches the stock `mtkbt` Bluetooth daemon binary for AVRCP 1.4
   - **Eleven patches applied:**
@@ -229,25 +231,27 @@ Gather the following files in a directory of your choice (e.g., `/home/user/y1-p
 
 The byte patchers and the smali patcher can be run standalone if you want to inspect the patched output before committing to a flash. Each script verifies the input MD5, checks patch sites before and after, and refuses to write output if anything is unexpected.
 
+All patch scripts now live under `src/patches/`; the su build under `src/su/`. Run the patchers from `src/patches/` so their `output/` and `_patch_workdir/` end up there (the bash always does this; for manual invocation it's a convention).
+
 ```bash
 # Music player APK
-python3 patch_y1_apk.py path/to/com.innioasis.y1_3.0.2.apk        # → output/com.innioasis.y1_3.0.2-patched.apk
+( cd src/patches && python3 patch_y1_apk.py path/to/com.innioasis.y1_3.0.2.apk )    # → src/patches/output/com.innioasis.y1_3.0.2-patched.apk
 
 # Bluetooth binaries (each takes the stock binary extracted from system.img)
-python3 patch_mtkbt.py            mtkbt                           # → output/mtkbt.patched
-python3 patch_mtkbt_odex.py       MtkBt.odex                      # → output/MtkBt.odex.patched
-python3 patch_libextavrcp_jni.py  libextavrcp_jni.so              # → output/libextavrcp_jni.so.patched
-python3 patch_libextavrcp.py      libextavrcp.so                  # → output/libextavrcp.so.patched
+( cd src/patches && python3 patch_mtkbt.py           mtkbt )                        # → src/patches/output/mtkbt.patched
+( cd src/patches && python3 patch_mtkbt_odex.py      MtkBt.odex )                   # → src/patches/output/MtkBt.odex.patched
+( cd src/patches && python3 patch_libextavrcp_jni.py libextavrcp_jni.so )           # → src/patches/output/libextavrcp_jni.so.patched
+( cd src/patches && python3 patch_libextavrcp.py     libextavrcp.so )               # → src/patches/output/libextavrcp.so.patched
 
-# adbd (extract /sbin/adbd from boot.img ramdisk first) — NOT WIRED INTO THE BASH (see warning in patch_adbd.py)
-python3 patch_adbd.py             adbd                            # → output/adbd.patched
+# adbd (extract /sbin/adbd from boot.img ramdisk first) — NOT WIRED INTO THE BASH (see warning in src/patches/patch_adbd.py)
+( cd src/patches && python3 patch_adbd.py            adbd )                         # → src/patches/output/adbd.patched
 
 # su (build the setuid-root escalator for /system/xbin/su; consumed by --root in v1.8.0)
-cd src/su && make && cd ../..                                     # → src/su/build/su
+cd src/su && make && cd ../..                                                       # → src/su/build/su
 ```
 
 These artifacts are not consumed by `innioasis-y1-fixes.bash` — they're for manual inspection / development. The bash invokes the same patch scripts under the hood and discards the temp files. **Notes:**
-- `patch_adbd.py` and `patch_bootimg.py` are kept as historical record but are *not* invoked by the bash in v1.7.0+; their output causes "device offline" on hardware (see warning banner in each script's docstring).
+- `src/patches/patch_adbd.py` and `src/patches/patch_bootimg.py` are kept as historical record but are *not* invoked by the bash in v1.7.0+; their output causes "device offline" on hardware (see warning banner in each script's docstring).
 - `src/su/build/su` *is* consumed by the bash's `--root` flag (v1.8.0+); the binary must exist at that path before `--root` runs.
 
 ### Step 3: Apply Firmware Patches
@@ -338,6 +342,7 @@ See [INVESTIGATION.md](INVESTIGATION.md) for the full investigation narrative in
 
 ## Changes
 
+- **2026-05-03** – `innioasis-y1-fixes.bash` v1.8.2: move the seven `patch_*.py` scripts (`patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp.py`, `patch_libextavrcp_jni.py`, `patch_y1_apk.py`, `patch_adbd.py`, `patch_bootimg.py`) into `src/patches/`, matching the `src/su/` pattern set in v1.8.1. Bash references updated: `${PATH_SCRIPT_DIR}/${script}` → `${PATH_SCRIPT_DIR}/src/patches/${script}` in `patch_in_place_bytes`; `cd "${PATH_SCRIPT_DIR}"` → `cd "${PATH_SCRIPT_DIR}/src/patches"` in `patch_in_place_y1_apk`; output APK lookup `${PATH_SCRIPT_DIR}/output/...` → `${PATH_SCRIPT_DIR}/src/patches/output/...`. `patch_y1_apk.py` writes its output APK to `output/` relative to CWD, so CWD-changing the patcher invocation moves the output dir too — no Python source change needed. `_patch_workdir/` (apktool scratch) likewise lands under `src/patches/_patch_workdir/`. `.gitignore` is unchanged (the existing `_patch_workdir`, `__pycache__`, `output` patterns are bare and match at any depth). No functional change to user invocation. README updated: layout note added at the top of "Main Scripts"; Step 2 (manual inspection) commands now run patchers via `( cd src/patches && python3 patch_*.py ... )`; "Notes" entries reference `src/patches/patch_*.py`.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.8.1: move `su/` → `src/su/` in anticipation of bringing additional source trees (Y1MediaBridge, the byte patchers) under a shared `src/` root for monorepo organization. The bash now references `${PATH_SCRIPT_DIR}/src/su/build/su`; the build instruction in the `--root` help text and the missing-prebuilt error become `cd src/su && make`. `.gitignore` updated. No functional change.
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.8.0: reintroduce `--root` flag with a fundamentally different mechanism. Instead of patching `/sbin/adbd` in the boot.img ramdisk (the v1.3.0–v1.6.0 approach, which caused "device offline" on hardware in every revision tried), the new `--root` installs a minimal setuid-root `su` binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` stays untouched, so the ADB protocol handshake comes up cleanly, and root is obtained post-flash by running `adb shell /system/xbin/su`. The binary is built from `src/su/su.c` (~80 lines of C) + `src/su/start.S` (~10 lines of ARM Thumb-2 assembly) via `arm-linux-gnu-gcc` — direct ARM-EABI syscalls (`setgid`, `setuid`, `execve`, `write`, `exit`), no libc, no manager APK, no whitelist. Output is a ~900-byte statically-linked ARMv7 ELF with no dynamic dependencies; every byte traces to GCC + the local source. Toolchain install on Rocky/Alma/RHEL/Fedora: `sudo dnf install -y epel-release && sudo dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make`. Build with `cd src/su && make`. The bash references the prebuilt at `${PATH_SCRIPT_DIR}/src/su/build/su`; if missing, `--root` exits with a clear error pointing at `make`. `--root` is system.img-only (no boot.img extraction, no ramdisk repack); the install block does `install -m 06755 -o root -g root src/su/build/su /system/xbin/su` against the mounted system.img. Re-added to `--all`. `patch_adbd.py` and `patch_bootimg.py` remain in the tree as historical record (still unwired). **Pending hardware verification.**
 - **2026-05-03** – `innioasis-y1-fixes.bash` v1.7.0: remove `--root` flag entirely. The H1/H2/H3 byte patches in `/sbin/adbd` (both NOP-the-blx and arg-zero revisions) caused "device offline" on hardware in flash testing — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. Static analysis of adbd found no `getuid()` gate, no uid==2000 compare, no obvious capability check; the failure mode is something we can't see without on-device visibility (which we lose the moment we ship a broken adbd). Boot.img extraction, patch_bootimg invocation, and boot.img mtkclient flash all dropped from the bash. Standalone `patch_adbd.py` and `patch_bootimg.py` kept in the tree as historical record with warning banners in their docstrings; their analysis (drop_privileges block at vaddr 0x94b8, bionic syscall wrappers at 0x17038/0x1701c/0x19418, cgroup-migration helper at 0x27b30 opening `/acct/uid/<uid>/tasks`) is preserved for whoever picks the root pass back up. Re-introducing `--root` later is straightforward (re-add the boot.img extraction block + patch_bootimg invocation + boot.img flash) once a working approach is found.

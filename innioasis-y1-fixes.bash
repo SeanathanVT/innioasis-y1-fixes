@@ -3,8 +3,9 @@
 # Script: innioasis-y1-fixes.bash
 # Description: Patches Innioasis Y1 system.img to fix Bluetooth AVRCP, remove APK-related cruft, and enable ADB debugging.
 # Author: Sean Halpin (github.com/SeanathanVT)
-# Version: 1.8.1
+# Version: 1.8.2
 # History:
+# 2026-05-03 (1.8.2): Move the seven patch_*.py scripts into src/patches/ to match the src/su/ pattern set in v1.8.1. Bash references updated: `${PATH_SCRIPT_DIR}/${script}` → `${PATH_SCRIPT_DIR}/src/patches/${script}` in `patch_in_place_bytes`; `cd "${PATH_SCRIPT_DIR}"` → `cd "${PATH_SCRIPT_DIR}/src/patches"` in `patch_in_place_y1_apk`; output APK lookup `${PATH_SCRIPT_DIR}/output/...` → `${PATH_SCRIPT_DIR}/src/patches/output/...` (patch_y1_apk.py writes its output APK to `output/` relative to CWD, so CWD-changing the patcher invocation moves the output dir too). The `_patch_workdir/` apktool scratch dir likewise lands under `src/patches/_patch_workdir/`. No functional change to user invocation.
 # 2026-05-03 (1.8.1): Move su/ → src/su/ in anticipation of bringing additional source trees (Y1MediaBridge, byte patchers) under a shared src/ root for monorepo organization. The bash now references ${PATH_SCRIPT_DIR}/src/su/build/su; the build instruction in the --root help text and the missing-prebuilt error become `cd src/su && make`. No functional change.
 # 2026-05-03 (1.8.0): Reintroduce --root flag with a fundamentally different mechanism — install a minimal setuid-root `su` binary at /system/xbin/su (mode 06755, root:root) instead of patching /sbin/adbd in the ramdisk. The H1/H2/H3 adbd byte patches (v1.3.x–v1.6.0) all caused "device offline" on hardware because something in the OEM adbd's startup sequence depends on the syscalls actually changing the uid (we couldn't see what without on-device visibility, which we lost the moment we shipped a broken adbd). The new approach leaves /sbin/adbd untouched: stock adbd starts at uid 2000 (shell) as normal, ADB protocol comes up cleanly, and root is obtained by running /system/xbin/su from the adb shell. The su binary is a ~900-byte direct-syscall ARM-EABI ELF compiled from src/su/ in this repo (no libc, no manager APK, no whitelist) — every byte traces to GCC + the local source. See src/su/su.c and src/su/start.S; the bash references the prebuilt artifact at ${PATH_SCRIPT_DIR}/src/su/build/su (run `cd src/su && make` to build). The --root flag is a system.img-only operation now (no boot.img extraction, no ramdisk repack); it copies the prebuilt binary into the mount and chmods 06755. Re-added to --all. patch_adbd.py and patch_bootimg.py remain in the tree as historical record (still unwired).
 # 2026-05-03 (1.7.0): Remove --root flag entirely. The H1/H2/H3 byte patches in /sbin/adbd (both the NOP-the-blx and arg-zero revisions) caused "device offline" on hardware — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. Without on-device visibility (logcat / dmesg / strace, all of which require ADB), we can't diagnose what about adbd-at-uid-0 breaks the protocol on this OEM build. The standalone patch_adbd.py and patch_bootimg.py scripts are kept in the tree as historical record (with warning notes in their docstrings); their analysis of the drop_privileges block, bionic syscall wrappers, and cgroup-migration helper is preserved for whoever picks the root pass back up. Re-introducing --root is straightforward (re-add the boot.img extraction + patch_bootimg invocation + boot.img flash) once a working approach is found.
@@ -335,7 +336,7 @@ patch_in_place_bytes() {
   sudo cp "${PATH_MOUNT}/${mount_rel}" "${stock}"
   sudo chown "$(id -u):$(id -g)" "${stock}"
 
-  if ! python3 "${PATH_SCRIPT_DIR}/${script}" "${stock}" --output "${patched}"; then
+  if ! python3 "${PATH_SCRIPT_DIR}/src/patches/${script}" "${stock}" --output "${patched}"; then
     echo "ERROR: ${script} failed for ${mount_rel}" >&2
     exit 1
   fi
@@ -352,21 +353,21 @@ patch_in_place_bytes() {
 # patch_in_place_y1_apk <mount-relative-path>
 #
 # Special-case wrapper for patch_y1_apk.py (script-style program, no --output
-# flag, output landing in CWD/output/). Runs the patcher from PATH_SCRIPT_DIR
-# so apktool.jar caches and the output APK end up there, then writes the
-# patched APK back into the mount.
+# flag, output landing in CWD/output/). Runs the patcher from src/patches/ so
+# apktool.jar caches and the output APK end up under src/patches/, then writes
+# the patched APK back into the mount.
 patch_in_place_y1_apk() {
   local mount_rel="$1"
   local stage_dir="${PATH_TMP_STAGE}/$(basename "${mount_rel}")"
   local stock="${stage_dir}/stock.apk"
-  local patched="${PATH_SCRIPT_DIR}/output/com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
+  local patched="${PATH_SCRIPT_DIR}/src/patches/output/com.innioasis.y1_${VERSION_FIRMWARE}-patched.apk"
 
   mkdir -p "${stage_dir}"
   echo "  ${mount_rel}: extract → patch_y1_apk.py → write-back"
   sudo cp "${PATH_MOUNT}/${mount_rel}" "${stock}"
   sudo chown "$(id -u):$(id -g)" "${stock}"
 
-  if ! ( cd "${PATH_SCRIPT_DIR}" && python3 patch_y1_apk.py "${stock}" ); then
+  if ! ( cd "${PATH_SCRIPT_DIR}/src/patches" && python3 patch_y1_apk.py "${stock}" ); then
     echo "ERROR: patch_y1_apk.py failed for ${mount_rel}" >&2
     exit 1
   fi
