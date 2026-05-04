@@ -86,7 +86,9 @@ if [ -z "$unreleased_body" ]; then
     exit 1
 fi
 
-# Show what's about to ship — last chance to abort.
+# Show what's about to ship. This script is non-interactive by design —
+# all preconditions have been validated above (clean tree, no existing tag,
+# non-empty [Unreleased]). To abort: Ctrl-C during the 3-second pause below.
 echo "About to release $TAG."
 echo
 echo "[Unreleased] entries that will become [$VERSION] - $TODAY:"
@@ -103,6 +105,9 @@ if $PUSH; then
 else
     echo "(push: not requested; will print commands for later)"
 fi
+echo
+echo "Proceeding in 3 seconds (Ctrl-C to abort)..."
+sleep 3
 echo
 
 # 5 — bump the bash's # Version: header (in-place, but verify after)
