@@ -93,13 +93,26 @@ EOF
 source ~/.bashrc
 ```
 
-**JDK requirement:** `sdkmanager` and AGP 8.7.3 need JDK 17+. Install via your distro:
+**JDK requirement:** AGP 8.7.3 (used by `src/Y1MediaBridge/`) supports **JDK 17 through 21**. JDK 22+ — including the LTS-track JDK 25 — is likely to fail with `Toolchain ... does not provide the required capabilities: [JAVA_COMPILER]`. **JDK 17 is the safest choice.** Install:
 
 - Rocky / Alma / RHEL / Fedora: `sudo dnf install -y java-17-openjdk-devel`
 - Debian / Ubuntu: `sudo apt install -y openjdk-17-jdk`
 - Arch: `sudo pacman -S jdk17-openjdk`
 
-If `java -version` reports < 17, set `JAVA_HOME` to the JDK 17 install location.
+The `-devel` (Rocky/Fedora) / `-jdk` (Debian) package suffix matters — the plain `java-17-openjdk` / `openjdk-17-jre` packages ship the JRE only, no `javac`. Gradle reports the same `[JAVA_COMPILER]` capability error in that case.
+
+After installing, point `JAVA_HOME` at the JDK directory. Adjust per distro:
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk    # Rocky/Fedora
+# or  /usr/lib/jvm/java-17-openjdk-amd64         # Debian/Ubuntu
+# or  /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home   # macOS
+
+$JAVA_HOME/bin/javac -version    # verify: javac 17.x.x
+echo 'export JAVA_HOME=/usr/lib/jvm/java-17-openjdk' >> ~/.bashrc    # persist
+```
+
+If you have a newer JDK already (e.g. JDK 25) installed system-wide, leave it — just set `JAVA_HOME` to the JDK 17 install for this project. The `tools/install-android-sdk.sh` script's `sdkmanager` calls work fine on JDK 22+; only the `./gradlew` build step is constrained.
 
 ## macOS
 
