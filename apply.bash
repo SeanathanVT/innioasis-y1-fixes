@@ -488,7 +488,10 @@ EOF
     fi
     echo "Extracted system.img is sparse — converting to raw via simg2img.."
     raw="${PATH_TMP_STAGE}/system-raw.img"
-    simg2img "$PATH_SYSTEM_IMG" "$raw"
+    if ! simg2img "$PATH_SYSTEM_IMG" "$raw"; then
+      echo "ERROR: simg2img conversion failed (corrupt sparse image, or disk full?)" >&2
+      exit 1
+    fi
     PATH_SYSTEM_IMG="$raw"
   fi
 
@@ -507,7 +510,10 @@ FILENAME_MUSIC_APK="$(firmware_field "$VERSION_FIRMWARE" music_apk)"
 # Copy validated raw system.img into the artifacts dir (mtkclient flashes from there) and mount.
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
-  cp "$PATH_SYSTEM_IMG" "$dst"
+  if ! cp "$PATH_SYSTEM_IMG" "$dst"; then
+    echo "ERROR: failed to copy system.img to ${dst} (disk full? read-only artifacts dir?)" >&2
+    exit 1
+  fi
   echo "Mounting working copy of system.img.."
   if [[ ! -d "${PATH_MOUNT}" ]]; then
     sudo mkdir -p "${PATH_MOUNT}"

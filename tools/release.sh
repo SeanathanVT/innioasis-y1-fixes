@@ -96,6 +96,15 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+# 2b — git author identity available (otherwise `git commit` fails late)
+if [ -z "$(git config user.name)" ] || [ -z "$(git config user.email)" ]; then
+    echo "ERROR: git user.name and/or user.email not set." >&2
+    echo "       git commit will fail later. Set them first:" >&2
+    echo "         git config --global user.name 'Your Name'" >&2
+    echo "         git config --global user.email 'you@example.com'" >&2
+    exit 1
+fi
+
 # 3 — tag doesn't already exist
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "ERROR: tag '$TAG' already exists." >&2
