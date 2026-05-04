@@ -90,15 +90,15 @@ while [[ $# -gt 0 ]]; do
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
-      echo "WARNING: --avrcp is known-broken on this device. It regresses stock"
-      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/"
-      echo "         headset) without delivering the AVRCP 1.4 metadata it"
-      echo "         intends to enable. mtkbt is internally a 1.0 implementation"
-      echo "         and byte-patches cannot make it process 1.3+ commands."
-      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the"
-      echo "         full negative result and the user-space proxy path that"
+      echo "WARNING: --avrcp is known-broken on this device. It regresses stock" >&2
+      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/" >&2
+      echo "         headset) without delivering the AVRCP 1.4 metadata it" >&2
+      echo "         intends to enable. mtkbt is internally a 1.0 implementation" >&2
+      echo "         and byte-patches cannot make it process 1.3+ commands." >&2
+      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the" >&2
+      echo "         full negative result and the user-space proxy path that" >&2
       echo "         aims to fix this. Continuing only because you asked." >&2
-      echo
+      echo "" >&2
       shift
       ;;
     --bluetooth)
@@ -146,8 +146,8 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "ERROR: Unknown option '$1'" >&2
-      echo ""
-      show_help
+      echo "" >&2
+      show_help >&2
       exit 1
       ;;
   esac
