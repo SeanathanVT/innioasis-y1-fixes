@@ -10,6 +10,9 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Fixed
+- `src/patches/patch_y1_apk.py`: silence androguard 4.x's loguru output. The existing `logging.getLogger("androguard").setLevel(logging.ERROR)` line only suppresses the stdlib `logging` channel; androguard 4.0 switched to [loguru](https://github.com/Delgan/loguru) for its own logging, which ignores stdlib config. Result: a flood of `androguard | INFO`-style lines on every APK parse. Added a try/except `from loguru import logger; logger.disable("androguard")` block at module load (preventive — only if loguru is available transitively) and again immediately before the `from androguard.core.apk import APK` inside `get_apk_info` (just-in-time — covers the case where the module-load attempt hit ImportError because androguard hadn't been pulled in yet). Both stdlib + loguru channels now silenced.
+
 ### Changed
 - **Bump AGP 8.7.3 → 9.2.0** in `src/Y1MediaBridge/build.gradle`. AGP 9.2.0 is the latest stable per Google's maven repository; 8.7.3 was from late 2024 and ~5 minor versions behind. AGP 9.x removes some long-deprecated DSL methods. Modernized `app/build.gradle` to match: `compileSdkVersion 34` → `compileSdk 34`, `minSdkVersion 17` → `minSdk 17`, `targetSdkVersion 17` → `targetSdk 17`. The `*Version` forms have been deprecated since AGP 7.x; the new property forms have been the canonical syntax for years and work on AGP 8.x too.
 - **Bump cmdline-tools build 11076708 → 14742923** in `tools/install-android-sdk.sh`. The 11076708 pin was from August 2023; 14742923 is the latest published by Google. Verified that both the linux and mac variants of the new build are reachable at `dl.google.com/android/repository/`.

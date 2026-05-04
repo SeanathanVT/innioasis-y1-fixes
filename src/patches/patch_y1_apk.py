@@ -118,7 +118,19 @@ DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
 
 import os, sys, re, shutil, subprocess, urllib.request, zipfile
 import glob
+import logging
 from collections import Counter
+
+# Silence androguard's logging upfront, before any \`from androguard…\` import
+# runs. Two channels matter: the stdlib logger (androguard 3.x) and loguru
+# (androguard 4.x switched to it; ignores the stdlib config). loguru is only
+# imported here if androguard pulled it in as a transitive dep.
+logging.getLogger("androguard").setLevel(logging.ERROR)
+try:
+    from loguru import logger as _loguru
+    _loguru.disable("androguard")
+except ImportError:
+    pass
 
 # -- Config -------------------------------------------------------------------
 WORK_DIR      = "_patch_workdir"
@@ -156,9 +168,15 @@ def find_java():
 def get_apk_info(apk_path: str):
     """Extract package name and version from binary AndroidManifest.xml."""
     try:
+        # Re-apply loguru disable here too — if androguard wasn't yet imported
+        # at module-load time, it's about to be imported now and we need the
+        # filter in place before the first log emission.
+        try:
+            from loguru import logger as _loguru
+            _loguru.disable("androguard")
+        except ImportError:
+            pass
         from androguard.core.apk import APK
-        import logging
-        logging.getLogger("androguard").setLevel(logging.ERROR)
         apk = APK(apk_path)
         return apk.get_package(), apk.get_androidversion_name()
     except Exception:
