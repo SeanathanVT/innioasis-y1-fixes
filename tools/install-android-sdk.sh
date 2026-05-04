@@ -86,15 +86,28 @@ esac
 # --- Decide which SDK to wire up -----------------------------------------
 # Three cases. In every case the local.properties + env-file write at the
 # end always runs — re-running this script heals missing config files.
+#
+# sdk_complete <root>: returns 0 iff <root> has all three required
+# components (platforms/, build-tools/, platform-tools/). Without checking
+# all three, a prior run that installed `platforms;android-34` but failed
+# on `build-tools;X.Y.Z` would leave the platforms dir in place; the next
+# run would skip the install entirely (gating only on platforms) and the
+# user would discover the missing build-tools at gradle build time.
+sdk_complete() {
+    local root="$1"
+    [[ -d "${root}/platforms/${ANDROID_PLATFORM}" ]] && \
+    [[ -d "${root}/build-tools/${BUILD_TOOLS_VERSION}" ]] && \
+    [[ -d "${root}/platform-tools" ]]
+}
 
 NEED_INSTALL=true
 
-if [[ -n "${ANDROID_HOME:-}" && -d "${ANDROID_HOME}/platforms/${ANDROID_PLATFORM}" ]]; then
-    echo "[install-sdk] Reusing ANDROID_HOME=${ANDROID_HOME} (has platforms/${ANDROID_PLATFORM}/)."
+if [[ -n "${ANDROID_HOME:-}" ]] && sdk_complete "${ANDROID_HOME}"; then
+    echo "[install-sdk] Reusing ANDROID_HOME=${ANDROID_HOME} (has all required components)."
     SDK_TARGET="${ANDROID_HOME}"
     NEED_INSTALL=false
-elif [[ -d "${SDK_DIR}/platforms/${ANDROID_PLATFORM}" ]]; then
-    echo "[install-sdk] Reusing existing tools/android-sdk/ (platforms/${ANDROID_PLATFORM}/ already present)."
+elif sdk_complete "${SDK_DIR}"; then
+    echo "[install-sdk] Reusing existing tools/android-sdk/ (all required components present)."
     echo "              To force a fresh download: rm -rf ${SDK_DIR} && $0"
     SDK_TARGET="${SDK_DIR}"
     NEED_INSTALL=false
