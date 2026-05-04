@@ -1,6 +1,10 @@
-# Innioasis Y1 Firmware Fixes
+# Koensayr
 
-A patching toolkit for the Innioasis Y1 media player that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `apply.bash`; add a row to support a new build.
+> Innioasis Y1 firmware patcher & research toolkit (MT6572 / Android 4.2.2)
+
+A patching toolkit for the Innioasis Y1 media player that improves the music-player UI, provides a setuid-root escalator for on-device debugging, ships diagnostic tooling for the AVRCP investigation, and configures pairing-essential Bluetooth bits. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `apply.bash`; add a row to support a new build.
+
+(The project name is a Star Wars deep cut: Koensayr Manufacturing made the Y-Wing starfighter; Y-Wing → Y1.)
 
 ## Overview
 

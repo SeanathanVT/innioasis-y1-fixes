@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# apply.bash — Innioasis Y1 system.img patcher.
+# apply.bash — Koensayr (Innioasis Y1 system.img patcher).
 #
 # Compatibility is defined by the KNOWN_FIRMWARES manifest (rom.zip MD5).
 # Add a row to support a new build.
