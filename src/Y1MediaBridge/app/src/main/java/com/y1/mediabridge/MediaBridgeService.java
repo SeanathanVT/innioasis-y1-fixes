@@ -496,8 +496,8 @@ public class MediaBridgeService extends Service {
     //
     // MtkBt's BTAvrcpMusicAdapter also wraps our binder with
     // IMediaPlaybackService.Stub.asInterface() for the metadata read path.
-    // The brief's code table had a few codes off — corrected here from the
-    // authoritative TRANSACTION_* fields extracted from the DEX.
+    // Earlier hand-derived code tables had a few codes off — corrected here
+    // from the authoritative TRANSACTION_* fields extracted from the DEX.
     // -----------------------------------------------------------------------
 
     private boolean handleMediaPlayback(int code, Parcel data, Parcel reply)

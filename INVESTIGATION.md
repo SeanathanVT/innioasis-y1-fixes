@@ -160,7 +160,7 @@ Find the actual entry point of mtkbt's connection logic. The 12 callers tell us 
 **Findings:**
 - 12 callers in 12 distinct containing functions.
 - Walking back 4 levels: 11 distinct top-level entry points (functions with 0 callers themselves) all eventually call `state=1`.
-- Critically: `fn@0x029e98` (the "callback dispatcher TBH" from the brief) appears at depth 2 in the walk — it's a top-level entry (0 direct callers) whose descendants include the state=1 setter. So 0x029e98 IS in the live call graph, reached from outside mtkbt as a callback.
+- Critically: `fn@0x029e98` (the "callback dispatcher TBH" identified in earlier analysis) appears at depth 2 in the walk — it's a top-level entry (0 direct callers) whose descendants include the state=1 setter. So 0x029e98 IS in the live call graph, reached from outside mtkbt as a callback.
 - The deepest entry found is `fn@0x06adee` at depth 4, which has 0 callers but 3 call sites going down.
 - **None of the "AV/C parser" / "op dispatcher" / "AVCTP RX handler" / "AVCTP register PSM" appear anywhere in this call tree.** They are not on the path from any top-level entry to the state=1 setter.
 
@@ -266,7 +266,7 @@ These all extend Trace #1 — pure static analysis, no flash cycles.
 
 ### `0x29e98` IS reachable — confirmed
 
-Traced the callback registration mechanism for the field `[conn+0x5cc]` (the per-connection callback fn ptr the brief documented as being read at `0x02fd74` and `blx`'d to dispatch the AVRCP layer).
+Traced the callback registration mechanism for the field `[conn+0x5cc]` (the per-connection callback fn ptr documented in earlier analysis as being read at `0x02fd74` and `blx`'d to dispatch the AVRCP layer).
 
 Chain found:
 
@@ -281,10 +281,10 @@ Caller (1 site only): 0x28a5e
     0x028a5e:  bl 0x2fecc               ; register_callback(r0=conn, r1=0x29e99, r2=...)
 ```
 
-The literal `0x1439` is **not** a function address — it's a PC-relative offset. The function address is computed at runtime by `add rN, pc`. Disassembly at the resolved target `0x29e98` matches the brief's documented "callback dispatcher TBH" character-for-character (`push.w {...,lr}; tbh [pc, r3, lsl #1]`). So:
+The literal `0x1439` is **not** a function address — it's a PC-relative offset. The function address is computed at runtime by `add rN, pc`. Disassembly at the resolved target `0x29e98` matches the documented "callback dispatcher TBH" character-for-character (`push.w {...,lr}; tbh [pc, r3, lsl #1]`). So:
 
 - `0x29e98` is reachable.
-- The brief's analysis of its role is correct.
+- The earlier analysis of its role is correct.
 - The function `0x3096c` (E5 patch site) is also genuinely reachable — it lives in the live call chain that this dispatcher reaches via TBH.
 
 ### Why earlier traces missed this
@@ -342,7 +342,7 @@ The other "0-caller" functions show **zero PIC constructions, zero R_ARM_RELATIV
 
 - `0x6d04a` AV/C parser → confirmed dead code (never reachable by any mechanism scanned).
 - `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp containing fn → likely also dead code (alternate implementations).
-- `0x02fd34` AVRCP 1.3/1.4 init body → reached via internal `b.w` tail-call from inside the live function `0x3096c` at offset `0x030aca` (per the brief's analysis). Not registered, just a sub-path within a live function.
+- `0x02fd34` AVRCP 1.3/1.4 init body → reached via internal `b.w` tail-call from inside the live function `0x3096c` at offset `0x030aca` (per earlier analysis). Not registered, just a sub-path within a live function.
 
 ### The three op-code=4 dispatchers
 
@@ -357,7 +357,7 @@ A 3-slot function-pointer table at vaddr `0xf94b0..0xf94bc` holds:
 All three are **op-code=4 (GetCapabilities) dispatchers** for different sub-contexts. They each read different combinations of `[conn+0x149]` (version) and `[conn+0x5d0]` (state code) and dispatch differently:
 - `0x3060c`: 3 reads of `[+0x149]`; cmps against `#0xa0`, `#0x82`
 - `0x30708`: 2 reads of `[+0x149]`; cmps `[+0x5d0]` against `#0x82`, `#0x81`, `#0x20`
-- `0x3096c`: 1 read of `[+0x149]`; **the brief's classic version-dispatch (cmp `#0x10` / `#0x20`)**
+- `0x3096c`: 1 read of `[+0x149]`; **classic version-dispatch (cmp `#0x10` / `#0x20`)**
 
 **E5 patched only the `0x3096c` branch.** If runtime selection picks `0x3060c` or `0x30708` for our peers (driven by some other state), the patch never fires.
 
@@ -378,7 +378,7 @@ Mapped all 14 readers of `[conn+0x5cc]` (the callback fn ptr slot holding `0x29e
 
 | Function | `[+0x5cc]` reads | Notes |
 |---|---|---|
-| `0x2fd36` (= AVRCP 1.3/1.4 init body) | 1 (at `0x2fd74`) | brief's documented site |
+| `0x2fd36` (= AVRCP 1.3/1.4 init body) | 1 (at `0x2fd74`) | previously-documented site |
 | `0x2fd84` | 1 | adjacent helper |
 | `0x3060c` (op-dispatcher slot 0) | 1 (at `0x306dc`) | one of the 3-slot table dispatchers |
 | `0x30708` (op-dispatcher slot 1) | 2 (at `0x308e2`, `0x3090a`) | another 3-slot dispatcher |
@@ -508,7 +508,7 @@ No additional Java/smali patches will help. F1 + F2 are necessary AND sufficient
 After Trace #1f the architectural picture is finally complete and consistent:
 
 - **`mtkbt` IS the AVRCP processor** (not chip firmware). ✓ confirmed by inspecting firmware blob.
-- **The brief's documented dispatchers (`0x29e98`, `0x02fd34`, `0x3096c`) are all reachable at runtime** — via PIC-style callback registration that earlier traces missed. ✓ confirmed.
+- **The documented dispatchers (`0x29e98`, `0x02fd34`, `0x3096c`) are all reachable at runtime** — via PIC-style callback registration that earlier traces missed. ✓ confirmed.
 - **`0x6d04a` "AV/C parser" is dead code** — multiple independent searches confirm no caller mechanism reaches it. ✓ confirmed.
 - **The cardinality:0 gate is in the runtime decision tree of `[conn+0x5d0]` × `[conn+0x149]` × dispatcher-table selection**, somewhere in the `0x29e98` → `0x3060c`/`0x30708`/`0x3096c` family of paths.
 - **Static analysis cannot determine which decision point fires for our peers without observing runtime values.** Every structural and addressable element has been mapped.
