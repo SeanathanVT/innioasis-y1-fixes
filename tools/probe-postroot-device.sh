@@ -1,7 +1,16 @@
 #!/system/bin/sh
-# On-device probe — runs as root via su.
+# On-device probe — runs as root via su, pushed to /data/local/tmp/probe.sh
+# by tools/probe-postroot.sh. Not intended to be run directly from a host shell.
 # Stock Android 4.2.2 toybox is MISSING: awk, head, tail, pidof.
 # This script uses only shell builtins (read, case, while) for limiting/filtering.
+
+case "${1:-}" in
+    -h|--help)
+        echo "This is the device-side probe script — push it to /data/local/tmp/" >&2
+        echo "and exec it under su (or just run ./tools/probe-postroot.sh)." >&2
+        exit 0
+        ;;
+esac
 
 hr() { echo; echo "=== $* ==="; }
 

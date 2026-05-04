@@ -21,6 +21,31 @@
 
 set -u
 
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+Usage: ./tools/dual-capture.sh [<out_dir>]
+
+Capture mtkbt's @btlog stream AND logcat simultaneously, with per-line
+timestamps in both for post-hoc correlation.
+
+Output (in <out_dir>):
+    btlog.bin         — raw @btlog stream (parse with tools/btlog-parse.py)
+    logcat.txt        — logcat -v threadtime against -b main -b system -b radio
+    dmesg-before.txt  — kernel ring buffer at start
+    dmesg-after.txt   — kernel ring buffer at stop
+    getprop.txt       — getprop snapshot
+
+Default <out_dir>: /tmp/koensayr-dual-<UTC-timestamp>/
+
+Pre-req: --root flashed (script needs su access for the @btlog socket).
+While capturing: drive the AVRCP scenario on the device (toggle BT
+off/on, pair/connect, change tracks, etc.). Ctrl-C to stop.
+EOF
+        exit 0
+        ;;
+esac
+
 OUT="${1:-/tmp/koensayr-dual-$(date -u +%Y%m%dT%H%M%SZ)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
