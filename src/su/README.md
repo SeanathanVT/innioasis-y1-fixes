@@ -35,10 +35,10 @@ Output is ~900 bytes, statically linked, stripped, no dynamic dependencies. Idem
 
 ## Deploy
 
-The top-level bash does this for you:
+The top-level bash does this for you (with `rom.zip` staged in `staging/`):
 
 ```bash
-./innioasis-y1-fixes.bash --artifacts-dir <path> --root
+./apply.bash --root
 ```
 
 Equivalent manual install (against the mounted system.img):

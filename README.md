@@ -1,85 +1,88 @@
-# Innioasis Y1 Firmware Fixes
+# Koensayr
 
-A patching toolkit for the Innioasis Y1 media player that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `innioasis-y1-fixes.bash`; add a row to support a new build.
+> Innioasis Y1 firmware patcher & research toolkit (MT6572 / Android 4.2.2)
+
+A patching toolkit for the Innioasis Y1 media player that improves the music-player UI, provides a setuid-root escalator for on-device debugging, ships diagnostic tooling for the AVRCP investigation, and configures pairing-essential Bluetooth bits. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `apply.bash`; add a row to support a new build.
+
+(The project name is a Star Wars deep cut: Koensayr Manufacturing made the Y-Wing starfighter; Y-Wing → Y1.)
 
 ## Overview
 
-- **Bluetooth AVRCP 1.4** — forces AVRCP 1.4 advertisement across all BT stack layers (daemon, ODEX, JNI library, core library).
-- **Artist→Album navigation** — improves the music-player UX by showing album cover art after artist selection instead of a flat song list.
-- **System configuration** — enables ADB debugging and tunes Bluetooth settings.
-- **APK patching** — patches the system music player APK at the smali level.
-- **Root** — installs a minimal `/system/xbin/su` (setuid-root, mode 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
+- **Music-player UX** — Artist→Album navigation patch on the system music APK (cover art on artist tap instead of a flat song list).
+- **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
+- **System config** — enable ADB debugging, remove preinstalled bloatware.
+- **Root** — install a minimal `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
+- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe) for the in-progress metadata-over-Bluetooth work. AVRCP-metadata delivery itself is not yet working — see [Status](#status).
 
 ## Layout
 
-This repo is a small monorepo. The bash entry-point at the root dispatches into source trees under `src/`:
+The bash entry-point at the root dispatches into source trees under `src/`:
 
-- [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
-- [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew assembleDebug`.
-- `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
-- `reference/` — manually-extracted reference files for v3.0.2
-
-## Scripts
-
-- **`src/patches/patch_mtkbt.py`** — patches stock `mtkbt` daemon for AVRCP 1.4. Eleven patches (B1-B3, C1-C3, A1, D1, E3, E4, E8). Stock MD5 `3af1d4ad…` → patched `d47c9040…`.
-- **`src/patches/patch_mtkbt_odex.py`** — patches `MtkBt.odex` (F1: `getPreferVersion()` returns 14; F2: `disable()` resets `sPlayServiceInterface`).
-- **`src/patches/patch_libextavrcp_jni.py`** — patches `libextavrcp_jni.so` (C2a/b: hardcode `g_tg_feature=0x0e`, `sdpfeature=0x23`; C3a/b: raise GetCapabilities event-list cap 13→14).
-- **`src/patches/patch_libextavrcp.py`** — single AVRCP version constant patch (C4: `0x0103 → 0x0104` at `0x002e3b`).
-- **`src/patches/patch_y1_apk.py`** — smali patcher for the Y1 music player APK (Artist→Album navigation). Uses androguard + apktool; preserves original signatures for system-app deployment.
-- **`src/patches/patch_adbd.py`** — *unwired since v1.7.0; historical record only.* H1/H2/H3 byte patches against `/sbin/adbd`.
-- **`src/patches/patch_bootimg.py`** — *unwired since v1.7.0; historical record only.* Format-aware boot.img cpio patcher.
-- **`src/su/`** — setuid-root `su` source. Built via `cd src/su && make` → `src/su/build/su`. ~900-byte direct-syscall ARM-EABI ELF.
-- **`innioasis-y1-fixes.bash`** — entry point. Takes `rom.zip`, MD5-validates against `KNOWN_FIRMWARES`, mounts `system.img`, dispatches each `--flag` to its patcher (auto-extract → patch → write-back, idempotent), flashes via mtkclient.
-
-Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
+- `apply.bash` — single entry point; flag-driven dispatch into the trees below
+- [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`); see [`src/patches/README.md`](src/patches/README.md) for the per-patcher table and [`docs/PATCHES.md`](docs/PATCHES.md) for byte-level detail
+- [`src/su/`](src/su/) — minimal setuid-root `su` for `--root` (~900-byte direct-syscall ARM-EABI ELF, no libc). Build via `cd src/su && make`
+- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`
+- [`src/btlog-dump/`](src/btlog-dump/) — `@btlog` abstract-socket reader (diagnostic; same toolchain as `src/su/`). Build via `cd src/btlog-dump && make`
+- `tools/` — setup, diagnostic, and release helpers
+- `staging/` — default `--artifacts-dir`; drop `rom.zip` here
+- `reference/` — example post-patch state of `/system/build.prop` and `/system/etc/bluetooth/*.conf` from a v3.0.2 device that's been through the bash. Reference snapshot only — not consumed by the build, not stock baselines. Useful for diff'ing against a freshly-patched device to spot drift
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. If using `--avrcp` build `src/Y1MediaBridge/` once; if using `--root` build `src/su/` once. The bash picks up both build outputs directly — no need to stage the artifacts.
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) inside the repo's `staging/` directory:
 
 ```bash
-mkdir -p ~/y1-patches
-cp /path/to/rom.zip ~/y1-patches/
+./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
+( cd src/su && make )               # one-time: build the setuid-su binary for --root
 
-# Build src/Y1MediaBridge/ once if using --avrcp:
-( cd src/Y1MediaBridge && ./gradlew assembleDebug )
+cp /path/to/rom.zip staging/
 
-# Build src/su/ once if using --root:
-( cd src/su && make )
-
-./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
+./apply.bash --all
 ```
 
-`rom.zip` is the only required artifact. Both `src/Y1MediaBridge/` and `src/su/` only need to be rebuilt when their sources change.
+`--all` = `--adb --bluetooth --music-apk --remove-apps --root`. `--avrcp` is intentionally excluded (see [Status](#status)).
 
-The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, applies the selected patches in-place, unmounts, and flashes the patched image via mtkclient.
+The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selected patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
+
+Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
+
+Opting in to `--avrcp` (known broken) additionally needs the Android SDK + `Y1MediaBridge.apk` build:
+
+```bash
+./tools/install-android-sdk.sh && source tools/android-sdk-env.sh
+( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
+```
+
+Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env) if you have those installed elsewhere.
 
 ### Flags
 
 | Flag | Effect |
 |---|---|
-| `--adb` | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleDebug`). |
-| `--bluetooth` | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
-| `--music-apk` | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
-| `--remove-apps` | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
-| `--root` | Installs the prebuilt `src/su/build/su` setuid-root binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` is untouched; root is obtained post-flash via `adb shell /system/xbin/su`. |
-| `--all` | All flags above. |
+| `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
+| `--avrcp` | **KNOWN BROKEN.** Patches AVRCP 1.4 binaries + installs `Y1MediaBridge.apk`. Excluded from `--all`. See [`INVESTIGATION.md`](INVESTIGATION.md). |
+| `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
+| `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
+| `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
+| `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). |
+| `--all` | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. Excludes `--avrcp`. |
 
-Run `./innioasis-y1-fixes.bash --help` for the full flag listing.
+Run `./apply.bash --help` for full flag detail. Patchers can also be run standalone — see [`src/patches/README.md`](src/patches/README.md).
 
-### Manual patcher invocation
+## Diagnostics
 
-The patchers can be run standalone from `src/patches/`. Each verifies the input MD5, checks patch sites before and after, and refuses to write output on mismatch. Example:
+Post-root tools for investigating AVRCP behaviour on hardware. None are invoked by the patch flow. Pre-req: `--root` flashed.
 
-```bash
-( cd src/patches && python3 patch_mtkbt.py mtkbt )    # → src/patches/output/mtkbt.patched
-```
+- **`@btlog` tap** — `src/btlog-dump/` (no-libc ARM ELF) + `tools/dual-capture.sh` (push + run + capture btlog & logcat) + `tools/btlog-parse.py` (decode framing). See [`src/btlog-dump/README.md`](src/btlog-dump/README.md).
+- **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, MTK debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets. Re-run against any new `KNOWN_FIRMWARES` entry.
 
-## Status (2026-05-03)
+Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`INVESTIGATION.md`](INVESTIGATION.md).
 
-All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. **Cardinality:0 persists across all three known-good 1.4 controllers** (car, Sonos Roam, Samsung TV) — no peer ever sends `REGISTER_NOTIFICATION`. The remaining gate is upstream of mtkbt's op_code=4 dispatcher table; the strongest static lead is `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`), suggesting accepted-but-degraded negotiation. The v1.8.0 setuid-`su` root path is pending hardware verification; if it works, HCI snoop / `__xlog_buf_printf` capture / `gdbserver` attach become reachable. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses and the trace history.
+## Status
+
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. **AVRCP metadata over BT is not delivered** — `--avrcp` was an attempt to enable it, but byte-patches against `mtkbt` cannot make the daemon process AVRCP 1.3+ commands, and the patches additionally regress stock PASSTHROUGH. `--avrcp` is therefore a known-broken opt-in (excluded from `--all`, prints a warning). `--bluetooth` covers only the pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits — it does **not** advertise an AVRCP version `mtkbt` can't deliver.
+
+Full investigation history, byte-patch test matrix, and the four-phase user-space proxy work plan that aims to fix metadata transport: [`INVESTIGATION.md`](INVESTIGATION.md).
 
 ## Stock firmware manifest
 
@@ -93,12 +96,13 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 ## Requirements
 
-- Bash 4+, `sudo` (loop-mount + chown), `unzip`, `md5sum` (Linux) or `md5 -q` (macOS).
-- `mtkclient` 2.1.4.1 at `/opt/mtkclient-2.1.4.1`.
-- Python 3.8+ (all patchers; stdlib only except `patch_y1_apk.py`).
-- Java 11+ and `androguard` (`pip install androguard`) — only for `--music-apk`. apktool is downloaded by `patch_y1_apk.py` on first invocation.
-- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch), `brew install simg2img` (macOS).
+- **Linux host**, Bash 4+, `sudo`. The patcher uses `mount -o loop` and GNU `sed -i` syntax — both Linux-only. macOS users would need a Linux VM (Lima, OrbStack, UTM) or a remote Linux shell.
+- `git`, `unzip`, `md5sum`.
+- Python 3.8+ with `venv` module. Patcher byte-level scripts are stdlib-only; `patch_y1_apk.py` needs `androguard`, which `tools/setup.sh` installs into `tools/python-venv/`. Java 11+ also required for `--music-apk` (apktool's smali assembler; apktool itself is downloaded by `patch_y1_apk.py` on first invocation).
+- `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
+- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
+- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install instructions in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 
 ## Documentation
 
@@ -106,6 +110,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - [INVESTIGATION.md](INVESTIGATION.md) — full AVRCP investigation narrative, refuted hypotheses, trace history
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 - [docs/DEX.md](docs/DEX.md) — DEX-level analysis for `patch_y1_apk.py`'s smali patches
+- [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp`)
 
 ## Deployment notes
 
@@ -120,7 +125,7 @@ adb reboot
 
 ## Verified against
 
-Innioasis Y1 media player — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Currently enrolled in `KNOWN_FIRMWARES`: **v3.0.2** (the only build that's been hardware-verified against this toolkit). Adding a new build means dropping in its `rom.zip` MD5 row and re-running the patchers; if site offsets shifted they'll fail their stock-MD5 check and need re-locating.
+Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Hardware-verified against the v3.0.2 build enrolled in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
 
 ## Author
 

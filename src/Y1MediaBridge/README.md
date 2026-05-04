@@ -1,6 +1,6 @@
 # Y1MediaBridge
 
-Single-APK AVRCP metadata bridge for the Innioasis Y1.
+Single-APK AVRCP metadata bridge for the Innioasis Y1. Implements the in-Android-OS half of the metadata-forwarding pipe (`IBTAvrcpMusic` + `IMediaPlaybackService` Binder, plus an `RemoteControlClient` publish path). The bridge implementation itself is verified-correct (see [INVESTIGATION.md](../../INVESTIGATION.md) "Verified true"); end-to-end metadata delivery is currently blocked by the native `mtkbt` daemon not relaying inbound AVRCP COMMANDs at the layer that would call into this bridge — see top-level [Status](../../README.md#status).
 
 ## Architecture
 
@@ -22,12 +22,17 @@ One system app. No separate daemon, no shared files, no IPC.
 ## Build
 
 ```bash
-./gradlew assembleDebug
+./gradlew --stop && ./gradlew assembleDebug
 ```
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`. The top-level
-[`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) reads from this
-path directly under `--avrcp` — no need to copy the APK anywhere.
+[`apply.bash`](../../apply.bash) reads from this path directly under
+`--avrcp` — no need to copy the APK anywhere.
+
+The `--stop` is defensive: gradle's daemon caches the JVM it started with,
+so a `JAVA_HOME` change between builds doesn't take effect until the daemon
+restarts. `--stop` first guarantees a fresh daemon. It's cheap (single
+build) and safe to always run.
 
 `assembleRelease` is intentionally avoided: AGP wires `lintVitalReportRelease`
 into the release-assembly chain, which fails with `SDK location not found`
@@ -38,11 +43,21 @@ keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug
 also leaves `debuggable=true` in the manifest, which is useful for a research
 device — you can JDWP-attach to the running service.
 
-Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 8.7.3, `compileSdk 34`,
-`minSdk 17`, `targetSdk 17`, Java 8 bytecode. A manual `javac --release 8 -cp
-android-34.jar` type-check of the source passes cleanly with zero errors (only
-the expected "--release 8 is obsolete" note from JDK 21 and a `RemoteControlClient`
-deprecation note — that deprecation is intentional, we target API 17).
+Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 9.2.0, `compileSdk 34`,
+`minSdk 17`, `targetSdk 17`, Java 8 bytecode. **Build with JDK 17 or newer.**
+Confirmed working on AGP 9.2.0: JDK 25. Earlier AGP 8.7.3 builds also
+confirmed JDK 17 and 21; both should still work on AGP 9.2.0 but only 25 has
+been re-verified end-to-end. See
+[`../../docs/ANDROID-SDK.md`](../../docs/ANDROID-SDK.md#jdk-requirement) for
+install instructions and the gradle-daemon-caching gotcha to watch for if you
+ever change `JAVA_HOME`.
+
+The Java-8-bytecode target produces a "source/target version 8 is obsolete"
+warning on JDK 21+. That's informational, not an error — Java 8 bytecode is
+fully compatible with Android 4.2.2 via D8/dex, and we deliberately target
+API 17. The warning will become an error in some future JDK; if/when that
+happens, raise `sourceCompatibility` / `targetCompatibility` in
+`app/build.gradle` to whatever JDK that release picks as the new floor.
 
 ## Install as system app
 
@@ -50,8 +65,8 @@ The APK *must* be installed as a system app — `READ_LOGS` is a signature/syste
 permission and `adb install` will leave it ungranted. Path inside `/system`:
 `/system/app/Y1MediaBridge.apk` (flat file, not a subdirectory — the Y1 system
 image's `app/` directory uses the flat layout). Mode `644`, owner `root:root`.
-See [`../../innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) for the
-full system.img patch + flash flow.
+See [`../../apply.bash`](../../apply.bash) for the full system.img patch +
+flash flow.
 
 Ship alongside the patched binaries:
 

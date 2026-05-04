@@ -5,7 +5,7 @@ privileges to AID_SHELL on startup. After flashing the patched ramdisk, the
 *intent* is that `adb shell` returns uid 0 directly.
 
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  ⚠  THIS PATCH HAS BEEN UNWIRED FROM innioasis-y1-fixes.bash (v1.7.0)     ║
+║  ⚠  THIS PATCH HAS BEEN UNWIRED FROM apply.bash (v1.7.0)     ║
 ║                                                                          ║
 ║  Both attempted approaches (NOP-the-blx and arg-zero) caused "device     ║
 ║  offline" on hardware: adbd starts and the USB endpoint enumerates,      ║

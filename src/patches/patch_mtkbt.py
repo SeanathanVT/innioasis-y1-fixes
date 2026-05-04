@@ -3,9 +3,26 @@
 patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
 Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: (regenerated on each build — see script output)
+Output md5: d47c904063e7d201f626cf2cc3ebd50b
 
---- Status (2026-05-03) ---
+--- Status (2026-05-04 — superseded the 2026-05-03 cardinality:0 narrative below) ---
+
+This patch set ships under apply.bash's `--avrcp` flag, which is now a
+KNOWN-BROKEN opt-in (excluded from `--all`). All eleven patches still land on
+the wire correctly (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures
+0x0033) but the resulting binary does not deliver AVRCP 1.4 metadata end-to-end
+and additionally regresses stock AVRCP 1.0 PASSTHROUGH. Root cause established
+2026-05-04: mtkbt is internally an AVRCP 1.0 implementation
+(compile-time tag `[AVRCP] AVRCP V10 compiled`, runtime `AVRCP register
+activeVersion:10`); byte-patches can shape the SDP advertisement but cannot
+make the daemon's command-handling layer process AVRCP 1.3+ COMMANDs that
+peers send in response. See INVESTIGATION.md "Conclusion (2026-05-04)" for the
+full negative-result write-up + the four-phase user-space proxy work plan that
+aims to fix metadata transport. Individual patches below remain load-bearing
+if/when that proxy work activates 1.3+ command handling — the SDP record needs
+to be there.
+
+--- Status (2026-05-03 — historical, preserved for context) ---
 
 The patch set below has been verified to land on the wire (sdptool shows AVRCP
 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt) and to satisfy the
@@ -20,7 +37,8 @@ GetCapabilities ever reaches any of the three op_code=4 dispatchers
 (0x3060c / 0x30708 / 0x3096c). The cardinality:0 gate is therefore upstream of
 the dispatcher table itself — somewhere in mtkbt's L2CAP→AVCTP RX path or the
 per-connection feature-negotiation logic ('bws:0 tg_feature:0 ct_featuer:0' in
-CONNECT_CNF suggests negotiation fails on the daemon side).
+CONNECT_CNF suggests negotiation fails on the daemon side). [Resolved
+2026-05-04: it's mtkbt's compiled-1.0 command set — see status block above.]
 
 Trace #1g had identified a clean single-instruction patch candidate inside fn
 0x3060c: NOP the `bge` at 0x3065e to force every classification through the
@@ -390,12 +408,14 @@ def main():
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
+    output_md5_mismatch = False
     if OUTPUT_MD5 is None:
         out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
     elif output_md5 == OUTPUT_MD5:
         out_tag = "[OK — matches expected]"
     else:
         out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
+        output_md5_mismatch = True
 
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")
@@ -405,6 +425,12 @@ def main():
     print(f"  adb reboot")
     print(f"  sdptool browse <Y1_BT_ADDR>   # expect: AVCTP 0x0103, AV Remote Version: 0x0104")
     print(f"  logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'")
+
+    if output_md5_mismatch and not args.skip_md5:
+        print("\nERROR: output MD5 doesn't match expected. Output was written but"
+              " the patcher's expected hash is stale or the patch logic diverged."
+              " Pass --skip-md5 to suppress.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

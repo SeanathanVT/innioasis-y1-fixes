@@ -7,6 +7,12 @@ output
 *.apk
 *.patched
 .state
+staging/*
+!staging/README.md
 src/su/build/
+src/btlog-dump/build/
 tools/mtkclient/
 tools/python-venv/
+tools/android-sdk/
+tools/android-sdk-env.sh
+tools/.cmdline-tools-*.zip

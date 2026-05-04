@@ -118,12 +118,23 @@ DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
 
 import os, sys, re, shutil, subprocess, urllib.request, zipfile
 import glob
+import logging
 from collections import Counter
+
+# Silence androguard's logging upfront, before any \`from androguard…\` import
+# runs. Two channels matter: the stdlib logger (androguard 3.x) and loguru
+# (androguard 4.x switched to it; ignores the stdlib config). loguru is only
+# imported here if androguard pulled it in as a transitive dep.
+logging.getLogger("androguard").setLevel(logging.ERROR)
+try:
+    from loguru import logger as _loguru
+    _loguru.disable("androguard")
+except ImportError:
+    pass
 
 # -- Config -------------------------------------------------------------------
 WORK_DIR      = "_patch_workdir"
-_NPM_APKTOOL  = "/home/claude/.npm-global/lib/node_modules/apktool/bin/apktool.jar"
-APKTOOL_JAR   = _NPM_APKTOOL if os.path.exists(_NPM_APKTOOL) else os.path.join(WORK_DIR, "apktool.jar")
+APKTOOL_JAR   = os.path.join(WORK_DIR, "apktool.jar")
 APKTOOL_URL   = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 UNPACKED_DIR  = os.path.join(WORK_DIR, "unpacked")
 
@@ -156,9 +167,15 @@ def find_java():
 def get_apk_info(apk_path: str):
     """Extract package name and version from binary AndroidManifest.xml."""
     try:
+        # Re-apply loguru disable here too — if androguard wasn't yet imported
+        # at module-load time, it's about to be imported now and we need the
+        # filter in place before the first log emission.
+        try:
+            from loguru import logger as _loguru
+            _loguru.disable("androguard")
+        except ImportError:
+            pass
         from androguard.core.apk import APK
-        import logging
-        logging.getLogger("androguard").setLevel(logging.ERROR)
         apk = APK(apk_path)
         return apk.get_package(), apk.get_androidversion_name()
     except Exception:
@@ -175,6 +192,10 @@ def get_apk_info(apk_path: str):
     return (pkg, ver.group(1) if ver else "unknown")
 
 # -- Step 0: Pre-flight -------------------------------------------------------
+if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+    sys.stdout.write(__doc__ or "")
+    sys.exit(0)
+
 print("=" * 60)
 print("Innioasis Y1 Artist->Album patch")
 print("=" * 60)
@@ -206,9 +227,7 @@ print(f"  Java:     {java}")
 # -- Step 1: Locate or download apktool ---------------------------------------
 os.makedirs(WORK_DIR, exist_ok=True)
 
-if APKTOOL_JAR == _NPM_APKTOOL:
-    print(f"\n[1/4] Using bundled apktool ({os.path.getsize(APKTOOL_JAR):,} bytes)")
-elif not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
+if not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
     print(f"\n[1/4] Downloading apktool from GitHub...")
     try:
         urllib.request.urlretrieve(APKTOOL_URL, APKTOOL_JAR)

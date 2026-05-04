@@ -11,10 +11,31 @@
 
 set -euo pipefail
 
-# Pinned MTKClient version. Last verified working: 2.1.4.1.
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+Usage: ./tools/setup.sh
+
+One-time tooling provisioner. Idempotent — re-runnable, skips work
+already done. Clones MTKClient at the pinned ref into tools/mtkclient/
+and creates two Python venvs (tools/mtkclient/venv/ for MTKClient deps,
+tools/python-venv/ for patcher deps from python-requirements.txt).
+
+To force a refresh of either subdir, delete it and re-run:
+    rm -rf tools/mtkclient && ./tools/setup.sh
+    rm -rf tools/python-venv && ./tools/setup.sh
+
+To bump the MTKClient pin, change MTKCLIENT_REF below and re-run.
+EOF
+        exit 0
+        ;;
+esac
+
+# Pinned MTKClient version. Last verified working: v2.1.4.1.
 # Bump after verifying compatibility against this repo's flash flow.
+# (List upstream tags: git ls-remote --tags https://github.com/bkerler/mtkclient.git)
 MTKCLIENT_REPO="https://github.com/bkerler/mtkclient.git"
-MTKCLIENT_REF="2.1.4.1"
+MTKCLIENT_REF="v2.1.4.1"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 TOOLS_DIR="$(pwd)"
@@ -38,46 +59,80 @@ if ! python3 -c "import venv" >/dev/null 2>&1; then
 fi
 
 # --- 1. Clone MTKClient at the pinned ref ----------------------------------
+# Idempotent: clone if missing, always ensure HEAD is at MTKCLIENT_REF
+# (so a re-run heals a partial state where the clone succeeded but the
+# checkout failed, e.g. a wrong tag name on the previous run).
 
-if [[ -d mtkclient ]]; then
-    echo "[setup] tools/mtkclient/ exists — skipping clone."
-    echo "        To refresh: rm -rf tools/mtkclient && $0"
-else
-    echo "[setup] Cloning MTKClient at ${MTKCLIENT_REF}.."
-    git clone "${MTKCLIENT_REPO}" mtkclient
-    ( cd mtkclient && git checkout "${MTKCLIENT_REF}" )
+if [[ ! -d mtkclient ]]; then
+    echo "[setup] Cloning MTKClient.."
+    git clone --quiet "${MTKCLIENT_REPO}" mtkclient
+elif [[ ! -d mtkclient/.git ]]; then
+    echo "ERROR: tools/mtkclient/ exists but isn't a git checkout." >&2
+    echo "       Remove it (rm -rf tools/mtkclient) and re-run." >&2
+    exit 1
 fi
 
-# --- 2. mtkclient venv + deps ----------------------------------------------
+# Ensure mtkclient is at MTKCLIENT_REF. git checkout to the current ref
+# is a no-op; if the ref doesn't exist locally, fetch tags first.
+if ! ( cd mtkclient && git checkout --quiet "${MTKCLIENT_REF}" 2>/dev/null ); then
+    echo "[setup] Fetching tags from origin to find ${MTKCLIENT_REF}.."
+    ( cd mtkclient && git fetch --quiet --tags )
+    if ! ( cd mtkclient && git checkout --quiet "${MTKCLIENT_REF}" 2>/dev/null ); then
+        echo "ERROR: ${MTKCLIENT_REF} not found in ${MTKCLIENT_REPO}." >&2
+        echo "       List upstream tags: git ls-remote --tags ${MTKCLIENT_REPO}" >&2
+        echo "       Update MTKCLIENT_REF at the top of $0." >&2
+        exit 1
+    fi
+fi
+echo "[setup] tools/mtkclient/ at ${MTKCLIENT_REF}."
 
-if [[ -d mtkclient/venv ]]; then
+# --- 2. mtkclient venv + deps ----------------------------------------------
+# A successful run leaves a marker file inside the venv. If the marker is
+# absent (fresh install OR a prior run aborted mid-pip), wipe and recreate —
+# without this, set -e leaves a broken venv on the disk and the next run
+# silently skips it as "already done" then fails much later in apply.bash.
+
+if [[ -f mtkclient/venv/.setup-complete ]]; then
     echo "[setup] tools/mtkclient/venv/ exists — skipping."
 else
-    echo "[setup] Creating tools/mtkclient/venv/.."
+    if [[ -d mtkclient/venv ]]; then
+        echo "[setup] tools/mtkclient/venv/ exists but incomplete — recreating.."
+        rm -rf mtkclient/venv
+    else
+        echo "[setup] Creating tools/mtkclient/venv/.."
+    fi
     python3 -m venv mtkclient/venv
     # shellcheck disable=SC1091
     source mtkclient/venv/bin/activate
-    pip install --quiet --upgrade pip
+    pip install --upgrade pip
     if [[ -f mtkclient/requirements.txt ]]; then
-        pip install --quiet -r mtkclient/requirements.txt
+        pip install -r mtkclient/requirements.txt
     else
         echo "WARNING: mtkclient/requirements.txt not found at this ref — venv created empty" >&2
     fi
     deactivate
+    touch mtkclient/venv/.setup-complete
 fi
 
 # --- 3. python-venv for patcher deps (androguard etc.) ---------------------
+# Same marker pattern as the mtkclient venv above.
 
-if [[ -d python-venv ]]; then
+if [[ -f python-venv/.setup-complete ]]; then
     echo "[setup] tools/python-venv/ exists — skipping."
 else
-    echo "[setup] Creating tools/python-venv/.."
+    if [[ -d python-venv ]]; then
+        echo "[setup] tools/python-venv/ exists but incomplete — recreating.."
+        rm -rf python-venv
+    else
+        echo "[setup] Creating tools/python-venv/.."
+    fi
     python3 -m venv python-venv
     # shellcheck disable=SC1091
     source python-venv/bin/activate
-    pip install --quiet --upgrade pip
-    pip install --quiet -r python-requirements.txt
+    pip install --upgrade pip
+    pip install -r python-requirements.txt
     deactivate
+    touch python-venv/.setup-complete
 fi
 
 echo "[setup] Done."
@@ -85,3 +140,9 @@ echo ""
 echo "  tools/mtkclient/         (MTKClient ${MTKCLIENT_REF})"
 echo "  tools/mtkclient/venv/    (MTKClient deps)"
 echo "  tools/python-venv/       (patcher deps from python-requirements.txt)"
+echo ""
+echo "If you'll use --avrcp (builds Y1MediaBridge.apk via gradle), also run:"
+echo "  ./tools/install-android-sdk.sh         # auto-installs Android SDK to tools/android-sdk/ (~1.5GB)"
+echo "  source tools/android-sdk-env.sh        # then source the env file for adb/sdkmanager on PATH"
+echo ""
+echo "Or skip if you have an Android SDK elsewhere — see docs/ANDROID-SDK.md."

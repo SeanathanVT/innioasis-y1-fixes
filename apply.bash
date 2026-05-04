@@ -1,34 +1,49 @@
 #!/usr/bin/env bash
 #
-# innioasis-y1-fixes.bash — Innioasis Y1 system.img patcher.
+# apply.bash — Koensayr (Innioasis Y1 system.img patcher).
 #
 # Compatibility is defined by the KNOWN_FIRMWARES manifest (rom.zip MD5).
 # Add a row to support a new build.
 #
 # Author:    Sean Halpin (github.com/SeanathanVT)
-# Version:   1.10.0
+# Version:   2.0.0
 # Changelog: see CHANGELOG.md
 # Patches:   see docs/PATCHES.md
 #
 
 show_help() {
   cat <<EOF
-Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [FLAGS] [TOOLING]
+Usage: ./apply.bash [--artifacts-dir <path>] [FLAGS] [TOOLING]
 
-Stage rom.zip in --artifacts-dir (validated against KNOWN_FIRMWARES MD5
-manifest), then pick one or more of the flags below. Run tools/setup.sh
-once first to clone MTKClient and create the patcher venv.
+Stage rom.zip in ./staging/ (default) or pass --artifacts-dir <path>
+pointing at a directory containing rom.zip (validated against
+KNOWN_FIRMWARES MD5 manifest). Then pick one or more of the flags below.
+Run tools/setup.sh once first to clone MTKClient and create the patcher
+venv.
 
 FLAGS:
-  --adb          Set persist.service.adb.enable / debuggable in build.prop
-  --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk.
-                 Build first: cd src/Y1MediaBridge && ./gradlew assembleDebug
-  --bluetooth    Configure audio.conf / build.prop Bluetooth entries
+  --adb          Set persist.service.adb.enable + persist.service.debuggable
+  --avrcp        KNOWN BROKEN. Patches the AVRCP 1.4 binaries + installs
+                 Y1MediaBridge.apk. Empirically regresses stock AVRCP 1.0
+                 PASSTHROUGH (play/pause from car/headset stops working) and
+                 does not deliver 1.4 metadata as intended — mtkbt's compiled
+                 AVRCP layer is 1.0-only and the byte-patch path can shape
+                 the SDP advertisement but cannot make the daemon process
+                 1.3+ commands. See INVESTIGATION.md "Conclusion (2026-05-04)"
+                 and the Diagnostics section of README.md. Excluded from
+                 --all. Available as an opt-in for the user-space proxy
+                 work that aims to fix the underlying issue. Build first:
+                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+  --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
+                 + build.prop entries that are essential for car/peer pairing.
+                 Does NOT set persist.bluetooth.avrcpversion — that property
+                 is dropped pending the AVRCP wire-protocol work.
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
-  --all          All of the above
+  --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
+                 NOT --avrcp (see warning above).
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed
@@ -39,7 +54,8 @@ elsewhere or are testing alternate builds):
                             (androguard). Default: tools/python-venv/.
 
 Quick example:
-  ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
+  cp /path/to/rom.zip ./staging/
+  ./apply.bash --all
 
 For details on the patches applied by each flag, see README.md and docs/PATCHES.md.
 EOF
@@ -60,9 +76,26 @@ OVERRIDE_MTKCLIENT_DIR=""
 OVERRIDE_PYTHON_VENV=""
 
 # Parse arguments
+# require_value <flag-name> <value>
+# Validates that a flag taking a path argument actually has one. Without this,
+# `./apply.bash --artifacts-dir` (no value) makes `shift 2` fail-without-shifting
+# on the 1-arg-remaining case, infinite-looping the parser.
+require_value() {
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: $1 requires a value" >&2
+    exit 1
+  fi
+  case "$2" in --*)
+    echo "ERROR: $1 requires a value (got flag '$2' instead)" >&2
+    exit 1
+    ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifacts-dir)
+      require_value --artifacts-dir "${2:-}"
       PATH_ARTIFACTS="$2"
       shift 2
       ;;
@@ -74,6 +107,15 @@ while [[ $# -gt 0 ]]; do
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
+      echo "WARNING: --avrcp is known-broken on this device. It regresses stock" >&2
+      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/" >&2
+      echo "         headset) without delivering the AVRCP 1.4 metadata it" >&2
+      echo "         intends to enable. mtkbt is internally a 1.0 implementation" >&2
+      echo "         and byte-patches cannot make it process 1.3+ commands." >&2
+      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the" >&2
+      echo "         full negative result and the user-space proxy path that" >&2
+      echo "         aims to fix this. Continuing only because you asked." >&2
+      echo "" >&2
       shift
       ;;
     --bluetooth)
@@ -97,7 +139,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      FLAG_AVRCP=true
+      # --avrcp is intentionally excluded — known broken; opt-in only via
+      # explicit --avrcp. See apply.bash --help.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
@@ -107,10 +150,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --mtkclient-dir)
+      require_value --mtkclient-dir "${2:-}"
       OVERRIDE_MTKCLIENT_DIR="$2"
       shift 2
       ;;
     --python-venv)
+      require_value --python-venv "${2:-}"
       OVERRIDE_PYTHON_VENV="$2"
       shift 2
       ;;
@@ -119,20 +164,32 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Error: Unknown option '$1'"
-      echo ""
-      show_help
+      echo "ERROR: Unknown option '$1'" >&2
+      echo "" >&2
+      show_help >&2
       exit 1
       ;;
   esac
 done
 
-# Validate mandatory --artifacts-dir flag
+# --artifacts-dir falls back to ./staging/ inside the repo if not given.
+# Lets the common case skip the flag: `cp rom.zip staging/ && ./apply.bash --all`.
+# Power users with artifacts on a different drive / multiple firmwares keep
+# passing --artifacts-dir explicitly.
+PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "$PATH_ARTIFACTS" ]]; then
-  echo "Error: --artifacts-dir is mandatory and must be specified"
-  echo ""
-  show_help
-  exit 1
+  PATH_ARTIFACTS="${PATH_SCRIPT_DIR}/staging"
+  if [[ ! -d "$PATH_ARTIFACTS" ]]; then
+    echo "ERROR: no rom.zip staged." >&2
+    echo "" >&2
+    echo "  Either:" >&2
+    echo "    mkdir -p ${PATH_ARTIFACTS} && cp /path/to/rom.zip ${PATH_ARTIFACTS}/" >&2
+    echo "  Or:" >&2
+    echo "    ./apply.bash --artifacts-dir <your-path> [FLAGS]" >&2
+    echo "" >&2
+    show_help
+    exit 1
+  fi
 fi
 
 # If no patching flags specified, show help
@@ -149,8 +206,16 @@ fi
 
 # Prompt for sudo only if we'll need it (mounting system.img).
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "ERROR: 'sudo' is required to mount system.img and chown patched files." >&2
+    echo "       Install sudo and re-run, or run this script as root directly." >&2
+    exit 1
+  fi
   echo "This script requires sudo for mounting and file operations."
-  sudo -v
+  if ! sudo -v; then
+    echo "ERROR: sudo authentication failed; aborting." >&2
+    exit 1
+  fi
   while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
   SUDO_KEEPALIVE_PID=$!
 fi
@@ -172,7 +237,7 @@ KNOWN_FIRMWARES=(
   "3.0.2|473991dadeb1a8c4d25902dee9ee362b|1f7920228a20c01ad274c61c94a8cf36|82657db82578a38c6f1877e02407127a|com.innioasis.y1_3.0.2.apk"
 )
 
-PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# (PATH_SCRIPT_DIR set earlier — used by the --artifacts-dir staging fallback.)
 
 PATH_MOUNT="/mnt/y1-devel"
 
@@ -221,14 +286,11 @@ resolve_python_venv() {
   fi
 }
 
-# Cross-platform MD5: md5sum on Linux, md5 -q on macOS.
 md5_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | awk '{print $1}'
-  elif command -v md5 >/dev/null 2>&1; then
-    md5 -q "$1"
   else
-    echo "ERROR: neither md5sum nor md5 in PATH — cannot validate stock images" >&2
+    echo "ERROR: md5sum not in PATH — cannot validate stock images" >&2
     exit 1
   fi
 }
@@ -278,22 +340,26 @@ firmware_field() {
 }
 
 print_known_firmwares() {
-  echo "Known stock firmware MD5s (manifest in innioasis-y1-fixes.bash):" >&2
+  echo "Known stock firmware MD5s (manifest in apply.bash):" >&2
   local row parts
   for row in "${KNOWN_FIRMWARES[@]}"; do
     IFS='|' read -ra parts <<< "$row"
     echo "  v${parts[0]}:" >&2
-    echo "    system.img:  ${parts[1]}  (raw / post-simg2img)" >&2
-    echo "    boot.img:    ${parts[2]}" >&2
-    echo "    rom.zip:     ${parts[3]}  (reference only, not consumed)" >&2
+    echo "    rom.zip:     ${parts[3]}  (primary input — this is what's MD5-validated)" >&2
+    echo "    system.img:  ${parts[1]}  (extracted from rom.zip; raw / post-simg2img)" >&2
+    echo "    boot.img:    ${parts[2]}  (in rom.zip; not consumed since v1.7.0)" >&2
     echo "    music APK:   app/${parts[4]}" >&2
   done
 }
 
 # Stages stock binaries extracted from the mount + their patched output before write-back.
-PATH_TMP_STAGE="$(mktemp -d -t y1-fixes.XXXXXX)"
+PATH_TMP_STAGE="$(mktemp -d -t koensayr.XXXXXX)"
+MOUNTED=false
 
 _cleanup() {
+  if [[ "$MOUNTED" == true ]]; then
+    sudo umount "${PATH_MOUNT}" 2>/dev/null && MOUNTED=false
+  fi
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null
   rm -rf "${PATH_TMP_STAGE}"
 }
@@ -321,7 +387,10 @@ patch_in_place_bytes() {
   fi
 
   if [[ -f "${patched}" ]]; then
-    sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+    if ! sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"; then
+      echo "ERROR: failed to write patched ${mount_rel} back to mount" >&2
+      exit 1
+    fi
     sudo chmod "${mode}" "${PATH_MOUNT}/${mount_rel}"
     sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
   fi
@@ -357,7 +426,10 @@ patch_in_place_y1_apk() {
     exit 1
   fi
 
-  sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+  if ! sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"; then
+    echo "ERROR: failed to write patched ${mount_rel} back to mount" >&2
+    exit 1
+  fi
   sudo chmod 644 "${PATH_MOUNT}/${mount_rel}"
   sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
 }
@@ -372,6 +444,11 @@ if [[ ! -f "$rom" ]]; then
 fi
 if ! command -v unzip >/dev/null 2>&1; then
   echo "ERROR: unzip is not in PATH — required to extract from ${FILENAME_ROM_ZIP}" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 is not in PATH — required by every patcher script + MTKClient." >&2
+  echo "       Run tools/setup.sh first (it'll bail with the same message but more context)." >&2
   exit 1
 fi
 
@@ -412,13 +489,15 @@ in PATH. Install it and re-run:
   Arch:                 sudo pacman -S android-tools
   Fedora:               sudo dnf install android-tools
   RHEL/Rocky/Alma 8+:   sudo dnf install epel-release && sudo dnf install android-tools
-  macOS (brew):         brew install simg2img
 EOF
       exit 1
     fi
     echo "Extracted system.img is sparse — converting to raw via simg2img.."
     raw="${PATH_TMP_STAGE}/system-raw.img"
-    simg2img "$PATH_SYSTEM_IMG" "$raw"
+    if ! simg2img "$PATH_SYSTEM_IMG" "$raw"; then
+      echo "ERROR: simg2img conversion failed (corrupt sparse image, or disk full?)" >&2
+      exit 1
+    fi
     PATH_SYSTEM_IMG="$raw"
   fi
 
@@ -437,9 +516,25 @@ FILENAME_MUSIC_APK="$(firmware_field "$VERSION_FIRMWARE" music_apk)"
 # Copy validated raw system.img into the artifacts dir (mtkclient flashes from there) and mount.
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
-  cp "$PATH_SYSTEM_IMG" "$dst"
+  if ! cp "$PATH_SYSTEM_IMG" "$dst"; then
+    echo "ERROR: failed to copy system.img to ${dst} (disk full? read-only artifacts dir?)" >&2
+    exit 1
+  fi
   echo "Mounting working copy of system.img.."
-  sudo mount -o loop "$dst" "${PATH_MOUNT}/"
+  if [[ ! -d "${PATH_MOUNT}" ]]; then
+    sudo mkdir -p "${PATH_MOUNT}"
+  fi
+  if mountpoint -q "${PATH_MOUNT}" 2>/dev/null; then
+    echo "ERROR: ${PATH_MOUNT} already has something mounted on it. Run:" >&2
+    echo "       sudo umount ${PATH_MOUNT}" >&2
+    echo "       and re-run." >&2
+    exit 1
+  fi
+  if ! sudo mount -o loop "$dst" "${PATH_MOUNT}/"; then
+    echo "ERROR: failed to loop-mount $dst at ${PATH_MOUNT}" >&2
+    exit 1
+  fi
+  MOUNTED=true
 fi
 
 # Enable ADB debugging
@@ -461,22 +556,28 @@ if [[ "$FLAG_ROOT" == true ]]; then
     exit 1
   fi
   echo "Installing /system/xbin/su (setuid-root escalator).."
-  sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"
+  if ! sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"; then
+    echo "ERROR: failed to install ${src_su} → ${PATH_MOUNT}/xbin/su" >&2
+    exit 1
+  fi
 fi
 
-# Enable AVRCP 1.4 support (WIP - pending flash verification)
+# Apply AVRCP 1.4 patches (KNOWN BROKEN — see warning at flag-parse and INVESTIGATION.md)
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Enabling AVRCP 1.4 support (WIP).."
+  echo "Applying AVRCP 1.4 patches (known broken; opt-in only).."
 
   src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
   if [[ ! -f "$src_y1mb" ]]; then
     echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew assembleDebug" >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
     exit 1
   fi
 
   echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
+  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
+    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
+    exit 1
+  fi
 
   patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
@@ -495,9 +596,13 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
 
   echo "Configuring build.prop for Bluetooth fixes.."
+  # persist.bluetooth.avrcpversion is intentionally NOT set — see
+  # INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
+  # AVRCP 1.4 advertisement that mtkbt can't actually deliver, regressing
+  # the working AVRCP 1.0 PASSTHROUGH. The remaining properties are
+  # essential for car/peer pairing and stay regardless of AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
-persist.bluetooth.avrcpversion=avrcp14
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
@@ -510,7 +615,11 @@ if [[ "$FLAG_MUSIC_APK" == true ]]; then
   patch_in_place_y1_apk "app/${FILENAME_MUSIC_APK}"
 fi
 
-# Remove unnecessary APK files
+# Remove unnecessary APK files. Patterns are passed to `find -name` so they
+# match both flat files (Foo.apk) and subdirectories (Foo/) using shell-glob
+# syntax. Previously these were rm with bash globs, but the path was double-
+# quoted (suppressing expansion), so --remove-apps silently no-op'd. find
+# does its own pattern matching independent of shell quoting.
 if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   echo "Removing unnecessary APK files.."
   apps_to_remove=(
@@ -535,13 +644,18 @@ if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   )
 
   for app in "${apps_to_remove[@]}"; do
-    sudo rm -rf "${PATH_MOUNT}/app/${app}"
+    sudo find "${PATH_MOUNT}/app" -maxdepth 1 -name "${app}" -exec rm -rf {} +
   done
 fi
 
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "Unmounting development system.img.."
-  sudo umount "${PATH_MOUNT}"
+  if ! sudo umount "${PATH_MOUNT}"; then
+    echo "ERROR: umount ${PATH_MOUNT} failed (busy mount? open file in there?)." >&2
+    echo "       Refusing to flash a still-mounted image — kernel may have dirty pages." >&2
+    exit 1
+  fi
+  MOUNTED=false
 
   # Flash via MTKClient. Resolve location + venv only now (no point checking
   # earlier — the patch steps don't need MTKClient).
@@ -554,12 +668,21 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   fi
 
   echo "Activating MTKClient venv (${PATH_MTKCLIENT}).."
-  cd "${PATH_MTKCLIENT}"
+  if ! cd "${PATH_MTKCLIENT}"; then
+    echo "ERROR: failed to cd into ${PATH_MTKCLIENT} (permissions?)" >&2
+    exit 1
+  fi
   # shellcheck disable=SC1091
   source "${PATH_VENV_MTKCLIENT}/bin/activate"
 
   echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
-  python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+  if ! python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"; then
+    echo "ERROR: mtk.py write failed — device left in an unknown state." >&2
+    echo "       Common causes: device not in BROM mode, USB cable not data-capable," >&2
+    echo "                      mtkclient version mismatch, missing libusb." >&2
+    deactivate
+    exit 1
+  fi
 
   echo "Deactivating MTKClient venv.."
   deactivate

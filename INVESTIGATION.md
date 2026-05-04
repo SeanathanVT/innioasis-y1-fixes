@@ -160,7 +160,7 @@ Find the actual entry point of mtkbt's connection logic. The 12 callers tell us 
 **Findings:**
 - 12 callers in 12 distinct containing functions.
 - Walking back 4 levels: 11 distinct top-level entry points (functions with 0 callers themselves) all eventually call `state=1`.
-- Critically: `fn@0x029e98` (the "callback dispatcher TBH" from the brief) appears at depth 2 in the walk — it's a top-level entry (0 direct callers) whose descendants include the state=1 setter. So 0x029e98 IS in the live call graph, reached from outside mtkbt as a callback.
+- Critically: `fn@0x029e98` (the "callback dispatcher TBH" identified in earlier analysis) appears at depth 2 in the walk — it's a top-level entry (0 direct callers) whose descendants include the state=1 setter. So 0x029e98 IS in the live call graph, reached from outside mtkbt as a callback.
 - The deepest entry found is `fn@0x06adee` at depth 4, which has 0 callers but 3 call sites going down.
 - **None of the "AV/C parser" / "op dispatcher" / "AVCTP RX handler" / "AVCTP register PSM" appear anywhere in this call tree.** They are not on the path from any top-level entry to the state=1 setter.
 
@@ -266,7 +266,7 @@ These all extend Trace #1 — pure static analysis, no flash cycles.
 
 ### `0x29e98` IS reachable — confirmed
 
-Traced the callback registration mechanism for the field `[conn+0x5cc]` (the per-connection callback fn ptr the brief documented as being read at `0x02fd74` and `blx`'d to dispatch the AVRCP layer).
+Traced the callback registration mechanism for the field `[conn+0x5cc]` (the per-connection callback fn ptr documented in earlier analysis as being read at `0x02fd74` and `blx`'d to dispatch the AVRCP layer).
 
 Chain found:
 
@@ -281,10 +281,10 @@ Caller (1 site only): 0x28a5e
     0x028a5e:  bl 0x2fecc               ; register_callback(r0=conn, r1=0x29e99, r2=...)
 ```
 
-The literal `0x1439` is **not** a function address — it's a PC-relative offset. The function address is computed at runtime by `add rN, pc`. Disassembly at the resolved target `0x29e98` matches the brief's documented "callback dispatcher TBH" character-for-character (`push.w {...,lr}; tbh [pc, r3, lsl #1]`). So:
+The literal `0x1439` is **not** a function address — it's a PC-relative offset. The function address is computed at runtime by `add rN, pc`. Disassembly at the resolved target `0x29e98` matches the documented "callback dispatcher TBH" character-for-character (`push.w {...,lr}; tbh [pc, r3, lsl #1]`). So:
 
 - `0x29e98` is reachable.
-- The brief's analysis of its role is correct.
+- The earlier analysis of its role is correct.
 - The function `0x3096c` (E5 patch site) is also genuinely reachable — it lives in the live call chain that this dispatcher reaches via TBH.
 
 ### Why earlier traces missed this
@@ -342,7 +342,7 @@ The other "0-caller" functions show **zero PIC constructions, zero R_ARM_RELATIV
 
 - `0x6d04a` AV/C parser → confirmed dead code (never reachable by any mechanism scanned).
 - `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp containing fn → likely also dead code (alternate implementations).
-- `0x02fd34` AVRCP 1.3/1.4 init body → reached via internal `b.w` tail-call from inside the live function `0x3096c` at offset `0x030aca` (per the brief's analysis). Not registered, just a sub-path within a live function.
+- `0x02fd34` AVRCP 1.3/1.4 init body → reached via internal `b.w` tail-call from inside the live function `0x3096c` at offset `0x030aca` (per earlier analysis). Not registered, just a sub-path within a live function.
 
 ### The three op-code=4 dispatchers
 
@@ -357,7 +357,7 @@ A 3-slot function-pointer table at vaddr `0xf94b0..0xf94bc` holds:
 All three are **op-code=4 (GetCapabilities) dispatchers** for different sub-contexts. They each read different combinations of `[conn+0x149]` (version) and `[conn+0x5d0]` (state code) and dispatch differently:
 - `0x3060c`: 3 reads of `[+0x149]`; cmps against `#0xa0`, `#0x82`
 - `0x30708`: 2 reads of `[+0x149]`; cmps `[+0x5d0]` against `#0x82`, `#0x81`, `#0x20`
-- `0x3096c`: 1 read of `[+0x149]`; **the brief's classic version-dispatch (cmp `#0x10` / `#0x20`)**
+- `0x3096c`: 1 read of `[+0x149]`; **classic version-dispatch (cmp `#0x10` / `#0x20`)**
 
 **E5 patched only the `0x3096c` branch.** If runtime selection picks `0x3060c` or `0x30708` for our peers (driven by some other state), the patch never fires.
 
@@ -378,7 +378,7 @@ Mapped all 14 readers of `[conn+0x5cc]` (the callback fn ptr slot holding `0x29e
 
 | Function | `[+0x5cc]` reads | Notes |
 |---|---|---|
-| `0x2fd36` (= AVRCP 1.3/1.4 init body) | 1 (at `0x2fd74`) | brief's documented site |
+| `0x2fd36` (= AVRCP 1.3/1.4 init body) | 1 (at `0x2fd74`) | previously-documented site |
 | `0x2fd84` | 1 | adjacent helper |
 | `0x3060c` (op-dispatcher slot 0) | 1 (at `0x306dc`) | one of the 3-slot table dispatchers |
 | `0x30708` (op-dispatcher slot 1) | 2 (at `0x308e2`, `0x3090a`) | another 3-slot dispatcher |
@@ -508,7 +508,7 @@ No additional Java/smali patches will help. F1 + F2 are necessary AND sufficient
 After Trace #1f the architectural picture is finally complete and consistent:
 
 - **`mtkbt` IS the AVRCP processor** (not chip firmware). ✓ confirmed by inspecting firmware blob.
-- **The brief's documented dispatchers (`0x29e98`, `0x02fd34`, `0x3096c`) are all reachable at runtime** — via PIC-style callback registration that earlier traces missed. ✓ confirmed.
+- **The documented dispatchers (`0x29e98`, `0x02fd34`, `0x3096c`) are all reachable at runtime** — via PIC-style callback registration that earlier traces missed. ✓ confirmed.
 - **`0x6d04a` "AV/C parser" is dead code** — multiple independent searches confirm no caller mechanism reaches it. ✓ confirmed.
 - **The cardinality:0 gate is in the runtime decision tree of `[conn+0x5d0]` × `[conn+0x149]` × dispatcher-table selection**, somewhere in the `0x29e98` → `0x3060c`/`0x30708`/`0x3096c` family of paths.
 - **Static analysis cannot determine which decision point fires for our peers without observing runtime values.** Every structural and addressable element has been mapped.
@@ -539,3 +539,791 @@ This trace was deferred during 2026-05-02 work as low-priority ("almost certainl
 - HCI snoop / btsnoop — no root, eliminated in earlier passes.
 - mtkbt instrumentation patches (insert log calls at choke points) — possible but very high effort, low marginal value over #1 + #2.
 - boot.img init scripts — won't reveal anything about the AVRCP path.
+
+---
+
+# Conclusion (2026-05-04) — byte-patch path exhausted, proxy work needed
+
+After the original investigation in this document concluded the gate was upstream of the op_code=4 dispatcher, post-root work in May 2026 added the diagnostic infrastructure to actually see what mtkbt and peers were doing on the wire (`@btlog` tap, `dual-capture`, `btlog-parse`, `probe-postroot` — all in `tools/` and `src/btlog-dump/`) and ran a series of byte-patch experiments to test increasingly informed hypotheses about the SDP-record shape required by working AVRCP CTs.
+
+**The byte-patch hypothesis is conclusively dead.** Five distinct (version, features) combinations were tested:
+
+| Configuration | SDP wire | AVCTP RX behaviour | Cardinality | PASSTHROUGH play/pause |
+|---|---|---|---|---|
+| Stock 1.0 + features `0x01` | `09 01 00 09 00 01` | Sonos doesn't bother sending AVRCP COMMANDs at all (no AVCTP_EVENT:4) | 0 | **WORKS** |
+| `--avrcp` standard 1.4 + features `0x33` | `09 01 04 09 00 33` | Sonos sends one COMMAND, mtkbt drops silently, Sonos gives up | 0 | **broken** |
+| Pixel-shape 1.5 + features `0xd1` (Browsing+MultiPlayer) | `09 01 05 09 00 d1` | Sonos tries to open AVCTP browse PSM `0x1B`, mtkbt has no listener (`+@l2cap: cannot find psm:0x1b!`), Sonos gives up | 0 | broken |
+| Pixel-1.3 mimic 1.3 + features `0x01` | `09 01 03 09 00 01` | Same dropped-COMMAND failure as 1.4 | 0 | broken |
+| Features-only at 1.4 + features `0x01` | `09 01 04 09 00 01` | Same | 0 | broken |
+
+**Reference: Pixel 4 ↔ Sonos works at every AVRCP version 1.3-1.6** (per user-supplied `sdptool browse F0:5C:77:E4:30:62` outputs at each Developer-Options-forced version, captured 2026-05-04). The Pixel at 1.3 advertises features `0x0001` — *the same value Y1 stock advertises* — and Sonos receives full title/artist/album metadata + responds correctly to `PASS_THROUGH` play/pause. The difference is not the SDP advertisement. It is mtkbt's command-handling layer.
+
+**mtkbt is internally an AVRCP 1.0 implementation.** Compile-time string `[AVRCP] AVRCP V10 compiled` + runtime log `AVRCP register activeVersion:10` are accurate. The opcode dispatchers identified earlier in this document (`0x3060c`, `0x30708`, `0x3096c` at op_code=4 = `GetCapabilities`) exist in the binary, but no inbound packet from any peer ever reaches them, regardless of how we shape the SDP record. The earlier "the gate is upstream of the dispatcher table" framing was correct; the missing piece was that there is no upstream gate that byte-patches can flip — mtkbt's AVCTP RX simply does not classify AVRCP COMMAND PDUs as anything its 1.0 dispatcher recognises, and silently drops them.
+
+The previously-listed primary lead, `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096`, was also disproven during this work: the same `0x1000` value is emitted at `MSG_ID_BT_AVRCP_ACTIVATE_CNF` time 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator.
+
+## Repo state after the conclusion (commits 2690d05 → 7077b5a → bd36160 → this one)
+
+- `--avrcp` is now a known-broken opt-in. It runs if explicitly requested (useful for the proxy work below) and prints a startup warning. **Excluded from `--all`.**
+- `--bluetooth` no longer sets `persist.bluetooth.avrcpversion=avrcp14`. The remaining audio.conf / `auto_pairing.conf` / `blacklist.conf` / `ro.bluetooth.class` / `ro.bluetooth.profiles.*.enabled` properties are pairing-essential and stay.
+- The recommended baseline is `--all` (without `--avrcp`): pairing works, A2DP audio works, AVRCP 1.0 PASSTHROUGH (play/pause/skip) works, no metadata over BT.
+- Diagnostic infrastructure remains in-tree: `src/btlog-dump/` (no-libc ARM ELF that taps mtkbt's `@btlog` socket), `tools/btlog-parse.py` (frame decoder), `tools/dual-capture.sh` (btlog + logcat correlated capture), `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh` (one-shot post-root sanity probe).
+- Failed-experiment scripts (Browsing-bit, Pixel-shape, Pixel-1.3 mimic, features-only) have been removed from `tools/`. Their results are summarised in the table above and in `CHANGELOG.md`.
+
+## Path forward — user-space AVRCP proxy
+
+Three architecture sketches were considered when the byte-patch path was first ruled out (see commit messages around `bd36160`). The smallest viable one is sketched below.
+
+**Approach: trampoline mtkbt's silent-drop site to forward unhandled AVRCP COMMANDs raw to the JNI; respond from Java.**
+
+The work is roughly four phases.
+
+### Phase 1 — Identify the silent-drop site (gdbserver, ~1-2 days)
+
+Push an API-17 ARM AOSP-prebuilt `gdbserver` to `/data/local/tmp/`, attach to the live `mtkbt` PID. PIE base is `0x400c1000` (per `tools/probe-postroot.sh` §1; verify on each session — the base is per-process not per-firmware). Set breakpoints on the candidate drop sites identified in the appendix below:
+
+- `0x6d9ba` (live `0x40128d9a`) — AVCTP RX handler
+- `0x6cf30` (live `0x40128f30`) — AVCTP_ConnectRsp
+- `0x0513a4` (live `0x401123a4`) — `[AVRCP][WRN] AVRCP receive too many data. Throw it!` log site
+- `0x29e98` (live `0x400d2e98`) — TBH callback dispatcher
+
+Trigger the failure scenario (Y1 ↔ Sonos with `--avrcp` on so peer engages enough to send a COMMAND). Whichever breakpoint fires when the single `AVCTP_EVENT:4` arrives is the candidate drop site. Dump the inbound packet bytes from r0/r1/stack at that point and confirm they're a real AVRCP COMMAND PDU (op_code 0x4 = GetCapabilities is the most likely first command).
+
+`tools/probe-postroot.sh` §11 confirmed SELinux is absent on this firmware and §12 confirmed `/proc/sys/kernel/yama/ptrace_scope` doesn't exist either, so ptrace attach is unblocked.
+
+### Phase 2 — Patch a trampoline (~3-5 days)
+
+At the identified drop site, replace the silent-drop branch with a `bl <trampoline>`. The trampoline (in a code-cave or appended to mtkbt's `.text`) marshals the inbound packet into a new IPC message — e.g., msg_id 999 — and writes it to the existing `bt.ext.adp.avrcp` abstract socket that already carries msg_ids JNI↔mtkbt. The IPC framing and the existing send wrapper at vaddr `0x511c0` are documented in the appendix below.
+
+Verification: `tools/btlog-parse.py` should now show the AVRCP COMMAND bytes flowing through the new msg_id; logcat should show the JNI receiving msg_id 999 (or whatever ID we pick).
+
+### Phase 3 — Java AVRCP COMMAND parser/responder (~1-2 weeks)
+
+Extend `Y1MediaBridge` (or add a sibling Java component) to:
+1. Receive the new msg_id from the JNI via the existing Binder path.
+2. Parse the AVCTP+AVRCP frame: AV/C control header, op_code, PDU ID, transId, params.
+3. Build the appropriate AVRCP RSP for at minimum:
+   - `GetCapabilities` (PDU `0x10`)
+   - `RegisterNotification` (PDU `0x31`) for `EVENT_TRACK_CHANGED` (`0x05`) and `EVENT_PLAYBACK_STATUS_CHANGED` (`0x01`)
+   - `GetPlayStatus` (PDU `0x30`)
+   - `GetElementAttributes` (PDU `0x20`)
+4. Use the existing `IBTAvrcpMusic`/`IBTAvrcpMusicCallback` plumbing for the actual track/state data — Y1MediaBridge already sources this from the music player via broadcast intents and RCC.
+
+`PASS_THROUGH` (op_code `0x7C`) commands should pass through to the existing 1.0 path so play/pause keeps working — don't intercept those.
+
+### Phase 4 — Outbound RSP path (~3-5 days)
+
+Patch a second trampoline (or extend the first) that takes a Java-built AVRCP RSP frame, marshals it into an outbound msg_id, and routes it through mtkbt's existing AVCTP TX path so it reaches the peer's AVCTP channel. The IPC dispatcher map in the appendix below (msg_ids 500-611, second TBH at vaddr `0x518ac`) names the candidate slots.
+
+### Verification target
+
+`tools/dual-capture.sh` against Sonos should show:
+- `cardinality:N` non-zero in `MMI_AVRCP: ACTION_REG_NOTIFY for notifyChange ... cardinality:N`
+- `MMI_AVRCP: registerNotificationInd eventId:` firing for events 1/2/9
+- Sonos app showing title/artist/album for the currently-playing track
+- Y1MediaBridge log lines `notifyAvrcpCallbacks code=N targets=>=1` (currently always logs `targets=0` because MtkBt never registers a callback — the proxy work fixes this by routing peer-side `RegisterNotification` through Java)
+- Physical play/pause from Sonos still working (PASSTHROUGH path unbroken)
+
+### Known prerequisites for the next agent
+
+- Read this entire document top-down — the failure modes earlier in the doc (G1/G2 SIGSEGV at NULL, blanket xlog redirect being too fragile, etc.) are real and re-tripping them wastes days.
+- Re-verify `tools/probe-postroot.sh` outputs against the device before assuming PIE base / PSM list / SELinux state. The probe is idempotent and cheap.
+- The diagnostic tooling (`@btlog` tap, dual-capture, parser) was developed against firmware 3.0.2. If `KNOWN_FIRMWARES` gains a new entry, re-verify the framing against that firmware before trusting parsed output.
+- `--avrcp` MUST be enabled to test the proxy work (otherwise the Y1MediaBridge bridge isn't installed and there's no Java endpoint for the proxy to deliver to). The startup warning is informational; ignore it for the duration of the proxy work.
+
+### Estimated total
+
+2-4 weeks of focused work for someone with ARM Thumb-2 binary RE + Android Bluetooth experience. The diagnostic infrastructure is in place; the gating risk is finding a viable drop site in mtkbt that we can hook without destabilising AVCTP. If no clean site exists (e.g., the drop happens inline rather than at a callable choke point), the alternative is the larger Option 2 — disable mtkbt's AVRCP entirely and bind PSM 0x17 from Java — which is a multi-month rewrite.
+
+---
+
+# Appendix — Reference detail (originally maintained as the working-notes brief, archived 2026-05-04)
+
+This appendix preserves the granular detail from a working-notes brief that was maintained externally to the repo during the 2026-05-02 → 2026-05-04 investigation. The narrative above (top of doc) is the canonical history; the conclusion above is the canonical end-state. **This appendix is reference data**: byte-level patch tables, MD5s, function offsets, ILM layouts, msg_id maps, log tag conventions, and the post-root traces (#8–#11) that complement the original Traces #1–#7. Future work should consult both halves of this document. The brief itself is no longer maintained.
+
+## Device Context
+
+| Item | Value |
+|---|---|
+| SoC | MT6572 |
+| Android | 4.2.2 (JDQ39) |
+| Bluetooth | 4.2 (host stack) |
+| Stock player | Proprietary Innioasis app — logcat prefix `DebugY1` |
+| BT stack | `MtkBt.apk` → `libextavrcp_jni.so` → `libextavrcp.so` → `mtkbt` daemon via Unix socket |
+| BT chip | MT6627 (combo: BT + Wi-Fi + FM + GPS), HCI-only — chip firmware is the WMT common subsystem and contains zero AVRCP code |
+| System access | Full system-partition write via MTKClient + loop-mount. Flash cycle 5–10 min. |
+| ADB root | **Hardware-verified 2026-05-04 via setuid `/system/xbin/su`** (v1.8.0+). Stock `/sbin/adbd` untouched. |
+
+## Architecture
+
+```
+[Car Stereo CT] <--SDP/AVRCP--> [mtkbt daemon] <--socket bt.ext.adp.avrcp--> [libextavrcp.so]
+                                       |                                           ^
+                                       | HCI / UART                     [libextavrcp_jni.so]
+                                       v                                           ^
+                                  [/dev/stpbt]                            [MtkBt.apk Java layer]
+                                       |
+                                       v
+                              [mtk_stp_bt.ko (kernel)]
+                                       |
+                                       v
+                                [MT6627 chip — HCI/radio only]
+```
+
+The socket `bt.ext.adp.avrcp` lives in `ANDROID_SOCKET_NAMESPACE_ABSTRACT` (namespace=0). Abstract sockets have no filesystem file and are auto-released on FD close; no stale socket is possible across BT toggle cycles.
+
+**Trace #7 confirmed** all four `libbluetooth*.so` libs (`libbluetoothdrv.so`, `libbluetooth_mtk.so`, `libbluetoothem_mtk.so`, `libbluetooth_relayer.so`) are HCI/transport-only. Combined `strings` search returned zero hits for `avrcp/avctp/profile/capability/notif/metadata/cardinal`. The cardinality:0 gate cannot live anywhere except inside `mtkbt`.
+
+Additionally, mtkbt exposes an undocumented `SOCK_STREAM` listener at the abstract socket `@btlog` (created by `socket_local_server("btlog", ABSTRACT, SOCK_STREAM)` at vaddr `0x6b4d4`). Connecting to it as root yields a stream of mtkbt's `__xlog_buf_printf` output **plus** decoded HCI command/event traffic — the diagnostic capability used by `tools/dual-capture.sh` and Trace #9. See `src/btlog-dump/README.md` for the framing format.
+
+## The mtkbt Fix — Eleven Patches (the `--avrcp` patch set; now known broken end-to-end per the conclusion above)
+
+The patches below ship under the `--avrcp` flag of `apply.bash`. All eleven land on the wire (`sdptool browse` confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initialises correctly for AVRCP 1.4. Despite that, the patch set as a whole is a **net regression** vs. stock 1.0 — it claims a version mtkbt's command-handling layer cannot deliver, and peers (Sonos, car) refuse to engage AVRCP COMMANDs as a result. See "Conclusion (2026-05-04)" above. The detail below is preserved because individual patches are still load-bearing if/when the user-space proxy work activates AVRCP 1.3+ command handling — the SDP record needs to be there.
+
+### Descriptor Table Structure
+
+The mtkbt descriptor table at file offset `0x0f9774` has **three** service record groups, each a contiguous run of 5–6 entries (`attrID LE16`, `len LE16`, `ptr LE32`, `zeros LE32`):
+
+| Group | Role | ProtocolDescList ptr | AdditionalProtocol ptr | ProfileDescList ptr | SupportedFeatures (stock) |
+|---|---|---|---|---|---|
+| 1 | TG (record A) | `0x0eba5c` (shared) | `0x0eba12` | `0x0eba6e` | `0x0021` (Cat1+GroupNav) |
+| 2 | TG (record B, **last wins**) | `0x0eba5c` (shared) | — | `0x0eba4f` | `0x0001` (Cat1 only) |
+| 3 | CT | `0x0eba26` | — | `0x0eba42` | `0x000f` (Cat1-4) |
+
+`AttrID=0x0311` (SupportedFeatures) **IS** registered in all three groups with non-zero values.
+
+### B1-B3 — AVCTP Version
+
+Stock mtkbt advertises AVCTP 1.0 in all three AVCTP-bearing SDP blobs. AVRCP 1.4 requires AVCTP 1.3.
+
+| Patch | Offset | Blob | Before | After | Effect |
+|---|---|---|---|---|---|
+| **B1** | `0x0eba6d` | Groups 1&2 TG ProtocolDescList | `0x00` | `0x03` | AVCTP 1.0 → 1.3 (TG control channel) |
+| **B2** | `0x0eba37` | Group 3 CT ProtocolDescList | `0x00` | `0x03` | AVCTP 1.0 → 1.3 (CT record) |
+| **B3** | `0x0eba25` | Group 1 AdditionalProtocol | `0x00` | `0x03` | AVCTP 1.0 → 1.3 (browsing channel descriptor) |
+
+### C1-C3 — AVRCP Profile Version
+
+Last-wins SDP semantics across all three ProfileDescList entries; all three patched to 1.4.
+
+| Patch | Offset | Record | Before | After | Effect |
+|---|---|---|---|---|---|
+| **C1** | `0x0eba4b` | [23] ProfileDescList | `0x00` | `0x04` | AVRCP 1.0 → 1.4 |
+| **C2** | `0x0eba58` | [18] ProfileDescList (served) | `0x00` | `0x04` | AVRCP 1.0 → 1.4 |
+| **C3** | `0x0eba77` | [13] ProfileDescList | `0x03` | `0x04` | AVRCP 1.3 → 1.4 |
+
+### A1 — Runtime SDP MOVW (belt-and-suspenders)
+
+```asm
+0x38BFC:  40 f2 01 37   MOVW r7, #0x0301      ; byte-swapped 1.3
+0x38C02:  a3 f8 48 70   STRH.W r7, [r3, #72]  ; writes {01 03} to runtime struct
+```
+
+| Offset | Before | After | Effect |
+|---|---|---|---|
+| `0x38BFC` | `40 f2 01 37` | `40 f2 01 47` | MOVW r7: #0x0301 → #0x0401 |
+
+### D1 — Runtime Registration Guard NOP at `0x38C6C`
+
+The SDP init function (`0x38AB0`–`0x38C74`) builds the AVRCP TG SDP struct in r3, then gates the final registration step behind `CMP r0, r5` / `BNE 0x38C76` where r5 = `0x111F`. r0 is never `0x111F`, so the three writes that complete registration are always skipped. NOP'ing the BNE links the constructed SDP struct into mtkbt's live registry.
+
+| Offset | Before | After | Effect |
+|---|---|---|---|
+| `0x38C6C` | `03 d1` | `00 bf` | `BNE 0x38C76 → NOP` — always fall through to registration writes |
+
+### E3/E4 — TG SupportedFeatures
+
+Wire-confirmed via `sdptool browse` after D1 was live: `AttrID=0x0311` IS served inside the AVRCP TG record (UUID 0x110c), but the served value is `0x0001` (Cat1 only — Group 2 wins the merge). 1.4 controllers see ProfileVersion=1.4 with a feature bitmask consistent with 1.0 (or 1.3). E3/E4 raise it to `0x0033`.
+
+| Patch | Offset | Group | Before | After | Notes |
+|---|---|---|---|---|---|
+| **E3** | `0x0eba5b` | Group 2 TG (served) | `0x01` | `0x33` | `0x0001 → 0x0033` — Cat1 + Cat2 + PAS + GroupNav |
+| **E4** | `0x0eba4e` | Group 1 TG (defense-in-depth) | `0x21` | `0x33` | `0x0021 → 0x0033` |
+
+The Browsing bit (6) was deliberately omitted at brief-writing time because `AdditionalProtocolDescriptorList` (0x000d) is in Group 1 only and isn't on the wire after the merge — claiming Browsing without serving the descriptor would re-introduce the same inconsistency. The Browsing-bit experiment (Trace #11 Thread A) and the Pixel-shape experiment (which set features `0xd1` including Browsing + Multi-Player) confirmed this concern: Sonos engages browse, mtkbt rejects PSM `0x1B` (`+@l2cap: cannot find psm:0x1b!`), Sonos gives up on AVRCP altogether.
+
+### E8 — op_code=4 dispatcher slot-0 sign gate
+
+```asm
+0x030658:  ldrsb.w r0, [r4, #0x149]     ; SIGNED load
+0x03065c:  cmp r0, #0
+0x03065e:  bge #0x30688                  ; ★ if [+0x149] >= 0 (high bit clear), bypass 1.4 init
+0x030684:  b.w #0x2fd34                  ; tail-call AVRCP 1.3/1.4 init
+```
+
+| Offset | Before | After | Effect |
+|---|---|---|---|
+| `0x3065e` | `13 da` | `00 bf` | `BGE 0x30688 → NOP` — force every classification through the 1.3/1.4 init path |
+
+**Tested 2026-05-02 and observed inert** — cardinality:0 persists, no `op_code=4` GetCapabilities messages reach the dispatchers. The gate is upstream of the dispatcher table entirely (and ultimately, per the 2026-05-04 conclusion, in mtkbt's compiled-1.0 command handling rather than at the dispatcher table). Kept as a verified-correct probe.
+
+### Patches that have been tried and removed/reverted
+
+| Patch | Site | Outcome | Status |
+|---|---|---|---|
+| **E1** `0x29be4` `BNE.W → NOP` | Inside `0x299fc` (REGISTER_NOTIFICATION dispatcher) | State gate is **legitimate** — only fires when state ∉ {3,5}. State=3 is set by an *incoming* REGISTER_NOTIFICATION, so no response should be sent without one. Bypass caused unsolicited responses → car cycle-1 disconnect. | **Reverted 2026-05-01** |
+| **E2** `0x0309ec` `BNE → NOP` | Inside `0x3096c` op_code=4 dispatcher | Branch routes 1.3/1.4 cars to the *correct* count=4 path (`0x02fd34` → 5-slot init + AVAILABLE_PLAYERS). NOPing it bypassed mandatory init. | **Reverted 2026-05-01** |
+| **E5** `0x309ed` `BNE → B` | Force 1.3/1.4 init in op_code=4 dispatcher slot 2 | Empirically inert across all three peers — likely never reached at runtime for our peer state. Initial "dead code" reasoning was wrong (Trace #1f proved the function IS reachable via PIC-style callback registration), but the *operational call to remove* was correct. | **Removed 2026-05-02** |
+| **E7a/E7b** `0x033dec`/`0x034100` `0x90 → 0x94` | No-SDP-CT fallback bytes | Empirically inert (Sonos *does* advertise CT 0x110e, so the fallback path doesn't fire for our peers). | **Removed 2026-05-02** |
+| **G1** `0x675c0` 12-byte Thumb thunk | xlog→logcat redirect (no NULL guard) | mtkbt SIGSEGV at addr 0 immediately at startup — at least one xlog callsite passes NULL in r2; bionic's `__android_log_print` at API 17 doesn't NULL-check the tag. | **Reverted 2026-05-02** |
+| **G2** `0xb408` ARM PLT thunk | Same redirect, ARM-mode entry path | Same SIGSEGV. | **Reverted 2026-05-02** |
+| **G1 attempt 2** `0x675c0` 20-byte Thumb thunk with `cbz r2, .L_null` guard | xlog→logcat redirect (NULL guard) | NULL guard helped but BT framework still couldn't enable: `bt_sendmsg(cmd=100, ...)` returned ENOENT — mtkbt's abstract socket never came up. Either crashed on a non-NULL but invalid pointer, or redirected log volume flooded logd past framework's init timeout. | **Reverted 2026-05-03** |
+| **Browsing bit / Pixel-shape / Pixel-1.3 / features-only** experiments | various E3/E4/B/C/A1/F1 byte tweaks | All disproven 2026-05-04 — see "Conclusion (2026-05-04)" test matrix above. Tooling deleted. | **Removed 2026-05-04** |
+
+**Conclusion (G1/G2):** blanket `__xlog_buf_printf → __android_log_print` redirect at the consolidated wrapper at `0x675c0` is too fragile. The wrapper is hit ~3000 times across mtkbt's lifecycle including very early init. Future diagnostic instrumentation must be surgical — explicit `bl __android_log_print` calls at a small number of high-value sites with hardcoded tag/fmt strings via a trampoline. (The `@btlog` passive tap from Trace #9 supersedes this need entirely for read-only observation; instrumentation is only needed to *change* mtkbt's behaviour, e.g. for the Phase-2 trampoline of the user-space proxy work.)
+
+## adbd Root Patches (H1/H2/H3) — Closed 2026-05-03 (failed on hardware), superseded by setuid `/system/xbin/su`
+
+> **Status: closed.** Both attempted revisions caused "device offline" on hardware. `--root` flag removed from `apply.bash` in v1.7.0 then reintroduced in v1.8.0 against `/system/xbin/su` instead. The standalone `patch_adbd.py` and `patch_bootimg.py` scripts are kept in the tree as historical record with warning banners; their analysis below is preserved for whoever picks up the root pass with a different mechanism.
+
+The OEM adbd has stripped the standard AOSP `should_drop_privileges()` gating. `strings adbd` returns ZERO references to `ro.secure`. The drop_privileges block at vaddr `0x94b8` runs unconditionally on every adbd startup.
+
+```asm
+0x94b8:  movs   r0, #0xb           ; arg0 = count = 11               ← H1
+0x94ba:  add    r1, sp, #0x24      ; arg1 = gid_array on stack
+0x94bc:  blx    #0x17038           ; setgroups(11, gids)
+0x94c0:  cmp    r0, #0
+0x94c2:  bne.w  #0x97ea            ; on failure → exit(1)
+0x94c6:  mov.w  r0, #0x7d0         ; arg0 = AID_SHELL = 2000          ← H2
+0x94ca:  blx    #0x1701c           ; setgid(2000)
+0x94ce:  cmp    r0, #0
+0x94d0:  bne.w  #0x97ea
+0x94d4:  mov.w  r0, #0x7d0         ; arg0 = AID_SHELL = 2000          ← H3
+0x94d8:  blx    #0x19418           ; setuid(2000) wrapper → bl 0x27b30; eventually mov r7,#0xd5; svc 0
+0x94dc:  mov    r3, r0
+0x94de:  cmp    r0, #0
+0x94e0:  bne.w  #0x97ea
+```
+
+**Final approach (arg-zero, 2026-05-03 revision):** change only the *argument loads* so the syscalls execute with arguments of 0. All bionic bookkeeping (capability bounding-set, thread-credential sync) runs normally; the process ends up at uid=0/gid=0 with no supplementary groups.
+
+| Patch | File offset | Before | After | Effect |
+|---|---|---|---|---|
+| **H1** | `0x14b8` | `0b 20` | `00 20` | `movs r0, #0xb` → `movs r0, #0` (setgroups count 11 → 0) |
+| **H2** | `0x14c6` | `4f f4 fa 60` | `4f f0 00 00` | `mov.w r0, #0x7d0` → `mov.w r0, #0` (setgid arg 2000 → 0) |
+| **H3** | `0x14d4` | `4f f4 fa 60` | `4f f0 00 00` | `mov.w r0, #0x7d0` → `mov.w r0, #0` (setuid arg 2000 → 0) |
+
+| Item | Value |
+|---|---|
+| Stock adbd MD5 | `9e7091f1699f89dc905dee3d9d5b23d8` (223,132 bytes) |
+| Patched adbd MD5 (arg-zero) | `9eeb6b3bef1bef19b132936cc3b0b230` (same size) |
+| Patched adbd MD5 (NOP-the-blx, earlier failed revision) | `ccebb66b25200f7e154ec23eb79ea9b4` |
+
+Confirmed `blx` targets:
+- `0x17038` → ARM-mode `mov r7, #0xce ; svc 0` (setgroups32 EABI #206)
+- `0x1701c` → ARM-mode `mov r7, #0xd6 ; svc 0` (setgid32 EABI #214)
+- `0x19418` → ARM wrapper that does `bl 0x27b30` *before* reaching `mov r7, #0xd5 ; svc 0` at `0x31a70` (setuid32 EABI #213) — the `bl 0x27b30` is the load-bearing bookkeeping (likely capability bounding-set / thread-credential sync) that the original NOP-the-blx revision skipped.
+
+**Why default.prop edits alone don't work.** Empirical confirmation 2026-05-03: `adb shell id` returned `uid=2000(shell)` despite `ro.secure=0`/`ro.debuggable=1`/`ro.adb.secure=0` correctly set per `getprop`. `adb root` is also actively harmful on the un-patched binary — adbd accepts the request (ro.debuggable=1 passes the permission check), sets `service.adb.root=1`, exits to be respawned, hits the same unconditional drop_privileges path again, and the self-restart triggers a USB rebind that the stock MTK adbd handles poorly (host loses the device until reboot).
+
+**Why arg-zero, not NOP-the-blx (history).** An earlier revision NOPed the three `blx` calls outright. **On hardware**, however, `adb shell` and `adb root` both returned "device offline" — adbd starts and the USB endpoint enumerates, but the ADB protocol handshake never completes. The bionic setuid wrapper at `0x19418` does `bl 0x27b30` *before* reaching the actual syscall stub, doing capability bounding-set / thread-credential bookkeeping that downstream adbd code depends on. NOPing the call entirely skips that bookkeeping → process is uid 0 nominally but has inconsistent credentials/capabilities → the USB ADB protocol layer never fully initializes. The arg-zero revision keeps every syscall and every bionic wrapper intact; `setuid(0)` when EUID is already 0 is a no-op that runs all the same bookkeeping. Same for `setgid(0)`. `setgroups(0, _)` clears supplementary groups, which is the desired end state anyway. **Even so, arg-zero ALSO failed on hardware** ("device offline"); root cause never fully diagnosed because losing ADB makes diagnosis circular.
+
+`patch_bootimg.py` extracted `/sbin/adbd` from the boot.img ramdisk cpio in-place, applied H1/H2/H3 via `patch_adbd.patch_bytes()`, and wrote it back. Same file size (223,132 bytes) so cpio record offsets are unchanged.
+
+## Root via setuid `/system/xbin/su` — v1.8.0 (verified on hardware 2026-05-04)
+
+> **Status: hardware-verified 2026-05-04.** First flash + `adb shell` → `su` → `id` returned `uid=0(root) gid=0(root)`. Replaces the failed H1/H2/H3 adbd byte-patch path; got us out of the "patched adbd is broken / can't even diagnose because we just broke ADB" trap.
+>
+> Verification log:
+>
+> ```
+> $ adb devices
+> List of devices attached
+> 0123456789ABCDEF	device
+>
+> $ adb shell
+> shell@android:/ $ id
+> uid=2000(shell) gid=2000(shell) groups=1003(graphics),1004(input),...
+> shell@android:/ $ su
+> shell@android:/ # id
+> uid=0(root) gid=0(root) groups=1003(graphics),1004(input),...
+> ```
+>
+> `su` resolved without explicit path → `/system/xbin/su` is on `$PATH`. Prompt flipped `$`→`#`. No password prompt, no manager APK gating. The 892-byte direct-syscall escalator works exactly as designed.
+
+### Strategy
+
+Sidestep adbd entirely. Stock `/sbin/adbd` is left untouched and continues to drop privileges to uid 2000 (shell) at boot — ADB protocol handshake comes up cleanly, identical to stock behavior. Root is then obtained per-session by exec'ing a setuid-root binary at `/system/xbin/su`.
+
+The binary is built from `src/su/su.c` (~80 lines of C) + `src/su/start.S` (~10 lines of ARM Thumb-2 assembly), entirely in-tree:
+
+- **No libc dependency** — direct ARM-EABI syscall implementation. `setgid(0)` → `setuid(0)` → `execve("/system/bin/sh", …)`. Three invocation forms: bare `su` (interactive root shell), `su -c "<cmd>"` (one-off), `su <prog> [args…]` (exec-passthrough).
+- **No supply chain beyond GCC + this source.** No SuperSU/Magisk/phh-style binary imported, no manager APK, no whitelist.
+- **Build via `cd src/su && make`.** Output: 892-byte statically-linked ARMv7 ELF, soft-float, EABI v5, no `NEEDED` entries. Output MD5 (current): `a87dc616085e1a0e905692a628e747e7`.
+
+The bash patcher's `--root` flag does:
+
+```
+sudo install -m 06755 -o root -g root src/su/build/su /mnt/y1-devel/xbin/su
+```
+
+against the mounted system.img. No boot.img extraction, no ramdisk repack, no `/sbin/adbd` byte-patches.
+
+### Trade-offs
+
+- **Anyone who can exec `/system/xbin/su` becomes root.** No permission-prompt UI, no whitelist. Acceptable for a single-user research device. Not appropriate for a consumer ROM.
+- The binary is intentionally tiny + direct so every byte is auditable. Statically linked means a future bionic mismatch can't brick the escalator.
+
+### Why this should work where H1/H2/H3 didn't
+
+The H1/H2/H3 failure mode was: patched `/sbin/adbd` got into a state where ADB protocol initialization failed, and once you've shipped a broken adbd you can't diagnose what broke it (you've lost ADB). The `su` install touches NOTHING in the boot path — adbd, init, ramdisk, even `default.prop` are all stock. If `/system/xbin/su` somehow doesn't work post-flash, ADB still works fine; we can pull `/system/xbin/su` and check what's wrong (perms? mode bits? signing? wrong arch?) without losing visibility.
+
+### Watch-items on the root install itself
+
+- **SELinux / `/system` enforcement.** The current `su` works because Android 4.2.2 + this OEM build apparently allows setuid binaries on `/system` to escalate. If a future firmware update hardens this, the manager-APK-paired SuperSU/Magisk fallback would become necessary.
+- **Cross-firmware portability.** `su` is verified on v3.0.2 only. If the `KNOWN_FIRMWARES` manifest gains other firmware versions (e.g. a hypothetical 3.0.3), re-verify `--root` against each.
+- **Kernel-level fallback** (CVE-based exploits against the 3.4-era kernel) and **MTK-specific accessory binaries** (`mtk_mtkbt_root` etc.) remain available if the setuid path is ever closed.
+
+## mtkbt AVRCP State Machine Analysis
+
+### Key Globals
+
+| Symbol | Offset | Role |
+|---|---|---|
+| `[conn+0xe99]` | per-conn | State byte for AVRCP notification state machine (values 0–9) |
+| `[conn+0x149]` | per-conn | Negotiated AVRCP version from remote SDP (0x10=1.0, 0x13=1.3, 0x14=1.4) |
+| `[conn+0x5cc]` | per-conn | Callback fn ptr (set to `0x29e98` via `register_callback` at `0x2fecc` from `0x28a5e`) |
+| `[conn+0x5d0]` | per-conn | State code consulted by op_code=4 dispatchers (vals: 0x82, 0x81, 0x20, 0xa0, …) |
+| `[global+0x25800+0x1b8]` | BSS | Callback dispatch count; drives TBH dispatch in `0x29e98` |
+
+### State Machine Values
+
+| Value | Meaning | Set at |
+|---|---|---|
+| 0 | init | initial |
+| 1 | new connection | `0x028d72` (connect handler) |
+| 3 | pending REGISTER_NOTIFICATION response | `0x029200` (incoming REGISTER_NOTIFICATION received) |
+| 5 | active registration | `0x0293d6` |
+
+### Three op_code=4 dispatchers (3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`)
+
+Confirmed reachable via R_ARM_RELATIVE relocations populated at load time.
+
+| Slot | Vaddr | Fn ptr | Function character |
+|---|---|---|---|
+| 0 | `0xf94b0` | `0x3060c` | 3 reads of `[+0x149]` (signed); cmps `[+0x5d0]` against 0xa0, 0x82. **E8 patch site (BGE→NOP at `0x3065e`).** |
+| 1 | `0xf94b4` | `0x30708` | 2 reads of `[+0x149]` (unsigned with `& 0x7f`); cmps `[+0x5d0]` against 0x82, 0x81, 0x20 |
+| 2 | `0xf94b8` | `0x3096c` | 1 read of `[+0x149]`; classic version-dispatch (cmp `#0x10` / `#0x20`). Old E5 patch site. |
+
+All three reach the AVRCP callback via `[conn+0x5cc]` (mapped to fn `0x29e98`) — they're not mutually exclusive paths, but each has different upstream gating logic. Post-E8 testing definitively showed **none of the three are reached for our peers**: only msg_ids 505 and 506 ever arrive, never `op_code=4`. This is now understood (per the 2026-05-04 conclusion) as mtkbt's AVCTP RX silently dropping unrecognized AVRCP COMMANDs at a layer upstream of the dispatcher table, because mtkbt's compiled command set is 1.0-only.
+
+### Callback registration mechanism (Trace #1f)
+
+```asm
+0x028a56:  ldr r1, [pc, #0x17c]    ; r1 = literal 0x1439 (PC-rel offset)
+0x028a5c:  add r1, pc               ; r1 = 0x1439 + 0x28a60 = 0x29e99
+0x028a5e:  bl 0x2fecc               ; register_callback(conn, 0x29e99, ...)
+
+register_callback (0x2fecc):
+  takes (conn_ptr, fn_ptr, sub_arg) and stores fn_ptr at [conn+0x5cc].
+```
+
+The literal `0x1439` is **not** a function address — it's a PC-relative offset. Earlier static-analysis searches missed this pattern. The earlier documented analysis of `0x29e98` (callback dispatcher TBH) elsewhere in this document is correct; the function is reachable, just registered through a PIC-style mechanism.
+
+The remaining "0-caller" functions (`0x6d04a` AV/C parser, `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp) show **zero PIC constructions, zero R_ARM_RELATIVE, zero literal pool entries, zero direct callers**. Likely registered through similar mechanisms via different `register_*` functions not yet enumerated.
+
+## Post-D1 Analysis — Why `tg_feature:0` Persists in CONNECT_CNF
+
+### CONNECT_CNF handler dissection (`libextavrcp_jni.so`)
+
+The receive loop (`FUN_0x5f0c`) dispatches on `msg_id` using a TBH at `0x60B8`. Resolved jump table:
+
+| msg_id | Dec | TBH index | Handler vaddr |
+|---|---|---|---|
+| 505 | CONNECT_CNF | 4 | **`0x62EA`** |
+| 506 | connect_ind | 5 | `0x619C` |
+
+**CONNECT_CNF handler at `0x62EA`:**
+1. Reads `result` from ILM+0x02, `conn_id` from ILM+0x01 → log
+2. Reads `bws` from ILM+0x0c, **`tg_feature` from ILM+0x0e**, `ct_feature` from ILM+0x10 → log
+3. Loads global flag; if flag=1: sends browse connect req; else: exits to function epilogue
+
+`tg_feature` is read and logged, then discarded. Whether 0 or non-zero, behavior is identical. `cardinality` is not set here.
+
+### connect_ind handler and CONNECT_RSP payload
+
+`connect_ind` handler (`0x619C`) calls `btmtk_avrcp_send_connect_ind_rsp` (PLT `0x3618`) at `0x62A8`:
+```asm
+0x62a0:  ldrb.w r1, [sp, #0x170]   ; r1 = conn_id
+0x62a6:  movs r2, #1                ; r2 = 1 (accept)
+0x62a8:  blx #0x3618                ; btmtk_avrcp_send_connect_ind_rsp(conn_ptr, conn_id, 1)
+```
+
+CONNECT_RSP payload (msg_id=507):
+```
+byte[0..3]  0x00000000
+byte[4]     conn_id
+byte[5]     0x01     (accept flag, hardcoded)
+byte[6]     0x00     (no tg_feature_code sent to mtkbt)
+byte[7]     0x00
+```
+
+`g_tg_feature` (set to 0x0e by C2b) is **not included in the CONNECT_RSP payload**. mtkbt's CONNECT_CNF tg_feature field is populated from mtkbt's own internal SDP registration state — D1 enables that registration, but mtkbt reports tg_feature=0 regardless.
+
+### Java layer audit (Trace #4 cross-reference)
+
+(See the Trace #4 section earlier in this document for the full decompilation. Summary preserved here for reference:)
+
+- `BTAvrcpMusicAdapter.getSupportVersion()B` returns `0x0e` if `sPlayServiceInterface` is true, else `0x0d`. Confirms F2's importance: `disable()` must reset the flag so re-activation doesn't see stale state.
+- `BTAvrcpMusicAdapter.checkCapability()V` builds the 1.4 EventList `[1, 2, 9, 10, 11]` (PLAYBACK_STATUS_CHANGED, TRACK_CHANGED, NOW_PLAYING_CONTENT_CHANGED, AVAILABLE_PLAYERS_CHANGED, ADDRESSED_PLAYER_CHANGED) when v=0xe.
+- `BTAvrcpMusicAdapter.registerNotification(B, I)Z` (the cardinality update site): events 1/2/9 → handle (`bReg=true`); 3/4/5/8/13 → blocked (`bReg=false`); 10/11/12 → fall through. If `bReg`: `field@0x90.set(eventId)` and log `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d`.
+
+**Definitive verdict (Trace #4):** logcat across multiple sessions shows neither `[BT][AVRCP](test1) registerNotificationInd eventId:%d` nor the cardinality update log. **`registerNotificationInd` never fires** — the JNI never receives a "REGISTER_NOTIFICATION arrived" event from mtkbt. Java layer is definitively ruled out.
+
+### Where the cardinality:0 gate is
+
+The gate is unambiguously inside mtkbt's native AVRCP layer, between AVCTP RX and the JNI dispatch socket. Per the 2026-05-04 conclusion, this is because mtkbt's compiled command set is 1.0-only — AVRCP 1.3+ COMMANDs from peers reach the AVCTP layer but are not classified by mtkbt as anything its 1.0 dispatcher recognises, and are silently dropped. Candidate drop sites identified for the user-space proxy work:
+
+- mtkbt's AVCTP receive handler at fn `0x6d9ba` (live `0x40128d9a` per probe v3 PIE base `0x400c1000`) — silently drops the inbound L2CAP frame before dispatch.
+- The silent-drop site at `0x0513a4` (live `0x401123a4`) — `[AVRCP][WRN] AVRCP receive too many data. Throw it!`.
+- The L2CAP→AVCTP demux logic upstream of `0x6d9ba` — wrong PSM routing, missing peer-state guard, etc.
+- `0x6cf30` (live `0x40128f30`) — AVCTP_ConnectRsp.
+
+These are the gdbserver targets for Phase 1 of the proxy work (see "Path forward" section above).
+
+## All Patches — Complete Status
+
+### `mtkbt` binary (11 patches in the `--avrcp` set)
+
+| ID | Offset | Patch | Status |
+|---|---|---|---|
+| **B1** | `0x0eba6d` | `0x00 → 0x03` (AVCTP 1.0→1.3, Groups 1&2 TG ProtocolDescList) | Live (in `--avrcp`) |
+| **B2** | `0x0eba37` | `0x00 → 0x03` (AVCTP 1.0→1.3, Group 3 CT ProtocolDescList) | Live |
+| **B3** | `0x0eba25` | `0x00 → 0x03` (AVCTP 1.0→1.3, Group 1 AdditionalProtocol) | Live |
+| **C1** | `0x0eba4b` | `0x00 → 0x04` (AVRCP 1.0→1.4, record [23] ProfileDescList) | Live |
+| **C2** | `0x0eba58` | `0x00 → 0x04` (AVRCP 1.0→1.4, record [18] ProfileDescList, served) | Live |
+| **C3** | `0x0eba77` | `0x03 → 0x04` (AVRCP 1.3→1.4, record [13] ProfileDescList) | Live |
+| **A1** | `0x38BFC` | `40 f2 01 37 → 40 f2 01 47` (MOVW r7: runtime SDP struct) | Live |
+| **D1** | `0x38C6C` | `03 d1 → 00 bf` (BNE→NOP: registration guard bypass) | Live |
+| **E3** | `0x0eba5b` | `0x01 → 0x33` (Group 2 TG SupportedFeatures: 0x0001 → 0x0033, served) | Live, confirmed by sdptool XML |
+| **E4** | `0x0eba4e` | `0x21 → 0x33` (Group 1 TG SupportedFeatures: 0x0021 → 0x0033, defense-in-depth) | Live |
+| **E8** | `0x3065e` | `13 da → 00 bf` (BGE→NOP in op_code=4 slot-0 dispatcher, force 1.3/1.4 init) | Live, observed inert |
+| ~~E5~~ | `0x309ed` | BNE→B in op_code=4 slot-2 | **Removed 2026-05-02** (inert) |
+| ~~E7a~~ | `0x033dec` | `0x90 → 0x94` no-SDP fallback | **Removed 2026-05-02** (inert) |
+| ~~E7b~~ | `0x034100` | `0x90 → 0x94` no-SDP fallback (second site) | **Removed 2026-05-02** (inert) |
+| ~~E1, E2~~ | various | State-gate / version-check NOPs | **Reverted 2026-05-01** (incorrect) |
+| ~~G1, G2~~ | `0x675c0` / `0xb408` | xlog→logcat redirect (with and without NULL guard) | **Reverted 2026-05-02 / 2026-05-03** (broke BT) |
+
+### `MtkBt.odex` (2 patches)
+
+| ID | Offset | Patch | Status |
+|---|---|---|---|
+| **F1** | `0x3e0ea` | `0a → 0e` (`getPreferVersion()` returns 14, AVRCP 1.4) | Live (in `--avrcp`) |
+| **F2** | `0x03f21a` | `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false` | Live |
+
+### `libextavrcp_jni.so` (4 patches)
+
+| ID | Offset | Patch | Status |
+|---|---|---|---|
+| **C2a** | `0x3764` | `1d 46 → 23 25` (sdpfeature=0x23 hardcoded, bypass bitmask) | Live, confirmed by logcat (sdpfeature:35) |
+| **C2b** | `0x37a8` | `01 20 → 0e 24` (`g_tg_feature=0x0e` hardcoded) | Live |
+| **C3a** | `0x5e56` | `0d 2c → 0e 2c` (GetCapabilities event cap cmp threshold 13→14) | Live, never observed firing — mtkbt doesn't dispatch GetCapabilities to JNI |
+| **C3b** | `0x5e5c` | `0d 24 → 0e 24` (GetCapabilities event cap movs value 13→14) | Live, same as C3a |
+
+### `libextavrcp.so` (1 patch)
+
+| ID | Offset | Patch | Status |
+|---|---|---|---|
+| **C4** | `0x002e3b` | `03 01 → 04 01` (version constant in .text) | Live (in `--avrcp`) |
+
+### `/sbin/adbd` (3 patches in `boot.img` ramdisk) — closed, see "adbd Root Patches" section above
+
+| ID | Offset | Patch | Status |
+|---|---|---|---|
+| ~~**H1**~~ | `0x14b8` | `0b 20 → 00 20` (setgroups count 11 → 0) | Reverted — caused "device offline" on hardware |
+| ~~**H2**~~ | `0x14c6` | `4f f4 fa 60 → 4f f0 00 00` (setgid arg 2000 → 0) | Reverted — same |
+| ~~**H3**~~ | `0x14d4` | `4f f4 fa 60 → 4f f0 00 00` (setuid arg 2000 → 0) | Reverted — same |
+| ~~**H1/H2/H3 (NOP-the-blx, earlier revision)**~~ | `0x14bc`/`0x14ca`/`0x14d8` | `blx setgroups/setgid/setuid → movs r0,#0; nop` | Reverted — also caused "device offline" |
+
+## Binary Reference Data
+
+### `mtkbt`
+
+| Property | Value |
+|---|---|
+| Stock MD5 | `3af1d4ad8f955038186696950430ffda` |
+| Patched MD5 (full `--avrcp`, 11 patches: B1-B3, C1-C3, A1, D1, E3, E4, E8) | `d47c904063e7d201f626cf2cc3ebd50b` |
+| File size | 1,029,140 bytes |
+| Format | ELF32 LE ARM, **ET_DYN** (PIE), base `0x00000000` (live PIE base on v3.0.2: `0x400c1000` per probe v3) |
+| ISA | ARM Thumb-2 throughout |
+
+**ELF segment map:**
+
+| Region | File offset | Vaddr | Flags |
+|---|---|---|---|
+| RX (code + rodata + SDP blob) | `0x00000000` | `0x00000000` | R-X |
+| `.data.rel.ro.local` | `0x000f3d40` | `0x000f4d40` | RW- |
+| `.data` (descriptor table) | `0x000f9000` | `0x000fa000` | RW- (vaddr+0x1000) |
+| BSS | — | `0x000fbe60`–`0x001be63d` | RW- (no file bytes; size 0xc27dd) |
+
+### `MtkBt.odex`
+
+| Property | Value |
+|---|---|
+| Stock MD5 | `11566bc23001e78de64b5db355238175` |
+| Patched MD5 | `acc578ada5e41e27475340f4df6afa59` |
+| Format | ODEX `dey\n036\0`, embedded DEX `dex\n035\0` at offset `0x28` |
+
+### `libextavrcp_jni.so`
+
+| Property | Value |
+|---|---|
+| Stock MD5 | `fd2ce74db9389980b55bccf3d8f15660` |
+| Patched MD5 | `6c348ed9b2da4bb9cc364c16d20e3527` |
+| Format | ELF32 LE ARM, ET_DYN, base `0x00000000` |
+| Global `g_tg_feature` | `0xD29C` |
+| Global `g_ct_feature` | `0xD004` |
+| CONNECT_CNF handler | `0x62EA` (msg_id=505, TBH index=4) |
+| connect_ind handler | `0x619C` (msg_id=506, TBH index=5) |
+| `getCapabilitiesRspNative` | `0x5DE8` (FUN_005de8; C3a at 0x5e56, C3b at 0x5e5c) |
+| `activateConfig_3req` | `0x375C` (C2a at 0x3764, C2b at 0x37a8) |
+
+**ILM layout in CONNECT_CNF receive loop stack frame:**
+
+| ILM offset | sp offset | Field | Observed value (peer 38:42:0B:38:A3:3E) |
+|---|---|---|---|
+| +0x00 | sp+0x170 | conn_id (byte) | 1 |
+| +0x02 | sp+0x172 | result (u16) | **4096 (0x1000)** ← phantom lead per Trace #10; mtkbt's standard ACK status code |
+| +0x0c | sp+0x17c | bws (u16) | 0 |
+| +0x0e | sp+0x17e | tg_feature (u16) | 0 (cosmetic in JNI handler) |
+| +0x10 | sp+0x180 | ct_feature (u16) | 0 |
+
+### `libextavrcp.so`
+
+| Property | Value |
+|---|---|
+| Stock MD5 | `6442b137d3074e5ac9a654de83a4941a` |
+| Patched MD5 | `943d406bfbb7669fd62cf1c450d34c42` |
+| File size | 17,552 bytes |
+| `btmtk_avrcp_send_activate_req` | `0x19CC` |
+| `AVRCP_SendMessage` | `0x18EC` |
+
+### `/sbin/adbd` (boot.img ramdisk, historical)
+
+| Property | Value |
+|---|---|
+| Stock MD5 | `9e7091f1699f89dc905dee3d9d5b23d8` |
+| Patched MD5 (arg-zero) | `9eeb6b3bef1bef19b132936cc3b0b230` |
+| Patched MD5 (NOP-the-blx, superseded — caused "device offline") | `ccebb66b25200f7e154ec23eb79ea9b4` |
+| File size | 223,132 bytes (unchanged after patching) |
+| Format | ELF32 LE ARM, EXEC (statically linked, stripped) |
+| RX segment | file_off `0x0`, vaddr `0x8000`, size `0x34594` |
+| Privilege-drop block | vaddr `0x94b8` (file_off `0x14b8`) |
+
+## Eliminated Paths — Do Not Pursue
+
+| Path | Why eliminated |
+|---|---|
+| Patching record [13] blob alone | Not the served ProfileDescList — record [18] overrides via last-wins. |
+| Old patches #2/#3 as "read-back only" | Both target live ProfileDescList minor-version bytes — superseded by C1/C2 at 1.4. |
+| Patching 0xeba1d / 0xeba4e (legacy claim) | Unrelated bytes; 0x0311 IS registered in all three groups. |
+| Descriptor table flags / ptr patches (0x0f97b2) | `flags` = element size, not control bit. |
+| FUN_00022cec MOVW cluster (0x00012d7c, 0x00012d84) | Not on any SDP path. |
+| `ldrb.w` intercept at 0x0000ead4 | FUN_000108d0 ignores its r1 parameter. |
+| Version sink at FUN_000afd60 (0x000afd6a) | Downstream of SDP record construction. |
+| Code caves in RX segment | All null blocks are live SDP/string data. |
+| Code caves in `.data` | RW- segment — non-executable; causes BT crash. |
+| BSS caves | No file bytes; loader zeroes before execution. |
+| **E1** `0x29be4` BNE.W→NOP | State gate is intentional; bypass caused unsolicited responses → car disconnect. **Reverted 2026-05-01.** |
+| **E2** `0x0309ec` BNE→NOP | Branch routes 1.3/1.4 cars to *correct* count=4 path; NOP'ing it bypassed init. **Reverted 2026-05-01.** |
+| **E5/E7a/E7b** | Empirically inert across all three peers; Trace #1f confirmed the patched functions ARE reachable via PIC callback registration, but the patched code paths are not exercised at runtime for our peer state. **Removed 2026-05-02.** |
+| **G1/G2** xlog→logcat redirect | Crashed mtkbt at NULL fmt; even with NULL guard, BT framework couldn't enable. **Reverted 2026-05-03.** Path closed within current constraints. |
+| `__xlog_buf_printf` capture without root | Special MTK tooling required. **Superseded by `@btlog` passive tap (Trace #9, requires root).** |
+| Property-only adbd root via `default.prop` | OEM adbd has stripped the standard `should_drop_privileges()` gating; `ro.secure=0` is inert (confirmed empirically 2026-05-03 — `adb shell id` returned `uid=2000(shell)` with all properties correctly set). |
+| H1/H2/H3 binary patches in `/sbin/adbd` (NOP-the-blx and arg-zero revisions) | **Tried 2026-05-03; both caused "device offline" on hardware.** Static analysis found no `getuid()` gate, no uid==2000 compare; the failure mode is something we can't see without on-device visibility (which we lose the moment we ship a broken adbd). `--root` flag removed from the bash in v1.7.0; **superseded 2026-05-03 (v1.8.0) by the setuid `/system/xbin/su` install** which leaves `/sbin/adbd` untouched. |
+| `AttrID 0x0311` SupportedFeatures via SDP response | Initial claim "not registered" was incorrect — IS registered in all three groups. E3/E4 patches the served value. |
+| IBTAvrcpMusic / binder dispatch | Not the gate (Trace #4 ruled out the Java layer). |
+| HCI snoop (`persist.bt.virtualsniff`) | Breaks BT init. **Superseded by `@btlog` passive tap (Trace #9).** |
+| Chip firmware (`mt6572_82_patch_e1_0_hdr.bin`) | WMT common subsystem only — sleep/coredump/queue/GPS/Wi-Fi power. Zero AVRCP code. |
+| `libbluetooth*.so` libs (Trace #7) | All four libs are HCI/transport-only — UART link to MT6627, GORM/HCC chip-bringup, NVRAM BD-address management. Zero hits for `avrcp/avctp/profile/capability/notif/metadata/cardinal`. mtkbt is the AVRCP processor. |
+| `0x6d04a` AV/C parser as patch site | Confirmed dead code via multiple independent searches (no callers via any mechanism). |
+| Java-side patches beyond F1/F2 (Trace #4) | Java initializes correctly for AVRCP 1.4; no version gate or capability check would suppress events when they DO arrive. |
+| **Browsing-bit experiment** (E3/E4 `0x33 → 0x73`) | Landed on the wire (sdptool confirmed `0x0073`); peer behaviour identical to baseline. **Disproven 2026-05-04.** Tooling deleted. |
+| **Pixel-shape experiment** (B/C bumped to AVCTP 1.4 + AVRCP 1.5; E3/E4 `0x33 → 0xd1` Cat1+PAS+Browsing+MultiPlayer) | Landed on the wire; peer (Sonos) tried to open AVCTP browse PSM `0x1B`; mtkbt has no L2CAP listener for that PSM (`+@l2cap: cannot find psm:0x1b!`); peer gave up. **Disproven 2026-05-04.** Tooling deleted. |
+| **Pixel-1.3 mimicry experiment** (B/C dropped to AVCTP 1.2 + AVRCP 1.3; E3/E4 → 0x01; A1/F1 reverted) | Landed on the wire; peer (Sonos) sent one AVRCP COMMAND (AVCTP_EVENT:4 with transId:0); mtkbt dropped silently; peer gave up. **Disproven 2026-05-04.** Tooling deleted. |
+| **Features-only experiment** (E3/E4 `0x33 → 0x01` keeping AVRCP 1.4) | Same dropped-COMMAND failure as Pixel-1.3 mimic. **Disproven 2026-05-04.** Tooling deleted. |
+| **Y1MediaBridge actively interfering** | Bridge-disable test 2026-05-04 confirmed bridge is innocent: same failure mode with bridge present (`mbPlayServiceInterface=true`) or disabled (`mbPlayServiceInterface=false`). The 1.4-version push comes from F1 (in odex) + B/C/E patches, not from the bridge. Bridge implements `IBTAvrcpMusic` correctly via raw `onTransact` dispatch — but MtkBt's `BTAvrcpMusicAdapter` never calls `registerCallback` against it because no peer-side AVRCP COMMAND ever reaches MtkBt to trigger the call. Bridge stays idle as a downstream consequence of the upstream silence. |
+
+## Post-Flash Verification Checklist
+
+For the (now-deprecated) `--avrcp` patch set, when verifying that the flash landed correctly:
+
+- `sdptool browse <Y1_BT_ADDR>` → `AV Remote (0x110e) Version: 0x0104`
+- `sdptool browse` → `AVCTP uint16: 0x0103`
+- `sdptool browse` → `SupportedFeatures = 0x0033`
+- D1 flashed — mtkbt no longer crashes, CONNECT_CNF received
+- `tg_feature:0` confirmed cosmetic — JNI CONNECT_CNF handler does not gate on it
+- mtkbt patched MD5 `d47c904063e7d201f626cf2cc3ebd50b` confirmed device-side
+- `libextavrcp_jni.so` patched MD5 `6c348ed9b2da4bb9cc364c16d20e3527` confirmed
+- `libextavrcp.so` patched MD5 `943d406bfbb7669fd62cf1c450d34c42` confirmed
+- `MtkBt.odex` patched MD5 `acc578ada5e41e27475340f4df6afa59` confirmed
+- `/system/xbin/su` setuid escalator — hardware-verified 2026-05-04. `adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`; prompt `$`→`#`.
+- ~~logcat → `cardinality > 0` in ACTION_REG_NOTIFY lines~~ — **STILL 0 across all peers**. This is the bug that the user-space proxy work is intended to fix.
+- ~~`getCapabilitiesRspNative` log~~ — never fires; confirms mtkbt is not dispatching inbound AVRCP commands to the JNI for any tested peer.
+
+## Log Tags
+
+| Tag | Layer |
+|---|---|
+| `DebugY1` | Innioasis Y1 stock player |
+| `Y1MediaBridge` | Y1MediaBridge bridge service |
+| `MMI_AVRCP` | MtkBt.apk AVRCP middleware |
+| `JNI_AVRCP` | `libextavrcp_jni.so` JNI bridge |
+| `EXT_AVRCP` | `libextavrcp_jni.so` / `libextavrcp.so` |
+| `BWS_AVRCP` | AVRCP 1.4 browse layer |
+| `EXTADP_AVRCP` | Adapter layer |
+
+## Trace #8 (2026-05-04, post-root) — `MSG_ID_BT_AVRCP_CONNECT_CNF` emit-path map in mtkbt
+
+Pure static analysis on stock mtkbt MD5 `3af1d4ad…`, driven by the post-root pivot to "find where `result=0x1000` is set" before reaching for gdbserver. The `result:4096` lead was disproven by Trace #10; this trace's emit-chain map is preserved because it documents the IPC dispatcher structure that the user-space proxy work's Phase 4 (outbound RSP path) will need.
+
+**Emit chain identified end-to-end:**
+
+| Layer | Vaddr | Role |
+|---|---|---|
+| msg_id 505 send | `0x000511c0` | Common ILM send wrapper (`b.w 0x67bc0`); shared by every adp message. |
+| CONNECT_CNF builder stub | `0x000512a8` | The **only** site in the binary that issues msg_id 505. Allocates 24-byte buf via allocator at `0x6a29c`, lays out: `buf+4`=conn_id (arg1 byte), `buf+5`=flag (arg4 byte), `buf+6`=**result u16** (arg2), `buf+8..15`=memcpy(arg3, 8). The JNI's ILM offsets are buf+4-relative — JNI's `ILM+0x02` ⇔ buf+6. |
+| Stub caller (sole) | `0x000515c4` | `bl 0x512a8`. Picks args from a dispatcher event struct in `r4`: `arg2 = ldrh r2, [r4, #2]` ⇒ **event[2:4] = result u16 in CONNECT_CNF**. |
+| Event-code dispatcher | `0x000514a4` | `ldrb r3, [r4, #0]; cmp r3, #102; tbh [pc, r3, lsl#1]` — generic AVRCP-adapter event-router. **Case 3 = CONNECT_CNF** (TBH entry value 0x77 → handler at `0x000515b6`). |
+| Event constructor (CONNECT_CNF) | `0x0000f7b0` | The only function found that does `movs r1, #3; strb.w r1, [sp]` then `blx r2` where `r2 = ctx[4]` (= dispatcher fn ptr). Builds the event on its own stack and dispatches via `ctx->callback`. |
+
+**Where the 0x1000 enters the system (sibling path):** Same code-region neighbour `0x0000f83c` calls helper `0x00010404` with `r1 = 0x1000` (bytes verified: `4f f4 80 51` at `0xf8a6`). Helper `0x10404` lays out an event on a 1872-byte stack frame: `strh.w r1, [sp, #6]` (=event[2:4] = 0x1000) and `strb.w r5, [sp, #4]` where `r5 = #8` — so it dispatches **event_code=8**, not 3. The dispatcher's case-8 handler at `0x00051622` reads `event[8..12]` but **does not** read `event[2:4]`. So this 0x1000-injection path does not directly reach CONNECT_CNF's result field — it produces a different msg_id with a `0x1000` status payload.
+
+**Second TBH dispatcher** at `0x000518ac` (msg_ids 500-611, JNI→mtkbt direction):
+- 500: ACTIVATE_REQ
+- 502: DEACTIVATE_REQ
+- 504: connect-related
+- 507: CONNECT_RSP
+- 508/513: disconnect-related
+- 511, 515, 517, 520, 522, 524…560+: various AVRCP COMMAND-class messages
+- The full TBH map is in the binary; consult via Trace #8's tooling (`objdump -d` + Python xref pass) when needed.
+
+**Negative results (so the next person doesn't redo them):**
+
+- No site in the binary directly stores `0x1000` to `[rN, #2]` of any struct (zero hits across all `mov*/strh*` pair scans in `.text`).
+- 28 sites store `0x1000` to `[rN, #0xe]` (= ILM+0x0e = `tg_feature`) — concentrated in the `0x13xxx`–`0x15xxx` range. Fits the bit-12 = "feature degraded" hypothesis but doesn't directly set CONNECT_CNF result.
+- Dispatcher `0x000514a4` has zero direct callers and zero R_ARM_RELATIVE relocs and zero word-aligned hits in `.data`/`.data.rel.ro` — registered via the same PIC `add Rn, pc` callback-registration pattern documented for `0x29e98` (Trace #1f).
+- The second msg_id-505 hit at `0x00071ffa` is a **false positive** — 505 there is the source line number passed to `__xlog_buf_printf` (signature `xlog(level, line_no, fmt, …)`), not an ILM msg_id.
+
+**Tooling:** linear `objdump -d` of the whole binary into `/tmp/mtkbt.dis` (~290k lines) plus a small Python pass that parses `mn`/`rest`/`addr` and resolves PC-relative xrefs by walking back from `add Rn, pc` to the prior `ldr Rn, [pc, #N]`. Confirmed correct against known-good xrefs to `[AVRCP] avctpCB AVCTP_EVENT:%d` (`0xc8c7e`) and `bt.ext.adp.avrcp` (`0xda7f9`).
+
+## Trace #9 (2026-05-04, post-root) — `@btlog` passive tap unlocks `__xlog_buf_printf` + HCI snoop in one stream
+
+The post-root probe (`tools/probe-postroot.sh` + `…-device.sh`) found that `mtkbt` runs `socket_local_server("btlog", ABSTRACT, SOCK_STREAM)` at vaddr `0x6b4d4` and that the abstract socket `@btlog` (inode 1497, mtkbt fd 13) is a `SOCK_STREAM` listener with `SO_ACCEPTCON` set. Built `src/btlog-dump/` — a 1016-byte no-libc ARM ELF using the same direct-syscall style as `src/su/` — that opens an `AF_UNIX/SOCK_STREAM` socket, `connect()`s to the abstract `@btlog` address, and pipes `read()` to stdout. **Connect requires no handshake; mtkbt starts pushing the moment a client attaches.**
+
+First capture confirms the stream contains both layers we needed:
+
+- **HCI command/event traffic** — fully decoded: `HCC_INQUIRY`, `HCC_CREATE_CONNECTION`, `HCC_WRITE_SCAN_ENABLE`, `HCC_AUTH_REQ`, `HCC_READ_REMOTE_FEATURES`, `HCC_READ_REMOTE_VERSION`, `HCC_READ_REMOTE_EXT_FEATURES`, `HCE_COMMAND_COMPLETE`, `HCE_READ_REMOTE_FEATURES_COMPLETE`, `HCE_READ_REMOTE_VERSION_COMPLETE`, `[BT]GetByte:`/`[BT]PutByte:` byte-level transport.
+- **`__xlog_buf_printf` output** — every `[AVRCP]…`, `[AVCTP]…`, `[L2CAP]…`, `[ME]…`, `[BT]…`, `SdpUuidCmp:…`, `ConnManager: event=…` log line that's invisible to logcat.
+
+**Framing format (preliminary, by inspection):**
+
+| Bytes | Field |
+|---|---|
+| 1 | Start marker `0x55` ('U') |
+| 1 | Always `0x00` (separator/flag?) |
+| 1 | Frame length |
+| 2 | Sequence ID (alphabetic, increments — `bl`, `bm`, `bn`, …) |
+| 1 | Severity / category (`0x12` for xlog text, `0xb4` for HCI snoop) |
+| 1 | `0x00` pad |
+| body[0..1]   | Often constant `00 e5` |
+| body[2..6]   | Timestamp (`u32` LE; monotonic per process lifetime, **separate domains per severity**) |
+| body[6..10]  | Zero/flag bytes |
+| body[10..12] | `u16` LE — typically the format-string base length |
+| body[12..]   | Variable-length sub-header (often NUL padding for arg alignment), then format string + substituted args, NUL-terminated |
+
+Severities seen: `0x12` (xlog text) and `0x07` / `0x08` / `0xb4` (HCI snoop / module-specific).
+
+See `src/btlog-dump/README.md` for the maintained version of this format documentation.
+
+**What this tooling collapsed from the prior plan:**
+
+- HCI snoop / btsnoop: DONE via `@btlog`. No need to push `hcidump` or fight with `persist.bt.virtualsniff`.
+- `__xlog_buf_printf` capture: DONE via `@btlog`. Same stream.
+- Surgical `__android_log_print` instrumentation: no longer needed for read-only observation. The xlog tag IS the log; we just had no way to read it before.
+
+## Trace #10 (2026-05-04, post-root) — first dual capture (Sonos Roam) kills the `result:4096` lead
+
+Captured `tools/dual-capture.sh` against Sonos Roam at `/work/logs/dual-sonos-attempt1/` — 1.5 MB `btlog.bin`, 159-line `logcat.txt`. The smoking-gun line landed cleanly:
+
+```
+05-03 23:29:43.371   710   710 I JNI_AVRCP: [BT][AVRCP]+_activate_1req index:0 version:14 sdpfeature:35
+05-03 23:29:43.371   710   710 I EXTADP_AVRCP: msg=500, ptr=0xBEA64D30, size=8        ← JNI sends ACTIVATE_REQ
+05-03 23:29:43.373   710  2451 I JNI_AVRCP: [BT][AVRCP] Recv AVRCP indication : 501   ← JNI receives ACTIVATE_CNF
+05-03 23:29:43.374   710  2451 V EXT_AVRCP: [BT][AVRCP] activate_cnf index:0 result:4096   ★
+
+… 22 seconds later, peer initiates connect …
+
+05-03 23:30:06.084   710  2451 I JNI_AVRCP: [BT][AVRCP] Recv AVRCP indication : 506   ← CONNECT_IND from mtkbt
+05-03 23:30:06.085   710  2451 I EXTADP_AVRCP: msg=507, ptr=0x523D3A98, size=8        ← JNI sends CONNECT_RSP
+05-03 23:30:06.139   710  2451 I JNI_AVRCP: [BT][AVRCP] MSG_ID_BT_AVRCP_CONNECT_CNF conn_id:1  result:4096   ★
+05-03 23:30:06.139   710  2451 I JNI_AVRCP: [BT][AVRCP] MSG_ID_BT_AVRCP_CONNECT_CNF bws:0 tg_feature:0 ct_featuer:0
+```
+
+**`result:4096` appears 3 ms after the JNI sends ACTIVATE_REQ — purely local mtkbt processing, before any peer is involved.** The same `result:4096` then re-appears at CONNECT_CNF time. **`0x1000` is mtkbt's standard "request acknowledged" status code, set on every CNF mtkbt emits to the JNI — not a "feature degraded" or peer-feedback indicator at all.**
+
+This kills the previously-listed primary lead. The Trace #8 emit-chain map is still useful (the IPC dispatcher structure is needed for the proxy work) but no longer aimed at "find where 0x1000 is set" — that question is answered.
+
+**What the dual capture actually shows about the peer:**
+
+- Sonos Roam (`38:42:0B:38:A3:3E`) initiates the connection 22 s after the JNI activate completes — likely after Sonos's own scan/discover cycle.
+- L2CAP/AVCTP come up cleanly: 3× `l2cap conn_rsp result:0`, 7× `handleconfigrsp result:0` on `psm:0x19`, then `[AVCTP] chid:66` (channel ID varies between captures — was `0x67` in Trace #9).
+- AVRCP profile-level connect succeeds end-to-end: `connect_ind` (msg 506) → `CONNECT_RSP` (msg 507) → `CONNECT_CNF` (msg 505).
+- After the connect, **only one `AVCTP_EVENT:4` (RECV_DATA-class event) fires from the peer**, accompanied by `[AVRCP] transId:0`, then **silence** — no further AVCTP RX activity, no `GetCapabilities`, no `RegisterNotification`. Sonos is not following up the basic AVRCP-profile connect with the AVRCP COMMAND PDUs a 1.4 controller should send.
+- The Y1 stays in this connected-but-silent state indefinitely until A2DP drops, at which point mtkbt cleans up via `AVRCP: disconnect because a2dp is lost`.
+- Java-side `cardinality:0` in `ACTION_REG_NOTIFY` lines is exactly what we'd expect from this state — `mRegBit` is empty because no peer has issued REGISTER_NOTIFICATION.
+
+## Trace #11 (2026-05-04, post-root) — Browsing-bit experiment failed, real-world reference peer comparisons settle the gate-location question
+
+Three independent threads, one conclusion.
+
+### Thread A: Browsing-bit experiment
+
+Hypothesis: served `SupportedFeatures = 0x0033` omits Browsing bit (`0x40`); some 1.4 controllers may decline AVRCP COMMANDs against a TG that doesn't claim Browsing.
+
+Built a non-destructive bash wrapper that swaps `src/patches/patch_mtkbt.py` for an alternate that overrides E3/E4 `after` bytes from `0x33` → `0x73`, runs the standard `--avrcp --bluetooth` flow, then restores the original on EXIT. Flashed and re-captured against Sonos.
+
+Direct evidence the experiment landed on the wire: btlog `SdpUuidCmp:uuid1, len=2, (11  e,  9  1,  4  9,  0 73)` — the served bytes for AVRCP TG (`0x110e`) are now `Version=0x0104` + `SupportedFeatures=0x0073`. Compare to Trace #9's `0x0033`.
+
+**Result: peer behaviour identical to baseline.** 14× `cardinality:0` lines, none non-zero. Same single `[AVRCP] avctpCB AVCTP_EVENT:4` → `[AVRCP] transId:0` → silence. Same `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096 bws:0 tg_feature:0 ct_featuer:0`. L2CAP/AVCTP config exchange clean.
+
+**Hypothesis #1 dead.** Tooling deleted on cleanup.
+
+### Thread B: hypothesis-#3 static (`[AVRCP] transId:0`)
+
+Two callers of the `[AVRCP] transId:%d` log function (`0x11374` static / `0x400d2374` live). Both read transId directly from inbound packet bytes (`event[1]` in caller `0x1457c..0x1458a`; `event[5]` in caller `0x51a20`). The `transId:0` we observe is **the actual transId byte the peer sent on the wire** — not mtkbt mangling the value. transId is a 4-bit AVCTP-header field; `0` is a perfectly valid value for the first packet on a fresh AVCTP channel. **Hypothesis #3 dead.**
+
+Bonus from the same pass: `@btlog`'s `[BT]GetByte:`/`[BT]PutByte:` lines around the AVCTP_EVENT:4 timestamp give a per-byte HCI trace. Decoded, mtkbt sends an outbound L2CAP CONFIG_REQ; Sonos sends back its own CONFIG_REQ for our `cid 0x42` carrying MTU=1024 — standard AVCTP control-channel config. Then AVCTP_EVENT:4 fires once and AVRCP-layer activity stops.
+
+### Thread C: real-world reference-peer comparisons (the decisive evidence)
+
+User-supplied empirical data:
+
+| Test | AVRCP works? | Implication |
+|---|---|---|
+| Pixel 4 (TG) ↔ Sonos Roam (CT), Sonos app shows now-playing metadata | ✅ | Sonos *is* a real working 1.4 controller |
+| Y1 (TG) ↔ Sonos Roam (CT), our captures | ❌ | Y1's TG is broken |
+| Y1 (TG) ↔ car head unit (CT) | ❌ — no metadata, **play/pause broken** | Y1's TG is broken end-to-end on the actual goal device (cars are the project's primary AVRCP target per the README's history) |
+
+**The play/pause break is the load-bearing finding.** Play/pause flows car→Y1 as AVRCP `PASS_THROUGH` commands. Functional break in the CT→TG command path — not just notification-cosmetic. Same root cause as cardinality:0.
+
+### Combined verdict
+
+**The gate is on the Y1 side**, not on any peer. Sonos's "single AVCTP_EVENT:4 then silence" pattern is Sonos sending its first AVRCP command (likely `GetCapabilities`), getting nothing usable back from Y1, and giving up.
+
+**Pixel 4 SDP record across all four AVRCP versions (Pixel Developer-Options-forced, captured 2026-05-04):**
+
+| Attribute | Pixel-1.3 | Pixel-1.4 | Pixel-1.5 | Pixel-1.6 |
+|---|---|---|---|---|
+| 0x0004 AVCTP version | `0x0102` (1.2) | `0x0103` (1.3) | `0x0104` (1.4) | `0x0104` (1.4) |
+| 0x0009 AVRCP version | `0x0103` | `0x0104` | `0x0105` | `0x0106` |
+| 0x000d AdditionalProtocolDescList | **MISSING** | PSM `0x001b` AVCTP 1.3 | PSM `0x001b` AVCTP 1.4 | PSM `0x001b` AVCTP 1.4 + OBEX (Cover Art) |
+| 0x0311 SupportedFeatures | **`0x0001`** (Cat1 only!) | `0x00d1` | `0x00d1` | `0x01d1` (extra bit 8) |
+
+User-confirmed: at every Pixel-AVRCP-version setting (1.3 / 1.4 / 1.5 / 1.6), Sonos receives full title/artist/album metadata + responds correctly to play/pause from Pixel. Cover art doesn't transfer (Sonos-side limitation).
+
+This is what makes the 2026-05-04 conclusion definitive: at AVRCP 1.3, the bare-minimum SDP record (Cat1 features, no AdditionalProtocolDescriptorList, AVCTP 1.2) is sufficient for Sonos to engage AVRCP COMMAND traffic — *if the implementation actually responds to those commands*. Y1 stock advertises features `0x0001` exactly like Pixel-1.3 but at AVRCP 1.0; Sonos doesn't bother sending COMMANDs because AVRCP 1.0 is too primitive. Y1 patched to 1.3+ advertises a richer record but mtkbt drops the COMMANDs Sonos then sends. **mtkbt is a 1.0-class implementation regardless of SDP advertisement.**
+
+---
+
+End of appendix. The brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md` is now redundant with this document and may be deleted.

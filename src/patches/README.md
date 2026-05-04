@@ -1,6 +1,6 @@
 # patches
 
-Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the top-level [`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash); each patcher can also be run standalone for inspection.
+Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the top-level [`apply.bash`](../../apply.bash); each patcher can also be run standalone for inspection.
 
 ## Files
 
@@ -65,4 +65,4 @@ Historical / unwired (kept for reference, *do not ship their output*):
 - [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 - [`../../docs/DEX.md`](../../docs/DEX.md) — DEX-level analysis backing `patch_y1_apk.py`'s smali patches
 - [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — full AVRCP investigation narrative
-- [`../../CHANGELOG.md`](../../CHANGELOG.md) — per-patcher version history
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog
