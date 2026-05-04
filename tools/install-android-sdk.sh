@@ -137,8 +137,14 @@ EOF
     # Wrapped so a non-zero exit prints a useful manual-debug pointer
     # instead of silently aborting via set -e.
 
-    echo "[install-sdk] Accepting Google's Android SDK licenses (yes | sdkmanager --licenses).."
-    if ! yes | "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses; then
+    # Feed 'yes' via process substitution rather than a pipe. With \`yes |
+    # sdkmanager\`, when sdkmanager finishes and closes its stdin, yes gets
+    # SIGPIPE and exits 141; \`set -o pipefail\` then reports the pipe as
+    # failed even when sdkmanager itself succeeded. < <(yes) avoids the
+    # pipefail accounting because process substitution runs yes in a
+    # background subshell whose exit isn't part of the foreground command.
+    echo "[install-sdk] Accepting Google's Android SDK licenses.."
+    if ! "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses < <(yes); then
         cat >&2 <<EOM
 ERROR: sdkmanager --licenses failed.
        Run manually with full output to see why:
