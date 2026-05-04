@@ -57,7 +57,7 @@ echo "When done, press Ctrl-C to stop."
 echo
 
 # Start logcat in background. -v threadtime → per-line timestamps for cross-stream
-# correlation. Tag filter: brief's AVRCP tags + Bluetooth framework + catch-all
+# correlation. Tag filter: AVRCP-related tags + Bluetooth framework + catch-all
 # silenced by '*:S'.
 adb logcat -v threadtime -b main -b system -b radio \
     DebugY1:V Y1MediaBridge:V MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V \

@@ -560,7 +560,7 @@ After the original investigation in this document concluded the gate was upstrea
 
 **mtkbt is internally an AVRCP 1.0 implementation.** Compile-time string `[AVRCP] AVRCP V10 compiled` + runtime log `AVRCP register activeVersion:10` are accurate. The opcode dispatchers identified earlier in this document (`0x3060c`, `0x30708`, `0x3096c` at op_code=4 = `GetCapabilities`) exist in the binary, but no inbound packet from any peer ever reaches them, regardless of how we shape the SDP record. The earlier "the gate is upstream of the dispatcher table" framing was correct; the missing piece was that there is no upstream gate that byte-patches can flip — mtkbt's AVCTP RX simply does not classify AVRCP COMMAND PDUs as anything its 1.0 dispatcher recognises, and silently drops them.
 
-The brief's previous primary lead, `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096`, was also disproven during this work: the same `0x1000` value is emitted at `MSG_ID_BT_AVRCP_ACTIVATE_CNF` time 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator.
+The previously-listed primary lead, `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096`, was also disproven during this work: the same `0x1000` value is emitted at `MSG_ID_BT_AVRCP_ACTIVATE_CNF` time 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator.
 
 ## Repo state after the conclusion (commits 2690d05 → 7077b5a → bd36160 → this one)
 
@@ -580,7 +580,7 @@ The work is roughly four phases.
 
 ### Phase 1 — Identify the silent-drop site (gdbserver, ~1-2 days)
 
-Push an API-17 ARM AOSP-prebuilt `gdbserver` to `/data/local/tmp/`, attach to the live `mtkbt` PID. PIE base is `0x400c1000` (per `tools/probe-postroot.sh` §1; verify on each session — the base is per-process not per-firmware). Set breakpoints on the candidate drop sites identified in the brief:
+Push an API-17 ARM AOSP-prebuilt `gdbserver` to `/data/local/tmp/`, attach to the live `mtkbt` PID. PIE base is `0x400c1000` (per `tools/probe-postroot.sh` §1; verify on each session — the base is per-process not per-firmware). Set breakpoints on the candidate drop sites identified in the appendix below:
 
 - `0x6d9ba` (live `0x40128d9a`) — AVCTP RX handler
 - `0x6cf30` (live `0x40128f30`) — AVCTP_ConnectRsp
@@ -593,7 +593,7 @@ Trigger the failure scenario (Y1 ↔ Sonos with `--avrcp` on so peer engages eno
 
 ### Phase 2 — Patch a trampoline (~3-5 days)
 
-At the identified drop site, replace the silent-drop branch with a `bl <trampoline>`. The trampoline (in a code-cave or appended to mtkbt's `.text`) marshals the inbound packet into a new IPC message — e.g., msg_id 999 — and writes it to the existing `bt.ext.adp.avrcp` abstract socket that already carries msg_ids JNI↔mtkbt. The brief documents the IPC framing and the existing send wrapper at vaddr `0x511c0`.
+At the identified drop site, replace the silent-drop branch with a `bl <trampoline>`. The trampoline (in a code-cave or appended to mtkbt's `.text`) marshals the inbound packet into a new IPC message — e.g., msg_id 999 — and writes it to the existing `bt.ext.adp.avrcp` abstract socket that already carries msg_ids JNI↔mtkbt. The IPC framing and the existing send wrapper at vaddr `0x511c0` are documented in the appendix below.
 
 Verification: `tools/btlog-parse.py` should now show the AVRCP COMMAND bytes flowing through the new msg_id; logcat should show the JNI receiving msg_id 999 (or whatever ID we pick).
 
@@ -613,7 +613,7 @@ Extend `Y1MediaBridge` (or add a sibling Java component) to:
 
 ### Phase 4 — Outbound RSP path (~3-5 days)
 
-Patch a second trampoline (or extend the first) that takes a Java-built AVRCP RSP frame, marshals it into an outbound msg_id, and routes it through mtkbt's existing AVCTP TX path so it reaches the peer's AVCTP channel. The IPC dispatcher map in the brief (msg_ids 500-611, second TBH at vaddr `0x518ac`) names the candidate slots.
+Patch a second trampoline (or extend the first) that takes a Java-built AVRCP RSP frame, marshals it into an outbound msg_id, and routes it through mtkbt's existing AVCTP TX path so it reaches the peer's AVCTP channel. The IPC dispatcher map in the appendix below (msg_ids 500-611, second TBH at vaddr `0x518ac`) names the candidate slots.
 
 ### Verification target
 
@@ -918,7 +918,7 @@ register_callback (0x2fecc):
   takes (conn_ptr, fn_ptr, sub_arg) and stores fn_ptr at [conn+0x5cc].
 ```
 
-The literal `0x1439` is **not** a function address — it's a PC-relative offset. Earlier static-analysis searches missed this pattern. The brief's documented analysis of `0x29e98` (callback dispatcher TBH) is correct; the function is reachable, just registered through a PIC-style mechanism.
+The literal `0x1439` is **not** a function address — it's a PC-relative offset. Earlier static-analysis searches missed this pattern. The earlier documented analysis of `0x29e98` (callback dispatcher TBH) elsewhere in this document is correct; the function is reachable, just registered through a PIC-style mechanism.
 
 The remaining "0-caller" functions (`0x6d04a` AV/C parser, `0x6d25c` AVCTP register PSM, `0x6d9ba` AVCTP RX handler, `0x6cf30` AVCTP_ConnectRsp) show **zero PIC constructions, zero R_ARM_RELATIVE, zero literal pool entries, zero direct callers**. Likely registered through similar mechanisms via different `register_*` functions not yet enumerated.
 
@@ -1262,14 +1262,14 @@ Captured `tools/dual-capture.sh` against Sonos Roam at `/work/logs/dual-sonos-at
 
 **`result:4096` appears 3 ms after the JNI sends ACTIVATE_REQ — purely local mtkbt processing, before any peer is involved.** The same `result:4096` then re-appears at CONNECT_CNF time. **`0x1000` is mtkbt's standard "request acknowledged" status code, set on every CNF mtkbt emits to the JNI — not a "feature degraded" or peer-feedback indicator at all.**
 
-This kills the brief's previously-listed primary lead. The Trace #8 emit-chain map is still useful (the IPC dispatcher structure is needed for the proxy work) but no longer aimed at "find where 0x1000 is set" — that question is answered.
+This kills the previously-listed primary lead. The Trace #8 emit-chain map is still useful (the IPC dispatcher structure is needed for the proxy work) but no longer aimed at "find where 0x1000 is set" — that question is answered.
 
 **What the dual capture actually shows about the peer:**
 
 - Sonos Roam (`38:42:0B:38:A3:3E`) initiates the connection 22 s after the JNI activate completes — likely after Sonos's own scan/discover cycle.
 - L2CAP/AVCTP come up cleanly: 3× `l2cap conn_rsp result:0`, 7× `handleconfigrsp result:0` on `psm:0x19`, then `[AVCTP] chid:66` (channel ID varies between captures — was `0x67` in Trace #9).
 - AVRCP profile-level connect succeeds end-to-end: `connect_ind` (msg 506) → `CONNECT_RSP` (msg 507) → `CONNECT_CNF` (msg 505).
-- After the connect, **only one `AVCTP_EVENT:4` (RECV_DATA-class event) fires from the peer**, accompanied by `[AVRCP] transId:0`, then **silence** — no further AVCTP RX activity, no `GetCapabilities`, no `RegisterNotification`. Sonos is not following up the basic AVRCP-profile connect with the AVRCP COMMAND PDUs that the brief documents 1.4 controllers should send.
+- After the connect, **only one `AVCTP_EVENT:4` (RECV_DATA-class event) fires from the peer**, accompanied by `[AVRCP] transId:0`, then **silence** — no further AVCTP RX activity, no `GetCapabilities`, no `RegisterNotification`. Sonos is not following up the basic AVRCP-profile connect with the AVRCP COMMAND PDUs a 1.4 controller should send.
 - The Y1 stays in this connected-but-silent state indefinitely until A2DP drops, at which point mtkbt cleans up via `AVRCP: disconnect because a2dp is lost`.
 - Java-side `cardinality:0` in `ACTION_REG_NOTIFY` lines is exactly what we'd expect from this state — `mRegBit` is empty because no peer has issued REGISTER_NOTIFICATION.
 
@@ -1303,7 +1303,7 @@ User-supplied empirical data:
 |---|---|---|
 | Pixel 4 (TG) ↔ Sonos Roam (CT), Sonos app shows now-playing metadata | ✅ | Sonos *is* a real working 1.4 controller |
 | Y1 (TG) ↔ Sonos Roam (CT), our captures | ❌ | Y1's TG is broken |
-| Y1 (TG) ↔ car head unit (CT) | ❌ — no metadata, **play/pause broken** | Y1's TG is broken end-to-end on the brief's actual goal device |
+| Y1 (TG) ↔ car head unit (CT) | ❌ — no metadata, **play/pause broken** | Y1's TG is broken end-to-end on the actual goal device (cars are the project's primary AVRCP target per the README's history) |
 
 **The play/pause break is the load-bearing finding.** Play/pause flows car→Y1 as AVRCP `PASS_THROUGH` commands. Functional break in the CT→TG command path — not just notification-cosmetic. Same root cause as cardinality:0.
 

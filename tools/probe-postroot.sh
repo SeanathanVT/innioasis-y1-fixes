@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./tools/probe-postroot.sh                   # runs everything
-#   ./tools/probe-postroot.sh > probe.log 2>&1  # capture for the brief
+#   ./tools/probe-postroot.sh > probe.log 2>&1  # capture for archival
 
 set -u
 
