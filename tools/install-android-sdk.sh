@@ -25,9 +25,9 @@ case "${1:-}" in
         cat <<EOF
 Usage: ./tools/install-android-sdk.sh
 
-Auto-installer for the Android SDK (Linux/macOS only). Required for
-building src/Y1MediaBridge/ via Gradle; needed only for the --avrcp
-flag (which is currently known-broken — see INVESTIGATION.md).
+Auto-installer for the Android SDK on Linux. Required for building
+src/Y1MediaBridge/ via Gradle; needed only for the --avrcp flag
+(which is currently known-broken — see INVESTIGATION.md).
 
 Detects existing \$ANDROID_HOME and short-circuits; otherwise
 downloads Google's pinned commandline-tools archive into
@@ -68,14 +68,16 @@ LOCAL_PROPS="${REPO_ROOT}/src/Y1MediaBridge/local.properties"
 ENV_FILE="${TOOLS_DIR}/android-sdk-env.sh"
 
 # --- OS detection ---------------------------------------------------------
+# Linux only. The whole project (apply.bash mount/flash path) is Linux-only,
+# so the SDK installer doesn't bother with macOS / other-Unix variants.
 
 case "$(uname -s)" in
     Linux*)  OS=linux ;;
-    Darwin*) OS=mac ;;
     *)
         cat >&2 <<EOF
-ERROR: Auto-install supports Linux and macOS only.
-       Windows users: see docs/ANDROID-SDK.md for manual steps.
+ERROR: This script (and the rest of the project's flash flow) is Linux-only.
+       The patcher uses mount -o loop and GNU sed -i, which don't work on
+       macOS / BSD / Windows. Run from a Linux host or Linux VM.
 EOF
         exit 1
         ;;
@@ -114,7 +116,6 @@ Install:
   Rocky / Alma / RHEL / Fedora: sudo dnf install -y java-17-openjdk-devel
   Debian / Ubuntu:              sudo apt install -y openjdk-17-jdk
   Arch:                         sudo pacman -S jdk17-openjdk
-  macOS (Homebrew):             brew install --cask temurin
 EOF
         exit 1
     fi

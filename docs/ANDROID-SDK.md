@@ -2,11 +2,11 @@
 
 The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1MediaBridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1MediaBridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt`/`d8`/etc.
 
-There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). On macOS Homebrew has a cask; on Windows there's an installer. Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
+This project (apply.bash flash flow) is **Linux-only**, so all instructions below target Linux. There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
 
-## Easy path: `tools/install-android-sdk.sh` (Linux + macOS)
+## Easy path: `tools/install-android-sdk.sh`
 
-For Linux and macOS, the repo provides an idempotent installer that downloads and provisions everything:
+The repo provides an idempotent installer that downloads and provisions everything:
 
 ```bash
 ./tools/install-android-sdk.sh
@@ -15,7 +15,7 @@ For Linux and macOS, the repo provides an idempotent installer that downloads an
 It will:
 
 1. Detect an existing SDK at `$ANDROID_HOME` or `tools/android-sdk/` — if either is usable (has `platforms/android-34/`), reuse it without re-downloading.
-2. Otherwise: download Google's `commandlinetools-{linux,mac}-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`, accept licenses (`yes | sdkmanager --licenses` — running this script is your acceptance, see the script header), install `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`.
+2. Otherwise: download Google's `commandlinetools-linux-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`, accept licenses (`yes | sdkmanager --licenses` — running this script is your acceptance, see the script header), install `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`.
 3. **Always** (re-runnable / heals partial-state from prior runs):
    - Write `sdk.dir=<path>` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
    - Write `tools/android-sdk-env.sh` (sourceable). Contains `export ANDROID_HOME=…; export PATH=…:cmdline-tools/latest/bin:platform-tools`. Source it (`source tools/android-sdk-env.sh`) when you want `adb` / `sdkmanager` on PATH for interactive shell use. Gradle doesn't need this — it reads `local.properties` directly.
@@ -33,7 +33,7 @@ If you want `ANDROID_HOME` persisted across shells, append the contents of `tool
 
 Bumping the pinned cmdline-tools build: edit `CMDLINE_TOOLS_BUILD` at the top of `tools/install-android-sdk.sh`, `rm -rf tools/android-sdk/`, re-run.
 
-Everything below is the **manual fallback**: how to install the SDK by hand if the script doesn't fit your situation (Windows, an existing system-wide install you'd rather configure, supply-chain policy that doesn't allow scripted downloads, etc.).
+Everything below is the **manual fallback**: how to install the SDK by hand if the script doesn't fit your situation (existing system-wide install you'd rather configure, supply-chain policy that doesn't allow scripted downloads, etc.).
 
 ## Components needed for this project
 
@@ -56,15 +56,9 @@ ls "$ANDROID_HOME/build-tools/34.0.0"                # should list non-empty
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version    # should print a version
 ```
 
-If `ANDROID_HOME` is unset but Android Studio is installed, the SDK is typically at:
+If `ANDROID_HOME` is unset but Android Studio is installed, the SDK is typically at `~/Android/Sdk` — set `ANDROID_HOME` to that path and you're done.
 
-- Linux: `~/Android/Sdk`
-- macOS: `~/Library/Android/sdk`
-- Windows: `%LOCALAPPDATA%\Android\Sdk`
-
-Set `ANDROID_HOME` to the right path and you're done.
-
-## Linux (Rocky / Alma / RHEL / Fedora / Debian / Ubuntu / Arch)
+## Manual install (Rocky / Alma / RHEL / Fedora / Debian / Ubuntu / Arch)
 
 Same steps regardless of distro — the cmdline-tools are platform-agnostic Java + scripts, distributed only by Google.
 
@@ -118,42 +112,6 @@ echo 'export JAVA_HOME=/usr/lib/jvm/java-25-openjdk' >> ~/.bashrc
 
 `./gradlew --version` shows the current daemon JVM under `Daemon JVM:`; if that doesn't match your `JAVA_HOME`, run `--stop`.
 
-## macOS
-
-### Homebrew (recommended)
-
-```bash
-brew install --cask android-commandlinetools
-
-# Homebrew puts the SDK at /opt/homebrew/share/android-commandlinetools
-# (Apple Silicon) or /usr/local/share/android-commandlinetools (Intel).
-# Set ANDROID_HOME and install components:
-export ANDROID_HOME=$(brew --prefix)/share/android-commandlinetools
-sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
-
-# Persist (zsh is default on modern macOS):
-cat >> ~/.zshrc <<EOF
-export ANDROID_HOME=$(brew --prefix)/share/android-commandlinetools
-export PATH=\$PATH:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools
-EOF
-source ~/.zshrc
-```
-
-JDK: `brew install --cask temurin` (Eclipse Temurin 21) or `brew install openjdk@17`.
-
-### Manual download
-
-Same shape as Linux — download `commandlinetools-mac-*_latest.zip` from `https://developer.android.com/studio#command-tools`, unzip into `~/Library/Android/sdk/cmdline-tools/latest/`, run `sdkmanager`, set `ANDROID_HOME=$HOME/Library/Android/sdk`.
-
-## Windows
-
-The full toolkit (bash, sudo, mtkclient, mount, simg2img) doesn't work natively on Windows — only the `src/Y1MediaBridge/` build does. If you're cross-developing the Android app from Windows, install via:
-
-- **Android Studio** (heaviest, includes the SDK): https://developer.android.com/studio
-- **Standalone cmdline-tools**: download `commandlinetools-win-*_latest.zip`, unzip into `%LOCALAPPDATA%\Android\Sdk\cmdline-tools\latest\`, run `sdkmanager.bat`, set `ANDROID_HOME` via Control Panel → System → Environment Variables.
-
-For everything else — flashing, patching — use WSL2 with one of the Linux setups above.
-
 ## Verify the install
 
 After the steps above, in a fresh shell:
@@ -181,6 +139,6 @@ The licenses live at `$ANDROID_HOME/licenses/` after acceptance — back them up
 
 If the project bumps `compileSdk` or AGP:
 
-1. Update the corresponding pin in `src/Y1MediaBridge/app/build.gradle` (`compileSdkVersion`).
+1. Update the corresponding pin in `src/Y1MediaBridge/app/build.gradle` (`compileSdk`).
 2. Re-run `sdkmanager --install "platforms;android-XX" "build-tools;XX.Y.Z"`.
 3. Update the **Components needed** table at the top of this file.
