@@ -87,11 +87,20 @@ fi
 echo "[setup] tools/mtkclient/ at ${MTKCLIENT_REF}."
 
 # --- 2. mtkclient venv + deps ----------------------------------------------
+# A successful run leaves a marker file inside the venv. If the marker is
+# absent (fresh install OR a prior run aborted mid-pip), wipe and recreate —
+# without this, set -e leaves a broken venv on the disk and the next run
+# silently skips it as "already done" then fails much later in apply.bash.
 
-if [[ -d mtkclient/venv ]]; then
+if [[ -f mtkclient/venv/.setup-complete ]]; then
     echo "[setup] tools/mtkclient/venv/ exists — skipping."
 else
-    echo "[setup] Creating tools/mtkclient/venv/.."
+    if [[ -d mtkclient/venv ]]; then
+        echo "[setup] tools/mtkclient/venv/ exists but incomplete — recreating.."
+        rm -rf mtkclient/venv
+    else
+        echo "[setup] Creating tools/mtkclient/venv/.."
+    fi
     python3 -m venv mtkclient/venv
     # shellcheck disable=SC1091
     source mtkclient/venv/bin/activate
@@ -102,20 +111,28 @@ else
         echo "WARNING: mtkclient/requirements.txt not found at this ref — venv created empty" >&2
     fi
     deactivate
+    touch mtkclient/venv/.setup-complete
 fi
 
 # --- 3. python-venv for patcher deps (androguard etc.) ---------------------
+# Same marker pattern as the mtkclient venv above.
 
-if [[ -d python-venv ]]; then
+if [[ -f python-venv/.setup-complete ]]; then
     echo "[setup] tools/python-venv/ exists — skipping."
 else
-    echo "[setup] Creating tools/python-venv/.."
+    if [[ -d python-venv ]]; then
+        echo "[setup] tools/python-venv/ exists but incomplete — recreating.."
+        rm -rf python-venv
+    else
+        echo "[setup] Creating tools/python-venv/.."
+    fi
     python3 -m venv python-venv
     # shellcheck disable=SC1091
     source python-venv/bin/activate
     pip install --upgrade pip
     pip install -r python-requirements.txt
     deactivate
+    touch python-venv/.setup-complete
 fi
 
 echo "[setup] Done."
