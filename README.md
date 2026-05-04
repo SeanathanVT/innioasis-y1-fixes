@@ -94,9 +94,9 @@ The patchers can be run standalone from `src/patches/`. Each verifies the input 
 ( cd src/patches && python3 patch_mtkbt.py mtkbt )    # → src/patches/output/mtkbt.patched
 ```
 
-## Status (2026-05-03)
+## Status (2026-05-04)
 
-All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. **Cardinality:0 persists across all three known-good 1.4 controllers** (car, Sonos Roam, Samsung TV) — no peer ever sends `REGISTER_NOTIFICATION`. The remaining gate is upstream of mtkbt's op_code=4 dispatcher table; the strongest static lead is `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`), suggesting accepted-but-degraded negotiation. The v1.8.0 setuid-`su` root path is pending hardware verification; if it works, HCI snoop / `__xlog_buf_printf` capture / `gdbserver` attach become reachable. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses and the trace history.
+All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. **Cardinality:0 persists across all three known-good 1.4 controllers** (car, Sonos Roam, Samsung TV) — no peer ever sends `REGISTER_NOTIFICATION`. The remaining gate is upstream of mtkbt's op_code=4 dispatcher table; the strongest static lead is `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`), suggesting accepted-but-degraded negotiation. **The v1.8.0 setuid-`su` root path is hardware-verified** (`adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`), so HCI snoop / `__xlog_buf_printf` capture / `gdbserver` attach are now unblocked for the next round of investigation. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses and the trace history.
 
 ## Stock firmware manifest
 
