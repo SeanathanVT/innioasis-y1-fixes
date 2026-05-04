@@ -187,8 +187,16 @@ fi
 
 # Prompt for sudo only if we'll need it (mounting system.img).
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "ERROR: 'sudo' is required to mount system.img and chown patched files." >&2
+    echo "       Install sudo and re-run, or run this script as root directly." >&2
+    exit 1
+  fi
   echo "This script requires sudo for mounting and file operations."
-  sudo -v
+  if ! sudo -v; then
+    echo "ERROR: sudo authentication failed; aborting." >&2
+    exit 1
+  fi
   while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done 2>/dev/null &
   SUDO_KEEPALIVE_PID=$!
 fi
