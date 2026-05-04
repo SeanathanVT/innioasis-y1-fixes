@@ -17,6 +17,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 - [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
 - [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`.
+- [`src/btlog-dump/`](src/btlog-dump/) — minimal ARM ELF that taps `mtkbt`'s `@btlog` abstract socket for `__xlog_buf_printf` + decoded HCI traffic. Used by [`tools/dual-capture.sh`](tools/dual-capture.sh). Build via `cd src/btlog-dump && make`.
 - `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
 - `reference/` — manually-extracted reference files for v3.0.2
 
@@ -30,6 +31,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 - **`src/patches/patch_adbd.py`** — *unwired since v1.7.0; historical record only.* H1/H2/H3 byte patches against `/sbin/adbd`.
 - **`src/patches/patch_bootimg.py`** — *unwired since v1.7.0; historical record only.* Format-aware boot.img cpio patcher.
 - **`src/su/`** — setuid-root `su` source. Built via `cd src/su && make` → `src/su/build/su`. ~900-byte direct-syscall ARM-EABI ELF.
+- **`src/btlog-dump/`** — `@btlog` abstract-socket reader (diagnostic; not part of the `--all` flash flow). Built via `cd src/btlog-dump && make` → `src/btlog-dump/build/btlog-dump`. ~1 KB direct-syscall ARM-EABI ELF, same toolchain as `src/su/`. Reuses `src/su/start.S`.
 - **`innioasis-y1-fixes.bash`** — entry point. Takes `rom.zip`, MD5-validates against `KNOWN_FIRMWARES`, mounts `system.img`, dispatches each `--flag` to its patcher (auto-extract → patch → write-back, idempotent), flashes via mtkclient.
 
 Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
@@ -94,9 +96,29 @@ The patchers can be run standalone from `src/patches/`. Each verifies the input 
 ( cd src/patches && python3 patch_mtkbt.py mtkbt )    # → src/patches/output/mtkbt.patched
 ```
 
+## Diagnostics
+
+Independent of the patch flow, the repo ships a small set of post-root diagnostic tools used to investigate AVRCP behaviour on hardware. Pre-req: `--root` flashed.
+
+- **`src/btlog-dump/`** + **`tools/dual-capture.sh`** + **`tools/btlog-parse.py`** — the `@btlog` tap. `mtkbt` runs an undocumented `SOCK_STREAM` listener at the abstract socket `@btlog` that pushes `__xlog_buf_printf` output (every `[AVRCP]` / `[AVCTP]` / `[L2CAP]` / `[ME]` log line that's invisible to `logcat`) plus decoded HCI command/event traffic. `dual-capture.sh` pushes the in-tree reader, runs it as root alongside `logcat -v threadtime`, and writes both streams to a timestamped output dir; `btlog-parse.py` decodes the structured binary stream and supports `--tag-include` / `--tag-exclude` filters. Replaces the conventional `persist.bt.virtualsniff` btsnoop knob (which breaks BT init on this device) and the `__xlog_buf_printf → logcat` redirect attempts (which crash mtkbt; see [INVESTIGATION.md](INVESTIGATION.md) G1/G2). One-shot:
+  ```bash
+  ( cd src/btlog-dump && make )                         # one-time build
+  ./tools/dual-capture.sh ~/captures/connect-attempt    # Ctrl-C when scenario complete
+  ./tools/btlog-parse.py ~/captures/connect-attempt/btlog.bin --tag-include AVRCP --tag-include AVCTP
+  ```
+- **`tools/probe-postroot.sh`** + **`tools/probe-postroot-device.sh`** — one-shot post-root sanity probe. Pushes a small device-side script that enumerates: `mtkbt` PIE base via `/proc/<pid>/maps`, `/proc/mtprintk` and other MTK debug-node accessibility, canonical btsnoop file paths, all `bt`/`bluetooth`/`snoop` `getprop` keys, `/dev/stp*` permissions, `dmesg` AVRCP/AVCTP/STP traces, gdbserver presence, SELinux mode, ptrace policy, and `/proc/net/unix` for the `bt.ext.adp.*` and `@btlog` abstract sockets. Useful to re-verify against a new firmware version if `KNOWN_FIRMWARES` ever gains a 3.0.3+ entry.
+
+Both tools are diagnostic-only — neither is invoked by the patch flow. Output is intentionally text-friendly so it can be saved alongside the brief / `INVESTIGATION.md` for any future investigator.
+
 ## Status (2026-05-04)
 
-All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. **Cardinality:0 persists across all three known-good 1.4 controllers** (car, Sonos Roam, Samsung TV) — no peer ever sends `REGISTER_NOTIFICATION`. The remaining gate is upstream of mtkbt's op_code=4 dispatcher table; the strongest static lead is `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`), suggesting accepted-but-degraded negotiation. **The v1.8.0 setuid-`su` root path is hardware-verified** (`adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`), so HCI snoop / `__xlog_buf_printf` capture / `gdbserver` attach are now unblocked for the next round of investigation. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses and the trace history.
+All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. The v1.8.0 setuid-`su` root path is hardware-verified (`adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`).
+
+**Cardinality:0 persists in all real-world test scenarios** — confirmed against the car (Kia/Bolt) with the additional functional symptom that **CT→Y1 PASS_THROUGH play/pause is also broken**, not just notification-cosmetic. Pixel 4 (TG) ↔ Sonos Roam (CT) works correctly with full metadata transfer, providing a free working-reference A/B for future diagnosis.
+
+The previous "primary lead" — `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`) — turned out to be a phantom: the same value is set on `ACTIVATE_CNF` 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator. The Browsing-bit experiment (testing `SupportedFeatures = 0x0033 → 0x0073`) was confirmed to land on the wire but did not change peer behaviour; that hypothesis is also dead.
+
+The active investigation is now the SDP-record A/B between Pixel 4 (working TG) and Y1 (broken TG) from a Linux laptop with `sdptool browse`. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses; live working notes (Trace #1 through #11) are maintained externally to the repo.
 
 ## Stock firmware manifest
 
