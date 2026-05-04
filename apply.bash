@@ -76,9 +76,26 @@ OVERRIDE_MTKCLIENT_DIR=""
 OVERRIDE_PYTHON_VENV=""
 
 # Parse arguments
+# require_value <flag-name> <value>
+# Validates that a flag taking a path argument actually has one. Without this,
+# `./apply.bash --artifacts-dir` (no value) makes `shift 2` fail-without-shifting
+# on the 1-arg-remaining case, infinite-looping the parser.
+require_value() {
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: $1 requires a value" >&2
+    exit 1
+  fi
+  case "$2" in --*)
+    echo "ERROR: $1 requires a value (got flag '$2' instead)" >&2
+    exit 1
+    ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifacts-dir)
+      require_value --artifacts-dir "${2:-}"
       PATH_ARTIFACTS="$2"
       shift 2
       ;;
@@ -133,10 +150,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --mtkclient-dir)
+      require_value --mtkclient-dir "${2:-}"
       OVERRIDE_MTKCLIENT_DIR="$2"
       shift 2
       ;;
     --python-venv)
+      require_value --python-venv "${2:-}"
       OVERRIDE_PYTHON_VENV="$2"
       shift 2
       ;;
