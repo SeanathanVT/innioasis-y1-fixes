@@ -638,7 +638,11 @@ fi
 
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "Unmounting development system.img.."
-  sudo umount "${PATH_MOUNT}"
+  if ! sudo umount "${PATH_MOUNT}"; then
+    echo "ERROR: umount ${PATH_MOUNT} failed (busy mount? open file in there?)." >&2
+    echo "       Refusing to flash a still-mounted image — kernel may have dirty pages." >&2
+    exit 1
+  fi
   MOUNTED=false
 
   # Flash via MTKClient. Resolve location + venv only now (no point checking
@@ -657,7 +661,13 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   source "${PATH_VENV_MTKCLIENT}/bin/activate"
 
   echo "Writing new system.img (plug in and reset Y1 device using button near USB-C port).."
-  python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
+  if ! python3 "${PATH_MTKCLIENT}/mtk.py" w android "${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"; then
+    echo "ERROR: mtk.py write failed — device left in an unknown state." >&2
+    echo "       Common causes: device not in BROM mode, USB cable not data-capable," >&2
+    echo "                      mtkclient version mismatch, missing libusb." >&2
+    deactivate
+    exit 1
+  fi
 
   echo "Deactivating MTKClient venv.."
   deactivate
