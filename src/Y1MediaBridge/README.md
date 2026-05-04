@@ -22,12 +22,17 @@ One system app. No separate daemon, no shared files, no IPC.
 ## Build
 
 ```bash
-./gradlew assembleDebug
+./gradlew --stop && ./gradlew assembleDebug
 ```
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`. The top-level
 [`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) reads from this
 path directly under `--avrcp` — no need to copy the APK anywhere.
+
+The `--stop` is defensive: gradle's daemon caches the JVM it started with,
+so a `JAVA_HOME` change between builds doesn't take effect until the daemon
+restarts. `--stop` first guarantees a fresh daemon. It's cheap (single
+build) and safe to always run.
 
 `assembleRelease` is intentionally avoided: AGP wires `lintVitalReportRelease`
 into the release-assembly chain, which fails with `SDK location not found`
@@ -38,9 +43,10 @@ keystore per `app/build.gradle`'s `signingConfig signingConfigs.debug`). Debug
 also leaves `debuggable=true` in the manifest, which is useful for a research
 device — you can JDWP-attach to the running service.
 
-Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 8.7.3, `compileSdk 34`,
+Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 9.2.0, `compileSdk 34`,
 `minSdk 17`, `targetSdk 17`, Java 8 bytecode. **Build with JDK 17 or newer.**
-Confirmed working: JDK 17, 21, and 25. See
+Confirmed working: JDK 17, 21, and 25 (with the previous AGP 8.7.3 — re-verify
+on AGP 9.2.0). See
 [`../../docs/ANDROID-SDK.md`](../../docs/ANDROID-SDK.md#jdk-requirement) for
 install instructions and the gradle-daemon-caching gotcha to watch for if you
 ever change `JAVA_HOME`.

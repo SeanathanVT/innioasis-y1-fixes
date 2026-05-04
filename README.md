@@ -49,8 +49,11 @@ cp /path/to/rom.zip ~/y1-patches/
 # see docs/ANDROID-SDK.md for Windows or manual setup):
 ./tools/install-android-sdk.sh
 
-# Build src/Y1MediaBridge/ once if using --avrcp:
-( cd src/Y1MediaBridge && ./gradlew assembleDebug )
+# Build src/Y1MediaBridge/ once if using --avrcp.
+# The --stop is defensive: gradle's daemon caches the JVM it started with,
+# so if you ever change JAVA_HOME between builds, --stop ensures a fresh
+# daemon picks up the new JDK. Cheap on a fresh setup.
+( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
 
 # Build src/su/ once if using --root:
 ( cd src/su && make )

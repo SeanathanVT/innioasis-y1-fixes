@@ -22,7 +22,7 @@ set -euo pipefail
 
 # Pinned commandline-tools build. To bump: change CMDLINE_TOOLS_BUILD,
 # delete tools/android-sdk, re-run.
-CMDLINE_TOOLS_BUILD="11076708"
+CMDLINE_TOOLS_BUILD="14742923"
 
 # Component versions to install (bump alongside src/Y1MediaBridge/app/build.gradle).
 ANDROID_PLATFORM="android-34"
