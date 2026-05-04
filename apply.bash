@@ -286,14 +286,11 @@ resolve_python_venv() {
   fi
 }
 
-# Cross-platform MD5: md5sum on Linux, md5 -q on macOS.
 md5_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | awk '{print $1}'
-  elif command -v md5 >/dev/null 2>&1; then
-    md5 -q "$1"
   else
-    echo "ERROR: neither md5sum nor md5 in PATH — cannot validate stock images" >&2
+    echo "ERROR: md5sum not in PATH — cannot validate stock images" >&2
     exit 1
   fi
 }
@@ -481,7 +478,6 @@ in PATH. Install it and re-run:
   Arch:                 sudo pacman -S android-tools
   Fedora:               sudo dnf install android-tools
   RHEL/Rocky/Alma 8+:   sudo dnf install epel-release && sudo dnf install android-tools
-  macOS (brew):         brew install simg2img
 EOF
       exit 1
     fi
