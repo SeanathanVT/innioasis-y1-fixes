@@ -329,7 +329,7 @@ print_known_firmwares() {
 }
 
 # Stages stock binaries extracted from the mount + their patched output before write-back.
-PATH_TMP_STAGE="$(mktemp -d -t y1-fixes.XXXXXX)"
+PATH_TMP_STAGE="$(mktemp -d -t koensayr.XXXXXX)"
 
 _cleanup() {
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null

@@ -8,37 +8,24 @@ A patching toolkit for the Innioasis Y1 media player that improves the music-pla
 
 ## Overview
 
-- **Bluetooth AVRCP 1.4** — forces AVRCP 1.4 advertisement across all BT stack layers (daemon, ODEX, JNI library, core library).
-- **Artist→Album navigation** — improves the music-player UX by showing album cover art after artist selection instead of a flat song list.
-- **System configuration** — enables ADB debugging and tunes Bluetooth settings.
-- **APK patching** — patches the system music player APK at the smali level.
-- **Root** — installs a minimal `/system/xbin/su` (setuid-root, mode 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
+- **Music-player UX** — Artist→Album navigation patch on the system music APK (cover art on artist tap instead of a flat song list).
+- **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
+- **System config** — enable ADB debugging, remove preinstalled bloatware.
+- **Root** — install a minimal `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
+- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe) for the in-progress metadata-over-Bluetooth work. AVRCP-metadata delivery itself is not yet working — see [Status](#status).
 
 ## Layout
 
-This repo is a small monorepo. The bash entry-point at the root dispatches into source trees under `src/`:
+The bash entry-point at the root dispatches into source trees under `src/`:
 
-- [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`)
-- [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`.
-- [`src/btlog-dump/`](src/btlog-dump/) — minimal ARM ELF that taps `mtkbt`'s `@btlog` abstract socket for `__xlog_buf_printf` + decoded HCI traffic. Used by [`tools/dual-capture.sh`](tools/dual-capture.sh). Build via `cd src/btlog-dump && make`.
-- `apply.bash` — single entry point at the root; flag-driven dispatch into the trees above
+- `apply.bash` — single entry point; flag-driven dispatch into the trees below
+- [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`); see [`src/patches/README.md`](src/patches/README.md) for the per-patcher table and [`docs/PATCHES.md`](docs/PATCHES.md) for byte-level detail
+- [`src/su/`](src/su/) — minimal setuid-root `su` for `--root` (~900-byte direct-syscall ARM-EABI ELF, no libc). Build via `cd src/su && make`
+- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`
+- [`src/btlog-dump/`](src/btlog-dump/) — `@btlog` abstract-socket reader (diagnostic; same toolchain as `src/su/`). Build via `cd src/btlog-dump && make`
+- `tools/` — setup, diagnostic, and release helpers
+- `staging/` — default `--artifacts-dir`; drop `rom.zip` here
 - `reference/` — manually-extracted reference files for v3.0.2
-
-## Scripts
-
-- **`src/patches/patch_mtkbt.py`** — patches stock `mtkbt` daemon for AVRCP 1.4. Eleven patches (B1-B3, C1-C3, A1, D1, E3, E4, E8). Stock MD5 `3af1d4ad…` → patched `d47c9040…`.
-- **`src/patches/patch_mtkbt_odex.py`** — patches `MtkBt.odex` (F1: `getPreferVersion()` returns 14; F2: `disable()` resets `sPlayServiceInterface`).
-- **`src/patches/patch_libextavrcp_jni.py`** — patches `libextavrcp_jni.so` (C2a/b: hardcode `g_tg_feature=0x0e`, `sdpfeature=0x23`; C3a/b: raise GetCapabilities event-list cap 13→14).
-- **`src/patches/patch_libextavrcp.py`** — single AVRCP version constant patch (C4: `0x0103 → 0x0104` at `0x002e3b`).
-- **`src/patches/patch_y1_apk.py`** — smali patcher for the Y1 music player APK (Artist→Album navigation). Uses androguard + apktool; preserves original signatures for system-app deployment.
-- **`src/patches/patch_adbd.py`** — *unwired since v1.7.0; historical record only.* H1/H2/H3 byte patches against `/sbin/adbd`.
-- **`src/patches/patch_bootimg.py`** — *unwired since v1.7.0; historical record only.* Format-aware boot.img cpio patcher.
-- **`src/su/`** — setuid-root `su` source. Built via `cd src/su && make` → `src/su/build/su`. ~900-byte direct-syscall ARM-EABI ELF.
-- **`src/btlog-dump/`** — `@btlog` abstract-socket reader (diagnostic; not part of the `--all` flash flow). Built via `cd src/btlog-dump && make` → `src/btlog-dump/build/btlog-dump`. ~1 KB direct-syscall ARM-EABI ELF, same toolchain as `src/su/`. Reuses `src/su/start.S`.
-- **`apply.bash`** — entry point. Takes `rom.zip`, MD5-validates against `KNOWN_FIRMWARES`, mounts `system.img`, dispatches each `--flag` to its patcher (auto-extract → patch → write-back, idempotent), flashes via MTKClient.
-
-Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
@@ -57,7 +44,7 @@ cp /path/to/rom.zip staging/
 
 The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selected patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
 
-`staging/` is `.gitignore`d. **`git clean -dfx` will nuke it** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
+Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
 
 Opting in to `--avrcp` (known broken) additionally needs the Android SDK + `Y1MediaBridge.apk` build:
 
@@ -80,15 +67,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). |
 | `--all` | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. Excludes `--avrcp`. |
 
-Run `./apply.bash --help` for full flag detail.
-
-### Manual patcher invocation
-
-The patchers can be run standalone from `src/patches/`. Each verifies the input MD5, checks patch sites before and after, and refuses to write output on mismatch. Example:
-
-```bash
-( cd src/patches && python3 patch_mtkbt.py mtkbt )    # → src/patches/output/mtkbt.patched
-```
+Run `./apply.bash --help` for full flag detail. Patchers can also be run standalone — see [`src/patches/README.md`](src/patches/README.md).
 
 ## Diagnostics
 
@@ -145,7 +124,7 @@ adb reboot
 
 ## Verified against
 
-Innioasis Y1 media player — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Currently enrolled in `KNOWN_FIRMWARES`: **v3.0.2** (the only build that's been hardware-verified against this toolkit). Adding a new build means dropping in its `rom.zip` MD5 row and re-running the patchers; if site offsets shifted they'll fail their stock-MD5 check and need re-locating.
+Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Hardware-verified against the v3.0.2 build enrolled in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
 
 ## Author
 

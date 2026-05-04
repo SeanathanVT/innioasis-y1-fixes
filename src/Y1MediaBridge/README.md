@@ -26,8 +26,8 @@ One system app. No separate daemon, no shared files, no IPC.
 ```
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`. The top-level
-[`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) reads from this
-path directly under `--avrcp` — no need to copy the APK anywhere.
+[`apply.bash`](../../apply.bash) reads from this path directly under
+`--avrcp` — no need to copy the APK anywhere.
 
 The `--stop` is defensive: gradle's daemon caches the JVM it started with,
 so a `JAVA_HOME` change between builds doesn't take effect until the daemon
@@ -65,8 +65,8 @@ The APK *must* be installed as a system app — `READ_LOGS` is a signature/syste
 permission and `adb install` will leave it ungranted. Path inside `/system`:
 `/system/app/Y1MediaBridge.apk` (flat file, not a subdirectory — the Y1 system
 image's `app/` directory uses the flat layout). Mode `644`, owner `root:root`.
-See [`../../innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash) for the
-full system.img patch + flash flow.
+See [`../../apply.bash`](../../apply.bash) for the full system.img patch +
+flash flow.
 
 Ship alongside the patched binaries:
 
