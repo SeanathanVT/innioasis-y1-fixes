@@ -440,6 +440,11 @@ if ! command -v unzip >/dev/null 2>&1; then
   echo "ERROR: unzip is not in PATH — required to extract from ${FILENAME_ROM_ZIP}" >&2
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 is not in PATH — required by every patcher script + MTKClient." >&2
+  echo "       Run tools/setup.sh first (it'll bail with the same message but more context)." >&2
+  exit 1
+fi
 
 echo "Validating rom.zip against stock-firmware manifest.."
 rom_md5=$(md5_of "$rom")
