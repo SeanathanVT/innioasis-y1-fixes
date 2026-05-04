@@ -80,7 +80,7 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 ## Status
 
-`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. **AVRCP metadata over BT is not delivered** — `--avrcp` was an attempt to enable it, but byte-patches against `mtkbt` cannot make the daemon process AVRCP 1.3+ commands and the patches additionally regress stock PASSTHROUGH. `--avrcp` is therefore a known-broken opt-in (excluded from `--all`, prints a warning); `--bluetooth` is split so the pairing-essential parts continue to apply without committing to the broken AVRCP version push.
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. **AVRCP metadata over BT is not delivered** — `--avrcp` was an attempt to enable it, but byte-patches against `mtkbt` cannot make the daemon process AVRCP 1.3+ commands, and the patches additionally regress stock PASSTHROUGH. `--avrcp` is therefore a known-broken opt-in (excluded from `--all`, prints a warning). `--bluetooth` covers only the pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits — it does **not** advertise an AVRCP version `mtkbt` can't deliver.
 
 Full investigation history, byte-patch test matrix, and the four-phase user-space proxy work plan that aims to fix metadata transport: [`INVESTIGATION.md`](INVESTIGATION.md).
 
