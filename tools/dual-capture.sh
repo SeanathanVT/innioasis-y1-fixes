@@ -96,7 +96,7 @@ echo "  logcat.txt: $(wc -l < "$OUT/logcat.txt" 2>/dev/null || echo 0) lines"
 echo
 echo "Quick decode:"
 echo "  ./tools/btlog-parse.py \"$OUT/btlog.bin\" --tag-include AVRCP --tag-include AVCTP --tag-exclude \"GetByte\" --tag-exclude \"PutByte\""
-echo "  grep -E \"result.4096|CONNECT_CNF\" \"$OUT/logcat.txt\""
+echo "  grep -E \"CONNECT_CNF|activeVersion|REGISTER_NOTIFICATION|tg_feature\" \"$OUT/logcat.txt\""
 exit 0
 ' INT TERM
 
