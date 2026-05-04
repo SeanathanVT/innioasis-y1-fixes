@@ -165,7 +165,7 @@ java -version                                            # → 17 or newer
 ( cd src/Y1MediaBridge && ./gradlew --version )          # → Gradle 9.5.0, JVM 17+
 ```
 
-If those four pass, `./innioasis-y1-fixes.bash --artifacts-dir <dir> --avrcp` will resolve the SDK and Gradle correctly.
+If those four pass, `./apply.bash --artifacts-dir <dir> --avrcp` will resolve the SDK and Gradle correctly.
 
 ## License acceptance
 

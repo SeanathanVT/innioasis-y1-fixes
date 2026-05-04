@@ -678,7 +678,7 @@ Additionally, mtkbt exposes an undocumented `SOCK_STREAM` listener at the abstra
 
 ## The mtkbt Fix — Eleven Patches (the `--avrcp` patch set; now known broken end-to-end per the conclusion above)
 
-The patches below ship under the `--avrcp` flag of `innioasis-y1-fixes.bash`. All eleven land on the wire (`sdptool browse` confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initialises correctly for AVRCP 1.4. Despite that, the patch set as a whole is a **net regression** vs. stock 1.0 — it claims a version mtkbt's command-handling layer cannot deliver, and peers (Sonos, car) refuse to engage AVRCP COMMANDs as a result. See "Conclusion (2026-05-04)" above. The detail below is preserved because individual patches are still load-bearing if/when the user-space proxy work activates AVRCP 1.3+ command handling — the SDP record needs to be there.
+The patches below ship under the `--avrcp` flag of `apply.bash`. All eleven land on the wire (`sdptool browse` confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initialises correctly for AVRCP 1.4. Despite that, the patch set as a whole is a **net regression** vs. stock 1.0 — it claims a version mtkbt's command-handling layer cannot deliver, and peers (Sonos, car) refuse to engage AVRCP COMMANDs as a result. See "Conclusion (2026-05-04)" above. The detail below is preserved because individual patches are still load-bearing if/when the user-space proxy work activates AVRCP 1.3+ command handling — the SDP record needs to be there.
 
 ### Descriptor Table Structure
 
@@ -774,7 +774,7 @@ The Browsing bit (6) was deliberately omitted at brief-writing time because `Add
 
 ## adbd Root Patches (H1/H2/H3) — Closed 2026-05-03 (failed on hardware), superseded by setuid `/system/xbin/su`
 
-> **Status: closed.** Both attempted revisions caused "device offline" on hardware. `--root` flag removed from `innioasis-y1-fixes.bash` in v1.7.0 then reintroduced in v1.8.0 against `/system/xbin/su` instead. The standalone `patch_adbd.py` and `patch_bootimg.py` scripts are kept in the tree as historical record with warning banners; their analysis below is preserved for whoever picks up the root pass with a different mechanism.
+> **Status: closed.** Both attempted revisions caused "device offline" on hardware. `--root` flag removed from `apply.bash` in v1.7.0 then reintroduced in v1.8.0 against `/system/xbin/su` instead. The standalone `patch_adbd.py` and `patch_bootimg.py` scripts are kept in the tree as historical record with warning banners; their analysis below is preserved for whoever picks up the root pass with a different mechanism.
 
 The OEM adbd has stripped the standard AOSP `should_drop_privileges()` gating. `strings adbd` returns ZERO references to `ro.secure`. The drop_privileges block at vaddr `0x94b8` runs unconditionally on every adbd startup.
 

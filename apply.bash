@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# innioasis-y1-fixes.bash — Innioasis Y1 system.img patcher.
+# apply.bash — Innioasis Y1 system.img patcher.
 #
 # Compatibility is defined by the KNOWN_FIRMWARES manifest (rom.zip MD5).
 # Add a row to support a new build.
@@ -13,7 +13,7 @@
 
 show_help() {
   cat <<EOF
-Usage: ./innioasis-y1-fixes.bash --artifacts-dir <path> [FLAGS] [TOOLING]
+Usage: ./apply.bash --artifacts-dir <path> [FLAGS] [TOOLING]
 
 Stage rom.zip in --artifacts-dir (validated against KNOWN_FIRMWARES MD5
 manifest), then pick one or more of the flags below. Run tools/setup.sh
@@ -52,7 +52,7 @@ elsewhere or are testing alternate builds):
                             (androguard). Default: tools/python-venv/.
 
 Quick example:
-  ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
+  ./apply.bash --artifacts-dir ~/y1-patches --all
 
 For details on the patches applied by each flag, see README.md and docs/PATCHES.md.
 EOF
@@ -120,7 +120,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --all)
       # --avrcp is intentionally excluded — known broken; opt-in only via
-      # explicit --avrcp. See innioasis-y1-fixes.bash --help.
+      # explicit --avrcp. See apply.bash --help.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
@@ -301,7 +301,7 @@ firmware_field() {
 }
 
 print_known_firmwares() {
-  echo "Known stock firmware MD5s (manifest in innioasis-y1-fixes.bash):" >&2
+  echo "Known stock firmware MD5s (manifest in apply.bash):" >&2
   local row parts
   for row in "${KNOWN_FIRMWARES[@]}"; do
     IFS='|' read -ra parts <<< "$row"

@@ -1,6 +1,6 @@
 # Innioasis Y1 Firmware Fixes
 
-A patching toolkit for the Innioasis Y1 media player that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `innioasis-y1-fixes.bash`; add a row to support a new build.
+A patching toolkit for the Innioasis Y1 media player that fixes Bluetooth AVRCP, improves the music-player UI, and provides a setuid-root escalator for on-device debugging. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `apply.bash`; add a row to support a new build.
 
 ## Overview
 
@@ -18,7 +18,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `/system/xbin/su` (consumed by `--root`)
 - [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build with Gradle: `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`.
 - [`src/btlog-dump/`](src/btlog-dump/) — minimal ARM ELF that taps `mtkbt`'s `@btlog` abstract socket for `__xlog_buf_printf` + decoded HCI traffic. Used by [`tools/dual-capture.sh`](tools/dual-capture.sh). Build via `cd src/btlog-dump && make`.
-- `innioasis-y1-fixes.bash` — single entry point at the root; flag-driven dispatch into the trees above
+- `apply.bash` — single entry point at the root; flag-driven dispatch into the trees above
 - `reference/` — manually-extracted reference files for v3.0.2
 
 ## Scripts
@@ -32,7 +32,7 @@ This repo is a small monorepo. The bash entry-point at the root dispatches into 
 - **`src/patches/patch_bootimg.py`** — *unwired since v1.7.0; historical record only.* Format-aware boot.img cpio patcher.
 - **`src/su/`** — setuid-root `su` source. Built via `cd src/su && make` → `src/su/build/su`. ~900-byte direct-syscall ARM-EABI ELF.
 - **`src/btlog-dump/`** — `@btlog` abstract-socket reader (diagnostic; not part of the `--all` flash flow). Built via `cd src/btlog-dump && make` → `src/btlog-dump/build/btlog-dump`. ~1 KB direct-syscall ARM-EABI ELF, same toolchain as `src/su/`. Reuses `src/su/start.S`.
-- **`innioasis-y1-fixes.bash`** — entry point. Takes `rom.zip`, MD5-validates against `KNOWN_FIRMWARES`, mounts `system.img`, dispatches each `--flag` to its patcher (auto-extract → patch → write-back, idempotent), flashes via MTKClient.
+- **`apply.bash`** — entry point. Takes `rom.zip`, MD5-validates against `KNOWN_FIRMWARES`, mounts `system.img`, dispatches each `--flag` to its patcher (auto-extract → patch → write-back, idempotent), flashes via MTKClient.
 
 Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
@@ -47,7 +47,7 @@ cp /path/to/rom.zip ~/y1-patches/
 ./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
 ( cd src/su && make )               # one-time: build the setuid-su binary for --root
 
-./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
+./apply.bash --artifacts-dir ~/y1-patches --all
 ```
 
 `--all` = `--adb --bluetooth --music-apk --remove-apps --root`. `--avrcp` is intentionally excluded (see [Status](#status)).
@@ -75,7 +75,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). |
 | `--all` | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. Excludes `--avrcp`. |
 
-Run `./innioasis-y1-fixes.bash --help` for full flag detail.
+Run `./apply.bash --help` for full flag detail.
 
 ### Manual patcher invocation
 

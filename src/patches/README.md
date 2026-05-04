@@ -1,6 +1,6 @@
 # patches
 
-Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the top-level [`innioasis-y1-fixes.bash`](../../innioasis-y1-fixes.bash); each patcher can also be run standalone for inspection.
+Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the top-level [`apply.bash`](../../apply.bash); each patcher can also be run standalone for inspection.
 
 ## Files
 

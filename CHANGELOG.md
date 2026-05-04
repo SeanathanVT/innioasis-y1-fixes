@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The version reflects `innioasis-y1-fixes.bash`'s `# Version:` header; patch-script-only
+The version reflects `apply.bash`'s `# Version:` header; patch-script-only
 changes are grouped under the bash version that was current at the time. For full
 prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
@@ -20,6 +20,7 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 - **`tools/install-android-sdk.sh`** — auto-installer for the Android SDK (Linux/macOS only). Detects existing `$ANDROID_HOME` and short-circuits; otherwise downloads Google's pinned commandline-tools archive, accepts licenses (`yes | sdkmanager --licenses`), installs `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`, and writes `sdk.dir=…` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell. Bails clearly if JDK 17+ is missing. Disk ~1.5–2 GB, network ~1.7 GB. Idempotent: re-runnable, pin-bumpable via `CMDLINE_TOOLS_BUILD` at the top.
 
 ### Changed
+- **Renamed the orchestration script `innioasis-y1-fixes.bash` → `apply.bash`.** Reads more naturally ("apply the fixes"), avoids the `cd y1-fixes && ./y1-fixes.bash` repetition, and decouples the script name from the company name in anticipation of a future repo-name change. All in-repo references updated (README, INVESTIGATION.md, sub-script READMEs, the bash's own `--help` output, `tools/release.sh`, etc.). External users / scripts that hardcoded `./innioasis-y1-fixes.bash` will need to update; no compatibility shim is provided (this is a v2.0.0 release).
 - **`--avrcp` is now a known-broken opt-in.** Empirical testing across five distinct (version, features) byte-patch combinations against Sonos Roam (a known-working AVRCP CT validated against Pixel 4 at every AVRCP version 1.3-1.6) confirms the byte-patch path cannot deliver AVRCP 1.4 metadata. mtkbt is internally an AVRCP 1.0 implementation (compile-time `[AVRCP] AVRCP V10 compiled`, runtime `AVRCP register activeVersion:10`); byte-patches successfully shape the on-wire SDP record but cannot make the daemon process AVRCP 1.3+ COMMANDs that peers send in response. The patches additionally regress stock AVRCP 1.0 PASSTHROUGH (play/pause from car/headset stops working). `--avrcp` continues to run if explicitly specified (useful for the user-space proxy work — see `INVESTIGATION.md` "Conclusion (2026-05-04) — path forward") and prints a startup warning. **Excluded from `--all`'s expansion.** See `INVESTIGATION.md` for the full negative-result write-up.
 - **`--bluetooth` no longer sets `persist.bluetooth.avrcpversion=avrcp14`.** Setting that property committed the device to an AVRCP version mtkbt couldn't deliver. The remaining audio.conf / `auto_pairing.conf` / `blacklist.conf` / `ro.bluetooth.class=2098204` / `ro.bluetooth.profiles.a2dp.source.enabled=true` / `ro.bluetooth.profiles.avrcp.target.enabled=true` properties are all pairing-essential and stay. `--bluetooth` continues to be required for car/peer pairing to work correctly.
 - **`--all` now expands to `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`.** `--avrcp` is intentionally excluded.
@@ -96,7 +97,7 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 ## [1.8.3] - 2026-05-03
 
 ### Changed
-- Drop the in-file version-history block from `innioasis-y1-fixes.bash` (~30 lines); `git log` and `CHANGELOG.md` are authoritative.
+- Drop the in-file version-history block from `apply.bash` (~30 lines); `git log` and `CHANGELOG.md` are authoritative.
 - `show_help()` reduced from 63 lines to 20 (single-screen output): one-line description per flag, one example, pointer to README.md / docs/PATCHES.md for details.
 - Trim function-doc and inline rationale comments throughout (110 comment lines → 45). Comments now retained only where the *why* is non-obvious from the code (e.g., `FLAG_ANY_SYSTEM_PATCH` separateness for future flag flexibility).
 - No functional change.

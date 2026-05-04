@@ -38,7 +38,7 @@ Output is ~900 bytes, statically linked, stripped, no dynamic dependencies. Idem
 The top-level bash does this for you:
 
 ```bash
-./innioasis-y1-fixes.bash --artifacts-dir <path> --root
+./apply.bash --artifacts-dir <path> --root
 ```
 
 Equivalent manual install (against the mounted system.img):

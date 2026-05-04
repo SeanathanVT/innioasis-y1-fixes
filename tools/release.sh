@@ -55,7 +55,7 @@ fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-BASH_FILE="innioasis-y1-fixes.bash"
+BASH_FILE="apply.bash"
 CHANGELOG="CHANGELOG.md"
 TAG="v$VERSION"
 TODAY="$(date +%Y-%m-%d)"
