@@ -102,31 +102,13 @@ Independent of the patch flow, the repo ships a small set of post-root diagnosti
   ```
 - **`tools/probe-postroot.sh`** + **`tools/probe-postroot-device.sh`** — one-shot post-root sanity probe. Pushes a small device-side script that enumerates: `mtkbt` PIE base via `/proc/<pid>/maps`, `/proc/mtprintk` and other MTK debug-node accessibility, canonical btsnoop file paths, all `bt`/`bluetooth`/`snoop` `getprop` keys, `/dev/stp*` permissions, `dmesg` AVRCP/AVCTP/STP traces, gdbserver presence, SELinux mode, ptrace policy, and `/proc/net/unix` for the `bt.ext.adp.*` and `@btlog` abstract sockets. Useful to re-verify against a new firmware version if `KNOWN_FIRMWARES` ever gains a 3.0.3+ entry.
 
-Both tools are diagnostic-only — neither is invoked by the patch flow. Output is intentionally text-friendly so it can be saved alongside the brief / `INVESTIGATION.md` for any future investigator.
+Both tools are diagnostic-only — neither is invoked by the patch flow. Output is intentionally text-friendly so captures can be archived alongside [`INVESTIGATION.md`](INVESTIGATION.md) for any future investigator.
 
-## Status (2026-05-04 — conclusive negative on the byte-patch path)
+## Status
 
-The **byte-patch approach to enabling AVRCP 1.4 metadata is exhausted and was a net regression**. Five distinct (version, features) combinations were tested across multiple flash cycles against Sonos Roam (a known-working AVRCP CT validated against Pixel 4):
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. **AVRCP metadata over BT is not delivered** — `--avrcp` was an attempt to enable it, but byte-patches against `mtkbt` cannot make the daemon process AVRCP 1.3+ commands and the patches additionally regress stock PASSTHROUGH. `--avrcp` is therefore a known-broken opt-in (excluded from `--all`, prints a warning); `--bluetooth` is split so the pairing-essential parts continue to apply without committing to the broken AVRCP version push.
 
-| Configuration | SDP wire | Peer engages? | Cardinality |
-|---|---|---|---|
-| Stock 1.0 + features `0x01` | `09 01 00 09 00 01` | No AVRCP COMMAND, but **PASSTHROUGH play/pause works** | 0 |
-| `--avrcp` standard 1.4 + features `0x33` | `09 01 04 09 00 33` | One COMMAND sent, dropped, peer gives up; **PASSTHROUGH also broken** | 0 |
-| Pixel-shape 1.5 + features `0xd1` | `09 01 05 09 00 d1` | Peer tries browse PSM 0x1B, mtkbt rejects, peer gives up | 0 |
-| Pixel-1.3 mimic 1.3 + features `0x01` | `09 01 03 09 00 01` | One COMMAND sent, dropped, peer gives up | 0 |
-| Features-only 1.4 + features `0x01` | `09 01 04 09 00 01` | Same dropped-COMMAND failure | 0 |
-
-**mtkbt is internally an AVRCP 1.0 implementation** (`[AVRCP] AVRCP V10 compiled`, `AVRCP register activeVersion:10`). Byte-patches successfully shape the on-wire SDP record but cannot make the daemon process AVRCP 1.3+ COMMANDs that peers send in response. Pixel 4 ↔ Sonos confirms Sonos works with bare-1.3 (features `0x01`) when the implementation actually delivers 1.3 commands; the gate on the Y1 is **mtkbt's command-handling layer, not the SDP advertisement**.
-
-Consequences:
-
-- **`--avrcp` is now a known-broken opt-in.** It still runs if you specify it explicitly (useful for the user-space proxy work — see below) but is excluded from `--all` and prints a warning at startup.
-- **`--bluetooth` still applies** (essential for car pairing) but no longer sets `persist.bluetooth.avrcpversion=avrcp14`. The remaining audio.conf / blacklist / ro.bluetooth.class properties are untouched.
-- **The recommended baseline is `--all` (without `--avrcp`)**: pairing works, A2DP audio works, AVRCP 1.0 PASSTHROUGH (play/pause/skip) works, **no metadata over BT**. `Y1MediaBridge.apk` is not installed by default — it's coupled to `--avrcp` because it provides the Java-side metadata source MtkBt's now-disabled patches needed.
-
-**The path forward to actual AVRCP 1.4 metadata is the user-space proxy work** documented in [`INVESTIGATION.md`](INVESTIGATION.md) "Conclusion (2026-05-04) — path forward". In short: patch a trampoline at mtkbt's silent-drop site for unhandled AVRCP COMMANDs (candidates `0x6d9ba`, `0x0513a4` per the brief), forward the raw AVCTP bytes to a Java-side AVRCP COMMAND parser/responder, and route the response back via mtkbt's outbound AVCTP path. Diagnostic infrastructure for this work (`@btlog` tap + parser + dual-capture + post-root probe) is in place — see the **Diagnostics** section. Estimated 2-4 weeks of focused binary-RE + Android Bluetooth work.
-
-`--root` (v1.8.0+, hardware-verified) and `--music-apk` / `--remove-apps` / `--adb` are unaffected by the AVRCP conclusion and continue to work as documented.
+Full investigation history, byte-patch test matrix, and the four-phase user-space proxy work plan that aims to fix metadata transport: [`INVESTIGATION.md`](INVESTIGATION.md).
 
 ## Stock firmware manifest
 
