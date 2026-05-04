@@ -134,8 +134,7 @@ except ImportError:
 
 # -- Config -------------------------------------------------------------------
 WORK_DIR      = "_patch_workdir"
-_NPM_APKTOOL  = "/home/claude/.npm-global/lib/node_modules/apktool/bin/apktool.jar"
-APKTOOL_JAR   = _NPM_APKTOOL if os.path.exists(_NPM_APKTOOL) else os.path.join(WORK_DIR, "apktool.jar")
+APKTOOL_JAR   = os.path.join(WORK_DIR, "apktool.jar")
 APKTOOL_URL   = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
 UNPACKED_DIR  = os.path.join(WORK_DIR, "unpacked")
 
