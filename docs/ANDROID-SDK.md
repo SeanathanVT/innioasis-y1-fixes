@@ -87,7 +87,9 @@ EOF
 source ~/.bashrc
 ```
 
-**JDK requirement:** **JDK 17 minimum.** Confirmed working: JDK 17, 21, and 25 with the in-tree AGP 9.2.0 + Gradle 9.5.0. Install whatever you prefer:
+## JDK requirement
+
+**JDK 17 minimum.** Confirmed working: JDK 17, 21, and 25 with the in-tree AGP 9.2.0 + Gradle 9.5.0. Install whatever you prefer:
 
 - Rocky / Alma / RHEL / Fedora: `sudo dnf install -y java-17-openjdk-devel` (or `java-21-openjdk-devel`, `java-25-openjdk-devel`)
 - Debian / Ubuntu: `sudo apt install -y openjdk-17-jdk` (or `openjdk-21-jdk`, etc.)
