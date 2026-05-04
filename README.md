@@ -49,6 +49,11 @@ cp /path/to/rom.zip ~/y1-patches/
 # see docs/ANDROID-SDK.md for Windows or manual setup):
 ./tools/install-android-sdk.sh
 
+# Source the env file so adb/sdkmanager are on PATH (gradle build itself
+# doesn't need this — sdk.dir is in src/Y1MediaBridge/local.properties —
+# but adb is handy for verifying the install on the device later).
+source tools/android-sdk-env.sh
+
 # Build src/Y1MediaBridge/ once if using --avrcp.
 # The --stop is defensive: gradle's daemon caches the JVM it started with,
 # so if you ever change JAVA_HOME between builds, --stop ensures a fresh

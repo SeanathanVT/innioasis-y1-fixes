@@ -199,9 +199,17 @@ cat <<EOF
   Local props:   ${LOCAL_PROPS}     (gradle reads sdk.dir from here)
   Env file:      ${ENV_FILE}        (source for ANDROID_HOME + adb/sdkmanager on PATH)
 
-  src/Y1MediaBridge/gradlew assembleDebug should now succeed.
+  Gradle build (cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew
+  assembleDebug) reads sdk.dir from local.properties directly — no shell
+  setup needed for that.
 
-  For shell tools (adb, sdkmanager) on PATH:
-      source tools/android-sdk-env.sh
-  Or persist by appending the same line to your ~/.bashrc / ~/.zshrc.
+╔══════════════════════════════════════════════════════════════════════════╗
+║  NEXT STEP — source the env file in your current shell:                  ║
+║                                                                          ║
+║      source tools/android-sdk-env.sh                                     ║
+║                                                                          ║
+║  Adds ANDROID_HOME, adb, and sdkmanager to your PATH for this session.   ║
+║  Persist across shells by appending the same line to ~/.bashrc /         ║
+║  ~/.zshrc / your shell's rc file.                                        ║
+╚══════════════════════════════════════════════════════════════════════════╝
 EOF

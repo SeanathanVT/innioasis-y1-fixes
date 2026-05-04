@@ -10,6 +10,9 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Changed
+- Make the `source tools/android-sdk-env.sh` step impossible to miss after `install-android-sdk.sh` finishes. The trailing summary now ends with a boxed `NEXT STEP` callout containing the exact `source …` line; the gradle-build invocation that *doesn't* need ANDROID_HOME is mentioned separately so users don't conflate the two. README Quick start now includes `source tools/android-sdk-env.sh` as an explicit step between SDK install and gradle build, with an inline note that gradle itself is fine without it (it reads `sdk.dir` from `local.properties`) — sourcing is for `adb`/`sdkmanager` shell use. `tools/setup.sh`'s post-completion message tightened to a two-line "do these in order" hint.
+
 ### Fixed
 - `src/patches/patch_y1_apk.py`: silence androguard 4.x's loguru output. The existing `logging.getLogger("androguard").setLevel(logging.ERROR)` line only suppresses the stdlib `logging` channel; androguard 4.0 switched to [loguru](https://github.com/Delgan/loguru) for its own logging, which ignores stdlib config. Result: a flood of `androguard | INFO`-style lines on every APK parse. Added a try/except `from loguru import logger; logger.disable("androguard")` block at module load (preventive — only if loguru is available transitively) and again immediately before the `from androguard.core.apk import APK` inside `get_apk_info` (just-in-time — covers the case where the module-load attempt hit ImportError because androguard hadn't been pulled in yet). Both stdlib + loguru channels now silenced.
 
