@@ -408,12 +408,14 @@ def main():
     output_path.write_bytes(data)
     output_md5 = md5(data)
 
+    output_md5_mismatch = False
     if OUTPUT_MD5 is None:
         out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
     elif output_md5 == OUTPUT_MD5:
         out_tag = "[OK — matches expected]"
     else:
         out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
+        output_md5_mismatch = True
 
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")
@@ -423,6 +425,12 @@ def main():
     print(f"  adb reboot")
     print(f"  sdptool browse <Y1_BT_ADDR>   # expect: AVCTP 0x0103, AV Remote Version: 0x0104")
     print(f"  logcat | grep -E 'tg_feature|ct_feature|cardinality|CONNECT_CNF'")
+
+    if output_md5_mismatch and not args.skip_md5:
+        print("\nERROR: output MD5 doesn't match expected. Output was written but"
+              " the patcher's expected hash is stale or the patch logic diverged."
+              " Pass --skip-md5 to suppress.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
