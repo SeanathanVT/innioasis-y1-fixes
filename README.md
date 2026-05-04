@@ -42,21 +42,23 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory:
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) inside the repo's `staging/` directory:
 
 ```bash
-mkdir -p ~/y1-patches
-cp /path/to/rom.zip ~/y1-patches/
-
 ./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
 ( cd src/su && make )               # one-time: build the setuid-su binary for --root
 
-./apply.bash --artifacts-dir ~/y1-patches --all
+mkdir -p staging
+cp /path/to/rom.zip staging/
+
+./apply.bash --all
 ```
 
 `--all` = `--adb --bluetooth --music-apk --remove-apps --root`. `--avrcp` is intentionally excluded (see [Status](#status)).
 
 The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selected patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
+
+`staging/` is `.gitignore`d. **`git clean -dfx` will nuke it** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
 
 Opting in to `--avrcp` (known broken) additionally needs the Android SDK + `Y1MediaBridge.apk` build:
 

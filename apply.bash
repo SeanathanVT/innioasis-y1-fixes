@@ -13,11 +13,13 @@
 
 show_help() {
   cat <<EOF
-Usage: ./apply.bash --artifacts-dir <path> [FLAGS] [TOOLING]
+Usage: ./apply.bash [--artifacts-dir <path>] [FLAGS] [TOOLING]
 
-Stage rom.zip in --artifacts-dir (validated against KNOWN_FIRMWARES MD5
-manifest), then pick one or more of the flags below. Run tools/setup.sh
-once first to clone MTKClient and create the patcher venv.
+Stage rom.zip in ./staging/ (default) or pass --artifacts-dir <path>
+pointing at a directory containing rom.zip (validated against
+KNOWN_FIRMWARES MD5 manifest). Then pick one or more of the flags below.
+Run tools/setup.sh once first to clone MTKClient and create the patcher
+venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable / debuggable in build.prop
@@ -52,7 +54,8 @@ elsewhere or are testing alternate builds):
                             (androguard). Default: tools/python-venv/.
 
 Quick example:
-  ./apply.bash --artifacts-dir ~/y1-patches --all
+  cp /path/to/rom.zip ./staging/
+  ./apply.bash --all
 
 For details on the patches applied by each flag, see README.md and docs/PATCHES.md.
 EOF
@@ -150,12 +153,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate mandatory --artifacts-dir flag
+# --artifacts-dir falls back to ./staging/ inside the repo if not given.
+# Lets the common case skip the flag: `cp rom.zip staging/ && ./apply.bash --all`.
+# Power users with artifacts on a different drive / multiple firmwares keep
+# passing --artifacts-dir explicitly.
+PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "$PATH_ARTIFACTS" ]]; then
-  echo "Error: --artifacts-dir is mandatory and must be specified"
-  echo ""
-  show_help
-  exit 1
+  PATH_ARTIFACTS="${PATH_SCRIPT_DIR}/staging"
+  if [[ ! -d "$PATH_ARTIFACTS" ]]; then
+    echo "Error: no rom.zip staged."
+    echo ""
+    echo "  Either:"
+    echo "    mkdir -p ${PATH_ARTIFACTS} && cp /path/to/rom.zip ${PATH_ARTIFACTS}/"
+    echo "  Or:"
+    echo "    ./apply.bash --artifacts-dir <your-path> [FLAGS]"
+    echo ""
+    show_help
+    exit 1
+  fi
 fi
 
 # If no patching flags specified, show help
@@ -195,7 +210,7 @@ KNOWN_FIRMWARES=(
   "3.0.2|473991dadeb1a8c4d25902dee9ee362b|1f7920228a20c01ad274c61c94a8cf36|82657db82578a38c6f1877e02407127a|com.innioasis.y1_3.0.2.apk"
 )
 
-PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# (PATH_SCRIPT_DIR set earlier — used by the --artifacts-dir staging fallback.)
 
 PATH_MOUNT="/mnt/y1-devel"
 
