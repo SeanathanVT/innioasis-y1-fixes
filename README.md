@@ -38,7 +38,7 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. Run `tools/setup.sh` once to clone MTKClient and create the patcher Python venv. Build `src/Y1MediaBridge/` once if using `--avrcp`, and `src/su/` once if using `--root` — the bash picks up both build outputs directly.
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. Run `tools/setup.sh` once to clone MTKClient and create the patcher Python venv. Build `src/su/` once if using `--root` — the bash picks up the build output directly.
 
 ```bash
 mkdir -p ~/y1-patches
@@ -47,28 +47,22 @@ cp /path/to/rom.zip ~/y1-patches/
 # One-time tooling setup (clones MTKClient, creates Python venvs):
 ./tools/setup.sh
 
-# One-time Android SDK install if using --avrcp (Linux/macOS only;
-# see docs/ANDROID-SDK.md for Windows or manual setup):
-./tools/install-android-sdk.sh
-
-# Source the env file so adb/sdkmanager are on PATH (gradle build itself
-# doesn't need this — sdk.dir is in src/Y1MediaBridge/local.properties —
-# but adb is handy for verifying the install on the device later).
-source tools/android-sdk-env.sh
-
-# Build src/Y1MediaBridge/ once if using --avrcp.
-# The --stop is defensive: gradle's daemon caches the JVM it started with,
-# so if you ever change JAVA_HOME between builds, --stop ensures a fresh
-# daemon picks up the new JDK. Cheap on a fresh setup.
-( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
-
-# Build src/su/ once if using --root:
+# Build src/su/ once (for --root):
 ( cd src/su && make )
 
 ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
 ```
 
-`rom.zip` is the only required artifact. Subdirectory build outputs (`src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk`, `src/su/build/su`) and the contents of `tools/` are picked up automatically; rebuild any of them only when their sources change.
+`--all` runs `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. `--avrcp` is **intentionally excluded** — it is known broken (see Status). If you opt in to `--avrcp` for the user-space proxy work, you'll also need the Android SDK + `Y1MediaBridge.apk` build:
+
+```bash
+# Only needed if opting in to --avrcp (known-broken):
+./tools/install-android-sdk.sh
+source tools/android-sdk-env.sh
+( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
+```
+
+`rom.zip` is the only required artifact. Subdirectory build outputs (`src/su/build/su`, plus `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` if using `--avrcp`) and the contents of `tools/` are picked up automatically; rebuild any of them only when their sources change.
 
 If you have MTKClient installed elsewhere (or want to test against an alternate checkout), pass `--mtkclient-dir <path>` to the bash, or set `MTKCLIENT_DIR` in your environment. Same for the patcher Python venv via `--python-venv <path>`.
 
@@ -79,12 +73,12 @@ The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, appli
 | Flag | Effect |
 |---|---|
 | <nobr>`--adb`</nobr> | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| <nobr>`--avrcp`</nobr> | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`). |
-| <nobr>`--bluetooth`</nobr> | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
+| <nobr>`--avrcp`</nobr> | **KNOWN BROKEN** — auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so`; installs `Y1MediaBridge.apk` (build via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`). Empirically regresses stock AVRCP 1.0 PASSTHROUGH (play/pause from car/headset stops working) without delivering 1.4 metadata as intended. **Excluded from `--all`.** Available as opt-in for the user-space proxy work that aims to fix the underlying issue (see [`INVESTIGATION.md`](INVESTIGATION.md) "Conclusion (2026-05-04)"). |
+| <nobr>`--bluetooth`</nobr> | Pairing-essential config: `audio.conf` `Enable=Source,Control,Target` + `Master=true`; clears `auto_pairing.conf` blacklists; removes `scoSocket` from `blacklist.conf`; sets `ro.bluetooth.class=2098204` + `ro.bluetooth.profiles.a2dp.source.enabled=true` + `ro.bluetooth.profiles.avrcp.target.enabled=true`. **No longer sets `persist.bluetooth.avrcpversion=avrcp14`** — that property committed the device to an AVRCP version mtkbt couldn't deliver and is dropped pending the wire-protocol work. |
 | <nobr>`--music-apk`</nobr> | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
 | <nobr>`--remove-apps`</nobr> | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
 | <nobr>`--root`</nobr> | Installs the prebuilt `src/su/build/su` setuid-root binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` is untouched; root is obtained post-flash via `adb shell /system/xbin/su`. |
-| <nobr>`--all`</nobr> | All flags above. |
+| <nobr>`--all`</nobr> | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. **`--avrcp` is intentionally excluded** — see warning above. |
 
 Run `./innioasis-y1-fixes.bash --help` for the full flag listing.
 
@@ -110,15 +104,29 @@ Independent of the patch flow, the repo ships a small set of post-root diagnosti
 
 Both tools are diagnostic-only — neither is invoked by the patch flow. Output is intentionally text-friendly so it can be saved alongside the brief / `INVESTIGATION.md` for any future investigator.
 
-## Status (2026-05-04)
+## Status (2026-05-04 — conclusive negative on the byte-patch path)
 
-All four binary patch scripts produce on-wire-verified output (sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033) and the Java layer initializes correctly for AVRCP 1.4. The v1.8.0 setuid-`su` root path is hardware-verified (`adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`).
+The **byte-patch approach to enabling AVRCP 1.4 metadata is exhausted and was a net regression**. Five distinct (version, features) combinations were tested across multiple flash cycles against Sonos Roam (a known-working AVRCP CT validated against Pixel 4):
 
-**Cardinality:0 persists in all real-world test scenarios** — confirmed against the car (Kia/Bolt) with the additional functional symptom that **CT→Y1 PASS_THROUGH play/pause is also broken**, not just notification-cosmetic. Pixel 4 (TG) ↔ Sonos Roam (CT) works correctly with full metadata transfer, providing a free working-reference A/B for future diagnosis.
+| Configuration | SDP wire | Peer engages? | Cardinality |
+|---|---|---|---|
+| Stock 1.0 + features `0x01` | `09 01 00 09 00 01` | No AVRCP COMMAND, but **PASSTHROUGH play/pause works** | 0 |
+| `--avrcp` standard 1.4 + features `0x33` | `09 01 04 09 00 33` | One COMMAND sent, dropped, peer gives up; **PASSTHROUGH also broken** | 0 |
+| Pixel-shape 1.5 + features `0xd1` | `09 01 05 09 00 d1` | Peer tries browse PSM 0x1B, mtkbt rejects, peer gives up | 0 |
+| Pixel-1.3 mimic 1.3 + features `0x01` | `09 01 03 09 00 01` | One COMMAND sent, dropped, peer gives up | 0 |
+| Features-only 1.4 + features `0x01` | `09 01 04 09 00 01` | Same dropped-COMMAND failure | 0 |
 
-The previous "primary lead" — `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096` (= `0x1000`) — turned out to be a phantom: the same value is set on `ACTIVATE_CNF` 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator. The Browsing-bit experiment (testing `SupportedFeatures = 0x0033 → 0x0073`) was confirmed to land on the wire but did not change peer behaviour; that hypothesis is also dead.
+**mtkbt is internally an AVRCP 1.0 implementation** (`[AVRCP] AVRCP V10 compiled`, `AVRCP register activeVersion:10`). Byte-patches successfully shape the on-wire SDP record but cannot make the daemon process AVRCP 1.3+ COMMANDs that peers send in response. Pixel 4 ↔ Sonos confirms Sonos works with bare-1.3 (features `0x01`) when the implementation actually delivers 1.3 commands; the gate on the Y1 is **mtkbt's command-handling layer, not the SDP advertisement**.
 
-The active investigation is now the SDP-record A/B between Pixel 4 (working TG) and Y1 (broken TG) from a Linux laptop with `sdptool browse`. See [INVESTIGATION.md](INVESTIGATION.md) for the full narrative including refuted hypotheses; live working notes (Trace #1 through #11) are maintained externally to the repo.
+Consequences:
+
+- **`--avrcp` is now a known-broken opt-in.** It still runs if you specify it explicitly (useful for the user-space proxy work — see below) but is excluded from `--all` and prints a warning at startup.
+- **`--bluetooth` still applies** (essential for car pairing) but no longer sets `persist.bluetooth.avrcpversion=avrcp14`. The remaining audio.conf / blacklist / ro.bluetooth.class properties are untouched.
+- **The recommended baseline is `--all` (without `--avrcp`)**: pairing works, A2DP audio works, AVRCP 1.0 PASSTHROUGH (play/pause/skip) works, **no metadata over BT**. `Y1MediaBridge.apk` is not installed by default — it's coupled to `--avrcp` because it provides the Java-side metadata source MtkBt's now-disabled patches needed.
+
+**The path forward to actual AVRCP 1.4 metadata is the user-space proxy work** documented in [`INVESTIGATION.md`](INVESTIGATION.md) "Conclusion (2026-05-04) — path forward". In short: patch a trampoline at mtkbt's silent-drop site for unhandled AVRCP COMMANDs (candidates `0x6d9ba`, `0x0513a4` per the brief), forward the raw AVCTP bytes to a Java-side AVRCP COMMAND parser/responder, and route the response back via mtkbt's outbound AVCTP path. Diagnostic infrastructure for this work (`@btlog` tap + parser + dual-capture + post-root probe) is in place — see the **Diagnostics** section. Estimated 2-4 weeks of focused binary-RE + Android Bluetooth work.
+
+`--root` (v1.8.0+, hardware-verified) and `--music-apk` / `--remove-apps` / `--adb` are unaffected by the AVRCP conclusion and continue to work as documented.
 
 ## Stock firmware manifest
 

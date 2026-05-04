@@ -539,3 +539,98 @@ This trace was deferred during 2026-05-02 work as low-priority ("almost certainl
 - HCI snoop / btsnoop — no root, eliminated in earlier passes.
 - mtkbt instrumentation patches (insert log calls at choke points) — possible but very high effort, low marginal value over #1 + #2.
 - boot.img init scripts — won't reveal anything about the AVRCP path.
+
+---
+
+# Conclusion (2026-05-04) — byte-patch path exhausted, proxy work needed
+
+After the original investigation in this document concluded the gate was upstream of the op_code=4 dispatcher, post-root work in May 2026 added the diagnostic infrastructure to actually see what mtkbt and peers were doing on the wire (`@btlog` tap, `dual-capture`, `btlog-parse`, `probe-postroot` — all in `tools/` and `src/btlog-dump/`) and ran a series of byte-patch experiments to test increasingly informed hypotheses about the SDP-record shape required by working AVRCP CTs.
+
+**The byte-patch hypothesis is conclusively dead.** Five distinct (version, features) combinations were tested:
+
+| Configuration | SDP wire | AVCTP RX behaviour | Cardinality | PASSTHROUGH play/pause |
+|---|---|---|---|---|
+| Stock 1.0 + features `0x01` | `09 01 00 09 00 01` | Sonos doesn't bother sending AVRCP COMMANDs at all (no AVCTP_EVENT:4) | 0 | **WORKS** |
+| `--avrcp` standard 1.4 + features `0x33` | `09 01 04 09 00 33` | Sonos sends one COMMAND, mtkbt drops silently, Sonos gives up | 0 | **broken** |
+| Pixel-shape 1.5 + features `0xd1` (Browsing+MultiPlayer) | `09 01 05 09 00 d1` | Sonos tries to open AVCTP browse PSM `0x1B`, mtkbt has no listener (`+@l2cap: cannot find psm:0x1b!`), Sonos gives up | 0 | broken |
+| Pixel-1.3 mimic 1.3 + features `0x01` | `09 01 03 09 00 01` | Same dropped-COMMAND failure as 1.4 | 0 | broken |
+| Features-only at 1.4 + features `0x01` | `09 01 04 09 00 01` | Same | 0 | broken |
+
+**Reference: Pixel 4 ↔ Sonos works at every AVRCP version 1.3-1.6** (per user-supplied `sdptool browse F0:5C:77:E4:30:62` outputs at each Developer-Options-forced version, captured 2026-05-04). The Pixel at 1.3 advertises features `0x0001` — *the same value Y1 stock advertises* — and Sonos receives full title/artist/album metadata + responds correctly to `PASS_THROUGH` play/pause. The difference is not the SDP advertisement. It is mtkbt's command-handling layer.
+
+**mtkbt is internally an AVRCP 1.0 implementation.** Compile-time string `[AVRCP] AVRCP V10 compiled` + runtime log `AVRCP register activeVersion:10` are accurate. The opcode dispatchers identified earlier in this document (`0x3060c`, `0x30708`, `0x3096c` at op_code=4 = `GetCapabilities`) exist in the binary, but no inbound packet from any peer ever reaches them, regardless of how we shape the SDP record. The earlier "the gate is upstream of the dispatcher table" framing was correct; the missing piece was that there is no upstream gate that byte-patches can flip — mtkbt's AVCTP RX simply does not classify AVRCP COMMAND PDUs as anything its 1.0 dispatcher recognises, and silently drops them.
+
+The brief's previous primary lead, `MSG_ID_BT_AVRCP_CONNECT_CNF result:4096`, was also disproven during this work: the same `0x1000` value is emitted at `MSG_ID_BT_AVRCP_ACTIVATE_CNF` time 3 ms after the JNI sends `ACTIVATE_REQ`, before any peer is involved. `0x1000` is mtkbt's standard "request acknowledged" status code, not a peer-feedback or "feature degraded" indicator.
+
+## Repo state after the conclusion (commits 2690d05 → 7077b5a → bd36160 → this one)
+
+- `--avrcp` is now a known-broken opt-in. It runs if explicitly requested (useful for the proxy work below) and prints a startup warning. **Excluded from `--all`.**
+- `--bluetooth` no longer sets `persist.bluetooth.avrcpversion=avrcp14`. The remaining audio.conf / `auto_pairing.conf` / `blacklist.conf` / `ro.bluetooth.class` / `ro.bluetooth.profiles.*.enabled` properties are pairing-essential and stay.
+- The recommended baseline is `--all` (without `--avrcp`): pairing works, A2DP audio works, AVRCP 1.0 PASSTHROUGH (play/pause/skip) works, no metadata over BT.
+- Diagnostic infrastructure remains in-tree: `src/btlog-dump/` (no-libc ARM ELF that taps mtkbt's `@btlog` socket), `tools/btlog-parse.py` (frame decoder), `tools/dual-capture.sh` (btlog + logcat correlated capture), `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh` (one-shot post-root sanity probe).
+- Failed-experiment scripts (Browsing-bit, Pixel-shape, Pixel-1.3 mimic, features-only) have been removed from `tools/`. Their results are summarised in the table above and in `CHANGELOG.md`.
+
+## Path forward — user-space AVRCP proxy
+
+Three architecture sketches were considered when the byte-patch path was first ruled out (see commit messages around `bd36160`). The smallest viable one is sketched below.
+
+**Approach: trampoline mtkbt's silent-drop site to forward unhandled AVRCP COMMANDs raw to the JNI; respond from Java.**
+
+The work is roughly four phases.
+
+### Phase 1 — Identify the silent-drop site (gdbserver, ~1-2 days)
+
+Push an API-17 ARM AOSP-prebuilt `gdbserver` to `/data/local/tmp/`, attach to the live `mtkbt` PID. PIE base is `0x400c1000` (per `tools/probe-postroot.sh` §1; verify on each session — the base is per-process not per-firmware). Set breakpoints on the candidate drop sites identified in the brief:
+
+- `0x6d9ba` (live `0x40128d9a`) — AVCTP RX handler
+- `0x6cf30` (live `0x40128f30`) — AVCTP_ConnectRsp
+- `0x0513a4` (live `0x401123a4`) — `[AVRCP][WRN] AVRCP receive too many data. Throw it!` log site
+- `0x29e98` (live `0x400d2e98`) — TBH callback dispatcher
+
+Trigger the failure scenario (Y1 ↔ Sonos with `--avrcp` on so peer engages enough to send a COMMAND). Whichever breakpoint fires when the single `AVCTP_EVENT:4` arrives is the candidate drop site. Dump the inbound packet bytes from r0/r1/stack at that point and confirm they're a real AVRCP COMMAND PDU (op_code 0x4 = GetCapabilities is the most likely first command).
+
+`tools/probe-postroot.sh` §11 confirmed SELinux is absent on this firmware and §12 confirmed `/proc/sys/kernel/yama/ptrace_scope` doesn't exist either, so ptrace attach is unblocked.
+
+### Phase 2 — Patch a trampoline (~3-5 days)
+
+At the identified drop site, replace the silent-drop branch with a `bl <trampoline>`. The trampoline (in a code-cave or appended to mtkbt's `.text`) marshals the inbound packet into a new IPC message — e.g., msg_id 999 — and writes it to the existing `bt.ext.adp.avrcp` abstract socket that already carries msg_ids JNI↔mtkbt. The brief documents the IPC framing and the existing send wrapper at vaddr `0x511c0`.
+
+Verification: `tools/btlog-parse.py` should now show the AVRCP COMMAND bytes flowing through the new msg_id; logcat should show the JNI receiving msg_id 999 (or whatever ID we pick).
+
+### Phase 3 — Java AVRCP COMMAND parser/responder (~1-2 weeks)
+
+Extend `Y1MediaBridge` (or add a sibling Java component) to:
+1. Receive the new msg_id from the JNI via the existing Binder path.
+2. Parse the AVCTP+AVRCP frame: AV/C control header, op_code, PDU ID, transId, params.
+3. Build the appropriate AVRCP RSP for at minimum:
+   - `GetCapabilities` (PDU `0x10`)
+   - `RegisterNotification` (PDU `0x31`) for `EVENT_TRACK_CHANGED` (`0x05`) and `EVENT_PLAYBACK_STATUS_CHANGED` (`0x01`)
+   - `GetPlayStatus` (PDU `0x30`)
+   - `GetElementAttributes` (PDU `0x20`)
+4. Use the existing `IBTAvrcpMusic`/`IBTAvrcpMusicCallback` plumbing for the actual track/state data — Y1MediaBridge already sources this from the music player via broadcast intents and RCC.
+
+`PASS_THROUGH` (op_code `0x7C`) commands should pass through to the existing 1.0 path so play/pause keeps working — don't intercept those.
+
+### Phase 4 — Outbound RSP path (~3-5 days)
+
+Patch a second trampoline (or extend the first) that takes a Java-built AVRCP RSP frame, marshals it into an outbound msg_id, and routes it through mtkbt's existing AVCTP TX path so it reaches the peer's AVCTP channel. The IPC dispatcher map in the brief (msg_ids 500-611, second TBH at vaddr `0x518ac`) names the candidate slots.
+
+### Verification target
+
+`tools/dual-capture.sh` against Sonos should show:
+- `cardinality:N` non-zero in `MMI_AVRCP: ACTION_REG_NOTIFY for notifyChange ... cardinality:N`
+- `MMI_AVRCP: registerNotificationInd eventId:` firing for events 1/2/9
+- Sonos app showing title/artist/album for the currently-playing track
+- Y1MediaBridge log lines `notifyAvrcpCallbacks code=N targets=>=1` (currently always logs `targets=0` because MtkBt never registers a callback — the proxy work fixes this by routing peer-side `RegisterNotification` through Java)
+- Physical play/pause from Sonos still working (PASSTHROUGH path unbroken)
+
+### Known prerequisites for the next agent
+
+- Read this entire document top-down — the failure modes earlier in the doc (G1/G2 SIGSEGV at NULL, blanket xlog redirect being too fragile, etc.) are real and re-tripping them wastes days.
+- Re-verify `tools/probe-postroot.sh` outputs against the device before assuming PIE base / PSM list / SELinux state. The probe is idempotent and cheap.
+- The diagnostic tooling (`@btlog` tap, dual-capture, parser) was developed against firmware 3.0.2. If `KNOWN_FIRMWARES` gains a new entry, re-verify the framing against that firmware before trusting parsed output.
+- `--avrcp` MUST be enabled to test the proxy work (otherwise the Y1MediaBridge bridge isn't installed and there's no Java endpoint for the proxy to deliver to). The startup warning is informational; ignore it for the duration of the proxy work.
+
+### Estimated total
+
+2-4 weeks of focused work for someone with ARM Thumb-2 binary RE + Android Bluetooth experience. The diagnostic infrastructure is in place; the gating risk is finding a viable drop site in mtkbt that we can hook without destabilising AVCTP. If no clean site exists (e.g., the drop happens inline rather than at a callable choke point), the alternative is the larger Option 2 — disable mtkbt's AVRCP entirely and bind PSM 0x17 from Java — which is a multi-month rewrite.

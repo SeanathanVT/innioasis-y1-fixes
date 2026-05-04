@@ -21,15 +21,27 @@ once first to clone MTKClient and create the patcher venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable / debuggable in build.prop
-  --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk.
-                 Build first:
+  --avrcp        KNOWN BROKEN. Patches the AVRCP 1.4 binaries + installs
+                 Y1MediaBridge.apk. Empirically regresses stock AVRCP 1.0
+                 PASSTHROUGH (play/pause from car/headset stops working) and
+                 does not deliver 1.4 metadata as intended — mtkbt's compiled
+                 AVRCP layer is 1.0-only and the byte-patch path can shape
+                 the SDP advertisement but cannot make the daemon process
+                 1.3+ commands. See INVESTIGATION.md "2026-05-04 conclusion"
+                 and the Diagnostics section of README.md. Excluded from
+                 --all. Available as an opt-in for the user-space proxy
+                 work that aims to fix the underlying issue. Build first:
                    cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
-  --bluetooth    Configure audio.conf / build.prop Bluetooth entries
+  --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
+                 + build.prop entries that are essential for car/peer pairing.
+                 Does NOT set persist.bluetooth.avrcpversion — that property
+                 is dropped pending the AVRCP wire-protocol work.
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
-  --all          All of the above
+  --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
+                 NOT --avrcp (see warning above).
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed
@@ -75,6 +87,15 @@ while [[ $# -gt 0 ]]; do
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
+      echo "WARNING: --avrcp is known-broken on this device. It regresses stock"
+      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/"
+      echo "         headset) without delivering the AVRCP 1.4 metadata it"
+      echo "         intends to enable. mtkbt is internally a 1.0 implementation"
+      echo "         and byte-patches cannot make it process 1.3+ commands."
+      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the"
+      echo "         full negative result and the user-space proxy path that"
+      echo "         aims to fix this. Continuing only because you asked." >&2
+      echo
       shift
       ;;
     --bluetooth)
@@ -98,7 +119,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      FLAG_AVRCP=true
+      # --avrcp is intentionally excluded — known broken; opt-in only via
+      # explicit --avrcp. See innioasis-y1-fixes.bash --help.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
@@ -496,9 +518,13 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
 
   echo "Configuring build.prop for Bluetooth fixes.."
+  # persist.bluetooth.avrcpversion is intentionally NOT set — see
+  # INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
+  # AVRCP 1.4 advertisement that mtkbt can't actually deliver, regressing
+  # the working AVRCP 1.0 PASSTHROUGH. The remaining properties are
+  # essential for car/peer pairing and stay regardless of AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
-persist.bluetooth.avrcpversion=avrcp14
 ro.bluetooth.class=2098204
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
