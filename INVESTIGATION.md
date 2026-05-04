@@ -651,7 +651,7 @@ This appendix preserves the granular detail from a working-notes brief that was 
 | Stock player | Proprietary Innioasis app — logcat prefix `DebugY1` |
 | BT stack | `MtkBt.apk` → `libextavrcp_jni.so` → `libextavrcp.so` → `mtkbt` daemon via Unix socket |
 | BT chip | MT6627 (combo: BT + Wi-Fi + FM + GPS), HCI-only — chip firmware is the WMT common subsystem and contains zero AVRCP code |
-| System access | Full system-partition write via mtkclient + loop-mount. Flash cycle 5–10 min. |
+| System access | Full system-partition write via MTKClient + loop-mount. Flash cycle 5–10 min. |
 | ADB root | **Hardware-verified 2026-05-04 via setuid `/system/xbin/su`** (v1.8.0+). Stock `/sbin/adbd` untouched. |
 
 ## Architecture
