@@ -596,7 +596,11 @@ if [[ "$FLAG_MUSIC_APK" == true ]]; then
   patch_in_place_y1_apk "app/${FILENAME_MUSIC_APK}"
 fi
 
-# Remove unnecessary APK files
+# Remove unnecessary APK files. Patterns are passed to `find -name` so they
+# match both flat files (Foo.apk) and subdirectories (Foo/) using shell-glob
+# syntax. Previously these were rm with bash globs, but the path was double-
+# quoted (suppressing expansion), so --remove-apps silently no-op'd. find
+# does its own pattern matching independent of shell quoting.
 if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   echo "Removing unnecessary APK files.."
   apps_to_remove=(
@@ -621,7 +625,7 @@ if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   )
 
   for app in "${apps_to_remove[@]}"; do
-    sudo rm -rf "${PATH_MOUNT}/app/${app}"
+    sudo find "${PATH_MOUNT}/app" -maxdepth 1 -name "${app}" -exec rm -rf {} +
   done
 fi
 
