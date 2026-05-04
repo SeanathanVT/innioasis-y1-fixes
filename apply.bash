@@ -668,7 +668,10 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   fi
 
   echo "Activating MTKClient venv (${PATH_MTKCLIENT}).."
-  cd "${PATH_MTKCLIENT}"
+  if ! cd "${PATH_MTKCLIENT}"; then
+    echo "ERROR: failed to cd into ${PATH_MTKCLIENT} (permissions?)" >&2
+    exit 1
+  fi
   # shellcheck disable=SC1091
   source "${PATH_VENV_MTKCLIENT}/bin/activate"
 
