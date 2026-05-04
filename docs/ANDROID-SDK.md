@@ -93,26 +93,30 @@ EOF
 source ~/.bashrc
 ```
 
-**JDK requirement:** AGP 8.7.3 (used by `src/Y1MediaBridge/`) supports **JDK 17 through 21**. JDK 22+ — including the LTS-track JDK 25 — is likely to fail with `Toolchain ... does not provide the required capabilities: [JAVA_COMPILER]`. **JDK 17 is the safest choice.** Install:
+**JDK requirement:** **JDK 17 minimum.** Confirmed working: JDK 17, 21, and 25 with the in-tree AGP 8.7.3 + Gradle 9.5.0. Install whatever you prefer:
 
-- Rocky / Alma / RHEL / Fedora: `sudo dnf install -y java-17-openjdk-devel`
-- Debian / Ubuntu: `sudo apt install -y openjdk-17-jdk`
-- Arch: `sudo pacman -S jdk17-openjdk`
+- Rocky / Alma / RHEL / Fedora: `sudo dnf install -y java-17-openjdk-devel` (or `java-21-openjdk-devel`, `java-25-openjdk-devel`)
+- Debian / Ubuntu: `sudo apt install -y openjdk-17-jdk` (or `openjdk-21-jdk`, etc.)
+- Arch: `sudo pacman -S jdk17-openjdk` (or `jdk21-openjdk`, `jdk-openjdk` for latest)
 
-The `-devel` (Rocky/Fedora) / `-jdk` (Debian) package suffix matters — the plain `java-17-openjdk` / `openjdk-17-jre` packages ship the JRE only, no `javac`. Gradle reports the same `[JAVA_COMPILER]` capability error in that case.
-
-After installing, point `JAVA_HOME` at the JDK directory. Adjust per distro:
+**The `-devel` (Rocky/Fedora) / `-jdk` (Debian) package suffix matters** — the plain `java-N-openjdk` / `openjdk-N-jre` packages ship the JRE only, no `javac`. Gradle reports `Toolchain ... does not provide the required capabilities: [JAVA_COMPILER]` if you only have the JRE. Install the dev/JDK variant.
 
 ```bash
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk    # Rocky/Fedora
-# or  /usr/lib/jvm/java-17-openjdk-amd64         # Debian/Ubuntu
-# or  /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home   # macOS
+# Adjust path per distro; example for Rocky/Fedora with JDK 25:
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk
+$JAVA_HOME/bin/javac -version    # verify: javac 25.x.x
 
-$JAVA_HOME/bin/javac -version    # verify: javac 17.x.x
-echo 'export JAVA_HOME=/usr/lib/jvm/java-17-openjdk' >> ~/.bashrc    # persist
+# Persist for new shells:
+echo 'export JAVA_HOME=/usr/lib/jvm/java-25-openjdk' >> ~/.bashrc
 ```
 
-If you have a newer JDK already (e.g. JDK 25) installed system-wide, leave it — just set `JAVA_HOME` to the JDK 17 install for this project. The `tools/install-android-sdk.sh` script's `sdkmanager` calls work fine on JDK 22+; only the `./gradlew` build step is constrained.
+**Gotcha — gradle daemon caching:** Gradle keeps its build daemon alive across invocations. If you change `JAVA_HOME` (or upgrade the underlying JDK install) after a build has run, the cached daemon keeps the *old* JVM. You'll get the same `[JAVA_COMPILER]` error even though the new `JAVA_HOME` is fine. Stop the daemon before rebuilding:
+
+```bash
+( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
+```
+
+`./gradlew --version` shows the current daemon JVM under `Daemon JVM:`; if that doesn't match your `JAVA_HOME`, run `--stop`.
 
 ## macOS
 

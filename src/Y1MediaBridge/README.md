@@ -39,16 +39,18 @@ also leaves `debuggable=true` in the manifest, which is useful for a research
 device — you can JDWP-attach to the running service.
 
 Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 8.7.3, `compileSdk 34`,
-`minSdk 17`, `targetSdk 17`, Java 8 bytecode. **Build with JDK 17–21.** AGP
-8.7.3 supports that range; JDK 22+ (including 25) fails with `Toolchain ...
-does not provide the required capabilities: [JAVA_COMPILER]`. See
+`minSdk 17`, `targetSdk 17`, Java 8 bytecode. **Build with JDK 17 or newer.**
+Confirmed working: JDK 17, 21, and 25. See
 [`../../docs/ANDROID-SDK.md`](../../docs/ANDROID-SDK.md#jdk-requirement) for
-install instructions.
+install instructions and the gradle-daemon-caching gotcha to watch for if you
+ever change `JAVA_HOME`.
 
-A manual `javac --release 8 -cp android-34.jar` type-check of the source passes
-cleanly with zero errors (only the expected "--release 8 is obsolete" note from
-JDK 21 and a `RemoteControlClient` deprecation note — that deprecation is
-intentional, we target API 17).
+The Java-8-bytecode target produces a "source/target version 8 is obsolete"
+warning on JDK 21+. That's informational, not an error — Java 8 bytecode is
+fully compatible with Android 4.2.2 via D8/dex, and we deliberately target
+API 17. The warning will become an error in some future JDK; if/when that
+happens, raise `sourceCompatibility` / `targetCompatibility` in
+`app/build.gradle` to whatever JDK that release picks as the new floor.
 
 ## Install as system app
 

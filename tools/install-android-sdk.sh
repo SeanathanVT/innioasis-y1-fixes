@@ -93,20 +93,6 @@ EOF
         echo "       Set JAVA_HOME to a JDK 17+ install or upgrade your default JDK." >&2
         exit 1
     fi
-    if [[ "${JAVA_MAJOR}" -gt 21 ]]; then
-        cat >&2 <<EOM
-WARNING: JDK ${JAVA_MAJOR} detected. AGP 8.7.3 (used by src/Y1MediaBridge/) supports
-         JDK 17–21; JDK ${JAVA_MAJOR} is likely to fail at build time with
-         "Toolchain ... does not provide the required capabilities: [JAVA_COMPILER]"
-         or similar. Install JDK 17 and set JAVA_HOME before running gradle:
-           sudo dnf install -y java-17-openjdk-devel        # Rocky/Alma/RHEL/Fedora
-           sudo apt install -y openjdk-17-jdk               # Debian/Ubuntu
-           export JAVA_HOME=/usr/lib/jvm/java-17-openjdk    # adjust per distro
-         (sdkmanager itself works fine on JDK ${JAVA_MAJOR}; this only
-         affects \`./gradlew assembleDebug\` later.)
-
-EOM
-    fi
 
     # --- Download + unpack cmdline-tools ----------------------------------
     # Skip the download+unpack if a prior run already produced a working
