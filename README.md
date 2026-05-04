@@ -76,13 +76,13 @@ The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, appli
 
 | Flag | Effect |
 |---|---|
-| `--adb` | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| `--avrcp` | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleDebug`). |
-| `--bluetooth` | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
-| `--music-apk` | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
-| `--remove-apps` | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
-| `--root` | Installs the prebuilt `src/su/build/su` setuid-root binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` is untouched; root is obtained post-flash via `adb shell /system/xbin/su`. |
-| `--all` | All flags above. |
+| <nobr>`--adb`</nobr> | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
+| <nobr>`--avrcp`</nobr> | Auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so` from the mount; installs `Y1MediaBridge.apk` from `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` (build once via `cd src/Y1MediaBridge && ./gradlew assembleDebug`). |
+| <nobr>`--bluetooth`</nobr> | Configures `audio.conf`, clears BT blacklists, sets `persist.bluetooth.avrcpversion=avrcp14` and the AVRCP target/source profile flags. |
+| <nobr>`--music-apk`</nobr> | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
+| <nobr>`--remove-apps`</nobr> | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
+| <nobr>`--root`</nobr> | Installs the prebuilt `src/su/build/su` setuid-root binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` is untouched; root is obtained post-flash via `adb shell /system/xbin/su`. |
+| <nobr>`--all`</nobr> | All flags above. |
 
 Run `./innioasis-y1-fixes.bash --help` for the full flag listing.
 
