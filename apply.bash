@@ -357,8 +357,12 @@ print_known_firmwares() {
 
 # Stages stock binaries extracted from the mount + their patched output before write-back.
 PATH_TMP_STAGE="$(mktemp -d -t koensayr.XXXXXX)"
+MOUNTED=false
 
 _cleanup() {
+  if [[ "$MOUNTED" == true ]]; then
+    sudo umount "${PATH_MOUNT}" 2>/dev/null && MOUNTED=false
+  fi
   [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null
   rm -rf "${PATH_TMP_STAGE}"
 }
@@ -504,7 +508,20 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   dst="${PATH_ARTIFACTS}/${FILENAME_SYSTEM_IMAGE_TARGET}"
   cp "$PATH_SYSTEM_IMG" "$dst"
   echo "Mounting working copy of system.img.."
-  sudo mount -o loop "$dst" "${PATH_MOUNT}/"
+  if [[ ! -d "${PATH_MOUNT}" ]]; then
+    sudo mkdir -p "${PATH_MOUNT}"
+  fi
+  if mountpoint -q "${PATH_MOUNT}" 2>/dev/null; then
+    echo "ERROR: ${PATH_MOUNT} already has something mounted on it. Run:" >&2
+    echo "       sudo umount ${PATH_MOUNT}" >&2
+    echo "       and re-run." >&2
+    exit 1
+  fi
+  if ! sudo mount -o loop "$dst" "${PATH_MOUNT}/"; then
+    echo "ERROR: failed to loop-mount $dst at ${PATH_MOUNT}" >&2
+    exit 1
+  fi
+  MOUNTED=true
 fi
 
 # Enable ADB debugging
@@ -611,6 +628,7 @@ fi
 if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
   echo "Unmounting development system.img.."
   sudo umount "${PATH_MOUNT}"
+  MOUNTED=false
 
   # Flash via MTKClient. Resolve location + venv only now (no point checking
   # earlier — the patch steps don't need MTKClient).
