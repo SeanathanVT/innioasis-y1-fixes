@@ -72,8 +72,10 @@ Severities seen: `0x12` (xlog text — `[AVRCP]`, `[AVCTP]`, `[L2CAP]`, `[ME]`, 
 
 ## See also
 
+- [`../../README.md`](../../README.md) — project overview
 - [`../../tools/dual-capture.sh`](../../tools/dual-capture.sh) — primary capture wrapper (btlog + logcat in one shot)
 - [`../../tools/btlog-parse.py`](../../tools/btlog-parse.py) — frame decoder
 - [`../../tools/probe-postroot.sh`](../../tools/probe-postroot.sh) — post-root sanity probe (PIE base, `/proc/net/unix`, ptrace policy, etc.)
 - [`../su/`](../su/) — sister no-libc ARM ELF; same toolchain + style
 - [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — AVRCP investigation context
+- [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog

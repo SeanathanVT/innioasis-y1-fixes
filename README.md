@@ -25,7 +25,7 @@ The bash entry-point at the root dispatches into source trees under `src/`:
 - [`src/btlog-dump/`](src/btlog-dump/) — `@btlog` abstract-socket reader (diagnostic; same toolchain as `src/su/`). Build via `cd src/btlog-dump && make`
 - `tools/` — setup, diagnostic, and release helpers
 - `staging/` — default `--artifacts-dir`; drop `rom.zip` here
-- `reference/` — manually-extracted reference files for v3.0.2
+- `reference/` — example post-patch state of `/system/build.prop` and `/system/etc/bluetooth/*.conf` from a v3.0.2 device that's been through the bash. Reference snapshot only — not consumed by the build, not stock baselines. Useful for diff'ing against a freshly-patched device to spot drift
 
 ## Quick start
 

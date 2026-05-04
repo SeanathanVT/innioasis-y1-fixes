@@ -29,7 +29,7 @@ FLAGS:
                  does not deliver 1.4 metadata as intended — mtkbt's compiled
                  AVRCP layer is 1.0-only and the byte-patch path can shape
                  the SDP advertisement but cannot make the daemon process
-                 1.3+ commands. See INVESTIGATION.md "2026-05-04 conclusion"
+                 1.3+ commands. See INVESTIGATION.md "Conclusion (2026-05-04)"
                  and the Diagnostics section of README.md. Excluded from
                  --all. Available as an opt-in for the user-space proxy
                  work that aims to fix the underlying issue. Build first:
