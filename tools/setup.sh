@@ -11,6 +11,26 @@
 
 set -euo pipefail
 
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+Usage: ./tools/setup.sh
+
+One-time tooling provisioner. Idempotent — re-runnable, skips work
+already done. Clones MTKClient at the pinned ref into tools/mtkclient/
+and creates two Python venvs (tools/mtkclient/venv/ for MTKClient deps,
+tools/python-venv/ for patcher deps from python-requirements.txt).
+
+To force a refresh of either subdir, delete it and re-run:
+    rm -rf tools/mtkclient && ./tools/setup.sh
+    rm -rf tools/python-venv && ./tools/setup.sh
+
+To bump the MTKClient pin, change MTKCLIENT_REF below and re-run.
+EOF
+        exit 0
+        ;;
+esac
+
 # Pinned MTKClient version. Last verified working: v2.1.4.1.
 # Bump after verifying compatibility against this repo's flash flow.
 # (List upstream tags: git ls-remote --tags https://github.com/bkerler/mtkclient.git)

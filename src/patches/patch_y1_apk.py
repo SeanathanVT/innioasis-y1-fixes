@@ -192,6 +192,10 @@ def get_apk_info(apk_path: str):
     return (pkg, ver.group(1) if ver else "unknown")
 
 # -- Step 0: Pre-flight -------------------------------------------------------
+if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+    sys.stdout.write(__doc__ or "")
+    sys.exit(0)
+
 print("=" * 60)
 print("Innioasis Y1 Artist->Album patch")
 print("=" * 60)

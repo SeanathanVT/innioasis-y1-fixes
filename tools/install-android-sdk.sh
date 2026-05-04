@@ -20,6 +20,38 @@
 
 set -euo pipefail
 
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+Usage: ./tools/install-android-sdk.sh
+
+Auto-installer for the Android SDK (Linux/macOS only). Required for
+building src/Y1MediaBridge/ via Gradle; needed only for the --avrcp
+flag (which is currently known-broken — see INVESTIGATION.md).
+
+Detects existing \$ANDROID_HOME and short-circuits; otherwise
+downloads Google's pinned commandline-tools archive into
+tools/android-sdk/, accepts licenses, and installs platforms;android-34
++ build-tools;34.0.0 + platform-tools.
+
+Always writes:
+  - src/Y1MediaBridge/local.properties (sdk.dir=…) — Gradle reads this
+  - tools/android-sdk-env.sh — sourceable for ANDROID_HOME on PATH
+
+Disk:    ~1.5–2 GB
+Network: ~1.7 GB (skipped if cmdline-tools already present)
+Prereq:  JDK 17+, curl, unzip
+
+To force a fresh download: rm -rf tools/android-sdk && ./tools/install-android-sdk.sh
+To bump the cmdline-tools pin: change CMDLINE_TOOLS_BUILD below and re-run.
+
+By running this script you implicitly accept Google's Android SDK
+licenses — it gets piped "yes" for every component.
+EOF
+        exit 0
+        ;;
+esac
+
 # Pinned commandline-tools build. To bump: change CMDLINE_TOOLS_BUILD,
 # delete tools/android-sdk, re-run.
 CMDLINE_TOOLS_BUILD="14742923"

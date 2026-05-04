@@ -28,10 +28,39 @@
 
 set -euo pipefail
 
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+Usage: ./tools/release.sh <semver> [--push]
+
+Release helper. Bumps apply.bash's # Version: header, renames
+[Unreleased] in CHANGELOG.md to [<version>] - YYYY-MM-DD (and prepends
+a new empty [Unreleased] above), commits both, and creates an
+annotated v<version> tag at HEAD.
+
+Refuses to proceed unless: <semver> is strict X.Y.Z (no v prefix,
+no pre-release / build metadata), the working tree is clean,
+no tag named v<semver> already exists, and [Unreleased] has at least
+one bulleted entry.
+
+After printing a summary, sleeps 3 seconds before mutating anything
+(Ctrl-C to abort during that window).
+
+Examples:
+    ./tools/release.sh 2.0.0          # commits + tags locally
+    ./tools/release.sh 2.0.0 --push   # also pushes main + the new tag
+
+Without --push, prints the manual push commands at the end.
+EOF
+        exit 0
+        ;;
+esac
+
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "usage: $0 <semver> [--push]" >&2
     echo "  e.g. $0 2.0.0" >&2
     echo "  e.g. $0 2.0.0 --push" >&2
+    echo "  see: $0 --help" >&2
     exit 1
 fi
 
