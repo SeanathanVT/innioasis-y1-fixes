@@ -45,8 +45,9 @@ device — you can JDWP-attach to the running service.
 
 Toolchain pinned in the tree: Gradle 9.5.0 wrapper, AGP 9.2.0, `compileSdk 34`,
 `minSdk 17`, `targetSdk 17`, Java 8 bytecode. **Build with JDK 17 or newer.**
-Confirmed working: JDK 17, 21, and 25 (with the previous AGP 8.7.3 — re-verify
-on AGP 9.2.0). See
+Confirmed working on AGP 9.2.0: JDK 25. Earlier AGP 8.7.3 builds also
+confirmed JDK 17 and 21; both should still work on AGP 9.2.0 but only 25 has
+been re-verified end-to-end. See
 [`../../docs/ANDROID-SDK.md`](../../docs/ANDROID-SDK.md#jdk-requirement) for
 install instructions and the gradle-daemon-caching gotcha to watch for if you
 ever change `JAVA_HOME`.

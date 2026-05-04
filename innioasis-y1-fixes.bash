@@ -22,7 +22,8 @@ once first to clone MTKClient and create the patcher venv.
 FLAGS:
   --adb          Set persist.service.adb.enable / debuggable in build.prop
   --avrcp        Patch the AVRCP 1.4 binaries; install Y1MediaBridge.apk.
-                 Build first: cd src/Y1MediaBridge && ./gradlew assembleDebug
+                 Build first:
+                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
   --bluetooth    Configure audio.conf / build.prop Bluetooth entries
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
@@ -471,7 +472,7 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
   if [[ ! -f "$src_y1mb" ]]; then
     echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew assembleDebug" >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
     exit 1
   fi
 

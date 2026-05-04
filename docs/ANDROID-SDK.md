@@ -40,7 +40,7 @@ Everything below is the **manual fallback**: how to install the SDK by hand if t
 | Component | Why |
 |---|---|
 | `platforms;android-34` | `compileSdk 34` in `src/Y1MediaBridge/app/build.gradle` |
-| `build-tools;34.0.0` | AGP 8.7.3 invokes `aapt2`, `d8`, `zipalign` from this version |
+| `build-tools;34.0.0` | AGP 9.2.0 invokes `aapt2`, `d8`, `zipalign` from this version |
 | `platform-tools` | `adb` for device interaction. Optional for *building*, mandatory for the post-flash verification steps. |
 
 Total fresh install (cmdline-tools + the three components above): **~1.5–2 GB** before Gradle pulls its own dependency cache (another ~500 MB on first `./gradlew assembleDebug`).
@@ -93,7 +93,7 @@ EOF
 source ~/.bashrc
 ```
 
-**JDK requirement:** **JDK 17 minimum.** Confirmed working: JDK 17, 21, and 25 with the in-tree AGP 8.7.3 + Gradle 9.5.0. Install whatever you prefer:
+**JDK requirement:** **JDK 17 minimum.** Confirmed working: JDK 17, 21, and 25 with the in-tree AGP 9.2.0 + Gradle 9.5.0. Install whatever you prefer:
 
 - Rocky / Alma / RHEL / Fedora: `sudo dnf install -y java-17-openjdk-devel` (or `java-21-openjdk-devel`, `java-25-openjdk-devel`)
 - Debian / Ubuntu: `sudo apt install -y openjdk-17-jdk` (or `openjdk-21-jdk`, etc.)
