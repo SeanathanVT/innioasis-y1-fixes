@@ -145,7 +145,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "Error: Unknown option '$1'"
+      echo "ERROR: Unknown option '$1'" >&2
       echo ""
       show_help
       exit 1
@@ -161,13 +161,13 @@ PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "$PATH_ARTIFACTS" ]]; then
   PATH_ARTIFACTS="${PATH_SCRIPT_DIR}/staging"
   if [[ ! -d "$PATH_ARTIFACTS" ]]; then
-    echo "Error: no rom.zip staged."
-    echo ""
-    echo "  Either:"
-    echo "    mkdir -p ${PATH_ARTIFACTS} && cp /path/to/rom.zip ${PATH_ARTIFACTS}/"
-    echo "  Or:"
-    echo "    ./apply.bash --artifacts-dir <your-path> [FLAGS]"
-    echo ""
+    echo "ERROR: no rom.zip staged." >&2
+    echo "" >&2
+    echo "  Either:" >&2
+    echo "    mkdir -p ${PATH_ARTIFACTS} && cp /path/to/rom.zip ${PATH_ARTIFACTS}/" >&2
+    echo "  Or:" >&2
+    echo "    ./apply.bash --artifacts-dir <your-path> [FLAGS]" >&2
+    echo "" >&2
     show_help
     exit 1
   fi
