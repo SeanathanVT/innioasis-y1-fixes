@@ -223,9 +223,7 @@ print(f"  Java:     {java}")
 # -- Step 1: Locate or download apktool ---------------------------------------
 os.makedirs(WORK_DIR, exist_ok=True)
 
-if APKTOOL_JAR == _NPM_APKTOOL:
-    print(f"\n[1/4] Using bundled apktool ({os.path.getsize(APKTOOL_JAR):,} bytes)")
-elif not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
+if not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
     print(f"\n[1/4] Downloading apktool from GitHub...")
     try:
         urllib.request.urlretrieve(APKTOOL_URL, APKTOOL_JAR)
