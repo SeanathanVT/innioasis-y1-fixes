@@ -3,7 +3,7 @@
 patch_mtkbt.py — Patch stock mtkbt binary → mtkbt.patched
 
 Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: (regenerated on each build — see script output)
+Output md5: d47c904063e7d201f626cf2cc3ebd50b
 
 --- Status (2026-05-04 — superseded the 2026-05-03 cardinality:0 narrative below) ---
 
