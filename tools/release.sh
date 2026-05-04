@@ -4,14 +4,19 @@
 #
 # What it does (in order):
 #   1. Validate args: $1 is a semver (X.Y.Z); --push is optional.
-#   2. Check the working tree is clean.
+#   2. Check the working tree is clean (+ git config user.name/.email set,
+#      + python3 available — both used later).
 #   3. Check no tag named v$VERSION already exists.
 #   4. Check CHANGELOG.md has a [Unreleased] section with at least one bullet
 #      under it (refuse to release an empty CHANGELOG entry).
-#   5. Update the bash's `# Version:` header in-place.
+#   5. Verify apply.bash's `# Version:` header matches the expected regex
+#      (so step 7a's sed doesn't fail mid-flight).
 #   6. Rename `## [Unreleased]` to `## [$VERSION] - YYYY-MM-DD` in CHANGELOG.md
-#      and prepend a fresh empty `## [Unreleased]` block above it.
-#   7. Commit both files with message "Release v$VERSION. See CHANGELOG.md for notes."
+#      and prepend a fresh empty `## [Unreleased]` block above it. (This step
+#      is the more-likely-to-fail of the two mutations, so it runs first —
+#      if it fails, apply.bash hasn't been touched yet.)
+#   7a. Update the bash's `# Version:` header in-place.
+#   7b. Commit both files with message "Release v$VERSION. See CHANGELOG.md for notes."
 #   8. Create annotated tag `v$VERSION` at HEAD with the same message.
 #   9. If --push given: push the commit and the tag together. Otherwise print
 #      the commands you'd run to push later.
@@ -157,20 +162,18 @@ echo "Proceeding in 3 seconds (Ctrl-C to abort)..."
 sleep 3
 echo
 
-# 5 — bump the bash's # Version: header (in-place, but verify after)
+# 5 — verify the bash's # Version: header has the expected format BEFORE
+# mutating CHANGELOG. This used to mutate apply.bash first and then run the
+# Python rewrite — if the Python regex missed (malformed [Unreleased] line),
+# the script bailed with apply.bash already mutated and CHANGELOG not, in
+# violation of the "never partial-applies" promise.
 if ! grep -qE '^# Version:[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' "$BASH_FILE"; then
     echo "ERROR: $BASH_FILE has no '# Version:' header in the expected format." >&2
     exit 1
 fi
-sed -i.bak -E "s/^# Version:[[:space:]]+[0-9]+\\.[0-9]+\\.[0-9]+[[:space:]]*$/# Version:   $VERSION/" "$BASH_FILE"
-rm -f "$BASH_FILE.bak"
-if ! grep -qE "^# Version:[[:space:]]+$VERSION[[:space:]]*$" "$BASH_FILE"; then
-    echo "ERROR: bash version bump didn't take. Check $BASH_FILE." >&2
-    exit 1
-fi
-echo "[bumped] $BASH_FILE  '# Version: $VERSION'"
 
-# 6 — rename [Unreleased] → [$VERSION] and add new empty [Unreleased] above
+# 6 — rewrite CHANGELOG first (the more-likely-to-fail step). If the regex
+# misses or anything else goes wrong, the apply.bash sed below never runs.
 python3 - "$CHANGELOG" "$VERSION" "$TODAY" <<'PYEOF'
 import sys, re, pathlib
 path, version, today = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -188,7 +191,16 @@ pathlib.Path(path).write_text(new)
 PYEOF
 echo "[updated] $CHANGELOG  [Unreleased] → [$VERSION] - $TODAY (and new empty [Unreleased])"
 
-# 7 — commit
+# 7a — bump the bash's # Version: header (now safe — CHANGELOG is already written)
+sed -i.bak -E "s/^# Version:[[:space:]]+[0-9]+\\.[0-9]+\\.[0-9]+[[:space:]]*$/# Version:   $VERSION/" "$BASH_FILE"
+rm -f "$BASH_FILE.bak"
+if ! grep -qE "^# Version:[[:space:]]+$VERSION[[:space:]]*$" "$BASH_FILE"; then
+    echo "ERROR: bash version bump didn't take. Check $BASH_FILE." >&2
+    exit 1
+fi
+echo "[bumped] $BASH_FILE  '# Version: $VERSION'"
+
+# 7b — commit
 COMMIT_MSG="Release v$VERSION. See CHANGELOG.md for notes."
 git add "$BASH_FILE" "$CHANGELOG"
 git commit -m "$COMMIT_MSG"
