@@ -321,9 +321,9 @@ print_known_firmwares() {
   for row in "${KNOWN_FIRMWARES[@]}"; do
     IFS='|' read -ra parts <<< "$row"
     echo "  v${parts[0]}:" >&2
-    echo "    system.img:  ${parts[1]}  (raw / post-simg2img)" >&2
-    echo "    boot.img:    ${parts[2]}" >&2
-    echo "    rom.zip:     ${parts[3]}  (reference only, not consumed)" >&2
+    echo "    rom.zip:     ${parts[3]}  (primary input — this is what's MD5-validated)" >&2
+    echo "    system.img:  ${parts[1]}  (extracted from rom.zip; raw / post-simg2img)" >&2
+    echo "    boot.img:    ${parts[2]}  (in rom.zip; not consumed since v1.7.0)" >&2
     echo "    music APK:   app/${parts[4]}" >&2
   done
 }
