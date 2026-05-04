@@ -105,6 +105,15 @@ if [ -z "$(git config user.name)" ] || [ -z "$(git config user.email)" ]; then
     exit 1
 fi
 
+# 2c — python3 available (used to rewrite the CHANGELOG; without this check,
+# the script would mutate apply.bash's # Version: header and then fail at
+# the python3 invocation, leaving a half-applied state in violation of the
+# "never partial-applies" promise above).
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 not in PATH (used to rewrite CHANGELOG.md)." >&2
+    exit 1
+fi
+
 # 3 — tag doesn't already exist
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "ERROR: tag '$TAG' already exists." >&2
