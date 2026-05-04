@@ -22,7 +22,7 @@ Run tools/setup.sh once first to clone MTKClient and create the patcher
 venv.
 
 FLAGS:
-  --adb          Set persist.service.adb.enable / debuggable in build.prop
+  --adb          Set persist.service.adb.enable + persist.service.debuggable
   --avrcp        KNOWN BROKEN. Patches the AVRCP 1.4 binaries + installs
                  Y1MediaBridge.apk. Empirically regresses stock AVRCP 1.0
                  PASSTHROUGH (play/pause from car/headset stops working) and

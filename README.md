@@ -59,7 +59,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 
 | Flag | Effect |
 |---|---|
-| `--adb` | Set `persist.service.adb.enable` + `debuggable` in `build.prop`. |
+| `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
 | `--avrcp` | **KNOWN BROKEN.** Patches AVRCP 1.4 binaries + installs `Y1MediaBridge.apk`. Excluded from `--all`. See [`INVESTIGATION.md`](INVESTIGATION.md). |
 | `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
 | `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
