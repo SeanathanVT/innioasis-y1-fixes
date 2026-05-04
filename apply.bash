@@ -502,9 +502,9 @@ if [[ "$FLAG_ROOT" == true ]]; then
   sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"
 fi
 
-# Enable AVRCP 1.4 support (WIP - pending flash verification)
+# Apply AVRCP 1.4 patches (KNOWN BROKEN — see warning at flag-parse and INVESTIGATION.md)
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Enabling AVRCP 1.4 support (WIP).."
+  echo "Applying AVRCP 1.4 patches (known broken; opt-in only).."
 
   src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
   if [[ ! -f "$src_y1mb" ]]; then

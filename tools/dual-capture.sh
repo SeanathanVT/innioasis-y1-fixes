@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # dual-capture — capture mtkbt's @btlog stream AND logcat simultaneously,
-# so the result:4096 line in logcat can be timestamp-correlated with the
-# mtkbt-side AVCTP/AVRCP/L2CAP traffic that produced it.
+# with per-line timestamps in both so they can be correlated post-hoc.
 #
 # Output layout:
 #   <out_dir>/btlog.bin        — raw @btlog stream (parse with tools/btlog-parse.py)
-#   <out_dir>/logcat.txt       — `logcat -v threadtime -b all` (filtered to BT-relevant tags)
+#   <out_dir>/logcat.txt       — `logcat -v threadtime` against -b main -b system -b radio
+#                                (Android 4.2.2 doesn't support `-b all`)
 #   <out_dir>/dmesg-before.txt — kernel ring buffer at start
 #   <out_dir>/dmesg-after.txt  — kernel ring buffer at stop
 #   <out_dir>/getprop.txt      — getprop snapshot
@@ -14,12 +14,14 @@
 #   ./tools/dual-capture.sh                              # interactive — Ctrl-C to stop
 #   ./tools/dual-capture.sh <out_dir>                    # custom output dir
 #
-# While capturing: do the AVRCP scenario on the device. Toggle BT off/on,
-# then pair/connect to the peer that exhibits cardinality:0 / result:4096.
+# Default <out_dir>: /tmp/koensayr-dual-<UTC-timestamp>/
+#
+# While capturing: drive the AVRCP scenario on the device (toggle BT off/on,
+# pair/connect, change tracks, etc.). Pre-req: --root flashed.
 
 set -u
 
-OUT="${1:-/work/logs/dual-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT="${1:-/tmp/koensayr-dual-$(date -u +%Y%m%dT%H%M%SZ)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOL_BIN="$REPO_ROOT/src/btlog-dump/build/btlog-dump"

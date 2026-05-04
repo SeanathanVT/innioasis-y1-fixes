@@ -77,7 +77,7 @@ if [[ "${NEED_INSTALL}" == "true" ]]; then
 
     if ! command -v java >/dev/null 2>&1; then
         cat >&2 <<EOF
-ERROR: java not found in PATH. JDK 17+ required by sdkmanager and AGP 8.x.
+ERROR: java not found in PATH. JDK 17+ required by sdkmanager and AGP 9.x.
 Install:
   Rocky / Alma / RHEL / Fedora: sudo dnf install -y java-17-openjdk-devel
   Debian / Ubuntu:              sudo apt install -y openjdk-17-jdk

@@ -2,7 +2,7 @@
 """
 btlog-parse.py — decode the structured stream from mtkbt's @btlog socket.
 
-Frame format (reverse-engineered from /work/logs/btlog-test1.txt):
+Frame format (reverse-engineered from a captured stream — see Trace #9 in INVESTIGATION.md):
 
   off  size  field
   ---  ----  -----
