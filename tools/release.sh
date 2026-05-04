@@ -19,19 +19,19 @@
 # Exits non-zero on any precondition failure; never partial-applies.
 #
 # Usage:
-#   ./tools/release.sh 1.11.0
-#   ./tools/release.sh 1.11.0 --push
+#   ./tools/release.sh 2.0.0
+#   ./tools/release.sh 2.0.0 --push
 #
 # After:
 #   git log --oneline --decorate=short --simplify-by-decoration | head
-#   # → shows v1.11.0 alongside the rest of the version anchors
+#   # → shows v2.0.0 alongside the rest of the version anchors
 
 set -euo pipefail
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "usage: $0 <semver> [--push]" >&2
-    echo "  e.g. $0 1.11.0" >&2
-    echo "  e.g. $0 1.11.0 --push" >&2
+    echo "  e.g. $0 2.0.0" >&2
+    echo "  e.g. $0 2.0.0 --push" >&2
     exit 1
 fi
 
