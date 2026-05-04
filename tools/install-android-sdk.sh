@@ -95,43 +95,68 @@ EOF
     fi
 
     # --- Download + unpack cmdline-tools ----------------------------------
-
-    ZIP_URL="https://dl.google.com/android/repository/commandlinetools-${OS}-${CMDLINE_TOOLS_BUILD}_latest.zip"
-    ZIP_FILE="${TOOLS_DIR}/.cmdline-tools-${OS}-${CMDLINE_TOOLS_BUILD}.zip"
-
-    echo "[install-sdk] Downloading cmdline-tools build ${CMDLINE_TOOLS_BUILD} (~150MB).."
-    echo "              ${ZIP_URL}"
-    curl -L --fail -o "${ZIP_FILE}" "${ZIP_URL}"
-
-    if command -v sha256sum >/dev/null 2>&1; then
-        ZIP_SHA256=$(sha256sum "${ZIP_FILE}" | awk '{print $1}')
-    else
-        ZIP_SHA256=$(shasum -a 256 "${ZIP_FILE}" | awk '{print $1}')
-    fi
-    echo "[install-sdk] Downloaded sha256: ${ZIP_SHA256}"
-    echo "              (Compare against developer.android.com/studio#command-tools if you want"
-    echo "               supply-chain verification before proceeding.)"
-
-    echo "[install-sdk] Unpacking to ${SDK_DIR}/cmdline-tools/latest/.."
-    mkdir -p "${SDK_DIR}/cmdline-tools"
-    ( cd "${SDK_DIR}/cmdline-tools" && unzip -q "${ZIP_FILE}" )
-
-    # Google's zip extracts to cmdline-tools/cmdline-tools/, but sdkmanager
-    # expects cmdline-tools/latest/. Rename the inner dir.
-    mv "${SDK_DIR}/cmdline-tools/cmdline-tools" "${SDK_DIR}/cmdline-tools/latest"
-    rm "${ZIP_FILE}"
+    # Skip the download+unpack if a prior run already produced a working
+    # sdkmanager — only the component install + license-accept will retry.
 
     SDKMANAGER="${SDK_DIR}/cmdline-tools/latest/bin/sdkmanager"
-    [[ -x "${SDKMANAGER}" ]] || { echo "ERROR: sdkmanager not where expected at ${SDKMANAGER}" >&2; exit 1; }
+
+    if [[ -x "${SDKMANAGER}" ]]; then
+        echo "[install-sdk] cmdline-tools/latest/bin/sdkmanager already present — skipping download."
+    else
+        # Wipe any half-extracted state from a prior failed run.
+        rm -rf "${SDK_DIR}/cmdline-tools"
+
+        ZIP_URL="https://dl.google.com/android/repository/commandlinetools-${OS}-${CMDLINE_TOOLS_BUILD}_latest.zip"
+        ZIP_FILE="${TOOLS_DIR}/.cmdline-tools-${OS}-${CMDLINE_TOOLS_BUILD}.zip"
+
+        echo "[install-sdk] Downloading cmdline-tools build ${CMDLINE_TOOLS_BUILD} (~150MB).."
+        echo "              ${ZIP_URL}"
+        curl -L --fail -o "${ZIP_FILE}" "${ZIP_URL}"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            ZIP_SHA256=$(sha256sum "${ZIP_FILE}" | awk '{print $1}')
+        else
+            ZIP_SHA256=$(shasum -a 256 "${ZIP_FILE}" | awk '{print $1}')
+        fi
+        echo "[install-sdk] Downloaded sha256: ${ZIP_SHA256}"
+
+        echo "[install-sdk] Unpacking to ${SDK_DIR}/cmdline-tools/latest/.."
+        mkdir -p "${SDK_DIR}/cmdline-tools"
+        ( cd "${SDK_DIR}/cmdline-tools" && unzip -q -o "${ZIP_FILE}" )
+
+        # Google's zip extracts to cmdline-tools/cmdline-tools/, but sdkmanager
+        # expects cmdline-tools/latest/. Rename the inner dir.
+        mv "${SDK_DIR}/cmdline-tools/cmdline-tools" "${SDK_DIR}/cmdline-tools/latest"
+        rm "${ZIP_FILE}"
+
+        [[ -x "${SDKMANAGER}" ]] || { echo "ERROR: sdkmanager not where expected at ${SDKMANAGER}" >&2; exit 1; }
+    fi
+
+    # --- Accept licenses (with explicit error visibility) -----------------
+    # No stdout redirect: any sdkmanager error is visible immediately.
+    # Wrapped so a non-zero exit prints a useful manual-debug pointer
+    # instead of silently aborting via set -e.
 
     echo "[install-sdk] Accepting Google's Android SDK licenses (yes | sdkmanager --licenses).."
-    yes | "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses >/dev/null
+    if ! yes | "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses; then
+        cat >&2 <<EOM
+ERROR: sdkmanager --licenses failed.
+       Run manually with full output to see why:
+         "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses
+       Common causes: JDK <17 picked up via JAVA_HOME, or no network.
+       Current java: $(java -version 2>&1 | head -n1)
+EOM
+        exit 1
+    fi
 
     echo "[install-sdk] Installing platforms;${ANDROID_PLATFORM}, build-tools;${BUILD_TOOLS_VERSION}, platform-tools (~1.5GB).."
-    "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --install \
+    if ! "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --install \
         "platforms;${ANDROID_PLATFORM}" \
         "build-tools;${BUILD_TOOLS_VERSION}" \
-        "platform-tools"
+        "platform-tools"; then
+        echo "ERROR: sdkmanager --install failed (see output above)." >&2
+        exit 1
+    fi
 fi
 
 # --- Wire SDK_TARGET into local.properties (always) -----------------------
