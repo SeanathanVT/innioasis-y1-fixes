@@ -38,49 +38,44 @@ Per-patch byte-level reference: **[docs/PATCHES.md](docs/PATCHES.md)**.
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory. Run `tools/setup.sh` once to clone MTKClient and create the patcher Python venv. Build `src/su/` once if using `--root` — the bash picks up the build output directly.
+Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) in a directory:
 
 ```bash
 mkdir -p ~/y1-patches
 cp /path/to/rom.zip ~/y1-patches/
 
-# One-time tooling setup (clones MTKClient, creates Python venvs):
-./tools/setup.sh
-
-# Build src/su/ once (for --root):
-( cd src/su && make )
+./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
+( cd src/su && make )               # one-time: build the setuid-su binary for --root
 
 ./innioasis-y1-fixes.bash --artifacts-dir ~/y1-patches --all
 ```
 
-`--all` runs `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. `--avrcp` is **intentionally excluded** — it is known broken (see Status). If you opt in to `--avrcp` for the user-space proxy work, you'll also need the Android SDK + `Y1MediaBridge.apk` build:
+`--all` = `--adb --bluetooth --music-apk --remove-apps --root`. `--avrcp` is intentionally excluded (see [Status](#status)).
+
+The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selected patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
+
+Opting in to `--avrcp` (known broken) additionally needs the Android SDK + `Y1MediaBridge.apk` build:
 
 ```bash
-# Only needed if opting in to --avrcp (known-broken):
-./tools/install-android-sdk.sh
-source tools/android-sdk-env.sh
+./tools/install-android-sdk.sh && source tools/android-sdk-env.sh
 ( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
 ```
 
-`rom.zip` is the only required artifact. Subdirectory build outputs (`src/su/build/su`, plus `src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk` if using `--avrcp`) and the contents of `tools/` are picked up automatically; rebuild any of them only when their sources change.
-
-If you have MTKClient installed elsewhere (or want to test against an alternate checkout), pass `--mtkclient-dir <path>` to the bash, or set `MTKCLIENT_DIR` in your environment. Same for the patcher Python venv via `--python-venv <path>`.
-
-The bash extracts `system.img` from `rom.zip`, mounts it as a loop device, applies the selected patches in-place, unmounts, and flashes the patched image via mtkclient.
+Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env) if you have those installed elsewhere.
 
 ### Flags
 
 | Flag | Effect |
 |---|---|
-| <nobr>`--adb`</nobr> | Sets `persist.service.adb.enable=1` and `persist.service.debuggable=1` in `build.prop`. |
-| <nobr>`--avrcp`</nobr> | **KNOWN BROKEN** — auto-extracts and patches `mtkbt`, `MtkBt.odex`, `libextavrcp.so`, `libextavrcp_jni.so`; installs `Y1MediaBridge.apk` (build via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`). Empirically regresses stock AVRCP 1.0 PASSTHROUGH (play/pause from car/headset stops working) without delivering 1.4 metadata as intended. **Excluded from `--all`.** Available as opt-in for the user-space proxy work that aims to fix the underlying issue (see [`INVESTIGATION.md`](INVESTIGATION.md) "Conclusion (2026-05-04)"). |
-| <nobr>`--bluetooth`</nobr> | Pairing-essential config: `audio.conf` `Enable=Source,Control,Target` + `Master=true`; clears `auto_pairing.conf` blacklists; removes `scoSocket` from `blacklist.conf`; sets `ro.bluetooth.class=2098204` + `ro.bluetooth.profiles.a2dp.source.enabled=true` + `ro.bluetooth.profiles.avrcp.target.enabled=true`. **No longer sets `persist.bluetooth.avrcpversion=avrcp14`** — that property committed the device to an AVRCP version mtkbt couldn't deliver and is dropped pending the wire-protocol work. |
-| <nobr>`--music-apk`</nobr> | Auto-extracts and patches the Y1 music player APK (Artist→Album navigation). |
-| <nobr>`--remove-apps`</nobr> | Removes bloatware APKs (`ApplicationGuide`, `BackupRestoreConfirmation`, `BasicDreams`, etc.). |
-| <nobr>`--root`</nobr> | Installs the prebuilt `src/su/build/su` setuid-root binary at `/system/xbin/su` (mode 06755, root:root). Stock `/sbin/adbd` is untouched; root is obtained post-flash via `adb shell /system/xbin/su`. |
-| <nobr>`--all`</nobr> | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. **`--avrcp` is intentionally excluded** — see warning above. |
+| `--adb` | Set `persist.service.adb.enable` + `debuggable` in `build.prop`. |
+| `--avrcp` | **KNOWN BROKEN.** Patches AVRCP 1.4 binaries + installs `Y1MediaBridge.apk`. Excluded from `--all`. See [`INVESTIGATION.md`](INVESTIGATION.md). |
+| `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
+| `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
+| `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
+| `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). |
+| `--all` | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. Excludes `--avrcp`. |
 
-Run `./innioasis-y1-fixes.bash --help` for the full flag listing.
+Run `./innioasis-y1-fixes.bash --help` for full flag detail.
 
 ### Manual patcher invocation
 
@@ -92,17 +87,12 @@ The patchers can be run standalone from `src/patches/`. Each verifies the input 
 
 ## Diagnostics
 
-Independent of the patch flow, the repo ships a small set of post-root diagnostic tools used to investigate AVRCP behaviour on hardware. Pre-req: `--root` flashed.
+Post-root tools for investigating AVRCP behaviour on hardware. None are invoked by the patch flow. Pre-req: `--root` flashed.
 
-- **`src/btlog-dump/`** + **`tools/dual-capture.sh`** + **`tools/btlog-parse.py`** — the `@btlog` tap. `mtkbt` runs an undocumented `SOCK_STREAM` listener at the abstract socket `@btlog` that pushes `__xlog_buf_printf` output (every `[AVRCP]` / `[AVCTP]` / `[L2CAP]` / `[ME]` log line that's invisible to `logcat`) plus decoded HCI command/event traffic. `dual-capture.sh` pushes the in-tree reader, runs it as root alongside `logcat -v threadtime`, and writes both streams to a timestamped output dir; `btlog-parse.py` decodes the structured binary stream and supports `--tag-include` / `--tag-exclude` filters. Replaces the conventional `persist.bt.virtualsniff` btsnoop knob (which breaks BT init on this device) and the `__xlog_buf_printf → logcat` redirect attempts (which crash mtkbt; see [INVESTIGATION.md](INVESTIGATION.md) G1/G2). One-shot:
-  ```bash
-  ( cd src/btlog-dump && make )                         # one-time build
-  ./tools/dual-capture.sh ~/captures/connect-attempt    # Ctrl-C when scenario complete
-  ./tools/btlog-parse.py ~/captures/connect-attempt/btlog.bin --tag-include AVRCP --tag-include AVCTP
-  ```
-- **`tools/probe-postroot.sh`** + **`tools/probe-postroot-device.sh`** — one-shot post-root sanity probe. Pushes a small device-side script that enumerates: `mtkbt` PIE base via `/proc/<pid>/maps`, `/proc/mtprintk` and other MTK debug-node accessibility, canonical btsnoop file paths, all `bt`/`bluetooth`/`snoop` `getprop` keys, `/dev/stp*` permissions, `dmesg` AVRCP/AVCTP/STP traces, gdbserver presence, SELinux mode, ptrace policy, and `/proc/net/unix` for the `bt.ext.adp.*` and `@btlog` abstract sockets. Useful to re-verify against a new firmware version if `KNOWN_FIRMWARES` ever gains a 3.0.3+ entry.
+- **`@btlog` tap** — `src/btlog-dump/` (no-libc ARM ELF) + `tools/dual-capture.sh` (push + run + capture btlog & logcat) + `tools/btlog-parse.py` (decode framing). See [`src/btlog-dump/README.md`](src/btlog-dump/README.md).
+- **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, MTK debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets. Re-run against any new `KNOWN_FIRMWARES` entry.
 
-Both tools are diagnostic-only — neither is invoked by the patch flow. Output is intentionally text-friendly so captures can be archived alongside [`INVESTIGATION.md`](INVESTIGATION.md) for any future investigator.
+Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`INVESTIGATION.md`](INVESTIGATION.md).
 
 ## Status
 
