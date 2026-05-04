@@ -48,7 +48,6 @@ Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](
 ./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
 ( cd src/su && make )               # one-time: build the setuid-su binary for --root
 
-mkdir -p staging
 cp /path/to/rom.zip staging/
 
 ./apply.bash --all
