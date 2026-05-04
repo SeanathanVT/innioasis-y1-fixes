@@ -387,7 +387,10 @@ patch_in_place_bytes() {
   fi
 
   if [[ -f "${patched}" ]]; then
-    sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+    if ! sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"; then
+      echo "ERROR: failed to write patched ${mount_rel} back to mount" >&2
+      exit 1
+    fi
     sudo chmod "${mode}" "${PATH_MOUNT}/${mount_rel}"
     sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
   fi
@@ -423,7 +426,10 @@ patch_in_place_y1_apk() {
     exit 1
   fi
 
-  sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"
+  if ! sudo cp "${patched}" "${PATH_MOUNT}/${mount_rel}"; then
+    echo "ERROR: failed to write patched ${mount_rel} back to mount" >&2
+    exit 1
+  fi
   sudo chmod 644 "${PATH_MOUNT}/${mount_rel}"
   sudo chown root:root "${PATH_MOUNT}/${mount_rel}"
 }
@@ -550,7 +556,10 @@ if [[ "$FLAG_ROOT" == true ]]; then
     exit 1
   fi
   echo "Installing /system/xbin/su (setuid-root escalator).."
-  sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"
+  if ! sudo install -m 06755 -o root -g root "$src_su" "${PATH_MOUNT}/xbin/su"; then
+    echo "ERROR: failed to install ${src_su} → ${PATH_MOUNT}/xbin/su" >&2
+    exit 1
+  fi
 fi
 
 # Apply AVRCP 1.4 patches (KNOWN BROKEN — see warning at flag-parse and INVESTIGATION.md)
@@ -565,7 +574,10 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   fi
 
   echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"
+  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
+    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
+    exit 1
+  fi
 
   patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
