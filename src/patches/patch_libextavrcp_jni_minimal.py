@@ -18,7 +18,7 @@ padding for page alignment, so we can grow LOAD #1 freely up to that limit
 plumbing — see docs/PROXY-BUILD.md).
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        fbe2670b1e61953730edf3cf3e8a29b5
+Output md5:        b5baaa7ad25917612465022df46ec1ea
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -126,9 +126,18 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "fbe2670b1e61953730edf3cf3e8a29b5"
+OUTPUT_MD5 = "b5baaa7ad25917612465022df46ec1ea"
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
+#
+# iter10 change: advertise only EVENT_TRACK_CHANGED (0x02), not the full set
+# 01/02/09/0a/0b. Sonos's empirical behaviour (iter9) is to RegisterNotification
+# events one at a time; on the first NOT_IMPLEMENTED reply it aborts the entire
+# registration sequence. Pre-iter9 the unknow-indication path was broken (no
+# response emitted), so Sonos timed out on event 0x01 and accidentally tried
+# 0x02 anyway. Now that msg=520 actually flows, Sonos respects it and stops —
+# meaning it would never reach event 0x02 unless we either ack 0x01 too (= T3,
+# more cave use) or just don't advertise 0x01. Latter is simpler.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -136,11 +145,11 @@ T1_TRAMPOLINE = bytes([
     0x04, 0xA3,                               # adr r3, 0x7324
     0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
     0x00, 0x21,                               # movs r1, #0
-    0x05, 0x22,                               # movs r2, #5
+    0x01, 0x22,                               # movs r2, #1   (events count = 1)
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x01, 0x02, 0x09, 0x0A, 0x0B,            # events: PLAYBACK,TRACK,NPL,AVAIL,ADDR
+    0x02, 0x00, 0x00, 0x00, 0x00,            # events: TRACK_CHANGED only
     0x00, 0x00, 0x00,                         # padding
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stage 2 entry)
 ])
