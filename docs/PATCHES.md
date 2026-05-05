@@ -177,7 +177,7 @@ No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic
 
 **Pending follow-ups (T3 + full T4):** PlaybackStatus response + actual GetElementAttributes response with track strings (read from `/data/local/tmp/y1-track-info` written by Y1MediaBridge). See `docs/PROXY-BUILD.md`.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `b5baaa7ad25917612465022df46ec1ea`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `fa6191d6ce8170f5ef5c8142202c8ba5`.
 
 ---
 

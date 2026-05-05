@@ -1394,7 +1394,21 @@ A clean patch will require static-analyzing what `0x65a4+` actually does (whethe
 
 **Iter7/iter8/iter9 — fix the unknow-indication path via ELF-extension T4 stub.** iter6 also surfaced a separate problem: unhandled inbound frames (size:13 events ≠ TRACK_CHANGED, size:45 GetElementAttributes) generated zero outbound responses. The b.w 0x65bc fall-through from T1/T2 was reaching the original "unknow indication" code, but that code requires `r0 = r5+8` (conn buffer; set at 0x6528 in original flow) AND `lr = halfword at sp+374` (= SIZE; loaded at 0x644e) — both of which the trampolines clobber. Iter7 restored r0 only (no msg=520 yet); iter8 added the lr restore (8 → 12 bytes at the 0xac54 stub). Iter9 hardware test: msg=520 NOT_IMPLEMENTED now flows for unhandled frames. **Major side effect**: AVRCP service stops restart-looping (iter6 had 30 PIDs cycling; iter9 has 2 stable), so PASSTHROUGH play/pause/skip now actually works on Sonos. First-ever transport-control delivery to a peer for this device.
 
-**Iter10 — single-event advertised.** Iter9 surprise: Sonos aborts the entire RegisterNotification loop on its first NOT_IMPLEMENTED reply. Pre-iter9 the broken unknow path silently dropped the first reject, so Sonos timed out and accidentally tried event 0x02 (TRACK_CHANGED) anyway, which T2 acked. With proper msg=520 flowing, Sonos respects the rejection — meaning it never reaches event 0x02 unless we ack 0x01 (PLAYBACK_STATUS_CHANGED) too. Cheapest fix: advertise only event 0x02 in T1's GetCapabilities response (events count: 5 → 1; events_data: `01 02 09 0a 0b` → `02`). Sonos then registers only TRACK_CHANGED, T2 acks, Sonos proceeds to GetElementAttributes. **Pending hardware verification.**
+**Iter10 — single-event advertised.** Iter9 surprise: Sonos aborts the entire RegisterNotification loop on its first NOT_IMPLEMENTED reply. Pre-iter9 the broken unknow path silently dropped the first reject, so Sonos timed out and accidentally tried event 0x02 (TRACK_CHANGED) anyway, which T2 acked. With proper msg=520 flowing, Sonos respects the rejection — meaning it never reaches event 0x02 unless we ack 0x01 (PLAYBACK_STATUS_CHANGED) too. Cheapest fix: advertise only event 0x02 in T1's GetCapabilities response (events count: 5 → 1; events_data: `01 02 09 0a 0b` → `02`). Sonos then registers only TRACK_CHANGED, T2 acks, Sonos proceeds to GetElementAttributes. **Iter10 confirmed**: Sonos sent 1265 size:13 + 1264 size:45 frames in a tight 70Hz loop — full path engaged but no real T4 yet to break the loop.
+
+**Iter11 — first metadata on Sonos screen.** T4 implemented at vaddr 0xac54 in extended LOAD #1 (the 4276-byte page-padding region between the original LOAD #1 and LOAD #2). Single-attribute hardcoded "Y1 Test" Title response, 68 bytes. Argument layout for `btmtk_avrcp_send_get_element_attributes_rsp` (PLT 0x3570) inferred empirically:
+- r0 = conn buffer (= r5+8)
+- r1 = 0 (string-follows flag — JNI wrapper at 0x56dc dispatches on this)
+- r2 = transId (jbyte at caller_sp+368; same convention as track_changed_rsp)
+- r3 = 0 (placeholder; meaning unknown but works)
+- sp[0]  = attribute_id LSB (1=Title, 2=Artist, 3=Album, 4=TrackNumber, …)
+- sp[4]  = 0x6a (UTF-8 charset; JNI hardcodes this)
+- sp[8]  = string length (in bytes)
+- sp[12] = pointer to UTF-8 string data
+
+**Iter11 hardware-verified 2026-05-05**: "Y1 Test" displayed on Sonos Now Playing screen. **First ever AVRCP metadata delivery from this device to a peer.** Loop continues at 70Hz because the TRACK_CHANGED INTERIM with track_id=0xFFFFFFFFFFFFFFFF tells Sonos to keep re-querying (no stable identity), but the metadata path itself works.
+
+**Iter12 — multi-attribute T4.** Extends T4 to 152 bytes with a dispatch loop: parse num_attributes from inbound at sp+394, walk requested attribute_ids at sp+395+, and for each one match against {0x01, 0x02, 0x03} — calling the response builder once per supported attribute with hardcoded strings ("Y1 Title", "Y1 Artist", "Y1 Album"). Unsupported attributes (0x04-0x07) are silently skipped. **Pending hardware verification.** Output md5 `fa6191d6ce8170f5ef5c8142202c8ba5`.
 
 ### Empirics + tooling for the next session
 
