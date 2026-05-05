@@ -221,6 +221,9 @@ BP_6dc52=$(fileoff_to_live 0x6dc52)   # event_code=8 setter (raw-forward path)
 BP_515ca=$(fileoff_to_live 0x515ca)   # dispatcher case 3 (event 4 → msg 506)
 BP_51622=$(fileoff_to_live 0x51622)   # dispatcher case 7 (event 8 → msg 519)
 BP_fde8=$(fileoff_to_live 0x0fde8)    # blx [r6-4] in fn 0xfb04 — the AV/C handler dispatch
+BP_14b48=$(fileoff_to_live 0x14b48)   # fn 0x147dc TBH case 4 (event_code 4 → bl 0x145b0)
+BP_14b50=$(fileoff_to_live 0x14b50)   # return from bl 0x145b0 (within fn 0x147dc case 4)
+BP_144bc=$(fileoff_to_live 0x144bc)   # downstream handler — fires only if [conn+172]==0 path taken
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -317,6 +320,34 @@ break *${BP_fde8}
 commands
 silent
 printf "BP@0x0fde8 (blx [r6-4]): r3=0x%x (callback fn ptr) r0=0x%x r1=0x%x [sp+32]=%u (event_code)\n", \$r3, \$r0, \$r1, *(unsigned char*)(\$sp+32)
+continue
+end
+
+# fn 0x147dc TBH case 4 entry — fires whenever the [r6-4] callback dispatches
+# event_code=4 to the AV/C-event handler chain.
+break *${BP_14b48}
+commands
+silent
+printf "BP@0x14b48 (case 4 entry in fn 0x147dc): r4=0x%x r5=0x%x\n", \$r4, \$r5
+continue
+end
+
+# Right after bl 0x145b0 returns. If both PASSTHROUGH and VENDOR_DEPENDENT
+# reach here, the msg 519 divergence is downstream of 0x145b0.
+break *${BP_14b50}
+commands
+silent
+printf "BP@0x14b50 (after bl 0x145b0 returns): r0=%u (return val)\n", \$r0
+continue
+end
+
+# Direct check: does PASSTHROUGH reach fn 0x144bc? My static analysis says no
+# (the cbz at 0x14632 takes the early-return branch for both PASSTHROUGH and
+# VENDOR_DEPENDENT), but empirics > theory.
+break *${BP_144bc}
+commands
+silent
+printf "BP@0x144bc (downstream handler): r0=0x%x r1=0x%x r2=0x%x\n", \$r0, \$r1, \$r2
 continue
 end
 
