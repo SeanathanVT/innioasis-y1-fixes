@@ -120,6 +120,31 @@ EOF
     exit 1
 fi
 
+# Host-side gdb. Check up-front rather than after all the device-side setup —
+# nothing useful happens without it. Also lets the user install in parallel
+# while the script does the device-side attach.
+HOST_GDB=""
+for c in gdb-multiarch arm-linux-gnu-gdb arm-linux-gnueabi-gdb gdb; do
+    if command -v "$c" >/dev/null 2>&1; then HOST_GDB="$c"; break; fi
+done
+
+if [ -z "$HOST_GDB" ]; then
+    cat >&2 <<'EOF'
+ERROR: no ARM-aware gdb on host. The device-side gdbserver needs a gdb on
+       this machine to talk to it. Install one of (per distro):
+
+  Debian/Ubuntu:  sudo apt install gdb-multiarch
+  Fedora/RHEL:    sudo dnf install gdb
+                  (modern Fedora gdb auto-detects ARM targets)
+  Arch:           sudo pacman -S gdb-multiarch
+
+       Then re-run this script.
+
+       Probed binaries: gdb-multiarch arm-linux-gnu-gdb arm-linux-gnueabi-gdb gdb
+EOF
+    exit 1
+fi
+
 # Validate adb
 if ! adb get-state >/dev/null 2>&1; then
     echo "ERROR: no device. Connect the Y1 and retry." >&2
@@ -271,20 +296,10 @@ echo "     too and mtkbt resumes.)"
 echo
 echo "In a SECOND terminal, run:"
 
-# Try to identify the host gdb command
-HOST_GDB=""
-for c in gdb-multiarch arm-linux-gnu-gdb arm-linux-gnueabi-gdb gdb; do
-    if command -v "$c" >/dev/null 2>&1; then HOST_GDB="$c"; break; fi
-done
-
-if [ -n "$HOST_GDB" ]; then
-    echo "    ${HOST_GDB} -x ${GDB_CMDS} ${REPO_ROOT}/staging/system_extracted/system/bin/mtkbt"
-    echo "    # (or whatever stock-mtkbt path you have; symbols help but aren't required)"
-else
-    echo "    gdb-multiarch -x ${GDB_CMDS} <path-to-stock-mtkbt>"
-    echo "    # gdb-multiarch / arm-linux-gnu-gdb not detected on this host —"
-    echo "    # install one to get nicer disassembly + symbol resolution."
-fi
+# HOST_GDB was validated up-front (see check after gdbserver discovery).
+echo "    ${HOST_GDB} -x ${GDB_CMDS} <path-to-stock-mtkbt>"
+echo "    # symbols are optional but help with disassembly; the stock mtkbt"
+echo "    # extracted from /work/v3.0.2/system.img.extracted/bin/mtkbt works fine"
 
 echo
 echo "Then drive the Sonos scenario:"
