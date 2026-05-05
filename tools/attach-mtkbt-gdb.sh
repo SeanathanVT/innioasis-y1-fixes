@@ -200,10 +200,14 @@ PIE_BASE=$((16#$PIE_BASE_HEX))
 
 printf "    mtkbt pid=%s  PIE base=0x%x\n" "$MTKBT_PID" "$PIE_BASE"
 
-# Compute live addresses (file_offset + PIE_base, ORed with 1 for Thumb mode)
+# Compute live addresses (file_offset + PIE_base, OR'd with 1 for Thumb mode).
+# mtkbt is built entirely as Thumb-2; the bit-0 flag tells gdb to plant a
+# 2-byte Thumb BKPT instead of a 4-byte ARM BKPT. Without this gdb corrupts
+# the Thumb-2 instruction that follows the patch site → mtkbt SIGSEGV at NULL
+# (verified the hard way 2026-05-05).
 fileoff_to_live() {
     local off=$1
-    printf "0x%x" $(( off + PIE_BASE ))
+    printf "0x%x" $(( (off + PIE_BASE) | 1 ))
 }
 
 BP_6da7a=$(fileoff_to_live 0x6da7a)   # inner TBH dispatcher (event subtype byte)
@@ -231,6 +235,12 @@ set print pretty on
 set logging file /tmp/mtkbt-gdb.log
 set logging overwrite on
 set logging on
+
+# mtkbt is all Thumb-2. When gdb has to guess (no symbols on raw addresses),
+# default to Thumb so even-addressed breakpoint expressions don't accidentally
+# get treated as ARM. Belt-and-suspenders alongside the |1 we OR into the BP
+# addresses themselves.
+set arm fallback-mode thumb
 
 target remote :${PORT}
 
