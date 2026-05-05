@@ -18,7 +18,7 @@ padding for page alignment, so we can grow LOAD #1 freely up to that limit
 plumbing — see docs/PROXY-BUILD.md).
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        b5baaa7ad25917612465022df46ec1ea
+Output md5:        d64f81b07f9fceba3d0ee540c70cd67d
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -126,7 +126,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "b5baaa7ad25917612465022df46ec1ea"
+OUTPUT_MD5 = "d64f81b07f9fceba3d0ee540c70cd67d"
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
 #
@@ -190,36 +190,88 @@ T2_BLOCK = bytes([
 ])
 assert len(T2_BLOCK) == 48
 
-# T4 stub at vaddr/file 0xac54 (12 bytes) — the smallest "fix" stub. Restores
-# r0 = r5+8 AND lr = halfword at sp+374 (= SIZE), then falls through to the
-# original "unknow indication" path at 0x65bc. Makes mtkbt actually emit
-# msg=520 NOT_IMPLEMENTED for size:13 events != TRACK_CHANGED and for size:45
-# (GetElementAttributes) — which previously generated NO response because the
-# unknown-indication path at 0x65bc requires:
+# T4 — full GetElementAttributes response trampoline at vaddr 0xac54.
+# Lives in the LOAD #1 page-alignment padding (4276 zero bytes between LOAD #1
+# and LOAD #2). Patcher extends LOAD #1's filesz/memsz so the kernel maps
+# these bytes as R+E. T2's "unknown" branch at 0x72f4 jumps here.
 #
-#   1. r0 = conn buffer (set at file 0x6528 in original flow; T1/T2 clobber)
-#   2. lr = SIZE halfword (loaded at file 0x644e from sp+374, before all the
-#      cmp/bne dispatches; bl.w 0x7308 at file 0x6538 clobbers lr to 0x653c).
+# iter11 simple version: hardcoded Title-only response with the string
+# "Y1 Test". This is to verify the response builder's argument layout and
+# Sonos's acceptance of partial responses. Once verified, iter12+ will add
+# multi-attribute looping + Y1MediaBridge file-based string sourcing.
 #
-# Without (2), 0x65bc's `str.w lr, [sp, #12]` writes the bogus return-address
-# 0x653c to sp+12 instead of SIZE. The pass_through_rsp builder then sees a
-# garbage size and silently fails to emit msg=520. Iter7 (just (1) without
-# (2)) confirmed this — Sonos kept retrying size:45 forever.
+# Layout (68 bytes total):
+#   0xac54: ldrb.w r0, [sp, #382]       ; re-read PDU
+#   0xac58: cmp r0, #0x20               ; GetElementAttributes?
+#   0xac5a: beq.n 0xac68                ; yes → do_simple
+#   0xac5c: ldrh.w lr, [sp, #374]       ; restore lr=SIZE
+#   0xac60: add.w r0, r5, #8            ; restore r0=conn
+#   0xac64: b.w 0x65bc                  ; fall through to "unknow indication"
+#   0xac68: do_simple:
+#   0xac68: sub sp, #16                 ; alloc 16 bytes for stack args
+#   0xac6a: add.w r0, r5, #8            ; r0 = conn buffer
+#   0xac6e: movs r1, #0                  ; r1 = 0 (has-string flag)
+#   0xac70: ldrb.w r2, [sp, #384]        ; r2 = transId (caller_sp+368, +16 alloc shift)
+#   0xac74: movs r3, #0                  ; r3 = 0 (educated guess)
+#   0xac76: movs r4, #1                  ; attribute_id LSB = 1 (Title)
+#   0xac78: str r4, [sp, #0]             ; sp[0] = attribute_id LSB
+#   0xac7a: movs r4, #0x6a               ; UTF-8
+#   0xac7c: str r4, [sp, #4]             ; sp[4] = charset
+#   0xac7e: movs r4, #7                  ; len("Y1 Test")
+#   0xac80: str r4, [sp, #8]             ; sp[8] = string length
+#   0xac82: adr r4, 0xac90               ; r4 = title_str ptr
+#   0xac84: str r4, [sp, #12]            ; sp[12] = string ptr
+#   0xac86: blx 0x3570                   ; PLT → btmtk_avrcp_send_get_element_attributes_rsp
+#   0xac8a: add sp, #16
+#   0xac8c: b.w 0x712a                   ; epilogue
+#   0xac90: "Y1 Test" (7 bytes) + pad
 #
-# Sits in 4276 zero-padding bytes between LOAD #1 (was 0..0xac54) and LOAD #2
-# (starts 0xbc08). LOAD #1's filesz/memsz are bumped to 0xac60 so the kernel
-# maps these bytes as R+E. This is also the entry point for the future full
-# T4 GetElementAttributes response (additional bytes appended past 0xac60).
+# r4 is callee-saved and gets restored by saveRegEventSeqId's epilogue at
+# 0x7154 (`pop {r4-r9, sl, fp, pc}`), so we don't need a local push/pop.
+#
+# Argument-layout guesses (pending iter11 hardware verification):
+#   r1 = 0  (string-follows flag; 0 = jstring path per the JNI wrapper)
+#   r2 = transId (jbyte; this is also the convention for track_changed_rsp)
+#   r3 = 0  (placeholder; meaning unclear without source)
+#   sp[0] = attribute_id LSB (1=Title, 2=Artist, 3=Album, ...)
+#   sp[4] = 0x6a (UTF-8 charset)
+#   sp[8] = string length (in bytes)
+#   sp[12] = pointer to UTF-8 string data
+#
+# If Sonos doesn't accept the response, vary r2/r3/sp[0] meaning and re-test.
 T4_STUB_VADDR = 0xac54
 T4_STUB = bytes([
-    0xBD, 0xF8, 0x76, 0xE1,                  # ldrh.w lr, [sp, #374] (SIZE)
-    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8 (conn buffer)
-    0xFB, 0xF7, 0xAE, 0xBC,                  # b.w 0x65bc (original "unknow indication")
+    # 0xac54: pre-check + fall-through (20 bytes)
+    0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
+    0x20, 0x28,                               # cmp r0, #0x20
+    0x05, 0xD0,                               # beq.n 0xac68 (do_simple)
+    0xBD, 0xF8, 0x76, 0xE1,                  # ldrh.w lr, [sp, #374]
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
+    0xFB, 0xF7, 0xAA, 0xBC,                  # b.w 0x65bc
+    # 0xac68: do_simple (Title-only response, 36 bytes)
+    0x84, 0xB0,                               # sub sp, #16
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
+    0x00, 0x21,                               # movs r1, #0
+    0x9D, 0xF8, 0x80, 0x21,                  # ldrb.w r2, [sp, #384] (transId)
+    0x00, 0x23,                               # movs r3, #0
+    0x01, 0x24,                               # movs r4, #1 (attribute_id)
+    0x00, 0x94,                               # str r4, [sp, #0]
+    0x6A, 0x24,                               # movs r4, #0x6a
+    0x01, 0x94,                               # str r4, [sp, #4]
+    0x07, 0x24,                               # movs r4, #7
+    0x02, 0x94,                               # str r4, [sp, #8]
+    0x03, 0xA4,                               # adr r4, 0xac90
+    0x03, 0x94,                               # str r4, [sp, #12]
+    0xF8, 0xF7, 0x74, 0xEC,                  # blx 0x3570 (PLT: get_element_attributes_rsp)
+    0x04, 0xB0,                               # add sp, #16
+    0xFC, 0xF7, 0x4D, 0xBA,                  # b.w 0x712a
+    # 0xac90: title_str = "Y1 Test" + pad (8 bytes)
+    0x59, 0x31, 0x20, 0x54, 0x65, 0x73, 0x74, 0x00,
 ])
-assert len(T4_STUB) == 12
+assert len(T4_STUB) == 68
 
-# Stock bytes at 0xac54..0xac5f — all zero (LOAD #1 page padding).
-T4_STUB_STOCK = bytes([0x00] * 12)
+# Stock bytes at 0xac54..0xac97 — all zero (LOAD #1 page padding).
+T4_STUB_STOCK = bytes([0x00] * 68)
 
 # LOAD #1 program-header bookkeeping
 LOAD1_PHDR_OFFSET = 0x54
