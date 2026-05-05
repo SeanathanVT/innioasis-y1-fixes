@@ -104,19 +104,16 @@ if [ -z "$GDBSERVER" ] || [ ! -x "$GDBSERVER" ]; then
     cat >&2 <<'EOF'
 ERROR: gdbserver not found.
 
-Place an ARM 32-bit, statically-linked, API-17-compatible gdbserver at one of:
+Easiest fix:
+  ./tools/install-gdbserver.sh
+
+Or manually place an ARM 32-bit, statically-linked, API-17-compatible
+gdbserver at one of:
   - tools/gdbserver  (in-tree, preferred)
   - $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver
   - explicit path via --gdbserver <path> or $GDBSERVER env var
 
-Sources:
-  - NDK r10e (last NDK with first-class API-17 support):
-      tar xf android-ndk-r10e-linux-x86_64.bin's gdbserver from
-      prebuilt/android-arm/gdbserver/gdbserver
-  - AOSP prebuilts/misc:
-      android.googlesource.com/platform/prebuilts/misc — android-arm/gdbserver
-
-Verify it's the right shape before pushing:
+Verify it's the right shape:
   file /path/to/gdbserver
   # → ELF 32-bit LSB executable, ARM, EABI5, statically linked
 EOF
