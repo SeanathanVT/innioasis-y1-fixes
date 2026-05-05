@@ -79,7 +79,7 @@ Research-probe patcher. **Four patches** against stock mtkbt: three SDP-shape pa
 
 ## `patch_libextavrcp_jni_minimal.py`
 
-Research-probe patcher complementing `patch_mtkbt_minimal.py`. Implements **trampoline T1** — a code-cave that intercepts inbound size!=3 dispatch in `_Z17saveRegEventSeqIdhh` (file body 0x5f0c) and calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT for VENDOR_DEPENDENT GetCapabilities (PDU `0x10`). Bypasses both the JNI's "unknow indication" default-reject (the original size!=8 branch) and the JNI->Java callback path (the size==8 branch).
+Research-probe patcher complementing `patch_mtkbt_minimal.py`. Implements two trampolines, **T1 (GetCapabilities)** and **T2 (RegisterNotification(TRACK_CHANGED))**, that intercept inbound size!=3 dispatch in `_Z17saveRegEventSeqIdhh` (file body 0x5f0c) and call response-builder functions directly via PLT. Bypasses both the JNI's "unknow indication" default-reject (the original size!=8 branch) and the JNI->Java callback path (the size==8 branch).
 
 **R1 — redirect** at `0x6538` (4 bytes):
 
@@ -112,19 +112,48 @@ Destroys the size==8 path's leading `movs r5, #9`. Acceptable because mtkbt-as-1
 0x732c: ff f7 46 b9     b.w 0x65bc               ; fall_through (original "unknow")
 ```
 
+**T2 — classInitNative stub + RegisterNotification(TRACK_CHANGED) trampoline** at `0x72d0` (48 bytes), overwriting the JNI debug method `classInitNative` (which is purely two `__android_log_print` calls + `return 0` — safe to stub). T1's fall-through arm at 0x732c bridges here via `b.w 0x72d4`.
+
+```
+0x72d0: 00 20 70 47     classInitNative stub (movs r0, #0; bx lr)
+                        — preserves the "return 0" contract; loses debug logs
+; T2 stage 2 entry
+0x72d4: 31 28           cmp r0, #0x31           ; PDU still in r0 from T1
+0x72d6: 0d d1           bne.n 0x72f4            ; not RegisterNotification
+0x72d8: 9d f8 82 01     ldrb.w r0, [sp, #386]   ; event_id (clobber PDU)
+0x72dc: 02 28           cmp r0, #0x02           ; EVENT_TRACK_CHANGED?
+0x72de: 09 d1           bne.n 0x72f4            ; not TRACK_CHANGED
+0x72e0: 05 f1 08 00     add.w r0, r5, #8        ; conn buffer
+0x72e4: 9d f8 70 11     ldrb.w r1, [sp, #368]   ; transId
+0x72e8: 0f 22           movs r2, #0x0f          ; INTERIM reasonCode
+0x72ea: 03 a3           adr r3, 0x72f8          ; track_id_data ptr
+0x72ec: fc f7 4a e8     blx 0x3384              ; PLT → …reg_notievent_track_changed_rsp
+0x72f0: ff f7 1b bf     b.w 0x712a              ; epilogue
+0x72f4: ff f7 62 b9     b.w 0x65bc              ; unknown PDU/event → "unknow indication"
+0x72f8: ff ff ff ff ff ff ff ff                ; track_id = 0xFFFFFFFFFFFFFFFF
+                                                ;   ("Identifier not allocated, metadata not available")
+```
+
+PLT 0x3384 → GOT 0xcf0c → `btmtk_avrcp_send_reg_notievent_track_changed_rsp`. Argument shape (r0=conn, r1=transId, r2=reasonCode, r3=ptr_to_8byte_track_id) verified via cross-reference with `notificationTrackChangedNative` at 0x3bc0 — see `add.w r0, r8, #8 / uxtb.w r1, r9 / uxtb.w r2, sl / add r3, sp, #12 / blx 3384` at 0x3c3c.
+
+EVENT_PLAYBACK_STATUS_CHANGED (0x01), NOW_PLAYING_CONTENT_CHANGED (0x09), AVAILABLE_PLAYERS_CHANGED (0x0a), and ADDRESSED_PLAYER_CHANGED (0x0b) all fall through to the unknown branch (b.w 0x65bc) → mtkbt sends NOT_IMPLEMENTED. Sonos retries each ~4× then gives up. Metadata handshake (TRACK_CHANGED is what gates GetElementAttributes) still proceeds with just T2 in place. T3 (playback) added later if needed.
+
 **Why this works:**
 - At the redirect site, the function has already executed `add.w r0, r5, #8` (at 0x6528), so `r0 = conn buffer` is on register exit. The trampoline reads PDU into r0 (clobbering it) for the cmp, then re-derives `r0 = r5+8` before the response-builder call.
 - `r5` is preserved across the `bl.w` because it's callee-saved in AAPCS and the trampoline doesn't push/pop it.
-- PLT 0x35dc resolves to GOT 0xcfd4 (`btmtk_avrcp_send_get_capabilities_rsp` per `objdump -R`).
 - 0x712a sets `r9=1` (the function's return value), runs the stack-canary check at 0x712e, and falls into the function epilogue at 0x7154 (`pop {r4-r9, sl, fp, pc}`).
 
-**History:** J1 (cmp.w lr,#8 → cmp.w lr,#9 at 0x6526) was tried 2026-05-05 (iter4) and rolled back — it routed our size-9 frames into the size-8 PASSTHROUGH dispatch, calling `btmtk_avrcp_send_pass_through_rsp` with VENDOR_DEPENDENT-shaped data and dispatching as a fake `key=1 isPress=0` PASSTHROUGH event. The BT-SIG halfword check at sp+382 also failed due to size-9 stack misalignment. See INVESTIGATION.md Trace #12.
+**Hardware verification:**
+- T1 alone (iter5, 2026-05-05): elicited 30-byte msg=522 outbound (consistent with a real GetCapabilities response); Sonos progressed and sent 4 size:13 RegisterNotification frames at 2-second intervals — confirming T1 fires correctly.
+- T2: pending hardware test.
+
+**History:** J1 (cmp.w lr,#8 → cmp.w lr,#9 at 0x6526) was tried 2026-05-05 (iter4) and rolled back — it routed our size-9 frames into the size-8 PASSTHROUGH dispatch, calling `btmtk_avrcp_send_pass_through_rsp` with VENDOR_DEPENDENT-shaped data and dispatching as a fake `key=1 isPress=0` PASSTHROUGH event. See INVESTIGATION.md Trace #12.
 
 **Mutual exclusion with `patch_libextavrcp_jni.py`:** both patchers target the same binary; the v2.0.0 set's C2a/b and C3a/b are at different offsets but cumulatively re-shape the JNI's behaviour, so combining them isn't supported.
 
-**Pending follow-ups (T2/T3/T4):** RegisterNotification + GetElementAttributes responses for live track-change and metadata read-back. See `docs/PROXY-BUILD.md`.
+**Pending follow-ups (T3/T4):** PlaybackStatus + GetElementAttributes responses for play/pause indication and live track-metadata read-back. See `docs/PROXY-BUILD.md`.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5949a7f28bf700e4d3934fa7fab00c9f`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5fec125a259d9fc210831d20dc2ecf48`.
 
 ---
 
