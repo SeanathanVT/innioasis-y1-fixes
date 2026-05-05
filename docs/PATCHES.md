@@ -79,21 +79,13 @@ Research-probe patcher. **Four patches** against stock mtkbt: three SDP-shape pa
 
 ## `patch_libextavrcp_jni_minimal.py`
 
-Research-probe patcher complementing `patch_mtkbt_minimal.py`. **One byte patch** in `libextavrcp_jni.so` to handle the size-9 msg-519 frames that P1 (in `patch_mtkbt_minimal.py`) produces for VENDOR_DEPENDENT inbound.
+Research-probe patcher complementing `patch_mtkbt_minimal.py`. **Currently applies no patches** — J1 was rolled back 2026-05-05 after iter4 testing showed it routed our size-9 frames into the size-8 PASSTHROUGH dispatch (calling `btmtk_avrcp_send_pass_through_rsp` with VENDOR_DEPENDENT-shaped data and dispatching as a fake `key=1 isPress=0` PASSTHROUGH event). The BT-SIG halfword check at sp+382 also failed due to size-9 stack misalignment.
 
-The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (file `0x5ee4`) dispatches inbound CMD_FRAME_IND on **frame size**:
-
-- size == 3 → PASSTHROUGH path
-- size == 8 → BT-SIG vendor check (cmp halfword, `#0x5819` at `0x656a`); on match, `JNIEnv->CallVoidMethodV` into a Java `*Ind` callback (vtable offset 248)
-- otherwise → "unknow indication" log + default reject
-
-P1 produces size-9 frames, which fall to "unknow indication". J1 changes the size-8 dispatch to size-9 so our frames take the VENDOR path.
-
-- **J1** `0x6526`: `0x08` → `0x09` — Thumb-2 32-bit `cmp.w lr, #8` (encoding `be f1 08 0f`) → `cmp.w lr, #9` (encoding `be f1 09 0f`). Single-byte imm8 change.
+The next patch under design is a **code-cave trampoline** that calls `btmtk_avrcp_send_get_capabilities_rsp` (and related response builders) via the PLT at 0xcfd4 directly — bypassing the JNI's PASSTHROUGH-centric dispatch. See INVESTIGATION.md Trace #12 for the full receive-side analysis.
 
 **Mutual exclusion with `patch_libextavrcp_jni.py`:** both patchers target the same binary; the v2.0.0 set's C2a/b and C3a/b are at different offsets but cumulatively re-shape the JNI's behaviour, so combining them isn't supported.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `eb4814395b9b07a78c8d03118cf58124`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `fd2ce74db9389980b55bccf3d8f15660` (no-op until trampoline patch lands).
 
 ---
 

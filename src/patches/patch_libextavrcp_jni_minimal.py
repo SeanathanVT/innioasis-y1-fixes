@@ -7,7 +7,7 @@ commands) into the JNI's existing size-8 BT-SIG VENDOR path, instead of
 the "unknow indication" default-reject path.
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        eb4814395b9b07a78c8d03118cf58124
+Output md5:        fd2ce74db9389980b55bccf3d8f15660  (no patches active — see below)
 
 --- Background (per INVESTIGATION.md Trace #12) ---
 
@@ -26,34 +26,20 @@ expected layout). Without this JNI patch, size=9 frames take the "unknow
 indication" branch — which is what blocks Y1MediaBridge from receiving the
 inbound command.
 
---- The patch (J1) ---
+--- Status (2026-05-05): J1 rolled back; trampoline patch under design ---
 
-  At file 0x6524 the JNI does `cmp.w lr, #8` (Thumb-2 32-bit insn). The
-  imm8 field is at file offset 0x6526. Change it from 0x08 to 0x09 so
-  size-9 frames take the BT-SIG path:
+J1 (cmp.w lr,#8 -> cmp.w lr,#9 at 0x6526) was tested 2026-05-05 (iter4).
+It DID route past the "unknow indication" path, but fell into the size-8
+PASSTHROUGH dispatch and called btmtk_avrcp_send_pass_through_rsp with
+size-9-shaped data. mtkbt then dispatched the inbound as a fake key=1
+PASSTHROUGH (Receive a Avrcpkey:1) and the BT-SIG halfword check at
+sp+382 failed because of the size-9 stack misalignment. Java was never
+invoked. See INVESTIGATION.md Trace #12 and dual-sonos-avrcp-min-iter4/.
 
-    cmp.w lr, #8  =  bytes  be f1 08 0f
-    cmp.w lr, #9  =  bytes  be f1 09 0f
-
-  Single byte: file 0x6526, 0x08 → 0x09.
-
---- Risks ---
-
-  - The size-8 path reads bytes at sp+381, sp+382, sp+385 expecting a specific
-    stack layout. The size-9 frame's stack layout may differ by one byte; the
-    BT-SIG check at sp+382 may fail unexpectedly.
-  - The path also calls `btmtk_avrcp_send_pass_through_rsp` at file 0x6550
-    BEFORE the BT-SIG check fires. For our VENDOR_DEPENDENT frame this sends
-    a malformed PASSTHROUGH response to the peer. Risk: Sonos sees the bogus
-    response and disengages, even if BT-SIG path succeeds afterwards.
-  - The methodID looked up at file 0xd008 (loaded at 0x65b0) is one specific
-    Java callback (likely registerNotificationInd or playerAppCapabilitiesInd
-    given the *Ind name list). For a GetCapabilities inbound, that may be the
-    wrong handler — Java may throw a NoSuchMethodError or just no-op.
-
-  If any of these manifest, the next patch is to NOP the pass_through_rsp
-  call at 0x6550 (4 bytes → two `nop`s). If even that fails, we fall back to
-  the binary trampoline plan from INVESTIGATION.md "Path forward".
+The next patch design is a code-cave trampoline that calls existing
+native response-builder functions directly (getCapabilitiesRspNative,
+registerNotificationRspNative, etc.) with hardcoded/Y1MediaBridge-
+sourced data. Trampoline TBD; this patcher currently applies no patches.
 
 Mutually exclusive with patch_libextavrcp_jni.py (the v2.0.0 4-patch set);
 both target overlapping code regions.
@@ -70,16 +56,9 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "eb4814395b9b07a78c8d03118cf58124"
+OUTPUT_MD5 = "fd2ce74db9389980b55bccf3d8f15660"  # no-op until trampoline patch lands
 
-PATCHES = [
-    {
-        "name":   "[J1] cmp.w lr, #8 -> cmp.w lr, #9  size-dispatch in saveRegEventSeqIdhh",
-        "offset": 0x6526,
-        "before": bytes([0x08]),
-        "after":  bytes([0x09]),
-    },
-]
+PATCHES = []  # see "Status" in the docstring above; trampoline patch under design
 
 
 def md5(data: bytes) -> str:
