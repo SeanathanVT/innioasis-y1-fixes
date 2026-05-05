@@ -220,6 +220,7 @@ BP_6dc36=$(fileoff_to_live 0x6dc36)   # event_code=4 setter (AV/C parse path)
 BP_6dc52=$(fileoff_to_live 0x6dc52)   # event_code=8 setter (raw-forward path)
 BP_515ca=$(fileoff_to_live 0x515ca)   # dispatcher case 3 (event 4 → msg 506)
 BP_51622=$(fileoff_to_live 0x51622)   # dispatcher case 7 (event 8 → msg 519)
+BP_fde8=$(fileoff_to_live 0x0fde8)    # blx [r6-4] in fn 0xfb04 — the AV/C handler dispatch
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -305,6 +306,17 @@ break *${BP_51622}
 commands
 silent
 printf "BP@0x51622: dispatcher firing case 7 (event 8 → msg 519 CMD_FRAME_IND)\n"
+continue
+end
+
+# blx [r6-4] in fn 0xfb04 — the AV/C handler. r3 holds the callback fn ptr we
+# need to identify. Compare r3 between PASSTHROUGH and VENDOR_DEPENDENT frames
+# to see whether they dispatch to the same handler (op_code branch inside) or
+# to different ones (which would be the cleanest patch site).
+break *${BP_fde8}
+commands
+silent
+printf "BP@0x0fde8 (blx [r6-4]): r3=0x%x (callback fn ptr) r0=0x%x r1=0x%x [sp+32]=%u (event_code)\n", \$r3, \$r0, \$r1, *(unsigned char*)(\$sp+32)
 continue
 end
 
