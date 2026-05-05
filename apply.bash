@@ -34,6 +34,18 @@ FLAGS:
                  --all. Available as an opt-in for the user-space proxy
                  work that aims to fix the underlying issue. Build first:
                    cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+  --avrcp-min    RESEARCH PROBE. Minimum SDP-only patches against stock mtkbt
+                 (3 byte-level edits via src/patches/patch_mtkbt_minimal.py).
+                 Targets the empirically-working Pixel-1.3 SDP shape + adds
+                 a 0x0100 ServiceName attribute that even Pixel-1.3 has but
+                 Y1's record at every patch level lacks. Does NOT install
+                 Y1MediaBridge or apply the F1/F2/JNI/libextavrcp patches.
+                 Mutually exclusive with --avrcp. Excluded from --all.
+                 Use this to test whether the SDP record shape (rather than
+                 mtkbt's command dispatcher) is what makes Sonos refuse to
+                 send AVRCP 1.3+ commands. Capture: sdptool browse + dual-
+                 capture; expect AVCTP 0x0102, AVRCP 0x0103, ServiceName
+                 attribute present.
   --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
                  + build.prop entries that are essential for car/peer pairing.
                  Does NOT set persist.bluetooth.avrcpversion — that property
@@ -65,6 +77,7 @@ EOF
 FLAG_ADB=false
 FLAG_ANY_SPECIFIED=false
 FLAG_AVRCP=false
+FLAG_AVRCP_MIN=false
 FLAG_BLUETOOTH=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
@@ -116,6 +129,11 @@ while [[ $# -gt 0 ]]; do
       echo "         full negative result and the user-space proxy path that" >&2
       echo "         aims to fix this. Continuing only because you asked." >&2
       echo "" >&2
+      shift
+      ;;
+    --avrcp-min)
+      FLAG_AVRCP_MIN=true
+      FLAG_ANY_SPECIFIED=true
       shift
       ;;
     --bluetooth)
@@ -171,6 +189,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$FLAG_AVRCP" == true && "$FLAG_AVRCP_MIN" == true ]]; then
+  echo "ERROR: --avrcp and --avrcp-min are mutually exclusive — they patch" >&2
+  echo "       overlapping byte ranges in mtkbt (0x0eba58, 0x0eba6d, the" >&2
+  echo "       0x0311 entry slot at 0x0f97ec). Pick one." >&2
+  exit 1
+fi
 
 # --artifacts-dir falls back to ./staging/ inside the repo if not given.
 # Lets the common case skip the flag: `cp rom.zip staging/ && ./apply.bash --all`.
@@ -583,6 +608,17 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
   patch_in_place_bytes "lib/libextavrcp.so"      "patch_libextavrcp.py"       644
   patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni.py"   644
+fi
+
+# Apply minimum SDP-only patches against stock mtkbt (research probe).
+# Distinct from --avrcp: only touches mtkbt's SDP descriptor table to advertise
+# AVRCP 1.3 + AVCTP 1.2 + ServiceName, leaves Java/JNI/odex untouched, does not
+# install Y1MediaBridge. The point is to test whether the SDP record shape (not
+# mtkbt's command dispatcher) is what makes peers like Sonos refuse to send
+# 1.3+ AVRCP COMMANDs. Mutually exclusive with --avrcp.
+if [[ "$FLAG_AVRCP_MIN" == true ]]; then
+  echo "Applying minimum AVRCP SDP probe (--avrcp-min; mtkbt SDP only).."
+  patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt_minimal.py"     755
 fi
 
 # Configure Bluetooth fixes

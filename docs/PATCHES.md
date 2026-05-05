@@ -54,6 +54,24 @@ The descriptor table contains three service record groups. Groups 1 & 2 are TG (
 
 ---
 
+## `patch_mtkbt_minimal.py`
+
+Research-probe patcher. **Three patches** against the served AVRCP TG record (Group D — the record that lands on the wire after mtkbt's last-wins merge). Targets the empirically-working **Pixel-1.3 SDP shape** plus the one structural attribute Pixel-1.3 has that Y1 lacks at every patch level: `0x0100` ServiceName.
+
+- **V1** `0x0eba58`: `0x00` → `0x03` — AVRCP 1.0 → 1.3 LSB in served Group D ProfileDescList. Same offset as **C2** in `patch_mtkbt.py` but narrowed to 1.3 instead of 1.4.
+- **V2** `0x0eba6d`: `0x00` → `0x02` — AVCTP 1.0 → 1.2 LSB in served Group D ProtocolDescList. Same offset as **B1** in `patch_mtkbt.py` but narrowed to 1.2 instead of 1.3.
+- **S1** `0x0f97ec` (12 bytes): replace the `0x0311` SupportedFeatures attribute table entry with a `0x0100` ServiceName entry pointing at the existing "Advanced Audio" SDP-encoded string at file offset `0x0eb9ce` (re-used from mtkbt's A2DP record; peers don't validate ServiceName content, only its presence).
+  - Before: `11 03 03 00 59 ba 0e 00 00 00 00 00` (attr=`0x0311`, len=3, ptr=`0x0eba59` → `uint16 0x0001`)
+  - After:  `00 01 11 00 ce b9 0e 00 00 00 00 00` (attr=`0x0100`, len=`0x11`, ptr=`0x0eb9ce` → `25 0f "Advanced Audio\0"`)
+
+**Cost of S1:** the served record loses the `0x0311` SupportedFeatures attribute. Empirically Pixel-1.3 advertises features `0x0001` and Sonos engages — but Sonos's behaviour with a record that has *no* `0x0311` attribute is the question this patcher exists to answer. If Sonos refuses to engage, S1 needs a different approach (e.g., add a 12-byte attribute slot elsewhere in the table without sacrificing `0x0311`).
+
+**Mutual exclusion with `patch_mtkbt.py`:** both patchers touch overlapping byte ranges (`0x0eba58`, `0x0eba6d`, the `0x0311` entry slot at `0x0f97ec`). `apply.bash` enforces this — `--avrcp` and `--avrcp-min` cannot both be specified.
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `add9e702a275c8ef1faeee5a0d48df51`.
+
+---
+
 ## `patch_mtkbt_odex.py`
 
 Patches `MtkBt.odex` with two fixes:
