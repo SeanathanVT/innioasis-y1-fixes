@@ -1324,6 +1324,73 @@ User-confirmed: at every Pixel-AVRCP-version setting (1.3 / 1.4 / 1.5 / 1.6), So
 
 This is what makes the 2026-05-04 conclusion definitive: at AVRCP 1.3, the bare-minimum SDP record (Cat1 features, no AdditionalProtocolDescriptorList, AVCTP 1.2) is sufficient for Sonos to engage AVRCP COMMAND traffic — *if the implementation actually responds to those commands*. Y1 stock advertises features `0x0001` exactly like Pixel-1.3 but at AVRCP 1.0; Sonos doesn't bother sending COMMANDs because AVRCP 1.0 is too primitive. Y1 patched to 1.3+ advertises a richer record but mtkbt drops the COMMANDs Sonos then sends. **mtkbt is a 1.0-class implementation regardless of SDP advertisement.**
 
+## Trace #12 (2026-05-05, post-root) — full silent-drop chain mapped end-to-end via gdbserver
+
+This trace settled the silent-drop architecture conclusively. Five gdb capture iterations narrowed the problem from "somewhere in mtkbt" to a 2-byte patch site, then exposed the next gate one binary upstack.
+
+### Setup
+
+Built `tools/install-gdbserver.sh` (fetches a sha256-pinned ARM 32-bit static gdbserver from `aosp-mirror/platform_prebuilt`, commit `f5033a8c`, sha256 `1c3db6a3...`, 186112 bytes — last touched upstream 2010) and `tools/attach-mtkbt-gdb.sh` (pushes gdbserver, attaches to live mtkbt PID, computes PIE base, generates a `commands`-driven gdb command file with breakpoints at the critical sites and silent printf+continue blocks). Watch-items learned the hard way:
+
+- mtkbt is all Thumb-2. Plain even-addressed BPs make gdb plant 4-byte ARM BKPTs that corrupt Thumb instructions → mtkbt SIGSEGV at NULL on the first BP hit. Fix: `set arm fallback-mode thumb` + `set arm force-mode thumb` in the gdb file (NOT `addr | 1` — that breaks gdb's trap-time PC lookup).
+- After mtkbt SIGSEGV mid-debug, gdbserver wedges with the dead PID's ptrace slot. Fix: clean up stale gdbserver via `/proc` walk before each attach, drop the adb forward.
+- mtkbt respawns automatically on crash; BT off→on resets cleanly.
+
+### What `--avrcp-min` (V1+V2+S1) shows
+
+With AVRCP 1.3 + AVCTP 1.2 + a `0x0100` ServiceName attribute on the served SDP record, Sonos sends a real **AV/C VENDOR_DEPENDENT GetCapabilities** (op_code 0x00, vendor BT-SIG `0x001958`, PDU 0x10, capability_id 0x02 = EVENTS_SUPPORTED). Confirmed by gdb breakpoint dumps of the inbound L2CAP frame bytes. This contradicts the earlier 2026-05-04 reading of Trace #10's capture, which assumed the inbound was a malformed/dropped command — it was actually a 14-byte real GetCapabilities all along.
+
+### The full mtkbt RX chain (PASSTHROUGH vs VENDOR_DEPENDENT)
+
+Both frame types follow the same path through:
+
+1. **AVCTP RX inner TBH** at file `0x6da7a` — keyed on `[r5,#0]` (event subtype 0..8); subtype 3 routes to the AV/C-bearing path.
+2. **Classifier** at `0x6db7c` — `ldrb r0, [r5,#5]; cmp r0, #1; bhi 0x6dc3a`. For both PASSTHROUGH and VENDOR_DEPENDENT, `[r5,#5]=0` so AV/C parse path taken.
+3. **AV/C parse** at `0x6dba0+` — extracts ctype/subunit_type/subunit_id/op_code from frame bytes 0..2, stores at `conn+160..163`.
+4. **event_code=4 setter** at `0x6dc36`.
+5. **Dispatch** at `0x6de64` via `[r4+244]` callback (= fn at file `0xfb04`, set up via `register_callback` fn at `0x6ce78` from caller at `0xeaec` with PSM=0x17 and a callback-fn-ptr literal).
+6. Inside fn `0xfb04`'s default arm, → `bl 0x145b0` (the AV/C-event handler in fn `0x147dc`'s case 4 = TBH index 3).
+7. fn `0x145b0` stores frame bytes at `conn+2956..` and `conn+2400+9`; calls `bl 0x144bc`.
+8. **fn `0x144bc` op_code dispatch at `0x144e8`** — `ldrb r3, [r6,#3]` reads op_code from `conn+163`:
+   - `r3 == 0x7c` (PASSTHROUGH) → `b.n 0x14528` → `bl 0x10404` → emits **msg_id 519** to JNI.
+   - `r3 < 0x30` or `r3 != 0x7c` (VENDOR_DEPENDENT op_code 0x00, also UNIT_INFO 0x30, SUBUNIT_INFO 0x31, etc.) → `bcc 0x1454a` or `bne 0x1454a` → `bl 0x11374` → log only, **silent drop**.
+
+The captured `r2` at fn `0x144bc` entry differs (3 for PASS, 9 for VENDOR), but that's downstream of the gate at `0x144e8`. The actual gate is the op_code branch.
+
+### P1 patch (mtkbt, file offset `0x144e8`)
+
+Two-byte rewrite of `cmp r3, #0x30` → `b.n 0x14528`:
+
+| | Bytes (LE) | Encoding |
+|---|---|---|
+| stock | `30 2b` | `cmp r3, #0x30` (0x2b30) |
+| patched | `1e e0` | `b.n 0x14528` (0xe01e, +0x3c from PC at 0x144ec) |
+
+Forces all AV/C frames through the bl `0x10404` → msg 519 emit path regardless of op_code. Hardware-verified 2026-05-05: **VENDOR_DEPENDENT GetCapabilities now reaches JNI as `MSG_ID_BT_AVRCP_CMD_FRAME_IND size:9 rawkey:0 data_len:9`** with the AV/C-body bytes intact.
+
+Ships as the fourth patch in `src/patches/patch_mtkbt_minimal.py`. Stock mtkbt md5 `3af1d4ad8f955038186696950430ffda` → output `a37d56c91beb00b021c55f7324f2cc09`.
+
+### What's NOT yet solved — the JNI's "unknow indication" path
+
+The JNI receive function in `libextavrcp_jni.so` is `_Z17saveRegEventSeqIdhh` at file `0x5ee4`. It dispatches msg 519 on **frame size**:
+
+- `cmp.w lr, #3` at `0x6452` — size 3 → PASSTHROUGH path; calls `btmtk_avrcp_send_pass_through_rsp`
+- `cmp.w lr, #8` at `0x6524` — size 8 → branch with a BT-SIG vendor check (`cmp r1, #0x5819` at `0x656a`); on match, jumps to `0x65a4` (VENDOR_DEPENDENT handling)
+- otherwise → `0x65bc` → "unknow indication" + dump first 16 bytes + default reject (msg_id 520 CMD_FRAME_RSP with NOT_IMPLEMENTED)
+
+P1 produces size=9 frames (the 14-byte AV/C frame minus 3-byte AV/C header minus 2 leading bytes — the trampoline path strips slightly differently from the size=8 path). **Size=9 falls into "unknow indication"**, and the inbound is auto-rejected before reaching Java's `BTAvrcpMusicAdapter`.
+
+The candidate next patch is at file `0x6526` of `libextavrcp_jni.so`: `cmp.w lr, #8` → `cmp.w lr, #9` (single byte 0x08 → 0x09). That'd route size-9 frames into the size-8 branch and onward to the BT-SIG vendor check at `0x656a`. Risk: the size-8 branch's downstream reads (sp+381, sp+382, sp+385) assume a specific stack layout that size-9 frames may not satisfy, AND the path eventually calls `btmtk_avrcp_send_pass_through_rsp` which is the wrong response builder for a VENDOR_DEPENDENT command. May need additional patches to skip the pass_through_rsp call and/or to invoke Java's `BTAvrcpMusicAdapter.checkCapability()` via JNI.
+
+A clean patch will require static-analyzing what `0x65a4+` actually does (whether it reaches Java or just logs+returns) before committing to a byte rewrite.
+
+### Empirics + tooling for the next session
+
+- Five gdbserver capture logs in `/work/logs/mtkbt-gdb-{getcap,passthrough,handler,narrow,drill}.log`
+- Iter3 dual-capture under `--avrcp-min` post-P1 in `/work/logs/dual-sonos-avrcp-min-iter3/` — shows the first-ever `MSG_ID_BT_AVRCP_CMD_FRAME_IND` for a non-PASSTHROUGH frame plus JNI's "unknow indication" log + 9-byte hex dump.
+- All gdb infrastructure (`tools/attach-mtkbt-gdb.sh`, `tools/install-gdbserver.sh`) committed and re-runnable.
+- Stock libextavrcp_jni.so disassembly: `arm-linux-gnu-objdump -d -M force-thumb /work/v3.0.2/system.img.extracted/lib/libextavrcp_jni.so`. Has C++ symbols (unlike mtkbt). Function `_Z17saveRegEventSeqIdhh` is the receive loop; first 1700 bytes from `0x5ee4` cover the size-dispatch.
+
 ---
 
 End of appendix. The brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md` is now redundant with this document and may be deleted.

@@ -43,7 +43,11 @@ FLAGS:
                  Components:
                    - patch_mtkbt_minimal.py (V1: AVRCP 1.0->1.3 SDP, V2:
                      AVCTP 1.0->1.2 SDP, S1: replace 0x0311 entry with
-                     0x0100 ServiceName)
+                     0x0100 ServiceName, P1: force fn 0x144bc op_code
+                     dispatch to msg 519 emit path for VENDOR_DEPENDENT)
+                   - patch_libextavrcp_jni_minimal.py (J1: route size-9
+                     msg 519 frames into the JNI's BT-SIG VENDOR path
+                     instead of the "unknow indication" default-reject)
                    - patch_mtkbt_odex.py (F1: getPreferVersion -> 14, F2:
                      disable() resets sPlayServiceInterface)
                    - Y1MediaBridge.apk install
@@ -656,6 +660,7 @@ if [[ "$FLAG_AVRCP_MIN" == true ]]; then
 
   patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt_minimal.py"     755
+  patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni_minimal.py" 644
 fi
 
 # Configure Bluetooth fixes
