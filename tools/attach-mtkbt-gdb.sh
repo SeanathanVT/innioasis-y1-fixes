@@ -200,14 +200,18 @@ PIE_BASE=$((16#$PIE_BASE_HEX))
 
 printf "    mtkbt pid=%s  PIE base=0x%x\n" "$MTKBT_PID" "$PIE_BASE"
 
-# Compute live addresses (file_offset + PIE_base, OR'd with 1 for Thumb mode).
-# mtkbt is built entirely as Thumb-2; the bit-0 flag tells gdb to plant a
-# 2-byte Thumb BKPT instead of a 4-byte ARM BKPT. Without this gdb corrupts
-# the Thumb-2 instruction that follows the patch site → mtkbt SIGSEGV at NULL
-# (verified the hard way 2026-05-05).
+# Compute live addresses (file_offset + PIE_base, plain even address).
+# mtkbt is entirely Thumb-2. We DON'T OR the address with 1 here because:
+#   - gdb plants a Thumb-aware BKPT via `set arm force-mode thumb` below
+#     (this prevents the 4-byte ARM BKPT corruption we hit on the first try).
+#   - Bit 0 in the *registered* address breaks gdb's trap-time PC lookup:
+#     when the BKPT fires the CPU reports PC = even byte-address, gdb's BP
+#     list has odd address, lookup misses, gdb treats the trap as a generic
+#     SIGTRAP and the `commands` block never runs.
+# Both failure modes verified the hard way 2026-05-05.
 fileoff_to_live() {
     local off=$1
-    printf "0x%x" $(( (off + PIE_BASE) | 1 ))
+    printf "0x%x" $(( off + PIE_BASE ))
 }
 
 BP_6da7a=$(fileoff_to_live 0x6da7a)   # inner TBH dispatcher (event subtype byte)
@@ -244,11 +248,12 @@ set logging file /tmp/mtkbt-gdb.log
 set logging overwrite on
 set logging on
 
-# mtkbt is all Thumb-2. When gdb has to guess (no symbols on raw addresses),
-# default to Thumb so even-addressed breakpoint expressions don't accidentally
-# get treated as ARM. Belt-and-suspenders alongside the |1 we OR into the BP
-# addresses themselves.
+# mtkbt is all Thumb-2. force-mode thumb makes gdb plant a 2-byte Thumb BKPT
+# at every breakpoint regardless of address parity / symbol info. fallback-mode
+# is the looser version (only when gdb can't otherwise decide) — keep both so
+# disassembly + BP planting are unambiguous.
 set arm fallback-mode thumb
+set arm force-mode thumb
 
 target remote :${PORT}
 
