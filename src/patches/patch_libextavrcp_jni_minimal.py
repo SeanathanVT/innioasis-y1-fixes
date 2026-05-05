@@ -18,7 +18,7 @@ padding for page alignment, so we can grow LOAD #1 freely up to that limit
 plumbing — see docs/PROXY-BUILD.md).
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        fa6191d6ce8170f5ef5c8142202c8ba5
+Output md5:        56d9d8514f30a12aaf2303b7a7f6a067
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -126,7 +126,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "fa6191d6ce8170f5ef5c8142202c8ba5"
+OUTPUT_MD5 = "56d9d8514f30a12aaf2303b7a7f6a067"
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
 #
@@ -233,77 +233,76 @@ T4_STUB_VADDR = 0xac54
 T4_STUB = bytes([
     # 0xac54: pre-check + fall-through to 0x65bc (20 bytes)
     0x9D, 0xF8, 0x7E, 0x01,    # ldrb.w r0, [sp, #382]   — PDU
-    0x20, 0x28,                # cmp r0, #0x20            — GetElementAttributes?
+    0x20, 0x28,                # cmp r0, #0x20
     0x05, 0xD0,                # beq.n do_t4 (0xac68)
     0xBD, 0xF8, 0x76, 0xE1,    # ldrh.w lr, [sp, #374]    — restore lr=SIZE
-    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8         — restore r0=conn
-    0xFB, 0xF7, 0xAA, 0xBC,    # b.w 0x65bc               — original "unknow"
-    # 0xac68: do_t4
-    0x84, 0xB0,                # sub sp, #16              — alloc stack args
-    0x9D, 0xF8, 0x9A, 0x41,    # ldrb.w r4, [sp, #410]    — num_attributes
-    0x07, 0x2C,                # cmp r4, #7
-    0x88, 0xBF,                # it hi
-    0x07, 0x24,                # movhi r4, #7             — clamp
-    0x0D, 0xF2, 0x9E, 0x16,    # addw r6, sp, #414        — ptr to attr_ids[0] LSB
-    0x00, 0x27,                # movs r7, #0              — loop counter
-    # 0xac7a: attr_loop
-    0xA7, 0x42,                # cmp r7, r4
-    0x24, 0xDA,                # bge.n attr_done (0xacc8)
-    0x30, 0x78,                # ldrb r0, [r6]            — attr_id LSB
-    0x01, 0x28,                # cmp r0, #1
-    0x06, 0xD0,                # beq.n use_title (0xac92)
-    0x02, 0x28,                # cmp r0, #2
-    0x08, 0xD0,                # beq.n use_artist (0xac9a)
-    0x03, 0x28,                # cmp r0, #3
-    0x0A, 0xD0,                # beq.n use_album (0xaca2)
-    # 0xac8c: skip_attr — unsupported attribute
-    0x04, 0x36,                # adds r6, #4
-    0x01, 0x37,                # adds r7, #1
-    0xF3, 0xE7,                # b.n attr_loop (0xac7a)
-    # 0xac92: use_title
-    0x0F, 0xA0,                # adr r0, title_str (0xacd0)
-    0x08, 0x21,                # movs r1, #8
-    0x01, 0x22,                # movs r2, #1              — attribute_id LSB
-    0x06, 0xE0,                # b.n call_rsp (0xaca8)
-    # 0xac9a: use_artist
-    0x0F, 0xA0,                # adr r0, artist_str (0xacd8)
-    0x09, 0x21,                # movs r1, #9
-    0x02, 0x22,                # movs r2, #2
-    0x02, 0xE0,                # b.n call_rsp
-    # 0xaca2: use_album (falls through to call_rsp)
-    0x10, 0xA0,                # adr r0, album_str (0xace4)
-    0x08, 0x21,                # movs r1, #8
-    0x03, 0x22,                # movs r2, #3
-    # 0xaca8: call_rsp
-    0x03, 0x90,                # str r0, [sp, #12]        — string ptr
-    0x02, 0x91,                # str r1, [sp, #8]         — length
-    0x00, 0x92,                # str r2, [sp, #0]         — attribute_id LSB
-    0x6A, 0x20,                # movs r0, #0x6a
-    0x01, 0x90,                # str r0, [sp, #4]         — UTF-8 charset
-    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8         — conn buffer
-    0x00, 0x21,                # movs r1, #0              — has-string flag
-    0x9D, 0xF8, 0x80, 0x21,    # ldrb.w r2, [sp, #384]    — transId
-    0x00, 0x23,                # movs r3, #0
-    0xF8, 0xF7, 0x58, 0xEC,    # blx 0x3570               — PLT: get_element_attributes_rsp
-    0x04, 0x36,                # adds r6, #4
-    0x01, 0x37,                # adds r7, #1
-    0xD8, 0xE7,                # b.n attr_loop
-    # 0xacc8: attr_done
+    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8
+    0xFB, 0xF7, 0xAA, 0xBC,    # b.w 0x65bc
+
+    # 0xac68: do_t4 — sub sp, alloc 16 bytes for stack args
+    0x84, 0xB0,                # sub sp, #16
+
+    # === Call 1: Title (index=0, total=3) — buffer reset on arg2==0, accumulate ===
+    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8       — conn
+    0x00, 0x21,                # movs r1, #0            — with-string, no reset
+    0x00, 0x22,                # movs r2, #0            — attribute INDEX
+    0x03, 0x23,                # movs r3, #3            — TOTAL attribute count
+    0x01, 0x24,                # movs r4, #1            — attr_id LSB = Title
+    0x00, 0x94,                # str r4, [sp, #0]
+    0x6A, 0x24,                # movs r4, #0x6a
+    0x01, 0x94,                # str r4, [sp, #4]
+    0x08, 0x24,                # movs r4, #8            — len("Y1 Title")
+    0x02, 0x94,                # str r4, [sp, #8]
+    0x12, 0xA4,                # adr r4, title_str (0xaccc)
+    0x03, 0x94,                # str r4, [sp, #12]
+    0xF8, 0xF7, 0x74, 0xEC,    # blx 0x3570
+
+    # === Call 2: Artist (index=1, total=3) — accumulate ===
+    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8
+    0x00, 0x21,                # movs r1, #0
+    0x01, 0x22,                # movs r2, #1            — index
+    0x03, 0x23,                # movs r3, #3
+    0x02, 0x24,                # movs r4, #2            — attr_id = Artist
+    0x00, 0x94,                # str r4, [sp, #0]
+    0x6A, 0x24,                # movs r4, #0x6a
+    0x01, 0x94,                # str r4, [sp, #4]
+    0x09, 0x24,                # movs r4, #9            — len("Y1 Artist")
+    0x02, 0x94,                # str r4, [sp, #8]
+    0x0D, 0xA4,                # adr r4, artist_str (0xacd4)
+    0x03, 0x94,                # str r4, [sp, #12]
+    0xF8, 0xF7, 0x66, 0xEC,    # blx 0x3570
+
+    # === Call 3: Album (index=2, total=3) — arg2+1==arg3 triggers EMIT ===
+    0x05, 0xF1, 0x08, 0x00,    # add.w r0, r5, #8
+    0x00, 0x21,                # movs r1, #0
+    0x02, 0x22,                # movs r2, #2            — index
+    0x03, 0x23,                # movs r3, #3
+    0x03, 0x24,                # movs r4, #3            — attr_id = Album
+    0x00, 0x94,                # str r4, [sp, #0]
+    0x6A, 0x24,                # movs r4, #0x6a
+    0x01, 0x94,                # str r4, [sp, #4]
+    0x08, 0x24,                # movs r4, #8            — len("Y1 Album")
+    0x02, 0x94,                # str r4, [sp, #8]
+    0x08, 0xA4,                # adr r4, album_str (0xace0)
+    0x03, 0x94,                # str r4, [sp, #12]
+    0xF8, 0xF7, 0x56, 0xEC,    # blx 0x3570
+
+    # Epilogue
     0x04, 0xB0,                # add sp, #16
-    0xFC, 0xF7, 0x2E, 0xBA,    # b.w 0x712a               — epilogue
-    # 0xacce: pad to 4-byte align for ADR strings
-    0x00, 0x00,
-    # 0xacd0: title_str = "Y1 Title"  (8 bytes, 4-byte aligned)
+    0xFC, 0xF7, 0x30, 0xBA,    # b.w 0x712a
+    0x00, 0x00,                # pad to 4-align
+
+    # 0xaccc: title_str = "Y1 Title" (8 bytes)
     0x59, 0x31, 0x20, 0x54, 0x69, 0x74, 0x6C, 0x65,
-    # 0xacd8: artist_str = "Y1 Artist" + 3-byte pad to 4-align (12 bytes total)
+    # 0xacd4: artist_str = "Y1 Artist" + 3-byte pad (12 bytes total, 4-aligned)
     0x59, 0x31, 0x20, 0x41, 0x72, 0x74, 0x69, 0x73, 0x74, 0x00, 0x00, 0x00,
-    # 0xace4: album_str = "Y1 Album"   (8 bytes)
+    # 0xace0: album_str = "Y1 Album" (8 bytes)
     0x59, 0x31, 0x20, 0x41, 0x6C, 0x62, 0x75, 0x6D,
 ])
-assert len(T4_STUB) == 152
+assert len(T4_STUB) == 148
 
-# Stock bytes at 0xac54..0xacec — all zero (LOAD #1 page padding).
-T4_STUB_STOCK = bytes([0x00] * 152)
+# Stock bytes at 0xac54..0xace8 — all zero (LOAD #1 page padding).
+T4_STUB_STOCK = bytes([0x00] * 148)
 
 # LOAD #1 program-header bookkeeping
 LOAD1_PHDR_OFFSET = 0x54
