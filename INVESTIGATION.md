@@ -1423,7 +1423,9 @@ The function maintains an internal 644-byte static buffer that's reset when (`ar
 
 **transId** is NOT an argument — the function reads it from `conn[17]` automatically.
 
-**iter13 output md5**: `56d9d8514f30a12aaf2303b7a7f6a067`. Pending hardware verification.
+**iter13 output md5**: `56d9d8514f30a12aaf2303b7a7f6a067`. **Hardware-verified 2026-05-05**: ratio 1:1 of msg=540 to size:45 (672 each) — exactly one emit per inbound GetElementAttributes containing all three attributes. **Sonos displays Title + Artist + Album simultaneously.** First time the Y1 has ever delivered a multi-attribute AVRCP 1.4 metadata response.
+
+The reverse-engineered argument layout is now empirically confirmed correct. The architectural work is done. Remaining work is pure data plumbing — replacing the hardcoded "Y1 Title"/"Y1 Artist"/"Y1 Album" strings with real metadata from Y1MediaBridge (iter14: file-based plumbing via `/data/local/tmp/y1-track-info`).
 
 For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 
