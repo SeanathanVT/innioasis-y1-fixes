@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni_minimal.py — Trampolines T1 (GetCapabilities) and T2
-(RegisterNotification(EVENT_TRACK_CHANGED)) for the --avrcp-min research
-probe. Redirects size!=8 dispatch in `_Z17saveRegEventSeqIdhh` to code-caves
-that call response-builder functions directly via PLT. Pairs with
-patch_mtkbt_minimal.py's P1 patch which routes inbound VENDOR_DEPENDENT
-AV/C commands through msg 519 with size=9.
+patch_libextavrcp_jni_minimal.py — Trampolines T1 (GetCapabilities), T2
+(RegisterNotification(EVENT_TRACK_CHANGED)), and T4 stub (placeholder for
+GetElementAttributes response, currently just restores r0 and falls through
+to the original "unknow indication" path so unhandled PDUs at least
+generate msg=520 NOT_IMPLEMENTED).
+
+Pairs with patch_mtkbt_minimal.py's P1 patch which routes inbound
+VENDOR_DEPENDENT AV/C commands through msg 519 with size=9.
+
+The T4 stub lives at vaddr 0xac54 — beyond the original LOAD #1 segment
+end. The patcher extends LOAD #1's FileSiz/MemSiz from 0xac54 to 0xac5c,
+which makes the kernel map those bytes as R+E at runtime. The 4276 bytes
+between LOAD #1's old end (0xac54) and LOAD #2's start (0xbc08) are zero
+padding for page alignment, so we can grow LOAD #1 freely up to that limit
+(this gives us headroom for the eventual full T4 with file-based metadata
+plumbing — see docs/PROXY-BUILD.md).
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        5fec125a259d9fc210831d20dc2ecf48
+Output md5:        6a075878ac5d5353848ab2672f9fac0c
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -116,7 +126,18 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "5fec125a259d9fc210831d20dc2ecf48"
+OUTPUT_MD5 = "6a075878ac5d5353848ab2672f9fac0c"
+
+# T4 stub goes at file/vaddr 0xac54 — first byte after the original LOAD #1 segment
+# end. The 4276 bytes between LOAD #1 (ends 0xac54) and LOAD #2 (starts 0xbc08) are
+# zero-padding for page alignment, so we reuse them. The patcher extends LOAD #1's
+# FileSiz/MemSiz to cover our new bytes, making them executable at runtime.
+T4_STUB_VADDR = 0xac54
+LOAD1_PHDR_OFFSET = 0x54        # Program header for LOAD segment #1 (R+E)
+LOAD1_FILESZ_OFFSET = 0x54 + 16 # filesz field within that phdr
+LOAD1_MEMSZ_OFFSET  = 0x54 + 20 # memsz field
+LOAD1_OLD_SIZE = 0xac54
+LOAD1_NEW_SIZE = 0xac5c
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
 T1_TRAMPOLINE = bytes([
@@ -164,12 +185,34 @@ T2_BLOCK = bytes([
     0x03, 0xA3,                               # adr r3, 0x72f8  (track_id_data)
     0xFC, 0xF7, 0x4A, 0xE8,                  # blx 0x3384 (PLT: track_changed_rsp)
     0xFF, 0xF7, 0x1B, 0xBF,                  # b.w 0x712a (epilogue)
-    # 0x72f4: unknown — fall through to original "unknow indication"
-    0xFF, 0xF7, 0x62, 0xB9,                  # b.w 0x65bc
+    # 0x72f4: unknown — bridge to T4 stub at 0xac54 (in extended LOAD #1)
+    0x03, 0xF0, 0xAE, 0xBC,                  # b.w 0xac54 (T4 stub)
     # 0x72f8: track_id_data — 0xFFFFFFFFFFFFFFFF
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 ])
 assert len(T2_BLOCK) == 48
+
+# T4 stub at vaddr/file 0xac54 (8 bytes) — the smallest possible "fix" stub:
+# restores r0 = r5+8 (which T1/T2 clobbered) and falls through to the original
+# "unknow indication" path at 0x65bc. This makes mtkbt actually emit a
+# msg=520 NOT_IMPLEMENTED for size:13 events != TRACK_CHANGED and for size:45
+# (GetElementAttributes) — which previously generated NO response because the
+# unknown-indication path at 0x65bc relies on r0 holding the conn buffer.
+#
+# Sits in 4276 zero-padding bytes between LOAD #1 (was 0..0xac54) and LOAD #2
+# (starts 0xbc08). LOAD #1's filesz/memsz are bumped to 0xac5c so the kernel
+# maps these bytes as R+E.
+#
+# This is also the entry point for the future full T4 GetElementAttributes
+# response (additional bytes appended past 0xac5c).
+T4_STUB = bytes([
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8 (restore conn buffer)
+    0xFB, 0xF7, 0xB0, 0xBC,                  # b.w 0x65bc (original "unknow indication")
+])
+assert len(T4_STUB) == 8
+
+# Stock bytes at 0xac54..0xac5b — should all be zero (LOAD #1 page padding).
+T4_STUB_STOCK = bytes([0x00] * 8)
 
 # Stock classInitNative (48 bytes) — entry + body + literal pool.
 CLASSINITNATIVE_STOCK = bytes([
@@ -200,6 +243,24 @@ PATCHES = [
         "offset": 0x72d0,
         "before": CLASSINITNATIVE_STOCK,
         "after":  T2_BLOCK,
+    },
+    {
+        "name": "T4: stub @ 0xac54 (8 bytes appended into LOAD #1 padding)",
+        "offset": T4_STUB_VADDR,
+        "before": T4_STUB_STOCK,
+        "after":  T4_STUB,
+    },
+    {
+        "name": "LOAD #1 filesz: 0xac54 → 0xac5c (cover T4 stub)",
+        "offset": LOAD1_FILESZ_OFFSET,
+        "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+        "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),
+    },
+    {
+        "name": "LOAD #1 memsz: 0xac54 → 0xac5c (cover T4 stub)",
+        "offset": LOAD1_MEMSZ_OFFSET,
+        "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+        "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),
     },
 ]
 

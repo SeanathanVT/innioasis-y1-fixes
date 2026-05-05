@@ -151,9 +151,27 @@ EVENT_PLAYBACK_STATUS_CHANGED (0x01), NOW_PLAYING_CONTENT_CHANGED (0x09), AVAILA
 
 **Mutual exclusion with `patch_libextavrcp_jni.py`:** both patchers target the same binary; the v2.0.0 set's C2a/b and C3a/b are at different offsets but cumulatively re-shape the JNI's behaviour, so combining them isn't supported.
 
-**Pending follow-ups (T3/T4):** PlaybackStatus + GetElementAttributes responses for play/pause indication and live track-metadata read-back. See `docs/PROXY-BUILD.md`.
+**T4 — stub at extended-LOAD-segment vaddr 0xac54** (8 bytes). The original libextavrcp_jni.so has a LOAD segment ending at vaddr/file 0xac54, with 4276 zero-padding bytes before LOAD #2 starts at file 0xbc08. The patcher writes T4 code into this padding and bumps LOAD #1's `FileSiz`/`MemSiz` from 0xac54 to 0xac5c so the kernel maps the bytes as R+E at runtime. T2's "unknown" branch at 0x72f4 is rewritten to `b.w 0xac54` instead of `b.w 0x65bc`.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5fec125a259d9fc210831d20dc2ecf48`.
+```
+0xac54: 05 f1 08 00     add.w r0, r5, #8        ; restore conn buffer
+                                                  ;   (T1/T2 clobbered r0)
+0xac58: fb f7 b0 bc     b.w 0x65bc               ; original "unknow indication"
+```
+
+**Why the r0 restore matters:** the original `bne 0x65bc` site at file 0x6538 was reached with `r0 = r5+8` (set at 0x6528, two instructions before the bne). The 0x65bc unknow-indication path doesn't re-set r0; it just sets `sp[0..16]` for `btmtk_avrcp_send_pass_through_rsp`'s extra args, then calls. Our T1/T2 trampolines clobber r0 (with PDU/event_id) before falling through, so without this restore, pass_through_rsp gets a bogus first arg and silently fails to emit msg=520 NOT_IMPLEMENTED. Iter5/iter6 captures showed Sonos retrying size:13/size:45 frames forever because mtkbt was emitting nothing back; T4 stub fixes this.
+
+**Future:** the same 0xac54 entry will host the full T4 GetElementAttributes response — currently a stub but expandable into the 4276-byte padding region. That's the path forward for live track metadata via Y1MediaBridge.
+
+**Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
+- offset+16 (`p_filesz`): 0xac54 → 0xac5c
+- offset+20 (`p_memsz`):  0xac54 → 0xac5c
+
+No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
+
+**Pending follow-ups (T3 + full T4):** PlaybackStatus response + actual GetElementAttributes response with track strings (read from `/data/local/tmp/y1-track-info` written by Y1MediaBridge). See `docs/PROXY-BUILD.md`.
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `6a075878ac5d5353848ab2672f9fac0c`.
 
 ---
 
