@@ -75,6 +75,7 @@ Post-root tools for investigating AVRCP behaviour on hardware. None are invoked 
 
 - **`@btlog` tap** — `src/btlog-dump/` (no-libc ARM ELF) + `tools/dual-capture.sh` (push + run + capture btlog & logcat) + `tools/btlog-parse.py` (decode framing). See [`src/btlog-dump/README.md`](src/btlog-dump/README.md).
 - **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, MTK debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets. Re-run against any new `KNOWN_FIRMWARES` entry.
+- **gdbserver attach to mtkbt** — `tools/attach-mtkbt-gdb.sh`. Pushes an ARM API-17 `gdbserver` (place at `tools/gdbserver` or set `$GDBSERVER`), attaches to the live mtkbt PID, computes live PIE base from `/proc/<pid>/maps`, and generates a gdb command file with breakpoints at the AVCTP-RX classifier (file offsets `0x6db7c` / `0x6dc36` / `0x6dc52`) plus the dispatcher arms (`0x515ca` / `0x51622`) — all translated to live addresses. Used to settle which event-code path PASSTHROUGH vs VENDOR_DEPENDENT inbound frames take.
 
 Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`INVESTIGATION.md`](INVESTIGATION.md).
 
