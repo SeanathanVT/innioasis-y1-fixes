@@ -17,9 +17,10 @@ Done:
 - [x] SDP-shape patches (V1, V2, S1) — make Sonos send AVRCP 1.3+ commands
 - [x] mtkbt P1 — routes inbound VENDOR_DEPENDENT through msg 519 emit path
 - [x] J1 attempted and rolled back — wrong dispatch (size==8 path is for PASSTHROUGH)
+- [x] **Trampoline T1 wired in `patch_libextavrcp_jni_minimal.py`** — code-cave at 0x7308 calls `btmtk_avrcp_send_get_capabilities_rsp` for inbound GetCapabilities (PDU 0x10). Output md5: `5949a7f28bf700e4d3934fa7fab00c9f`. **Pending hardware verification.**
 
 Pending (this document is the plan):
-- [ ] Trampoline T1 — call `btmtk_avrcp_send_get_capabilities_rsp` for inbound GetCapabilities
+- [ ] Hardware test T1 — confirm Sonos sees a real GetCapabilities response and proceeds to RegisterNotification
 - [ ] Trampoline T2 — call `btmtk_avrcp_send_reg_notievent_track_changed_rsp` for inbound RegisterNotification(EVENT_TRACK_CHANGED)
 - [ ] Trampoline T3 — call `btmtk_avrcp_send_reg_notievent_playback_rsp` for inbound RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED)
 - [ ] Trampoline T4 — call `btmtk_avrcp_send_get_element_attributes_rsp` for inbound GetElementAttributes (needs current track info from Y1MediaBridge — see "Track-data plumbing" below)
@@ -71,68 +72,33 @@ No usable zero-runs in `.text` (it's contiguous 0x3660–0x7764). Three viable o
 
 **Option C**: append a new section to the ELF. Out of scope for this plan; only do this if (A) and (B) are insufficient.
 
-## Trampoline T1 sketch (GetCapabilities)
+## Trampoline T1 (GetCapabilities) — final
 
-Called from saveRegEventSeqId via `bl <trampoline>` (replacing `bne 0x65bc` at file 0x6538).
+Implementation in `src/patches/patch_libextavrcp_jni_minimal.py`. Two patches:
+
+- **R1 (redirect)** at file `0x6538`: 4 bytes `40 d1 09 25` (`bne.n 0x65bc; movs r5, #9`) → `00 f0 e6 fe` (`bl.w 0x7308`).
+- **T1 (trampoline)** at file `0x7308`, 40 bytes (overwrites `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa`):
 
 ```
-trampoline_t1:
-    push    {r4, r5, lr}              ; preserve regs we'll touch
-    sub     sp, #8                    ; events array buffer
-
-    ; --- detect frame type ---
-    ; saveRegEventSeqId has the inbound data buffer accessible via sp.
-    ; The data layout at sp+378 (per the size==3/8 paths' reads) is
-    ; the AV/C-stripped body. We need to peek at byte 4 (PDU) and
-    ; check if it's 0x10 (GetCapabilities).
-    ; …compute caller's sp+378 offset… (depends on exact stack frame
-    ; we land in; finalize during trampoline write)
-    ldrb    r4, [<caller_sp>+382]     ; PDU byte (or whichever offset
-                                      ;  matches our captured layout)
-    cmp     r4, #0x10
-    bne     trampoline_fallthrough    ; not GetCapabilities → defer
-
-    ; --- build events array on stack ---
-    movs    r0, #1
-    strb    r0, [sp, #0]              ; PLAYBACK_STATUS_CHANGED
-    movs    r0, #2
-    strb    r0, [sp, #1]              ; TRACK_CHANGED
-    movs    r0, #9
-    strb    r0, [sp, #2]              ; NOW_PLAYING_CONTENT_CHANGED
-    movs    r0, #10
-    strb    r0, [sp, #3]              ; AVAILABLE_PLAYERS_CHANGED
-    movs    r0, #11
-    strb    r0, [sp, #4]              ; ADDRESSED_PLAYER_CHANGED
-
-    ; --- arg setup for btmtk_avrcp_send_get_capabilities_rsp ---
-    add     r0, r5, #8                ; r0 = "conn buffer" — r5 was set
-                                      ;  in saveRegEventSeqId at 0x5f30
-                                      ;  from `bl 0x36c0`. We'll need
-                                      ;  to either preserve r5 across
-                                      ;  the redirect or pass it as arg.
-    movs    r1, #0
-    movs    r2, #5                    ; events count
-    mov     r3, sp                    ; events array ptr
-    blx     0x35dc                    ; bl …get_capabilities_rsp@plt
-
-    add     sp, #8
-    pop     {r4, r5, pc}
-
-trampoline_fallthrough:
-    ; Frame isn't GetCapabilities — fall back to default-reject path.
-    add     sp, #8
-    pop     {r4, r5, lr}
-    b       0x65bc                    ; original "unknow indication" target
+0x7308: ldrb.w r0, [sp, #382]         ; PDU byte (AV/C body+4)
+0x730c: cmp r0, #0x10                  ; GetCapabilities?
+0x730e: bne.n 0x732c                   ; no → fall_through
+0x7310: adr r3, 0x7324                 ; events_data ptr
+0x7312: add.w r0, r5, #8               ; r0 = conn buffer (r5 from prologue)
+0x7316: movs r1, #0
+0x7318: movs r2, #5                    ; events count
+0x731a: blx 0x35dc                     ; PLT → btmtk_avrcp_send_get_capabilities_rsp
+0x731e: b.w 0x712a                     ; mov r9,#1; canary; epilogue
+0x7322: nop
+0x7324: 01 02 09 0a 0b 00 00 00        ; supported events
+0x732c: b.w 0x65bc                     ; fall_through (original "unknow")
 ```
 
-Estimated size: ~50 bytes. Fits in testparmnum's slot.
-
-## Open questions to resolve when writing the actual asm
-
-1. **Exact offset of the inbound data buffer** in saveRegEventSeqId's stack frame at the redirect point — this depends on which redirect site we use (`bne 0x6538` lands inside the function with sp at one specific value; from a `bl` to a code-cave the trampoline's stack frame is a child, so it'd need to read caller-sp via offsets relative to LR/saved fp). May be cleaner to do the redirect via a `b` (not `bl`), keeping us in the parent frame.
-2. **r5's preservation across the redirect**. saveRegEventSeqId saves r5 in its prologue. If we redirect via `bl`, r5 is preserved across our call automatically (callee-saved). If via `b`, r5 stays in scope.
-3. **PDU offset detection**. Our inbound CMD_FRAME_IND has data_len:9 with bytes `00 00 19 58 10 00 00 01 02`. If we read byte at data+4 we get `0x10` (PDU). The actual sp offset depends on saveRegEventSeqId's data buffer placement.
-4. **Return path semantics**. After `btmtk_avrcp_send_get_capabilities_rsp` succeeds, what does the caller's flow expect? We should NOT call `btmtk_avrcp_send_pass_through_rsp` (avoids the bogus PASSTHROUGH-shaped response we saw in iter4). Probably skip ahead to the function's epilogue at 0x6e74 → 0x711c.
+**Resolved questions:**
+1. *Stack offset for PDU.* The redirect uses `bl.w` rather than a function-frame-altering call sequence; the trampoline pushes nothing, so its sp == caller's sp at the redirect site. Confirmed via disassembly that the size==3 path reads `[sp, #379]` for the AV/C body's byte-1 (`op_id|state` for PASSTHROUGH), so `[sp, #378]` is the body start. For VENDOR_DEPENDENT, byte-4 of the body = PDU, hence `[sp, #382]`.
+2. *r5 preservation.* `bl.w` clobbers `lr` only; `r5` is preserved (AAPCS callee-saved, untouched by trampoline).
+3. *r0 setup.* The function has *already* executed `add.w r0, r5, #8` at 0x6528 by the time we reach the redirect at 0x6538 — so r0 is the conn buffer on entry to the trampoline. The trampoline reads PDU into r0 (clobbering it) for the cmp, then re-derives `r0 = r5+8` before the response-builder call.
+4. *Return path.* `b.w 0x712a` lands on `mov.w r9, #1` (return value = 1), falling through to the stack-canary check at 0x712e and the function epilogue at 0x7154 (`pop {r4-r9, sl, fp, pc}`).
 
 ## Track-data plumbing for T4 (GetElementAttributes)
 

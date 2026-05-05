@@ -1384,6 +1384,8 @@ The candidate next patch is at file `0x6526` of `libextavrcp_jni.so`: `cmp.w lr,
 
 A clean patch will require static-analyzing what `0x65a4+` actually does (whether it reaches Java or just logs+returns) before committing to a byte rewrite.
 
+**2026-05-05 follow-up.** The single-byte J1 (cmp 8 → 9) was tried and rolled back — it routed size-9 frames through the PASSTHROUGH dispatch, generating fake `key=1 isPress=0` events and never reaching Java. Path forward (now in `patch_libextavrcp_jni_minimal.py`) is **trampoline T1**: redirect `bne.n 0x65bc` at file 0x6538 to a code-cave at file 0x7308 (overwriting the unused JNI debug method `testparmnum`). The trampoline checks the PDU byte at sp+382, and on `0x10` (GetCapabilities) calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT 0x35dc, then exits. See `docs/PROXY-BUILD.md` for the full plan including T2/T3/T4 follow-ups.
+
 ### Empirics + tooling for the next session
 
 - Five gdbserver capture logs in `/work/logs/mtkbt-gdb-{getcap,passthrough,handler,narrow,drill}.log`

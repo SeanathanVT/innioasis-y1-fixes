@@ -79,13 +79,52 @@ Research-probe patcher. **Four patches** against stock mtkbt: three SDP-shape pa
 
 ## `patch_libextavrcp_jni_minimal.py`
 
-Research-probe patcher complementing `patch_mtkbt_minimal.py`. **Currently applies no patches** — J1 was rolled back 2026-05-05 after iter4 testing showed it routed our size-9 frames into the size-8 PASSTHROUGH dispatch (calling `btmtk_avrcp_send_pass_through_rsp` with VENDOR_DEPENDENT-shaped data and dispatching as a fake `key=1 isPress=0` PASSTHROUGH event). The BT-SIG halfword check at sp+382 also failed due to size-9 stack misalignment.
+Research-probe patcher complementing `patch_mtkbt_minimal.py`. Implements **trampoline T1** — a code-cave that intercepts inbound size!=3 dispatch in `_Z17saveRegEventSeqIdhh` (file body 0x5f0c) and calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT for VENDOR_DEPENDENT GetCapabilities (PDU `0x10`). Bypasses both the JNI's "unknow indication" default-reject (the original size!=8 branch) and the JNI->Java callback path (the size==8 branch).
 
-The next patch under design is a **code-cave trampoline** that calls `btmtk_avrcp_send_get_capabilities_rsp` (and related response builders) via the PLT at 0xcfd4 directly — bypassing the JNI's PASSTHROUGH-centric dispatch. See INVESTIGATION.md Trace #12 for the full receive-side analysis.
+**R1 — redirect** at `0x6538` (4 bytes):
+
+| | bytes | mnemonic |
+|---|---|---|
+| before | `40 d1 09 25` | `bne.n 0x65bc` + `movs r5, #9` |
+| after  | `00 f0 e6 fe` | `bl.w 0x7308` |
+
+Destroys the size==8 path's leading `movs r5, #9`. Acceptable because mtkbt-as-1.0 never legitimately produces size==8 frames on this device, and size!=8 was already routed to "unknow indication" — the trampoline still routes it there via its `fall_through` arm.
+
+**T1 — trampoline** at `0x7308` (40 bytes), overwriting the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot):
+
+```
+0x7308: 9d f8 7e 01     ldrb.w r0, [sp, #382]    ; PDU byte (AV/C body+4)
+0x730c: 10 28           cmp r0, #0x10            ; GetCapabilities?
+0x730e: 0d d1           bne.n 0x732c             ; no -> fall_through
+0x7310: 04 a3           adr r3, 0x7324           ; events_data ptr
+0x7312: 05 f1 08 00     add.w r0, r5, #8         ; r0 = conn buffer (r5 from prologue)
+0x7316: 00 21           movs r1, #0
+0x7318: 05 22           movs r2, #5              ; events count
+0x731a: fc f7 60 e9     blx 0x35dc               ; PLT->btmtk_avrcp_send_get_capabilities_rsp
+0x731e: ff f7 04 bf     b.w 0x712a               ; mov r9,#1; canary; epilogue
+0x7322: 00 bf           nop
+0x7324: 01 02 09 0a 0b 00 00 00                  ; supported events:
+                                                 ;   0x01 PLAYBACK_STATUS_CHANGED
+                                                 ;   0x02 TRACK_CHANGED
+                                                 ;   0x09 NOW_PLAYING_CONTENT_CHANGED
+                                                 ;   0x0a AVAILABLE_PLAYERS_CHANGED
+                                                 ;   0x0b ADDRESSED_PLAYER_CHANGED
+0x732c: ff f7 46 b9     b.w 0x65bc               ; fall_through (original "unknow")
+```
+
+**Why this works:**
+- At the redirect site, the function has already executed `add.w r0, r5, #8` (at 0x6528), so `r0 = conn buffer` is on register exit. The trampoline reads PDU into r0 (clobbering it) for the cmp, then re-derives `r0 = r5+8` before the response-builder call.
+- `r5` is preserved across the `bl.w` because it's callee-saved in AAPCS and the trampoline doesn't push/pop it.
+- PLT 0x35dc resolves to GOT 0xcfd4 (`btmtk_avrcp_send_get_capabilities_rsp` per `objdump -R`).
+- 0x712a sets `r9=1` (the function's return value), runs the stack-canary check at 0x712e, and falls into the function epilogue at 0x7154 (`pop {r4-r9, sl, fp, pc}`).
+
+**History:** J1 (cmp.w lr,#8 → cmp.w lr,#9 at 0x6526) was tried 2026-05-05 (iter4) and rolled back — it routed our size-9 frames into the size-8 PASSTHROUGH dispatch, calling `btmtk_avrcp_send_pass_through_rsp` with VENDOR_DEPENDENT-shaped data and dispatching as a fake `key=1 isPress=0` PASSTHROUGH event. The BT-SIG halfword check at sp+382 also failed due to size-9 stack misalignment. See INVESTIGATION.md Trace #12.
 
 **Mutual exclusion with `patch_libextavrcp_jni.py`:** both patchers target the same binary; the v2.0.0 set's C2a/b and C3a/b are at different offsets but cumulatively re-shape the JNI's behaviour, so combining them isn't supported.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `fd2ce74db9389980b55bccf3d8f15660` (no-op until trampoline patch lands).
+**Pending follow-ups (T2/T3/T4):** RegisterNotification + GetElementAttributes responses for live track-change and metadata read-back. See `docs/PROXY-BUILD.md`.
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5949a7f28bf700e4d3934fa7fab00c9f`.
 
 ---
 

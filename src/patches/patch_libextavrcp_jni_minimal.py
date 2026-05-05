@@ -1,45 +1,82 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni_minimal.py — Minimum JNI-side patch for the --avrcp-min
-research probe. One byte rewrite that routes size-9 inbound msg-519 frames
-(produced by patch_mtkbt_minimal.py's P1 patch for VENDOR_DEPENDENT AV/C
-commands) into the JNI's existing size-8 BT-SIG VENDOR path, instead of
-the "unknow indication" default-reject path.
+patch_libextavrcp_jni_minimal.py — Trampoline T1 for the --avrcp-min research
+probe. Redirects size!=8 dispatch in `_Z17saveRegEventSeqIdhh` to a code-cave
+that calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT, then
+exits the function. Bypasses both the JNI->Java callback (which the size==8
+path uses) and the "unknow indication" default-reject (the original size!=8
+target). Pairs with patch_mtkbt_minimal.py's P1 patch which routes inbound
+VENDOR_DEPENDENT AV/C commands through msg 519 with size=9.
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        fd2ce74db9389980b55bccf3d8f15660  (no patches active — see below)
+Output md5:        5949a7f28bf700e4d3934fa7fab00c9f
 
---- Background (per INVESTIGATION.md Trace #12) ---
+--- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
-The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (file 0x5ee4)
-dispatches inbound CMD_FRAME_IND on frame size:
+The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (body at file
+0x5f0c) dispatches inbound CMD_FRAME_IND on frame size:
 
-  size == 3 → PASSTHROUGH path → btmtk_avrcp_send_pass_through_rsp
-  size == 8 → branch with BT-SIG vendor check (cmp halfword, #0x5819 at 0x656a)
-              → on match, jumps to 0x65a4 → calls JNIEnv->CallVoidMethodV
+  size == 3 → PASSTHROUGH path → btmtk_avrcp_send_pass_through_rsp + JNI->Java
+  size == 8 → BT-SIG vendor check; on match calls JNIEnv->CallVoidMethodV
               (vtable offset 248) into a Java *Ind callback
   otherwise → "unknow indication" + default reject (msg 520 NOT_IMPLEMENTED)
 
-The mtkbt P1 patch routes VENDOR_DEPENDENT frames into the msg-519 emit path,
-producing CMD_FRAME_IND with size=9 (one byte off from the size-8 path's
-expected layout). Without this JNI patch, size=9 frames take the "unknow
-indication" branch — which is what blocks Y1MediaBridge from receiving the
-inbound command.
+P1 (in patch_mtkbt_minimal.py) routes VENDOR_DEPENDENT frames into the msg-519
+emit path with size=9, so the JNI sees size!=8 and falls into the "unknow
+indication" branch. We need to handle GetCapabilities (PDU 0x10) here, since
+mtkbt's own dispatcher is compiled-1.0 and never invokes the response builder
+for inbound 1.3+ COMMANDs.
 
---- Status (2026-05-05): J1 rolled back; trampoline patch under design ---
+--- Patch (T1) ---
 
-J1 (cmp.w lr,#8 -> cmp.w lr,#9 at 0x6526) was tested 2026-05-05 (iter4).
-It DID route past the "unknow indication" path, but fell into the size-8
-PASSTHROUGH dispatch and called btmtk_avrcp_send_pass_through_rsp with
-size-9-shaped data. mtkbt then dispatched the inbound as a fake key=1
-PASSTHROUGH (Receive a Avrcpkey:1) and the BT-SIG halfword check at
-sp+382 failed because of the size-9 stack misalignment. Java was never
-invoked. See INVESTIGATION.md Trace #12 and dual-sonos-avrcp-min-iter4/.
+R1 — redirect: at file 0x6538, replace `bne.n 0x65bc; movs r5, #9`
+     (4 bytes: 40 d1 09 25) with `bl.w 0x7308` (4 bytes: 00 f0 e6 fe).
+     This branches to the trampoline at 0x7308 for ALL size!=3 cases.
+     Destroys the size==8 fall-through head (`movs r5, #9`) — acceptable
+     because mtkbt-as-1.0 never legitimately produces size==8 frames on
+     this device, and the original size!=8 path led to "unknow indication"
+     anyway (which the trampoline still routes to via the fall_through arm).
 
-The next patch design is a code-cave trampoline that calls existing
-native response-builder functions directly (getCapabilitiesRspNative,
-registerNotificationRspNative, etc.) with hardcoded/Y1MediaBridge-
-sourced data. Trampoline TBD; this patcher currently applies no patches.
+T1 — trampoline: at file 0x7308, overwrite the unused JNI debug method
+     `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa`
+     with 40 bytes of Thumb code:
+
+       0x7308: ldrb.w r0, [sp, #382]   ; PDU byte (AV/C body offset 4 → sp+382)
+       0x730c: cmp    r0, #0x10        ; GetCapabilities PDU?
+       0x730e: bne.n  0x732c           ; no → fall_through
+       0x7310: adr    r3, 0x7324       ; events_data ptr
+       0x7312: add.w  r0, r5, #8       ; r0 = conn buffer (r5 was set in prologue)
+       0x7316: movs   r1, #0           ; ?
+       0x7318: movs   r2, #5           ; events count = 5
+       0x731a: blx    0x35dc           ; btmtk_avrcp_send_get_capabilities_rsp
+       0x731e: b.w    0x712a           ; mov r9,#1; canary check; epilogue
+       0x7322: nop
+       0x7324: 01 02 09 0a 0b 00 00 00 ; events: PLAYBACK_STATUS_CHANGED,
+                                       ;         TRACK_CHANGED,
+                                       ;         NOW_PLAYING_CONTENT_CHANGED,
+                                       ;         AVAILABLE_PLAYERS_CHANGED,
+                                       ;         ADDRESSED_PLAYER_CHANGED
+       0x732c: b.w    0x65bc           ; fall_through (original "unknow" target)
+
+     PLT 0x35dc → GOT 0xcfd4 → btmtk_avrcp_send_get_capabilities_rsp
+     (verified via objdump -R).
+
+testparmnum is presumed unused (debug method that takes 12 jbyte args, logs
+each, returns 0). MtkBt.apk's smali should be grep-checked for any caller
+before shipping (none expected).
+
+If T1 succeeds (Sonos receives a real GetCapabilities response and proceeds
+to RegisterNotification/GetElementAttributes), the next patches T2/T3/T4
+follow the same trampoline pattern in additional code-cave space (see
+docs/PROXY-BUILD.md).
+
+--- History ---
+
+J1 (cmp.w lr,#8 -> cmp.w lr,#9 at 0x6526) was tried 2026-05-05 (iter4) and
+rolled back — it routed VENDOR_DEPENDENT through the size==8 PASSTHROUGH
+dispatch which generated fake key=1 PASSTHROUGH events and didn't reach the
+intended Java callback (BT-SIG halfword check at sp+382 failed due to size-9
+stack misalignment). See INVESTIGATION.md Trace #12.
 
 Mutually exclusive with patch_libextavrcp_jni.py (the v2.0.0 4-patch set);
 both target overlapping code regions.
@@ -56,9 +93,50 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "fd2ce74db9389980b55bccf3d8f15660"  # no-op until trampoline patch lands
+OUTPUT_MD5 = "5949a7f28bf700e4d3934fa7fab00c9f"
 
-PATCHES = []  # see "Status" in the docstring above; trampoline patch under design
+# T1 trampoline at 0x7308 (overwrites testparmnum, 40 bytes of 44 available).
+TRAMPOLINE_BYTES = bytes([
+    0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
+    0x10, 0x28,                               # cmp r0, #0x10
+    0x0D, 0xD1,                               # bne.n 0x732c
+    0x04, 0xA3,                               # adr r3, 0x7324
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
+    0x00, 0x21,                               # movs r1, #0
+    0x05, 0x22,                               # movs r2, #5
+    0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
+    0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
+    0x00, 0xBF,                               # nop
+    0x01, 0x02, 0x09, 0x0A, 0x0B,            # events: PLAYBACK,TRACK,NPL,AVAIL,ADDR
+    0x00, 0x00, 0x00,                         # padding
+    0xFF, 0xF7, 0x46, 0xB9,                  # b.w 0x65bc (fall_through)
+])
+assert len(TRAMPOLINE_BYTES) == 40
+
+# Stock testparmnum first 40 bytes (unused JNI debug method).
+TESTPARMNUM_STOCK = bytes([
+    0x10, 0xB5, 0x04, 0x20, 0x07, 0x4C, 0x08, 0x4A,
+    0x7C, 0x44, 0x21, 0x46, 0x7A, 0x44, 0xFB, 0xF7,
+    0xF4, 0xEF, 0x06, 0x4A, 0x04, 0x20, 0x21, 0x46,
+    0x00, 0x23, 0x7A, 0x44, 0xFB, 0xF7, 0xEC, 0xEF,
+    0x00, 0x20, 0x10, 0xBD, 0x01, 0x07, 0x00, 0x00,
+])
+assert len(TESTPARMNUM_STOCK) == 40
+
+PATCHES = [
+    {
+        "name": "R1: redirect bne.n 0x65bc → bl.w 0x7308 (T1 trampoline) at 0x6538",
+        "offset": 0x6538,
+        "before": bytes([0x40, 0xD1, 0x09, 0x25]),  # bne.n 0x65bc; movs r5, #9
+        "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
+    },
+    {
+        "name": "T1: GetCapabilities trampoline (overwrites testparmnum) at 0x7308",
+        "offset": 0x7308,
+        "before": TESTPARMNUM_STOCK,
+        "after":  TRAMPOLINE_BYTES,
+    },
+]
 
 
 def md5(data: bytes) -> str:
