@@ -224,6 +224,11 @@ BP_fde8=$(fileoff_to_live 0x0fde8)    # blx [r6-4] in fn 0xfb04 — the AV/C han
 BP_14b48=$(fileoff_to_live 0x14b48)   # fn 0x147dc TBH case 4 (event_code 4 → bl 0x145b0)
 BP_14b50=$(fileoff_to_live 0x14b50)   # return from bl 0x145b0 (within fn 0x147dc case 4)
 BP_144bc=$(fileoff_to_live 0x144bc)   # downstream handler — fires only if [conn+172]==0 path taken
+BP_11374=$(fileoff_to_live 0x11374)   # fn 0x11374 entry — both call this; gate is inside or below
+BP_113f2=$(fileoff_to_live 0x113f2)   # bne to 0x11484 (gates on [r8+r6] == 4)
+BP_308ea=$(fileoff_to_live 0x308ea)   # cmp r6, #8 — entry to outer-dispatcher invocation block
+BP_308f4=$(fileoff_to_live 0x308f4)   # cmp [conn+0x5d5], #1 — the should-forward flag check
+BP_3090e=$(fileoff_to_live 0x3090e)   # blx [conn+0x5cc] — actual outer dispatcher invocation
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -348,6 +353,50 @@ break *${BP_144bc}
 commands
 silent
 printf "BP@0x144bc (downstream handler): r0=0x%x r1=0x%x r2=0x%x\n", \$r0, \$r1, \$r2
+continue
+end
+
+# fn 0x11374 entry — both fn 0x144bc paths bl into 0x11374. Capture r0/r2/r3 to
+# see what each frame type passes.
+break *${BP_11374}
+commands
+silent
+printf "BP@0x11374 (fn entry): r0=0x%x r1=0x%x r2=0x%x r3=0x%x [sp+12]=0x%x\n", \$r0, \$r1, \$r2, \$r3, *(unsigned int*)(\$sp+12)
+continue
+end
+
+# 0x113f2 — bne to 0x11484 (the early-return path inside fn 0x11374). PASSTHROUGH
+# vs VENDOR_DEPENDENT may diverge here based on [r8+r6] == 4 check at 0x113f0.
+break *${BP_113f2}
+commands
+silent
+printf "BP@0x113f2 (gate check inside 0x11374): r0=0x%x r5=0x%x\n", \$r0, \$r5
+continue
+end
+
+# Outer dispatcher invocation block (0x308ea+). The conn+0x5d5 flag gates
+# whether the outer dispatcher fires for event 8. Capture both arms:
+break *${BP_308ea}
+commands
+silent
+printf "BP@0x308ea (outer invoke gate): r6=%u (event_code) [conn+0x5d5]=%u\n", \$r6, *(unsigned char*)(\$r4+0x5d5)
+continue
+end
+
+break *${BP_308f4}
+commands
+silent
+printf "BP@0x308f4 ([conn+0x5d5]==1 check): r0=%u (the loaded byte)\n", \$r0
+continue
+end
+
+# Actual outer-dispatcher invocation. If this fires, msg 519 will follow.
+# This BP being hit for PASSTHROUGH but not VENDOR_DEPENDENT confirms the gate
+# is upstream of here (in conn+0x5d5's value or how event_code 8 gets queued).
+break *${BP_3090e}
+commands
+silent
+printf "BP@0x3090e (blx [conn+0x5cc]): r1=0x%x (callback fn ptr)\n", \$r1
 continue
 end
 
