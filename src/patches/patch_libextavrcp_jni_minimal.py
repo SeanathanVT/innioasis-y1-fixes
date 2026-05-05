@@ -18,7 +18,7 @@ padding for page alignment, so we can grow LOAD #1 freely up to that limit
 plumbing — see docs/PROXY-BUILD.md).
 
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        6a075878ac5d5353848ab2672f9fac0c
+Output md5:        fbe2670b1e61953730edf3cf3e8a29b5
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -126,18 +126,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "6a075878ac5d5353848ab2672f9fac0c"
-
-# T4 stub goes at file/vaddr 0xac54 — first byte after the original LOAD #1 segment
-# end. The 4276 bytes between LOAD #1 (ends 0xac54) and LOAD #2 (starts 0xbc08) are
-# zero-padding for page alignment, so we reuse them. The patcher extends LOAD #1's
-# FileSiz/MemSiz to cover our new bytes, making them executable at runtime.
-T4_STUB_VADDR = 0xac54
-LOAD1_PHDR_OFFSET = 0x54        # Program header for LOAD segment #1 (R+E)
-LOAD1_FILESZ_OFFSET = 0x54 + 16 # filesz field within that phdr
-LOAD1_MEMSZ_OFFSET  = 0x54 + 20 # memsz field
-LOAD1_OLD_SIZE = 0xac54
-LOAD1_NEW_SIZE = 0xac5c
+OUTPUT_MD5 = "fbe2670b1e61953730edf3cf3e8a29b5"
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
 T1_TRAMPOLINE = bytes([
@@ -192,27 +181,43 @@ T2_BLOCK = bytes([
 ])
 assert len(T2_BLOCK) == 48
 
-# T4 stub at vaddr/file 0xac54 (8 bytes) — the smallest possible "fix" stub:
-# restores r0 = r5+8 (which T1/T2 clobbered) and falls through to the original
-# "unknow indication" path at 0x65bc. This makes mtkbt actually emit a
+# T4 stub at vaddr/file 0xac54 (12 bytes) — the smallest "fix" stub. Restores
+# r0 = r5+8 AND lr = halfword at sp+374 (= SIZE), then falls through to the
+# original "unknow indication" path at 0x65bc. Makes mtkbt actually emit
 # msg=520 NOT_IMPLEMENTED for size:13 events != TRACK_CHANGED and for size:45
 # (GetElementAttributes) — which previously generated NO response because the
-# unknown-indication path at 0x65bc relies on r0 holding the conn buffer.
+# unknown-indication path at 0x65bc requires:
+#
+#   1. r0 = conn buffer (set at file 0x6528 in original flow; T1/T2 clobber)
+#   2. lr = SIZE halfword (loaded at file 0x644e from sp+374, before all the
+#      cmp/bne dispatches; bl.w 0x7308 at file 0x6538 clobbers lr to 0x653c).
+#
+# Without (2), 0x65bc's `str.w lr, [sp, #12]` writes the bogus return-address
+# 0x653c to sp+12 instead of SIZE. The pass_through_rsp builder then sees a
+# garbage size and silently fails to emit msg=520. Iter7 (just (1) without
+# (2)) confirmed this — Sonos kept retrying size:45 forever.
 #
 # Sits in 4276 zero-padding bytes between LOAD #1 (was 0..0xac54) and LOAD #2
-# (starts 0xbc08). LOAD #1's filesz/memsz are bumped to 0xac5c so the kernel
-# maps these bytes as R+E.
-#
-# This is also the entry point for the future full T4 GetElementAttributes
-# response (additional bytes appended past 0xac5c).
+# (starts 0xbc08). LOAD #1's filesz/memsz are bumped to 0xac60 so the kernel
+# maps these bytes as R+E. This is also the entry point for the future full
+# T4 GetElementAttributes response (additional bytes appended past 0xac60).
+T4_STUB_VADDR = 0xac54
 T4_STUB = bytes([
-    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8 (restore conn buffer)
-    0xFB, 0xF7, 0xB0, 0xBC,                  # b.w 0x65bc (original "unknow indication")
+    0xBD, 0xF8, 0x76, 0xE1,                  # ldrh.w lr, [sp, #374] (SIZE)
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8 (conn buffer)
+    0xFB, 0xF7, 0xAE, 0xBC,                  # b.w 0x65bc (original "unknow indication")
 ])
-assert len(T4_STUB) == 8
+assert len(T4_STUB) == 12
 
-# Stock bytes at 0xac54..0xac5b — should all be zero (LOAD #1 page padding).
-T4_STUB_STOCK = bytes([0x00] * 8)
+# Stock bytes at 0xac54..0xac5f — all zero (LOAD #1 page padding).
+T4_STUB_STOCK = bytes([0x00] * 12)
+
+# LOAD #1 program-header bookkeeping
+LOAD1_PHDR_OFFSET = 0x54
+LOAD1_FILESZ_OFFSET = LOAD1_PHDR_OFFSET + 16
+LOAD1_MEMSZ_OFFSET  = LOAD1_PHDR_OFFSET + 20
+LOAD1_OLD_SIZE = 0xac54
+LOAD1_NEW_SIZE = T4_STUB_VADDR + len(T4_STUB)  # 0xac60
 
 # Stock classInitNative (48 bytes) — entry + body + literal pool.
 CLASSINITNATIVE_STOCK = bytes([
@@ -245,19 +250,19 @@ PATCHES = [
         "after":  T2_BLOCK,
     },
     {
-        "name": "T4: stub @ 0xac54 (8 bytes appended into LOAD #1 padding)",
+        "name": f"T4: stub @ 0x{T4_STUB_VADDR:x} ({len(T4_STUB)} bytes appended into LOAD #1 padding)",
         "offset": T4_STUB_VADDR,
         "before": T4_STUB_STOCK,
         "after":  T4_STUB,
     },
     {
-        "name": "LOAD #1 filesz: 0xac54 → 0xac5c (cover T4 stub)",
+        "name": f"LOAD #1 filesz: 0x{LOAD1_OLD_SIZE:x} → 0x{LOAD1_NEW_SIZE:x} (cover T4 stub)",
         "offset": LOAD1_FILESZ_OFFSET,
         "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
         "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),
     },
     {
-        "name": "LOAD #1 memsz: 0xac54 → 0xac5c (cover T4 stub)",
+        "name": f"LOAD #1 memsz: 0x{LOAD1_OLD_SIZE:x} → 0x{LOAD1_NEW_SIZE:x} (cover T4 stub)",
         "offset": LOAD1_MEMSZ_OFFSET,
         "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
         "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),

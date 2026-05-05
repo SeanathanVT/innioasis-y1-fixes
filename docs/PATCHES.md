@@ -151,27 +151,33 @@ EVENT_PLAYBACK_STATUS_CHANGED (0x01), NOW_PLAYING_CONTENT_CHANGED (0x09), AVAILA
 
 **Mutual exclusion with `patch_libextavrcp_jni.py`:** both patchers target the same binary; the v2.0.0 set's C2a/b and C3a/b are at different offsets but cumulatively re-shape the JNI's behaviour, so combining them isn't supported.
 
-**T4 — stub at extended-LOAD-segment vaddr 0xac54** (8 bytes). The original libextavrcp_jni.so has a LOAD segment ending at vaddr/file 0xac54, with 4276 zero-padding bytes before LOAD #2 starts at file 0xbc08. The patcher writes T4 code into this padding and bumps LOAD #1's `FileSiz`/`MemSiz` from 0xac54 to 0xac5c so the kernel maps the bytes as R+E at runtime. T2's "unknown" branch at 0x72f4 is rewritten to `b.w 0xac54` instead of `b.w 0x65bc`.
+**T4 — stub at extended-LOAD-segment vaddr 0xac54** (12 bytes). The original libextavrcp_jni.so has a LOAD segment ending at vaddr/file 0xac54, with 4276 zero-padding bytes before LOAD #2 starts at file 0xbc08. The patcher writes T4 code into this padding and bumps LOAD #1's `FileSiz`/`MemSiz` from 0xac54 to 0xac60 so the kernel maps the bytes as R+E at runtime. T2's "unknown" branch at 0x72f4 is rewritten to `b.w 0xac54` instead of `b.w 0x65bc`.
 
 ```
-0xac54: 05 f1 08 00     add.w r0, r5, #8        ; restore conn buffer
-                                                  ;   (T1/T2 clobbered r0)
-0xac58: fb f7 b0 bc     b.w 0x65bc               ; original "unknow indication"
+0xac54: bd f8 76 e1     ldrh.w lr, [sp, #374]   ; restore lr = SIZE
+0xac58: 05 f1 08 00     add.w  r0, r5, #8        ; restore r0 = conn buffer
+0xac5c: fb f7 ae bc     b.w    0x65bc            ; original "unknow indication"
 ```
 
-**Why the r0 restore matters:** the original `bne 0x65bc` site at file 0x6538 was reached with `r0 = r5+8` (set at 0x6528, two instructions before the bne). The 0x65bc unknow-indication path doesn't re-set r0; it just sets `sp[0..16]` for `btmtk_avrcp_send_pass_through_rsp`'s extra args, then calls. Our T1/T2 trampolines clobber r0 (with PDU/event_id) before falling through, so without this restore, pass_through_rsp gets a bogus first arg and silently fails to emit msg=520 NOT_IMPLEMENTED. Iter5/iter6 captures showed Sonos retrying size:13/size:45 frames forever because mtkbt was emitting nothing back; T4 stub fixes this.
+**Why these two restores:** the original `bne 0x65bc` site at file 0x6538 was reached with two specific values that 0x65bc relies on:
+- `r0 = r5+8` (set at 0x6528, two instructions before the bne)
+- `lr = halfword at sp+374` (= SIZE; loaded at 0x644e, before all the cmp/bne dispatches)
+
+The 0x65bc path then runs `str.w lr, [sp, #12]` to pass SIZE to `btmtk_avrcp_send_pass_through_rsp` as a stack arg. Our T1/T2 trampolines clobber r0 (with PDU/event_id) AND the `bl.w 0x7308` at 0x6538 clobbers lr (to 0x653c, the bl return address). Without both restores, pass_through_rsp gets bogus args and silently fails to emit msg=520 NOT_IMPLEMENTED.
+
+Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frames forever because mtkbt was emitting nothing back. Iter7 (only the r0 restore, no lr restore) tested the ELF-extension infrastructure but still didn't generate msg=520 — the lr clobber was the second half of the bug. Iter8 (this version) restores both.
 
 **Future:** the same 0xac54 entry will host the full T4 GetElementAttributes response — currently a stub but expandable into the 4276-byte padding region. That's the path forward for live track metadata via Y1MediaBridge.
 
 **Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
-- offset+16 (`p_filesz`): 0xac54 → 0xac5c
-- offset+20 (`p_memsz`):  0xac54 → 0xac5c
+- offset+16 (`p_filesz`): 0xac54 → 0xac60
+- offset+20 (`p_memsz`):  0xac54 → 0xac60
 
 No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
 
 **Pending follow-ups (T3 + full T4):** PlaybackStatus response + actual GetElementAttributes response with track strings (read from `/data/local/tmp/y1-track-info` written by Y1MediaBridge). See `docs/PROXY-BUILD.md`.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `6a075878ac5d5353848ab2672f9fac0c`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `fbe2670b1e61953730edf3cf3e8a29b5`.
 
 ---
 

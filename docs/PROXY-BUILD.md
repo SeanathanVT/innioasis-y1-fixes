@@ -19,10 +19,11 @@ Done:
 - [x] J1 attempted and rolled back — wrong dispatch (size==8 path is for PASSTHROUGH)
 - [x] **Trampoline T1** — code-cave at 0x7308 calls `btmtk_avrcp_send_get_capabilities_rsp` for inbound GetCapabilities (PDU 0x10). Hardware-verified iter5 2026-05-05: Sonos received the response and progressed to sending RegisterNotification frames (size:13 at 2-second intervals).
 - [x] **Trampoline T2** — code-cave at 0x72d0 (overwrites `classInitNative` debug stub) calls `btmtk_avrcp_send_reg_notievent_track_changed_rsp` for inbound RegisterNotification(EVENT_TRACK_CHANGED). **Hardware-verified iter6 2026-05-05**: 2× msg=544 size=40 outbound on inbound size:13, and Sonos progressed to sending size:45 GetElementAttributes (PDU 0x20, 26 retries at 2-second intervals).
-- [x] **T4 stub + ELF section append (iter7)** — patcher extends LOAD #1's `FileSiz`/`MemSiz` from 0xac54 to 0xac5c, occupying 8 bytes of the page-alignment padding between LOAD #1 and LOAD #2. Stub at vaddr 0xac54 just restores `r0 = r5+8` (which T1/T2 clobbered) and falls through to the original "unknow indication" path at 0x65bc. T2's unknown branch at 0x72f4 now points to 0xac54 instead of 0x65bc. **Pending hardware verification.** Output md5: `6a075878ac5d5353848ab2672f9fac0c`.
+- [x] **T4 stub iter7** — first attempt: extended LOAD #1 to 0xac5c (8 bytes), restored only r0. Hardware-tested but didn't generate msg=520 — Sonos kept retrying. Diagnosis: 0x65bc also relies on `lr = SIZE` (loaded earlier at 0x644e from sp+374), and our `bl.w` at 0x6538 clobbered lr to 0x653c.
+- [x] **T4 stub iter8** — extended LOAD #1 to 0xac60 (12 bytes); now restores BOTH `r0 = r5+8` AND `lr = halfword at sp+374` before falling through to 0x65bc. T2's unknown branch at 0x72f4 points to 0xac54. **Pending hardware verification.** Output md5: `fbe2670b1e61953730edf3cf3e8a29b5`.
 
 Pending (this document is the plan):
-- [ ] Hardware test iter7 — verify (a) ELF still loads + Bluetooth functional, (b) size:45 (GetElementAttributes) frames now generate msg=520 NOT_IMPLEMENTED outbound (which was the gate; in iter6 they generated nothing because r0 was clobbered).
+- [ ] Hardware test iter8 — verify size:13 (events != TRACK_CHANGED) and size:45 (GetElementAttributes) frames now generate msg=520 NOT_IMPLEMENTED outbound. Sonos should stop retrying once it sees the rejects.
 - [ ] Trampoline T3 — call `btmtk_avrcp_send_reg_notievent_playback_rsp` for inbound RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED). Optional unless Sonos blocks on it.
 - [ ] Trampoline T4 — call `btmtk_avrcp_send_get_element_attributes_rsp` for inbound GetElementAttributes (needs current track info from Y1MediaBridge — see "Track-data plumbing" below). **This is what actually puts metadata on Sonos's screen.**
 
