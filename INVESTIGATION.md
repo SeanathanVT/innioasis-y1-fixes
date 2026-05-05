@@ -1408,7 +1408,24 @@ A clean patch will require static-analyzing what `0x65a4+` actually does (whethe
 
 **Iter11 hardware-verified 2026-05-05**: "Y1 Test" displayed on Sonos Now Playing screen. **First ever AVRCP metadata delivery from this device to a peer.** Loop continues at 70Hz because the TRACK_CHANGED INTERIM with track_id=0xFFFFFFFFFFFFFFFF tells Sonos to keep re-querying (no stable identity), but the metadata path itself works.
 
-**Iter12 — multi-attribute T4.** Extends T4 to 152 bytes with a dispatch loop: parse num_attributes from inbound at sp+394, walk requested attribute_ids at sp+395+, and for each one match against {0x01, 0x02, 0x03} — calling the response builder once per supported attribute with hardcoded strings ("Y1 Title", "Y1 Artist", "Y1 Album"). Unsupported attributes (0x04-0x07) are silently skipped. **Pending hardware verification.** Output md5 `fa6191d6ce8170f5ef5c8142202c8ba5`.
+**Iter12 — multi-attribute T4 dispatch (loop, separate frames).** Extended T4 to 152 bytes with a dispatch loop: parse num_attributes from inbound at sp+394, walk requested attribute_ids at sp+395+, and for each one match against {0x01, 0x02, 0x03} — calling the response builder once per supported attribute with hardcoded strings ("Y1 Title", "Y1 Artist", "Y1 Album"). Unsupported attributes (0x04-0x07) silently skipped. **Hardware-verified iter12 2026-05-05**: ratio 3:1 of msg=540 to size:45 — three frames per query. Sonos accepted the first frame and displayed "Y1 Title" only; subsequent frames with same transId were ignored as duplicates. Output md5 `fa6191d6ce8170f5ef5c8142202c8ba5`.
+
+**Iter13 — multi-attribute single-frame response (correct semantics, breakthrough).** After disassembling `btmtk_avrcp_send_get_element_attributes_rsp` at libextavrcp.so:0x2188, decoded the function's actual contract:
+- `arg1 (r1)` = "with-string / reset" flag (0 = with string, append; !=0 = no-string finalize)
+- `arg2 (r2)` = attribute INDEX in this response (0..N-1) — **NOT transId**
+- `arg3 (r3)` = TOTAL number of attributes in this response
+- `sp[0]` = attribute_id LSB
+- `sp[4]` = 0x6a (UTF-8, JNI-hardcoded)
+- `sp[8]` = string length
+- `sp[12]` = string pointer
+
+The function maintains an internal 644-byte static buffer that's reset when (`arg1!=0` OR `arg2==0`). It emits the IPC frame only when `(arg2+1)==arg3` AND `arg3!=0` (last attribute) — earlier calls accumulate. iter11/12 worked by accident because passing `arg3=0` triggered the legacy single-shot send path. iter13 makes 3 sequential calls with `arg2=0/1/2`, `arg3=3` → first two accumulate, third emits ONE frame containing all 3 attributes.
+
+**transId** is NOT an argument — the function reads it from `conn[17]` automatically.
+
+**iter13 output md5**: `56d9d8514f30a12aaf2303b7a7f6a067`. Pending hardware verification.
+
+For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 
 ### Empirics + tooling for the next session
 

@@ -81,9 +81,15 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 ## Status
 
-`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. **AVRCP metadata over BT is not delivered** — `--avrcp` was an attempt to enable it, but byte-patches against `mtkbt` cannot make the daemon process AVRCP 1.3+ commands, and the patches additionally regress stock PASSTHROUGH. `--avrcp` is therefore a known-broken opt-in (excluded from `--all`, prints a warning). `--bluetooth` covers only the pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits — it does **not** advertise an AVRCP version `mtkbt` can't deliver.
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
 
-Full investigation history, byte-patch test matrix, and the four-phase user-space proxy work plan that aims to fix metadata transport: [`INVESTIGATION.md`](INVESTIGATION.md).
+**AVRCP metadata over BT is now partially working under `--avrcp-min`** (as of 2026-05-05, iter11/12 on hardware): "Y1 Test" / "Y1 Title" displayed on Sonos's Now Playing screen — first time AVRCP metadata has been delivered to a peer device from this firmware. iter13 ships proper multi-attribute single-frame responses (Title + Artist + Album); awaiting hardware verification. iter14+ replaces hardcoded strings with real metadata via Y1MediaBridge.
+
+The breakthrough is a chain of binary trampolines patched into `libextavrcp_jni.so` that intercept inbound AVRCP commands and call the existing C response-builder functions in `libextavrcp.so` directly — bypassing the OEM's incomplete Java AVRCP TG. Full architecture, calling conventions, and the ELF-segment-extension technique used to host code past the original LOAD #1 segment end are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+The legacy `--avrcp` flag is still **known-broken** (byte-patches against `mtkbt` 1.4 advertisement without the trampoline chain regress PASSTHROUGH). Use `--avrcp-min` instead. `--bluetooth` covers only pairing-essential config edits — it does not modify SDP/AVRCP behavior.
+
+Full investigation history including refuted hypotheses and the path to the current architecture: [`INVESTIGATION.md`](INVESTIGATION.md).
 
 ## Stock firmware manifest
 
@@ -108,10 +114,12 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
-- [INVESTIGATION.md](INVESTIGATION.md) — full AVRCP investigation narrative, refuted hypotheses, trace history
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. **Read this if working on the metadata pipeline.**
+- [docs/PROXY-BUILD.md](docs/PROXY-BUILD.md) — concrete iteration plan and pending work for the AVRCP proxy
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
+- [INVESTIGATION.md](INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/DEX.md](docs/DEX.md) — DEX-level analysis for `patch_y1_apk.py`'s smali patches
-- [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp`)
+- [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
 
 ## Deployment notes
 
