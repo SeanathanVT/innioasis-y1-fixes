@@ -217,6 +217,14 @@ BP_6dc52=$(fileoff_to_live 0x6dc52)   # event_code=8 setter (raw-forward path)
 BP_515ca=$(fileoff_to_live 0x515ca)   # dispatcher case 3 (event 4 → msg 506)
 BP_51622=$(fileoff_to_live 0x51622)   # dispatcher case 7 (event 8 → msg 519)
 
+echo "==> Cleaning up stale gdbserver from any prior run.."
+# toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
+# (no-op if nothing to kill). Necessary because a prior mtkbt crash mid-debug
+# can leave gdbserver wedged with the dead PID's ptrace slot, blocking the
+# next --attach with "Operation not permitted".
+adb shell 'su -c "for d in /proc/[0-9]*; do n=\$(cat \$d/comm 2>/dev/null); if [ \"\$n\" = gdbserver ]; then kill -9 \${d#/proc/} 2>/dev/null; fi; done"' >/dev/null 2>&1
+adb forward --remove "tcp:${PORT}" >/dev/null 2>&1 || true
+
 echo "==> Pushing gdbserver to /data/local/tmp/.."
 adb push "$GDBSERVER" /data/local/tmp/gdbserver >/dev/null
 adb shell 'su -c "chmod 755 /data/local/tmp/gdbserver"'
