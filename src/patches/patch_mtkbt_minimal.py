@@ -3,7 +3,7 @@
 patch_mtkbt_minimal.py — Minimum SDP patches against stock mtkbt.
 
 Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: add9e702a275c8ef1faeee5a0d48df51
+Output md5: a37d56c91beb00b021c55f7324f2cc09
 
 Three byte-level patches against the SERVED AVRCP TG record (Group D, the
 record that actually lands on the wire after mtkbt's last-wins merge). The
@@ -28,6 +28,20 @@ S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
      The string content "Advanced Audio" is reused from mtkbt's existing A2DP
      ServiceName — peers don't validate ServiceName content; they just need
      the attribute present so the record passes structural sanity checks.
+P1 — Force fn 0x144bc's op_code dispatch to always take the PASSTHROUGH branch
+     (which calls bl 0x10404 → emits msg 519 CMD_FRAME_IND to JNI). gdbserver
+     traces confirmed PASSTHROUGH (op_code=0x7c) flows through fn 0x144bc's
+     b.n 0x14528 path → bl 0x10404 and produces msg 519, while VENDOR_DEPENDENT
+     (op_code=0x00) takes the bcc → bl 0x11374 path which only logs. The patch
+     replaces the first cmp at 0x144e8 with an unconditional b.n 0x14528,
+     skipping the op_code check entirely. All inbound AV/C frames now take the
+     emit path; Y1MediaBridge can parse the frame and respond.
+
+     Risk: the bl 0x10404 path may interpret VENDOR_DEPENDENT frame bytes as
+     PASSTHROUGH, producing malformed responses. Worst case is mtkbt emits
+     a NOT_IMPLEMENTED reply to the peer (which is what currently happens
+     anyway). Best case msg 519 fires with the inbound bytes preserved and
+     Y1MediaBridge handles the rest.
 
 This patcher is mutually exclusive with patch_mtkbt.py — they touch
 overlapping byte ranges (0x0eba58, 0x0eba6d, the 0x0311 entry slot). Apply
@@ -53,7 +67,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5  = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5 = "add9e702a275c8ef1faeee5a0d48df51"
+OUTPUT_MD5 = "a37d56c91beb00b021c55f7324f2cc09"
 
 # 12-byte descriptor table entry: attrID:LE16, len:LE16, ptr:LE32, zeros:LE32
 def entry(attr_id: int, length: int, ptr: int) -> bytes:
@@ -79,6 +93,19 @@ PATCHES = [
         "before": entry(0x0311, 0x0003, 0x000eba59),
         # patched: attr=0x0100, len=0x11, ptr=0x0eb9ce (-> SDP TEXT_STR_8 "Advanced Audio\\0")
         "after":  entry(0x0100, 0x0011, 0x000eb9ce),
+    },
+    {
+        # `cmp r3, #0x30` at 0x144e8 → `b.n 0x14528` (unconditional). Bypasses
+        # the op_code dispatch in fn 0x144bc so all inbound AV/C frames reach
+        # the bl 0x10404 PASSTHROUGH-emit path → msg 519 CMD_FRAME_IND fires
+        # for VENDOR_DEPENDENT frames too.
+        # Thumb encoding: cmp r3, #0x30 = 0x2b30 (LE bytes 30 2b)
+        #                 b.n +0x3c    = 0xe01e (LE bytes 1e e0)
+        # Branch target at 0x14528 = current PC (0x144ec) + 0x3c.
+        "name":   "[P1] cmp r3, #0x30 -> b.n 0x14528  force msg 519 emit path in fn 0x144bc",
+        "offset": 0x144e8,
+        "before": bytes([0x30, 0x2b]),
+        "after":  bytes([0x1e, 0xe0]),
     },
 ]
 

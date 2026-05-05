@@ -7,7 +7,7 @@ Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the
 | Patcher | Target | Patches |
 |---|---|---|
 | **`patch_mtkbt.py`** | `mtkbt` (Bluetooth daemon) | B1-B3 (AVCTP 1.0→1.3), C1-C3 (AVRCP 1.0/1.3→1.4), A1 (runtime SDP MOVW), D1 (registration guard NOP), E3/E4 (SupportedFeatures `0x0033`), E8 (op_code=4 dispatcher gate NOP) — **11 patches total** |
-| **`patch_mtkbt_minimal.py`** | `mtkbt` (Bluetooth daemon) | V1 (AVRCP 1.0→1.3), V2 (AVCTP 1.0→1.2), S1 (replace 0x0311 SupportedFeatures slot with 0x0100 ServiceName pointing at existing "Advanced Audio" string) — **3 patches**. Pixel-1.3 SDP shape probe; mutually exclusive with `patch_mtkbt.py`. Wired by `apply.bash --avrcp-min`. |
+| **`patch_mtkbt_minimal.py`** | `mtkbt` (Bluetooth daemon) | V1 (AVRCP 1.0→1.3), V2 (AVCTP 1.0→1.2), S1 (replace 0x0311 SupportedFeatures slot with 0x0100 ServiceName pointing at existing "Advanced Audio" string), P1 (force fn 0x144bc op_code dispatch to PASSTHROUGH branch → bl 0x10404 → msg 519 emit) — **4 patches**. Pixel-1.3 SDP shape + bypass mtkbt's silent-drop of VENDOR_DEPENDENT 1.3+ COMMANDs. Mutually exclusive with `patch_mtkbt.py`. Wired by `apply.bash --avrcp-min`. |
 | **`patch_mtkbt_odex.py`** | `MtkBt.odex` | F1 (`getPreferVersion()` returns 14), F2 (`disable()` resets `sPlayServiceInterface`). Recomputes DEX adler32. |
 | **`patch_libextavrcp_jni.py`** | `libextavrcp_jni.so` | C2a/b (hardcode `g_tg_feature=0x0e`, `sdpfeature=0x23`), C3a/b (raise GetCapabilities event-list cap 13→14) |
 | **`patch_libextavrcp.py`** | `libextavrcp.so` | C4 (`0x0103 → 0x0104` at `0x002e3b`) |
