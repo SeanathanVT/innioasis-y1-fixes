@@ -18,10 +18,9 @@ Done:
 - [x] mtkbt P1 — routes inbound VENDOR_DEPENDENT through msg 519 emit path
 - [x] J1 attempted and rolled back — wrong dispatch (size==8 path is for PASSTHROUGH)
 - [x] **Trampoline T1** — code-cave at 0x7308 calls `btmtk_avrcp_send_get_capabilities_rsp` for inbound GetCapabilities (PDU 0x10). Hardware-verified iter5 2026-05-05: Sonos received the response and progressed to sending RegisterNotification frames (size:13 at 2-second intervals).
-- [x] **Trampoline T2** — code-cave at 0x72d0 (overwrites `classInitNative` debug stub) calls `btmtk_avrcp_send_reg_notievent_track_changed_rsp` for inbound RegisterNotification(EVENT_TRACK_CHANGED). Output md5: `5fec125a259d9fc210831d20dc2ecf48`. **Pending hardware verification.**
+- [x] **Trampoline T2** — code-cave at 0x72d0 (overwrites `classInitNative` debug stub) calls `btmtk_avrcp_send_reg_notievent_track_changed_rsp` for inbound RegisterNotification(EVENT_TRACK_CHANGED). Output md5: `5fec125a259d9fc210831d20dc2ecf48`. **Hardware-verified iter6 2026-05-05**: 2× msg=544 size=40 outbound on inbound size:13, and Sonos progressed to sending size:45 GetElementAttributes (PDU 0x20, 26 retries at 2-second intervals).
 
 Pending (this document is the plan):
-- [ ] Hardware test T2 — confirm Sonos receives the INTERIM TRACK_CHANGED response and proceeds to GetElementAttributes (PDU 0x20)
 - [ ] Trampoline T3 — call `btmtk_avrcp_send_reg_notievent_playback_rsp` for inbound RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED). Optional unless Sonos blocks on it.
 - [ ] Trampoline T4 — call `btmtk_avrcp_send_get_element_attributes_rsp` for inbound GetElementAttributes (needs current track info from Y1MediaBridge — see "Track-data plumbing" below). **This is what actually puts metadata on Sonos's screen.**
 
