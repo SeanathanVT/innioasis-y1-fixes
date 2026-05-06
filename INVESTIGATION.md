@@ -1445,7 +1445,24 @@ The reverse-engineered argument layout is now empirically confirmed correct. The
 
 Cause: AVRCP 1.4 §6.7.2 — peer behaviour depends critically on whether the TG advertises a stable track identity. With a real id we entered a CT/TG handshake that requires us to push asynchronous CHANGED edges, but our trampolines are reactive only.
 
-**Iter16 — same architecture, INTERIM/CHANGED track_id pinned to 0xFF×8.** Output md5 `5d74443293f663bcd3765721bb690479`. The change-detection bookkeeping (file bytes 0..7 vs state bytes 0..7) is preserved; only the wire-level `track_id` field in the response is hardcoded to the `0xFFFFFFFFFFFFFFFF` "not bound to a particular media element" sentinel. Implementation: an 8-byte 0xFF constant labelled `sentinel_ffx8` is appended after the path strings; `extended_T2`'s INTERIM emit and `T4`'s CHANGED emit both `ADR.W r3, sentinel_ffx8` instead of computing a stack address. Trampoline blob grows 572 → 580 bytes; LOAD #1 ends at 0xae98. Pending hardware verification.
+**Iter16 — same architecture, INTERIM/CHANGED track_id pinned to 0xFF×8.** Output md5 `5d74443293f663bcd3765721bb690479`. The change-detection bookkeeping (file bytes 0..7 vs state bytes 0..7) is preserved; only the wire-level `track_id` field in the response is hardcoded to the `0xFFFFFFFFFFFFFFFF` "not bound to a particular media element" sentinel. Implementation: an 8-byte 0xFF constant labelled `sentinel_ffx8` is appended after the path strings; `extended_T2`'s INTERIM emit and `T4`'s CHANGED emit both `ADR.W r3, sentinel_ffx8` instead of computing a stack address. Trampoline blob grows 572 → 580 bytes; LOAD #1 ends at 0xae98.
+
+**Hardware-tested 2026-05-06: iter16 protocol layer fully working.** Sonos engaged (115 inbound CMD_FRAME_INDs in 71 s, 67 RegisterNotification responses, 43 GetElementAttributes responses). Forensic dump of y1-track-info (audioId 360 = "The Kintsugi Kid (Ten Years)" / Fall Out Boy) and y1-trampoline-state (audioId 358 = "Bleed American" / Jimmy Eat World, transId=0x00) confirmed Y1MediaBridge writes the file correctly and the trampolines update state when fired. The remaining defect is **polling cadence**: Sonos polled aggressively for the iter16 capture window (UI was being viewed) but its idle poll rate is too slow for shuffle-heavy playback. State froze 2 audioIds behind reality, so display was stuck on "Bleed American" while the current track was "The Kintsugi Kid". The iter16 reactive trampolines can't push CHANGED without an inbound query — fundamentally a chicken-and-egg with Sonos's polling.
+
+**Iter17a — proactive CHANGED via Java→JNI hook.** Output md5s libextavrcp_jni.so `37ad4394efe7686d367d08f20e6f623b`, MtkBt.odex `ca23da7a4d55365e5bcf9245a48eb675`. Adds asynchronous CHANGED emission triggered by Y1MediaBridge's existing track-change broadcast, independent of Sonos's polling rate.
+
+  Y1MediaBridge sends `com.android.music.metachanged` → MtkBt's BluetoothAvrcpReceiver intercepts → updates internal state and calls `BTAvrcpMusicAdapter.passNotifyMsg(2, 0)` (Message what=34, arg1=2 = TRACK_CHANGED) → handleKeyMessage's sparse-switch lands at sswitch_1a3 → cardinality check `BitSet.get(2)` (Java-side bookkeeping; never populated because our JNI trampolines bypass the Java path → permanently 0) → if-eqz skips the native call.
+
+  Patch A (`MtkBt.odex` @ 0x03c530): NOP the `if-eqz v5, :cond_184` (4 bytes `38 05 da ff` → `00 00 00 00`). The native call now fires on every track-change broadcast.
+
+  Patch B (`libextavrcp_jni.so` @ 0x3bc0): replace `notificationTrackChangedNative`'s `stmdb` prologue with a 4-byte `b.w T5`. T5 lives in LOAD #1 padding alongside T4/extended_T2/sentinel_ffx8 and:
+  1. Calls the JNI helper at 0x36c0 (same one the stock native used) to obtain the BluetoothAvrcpService per-conn struct → conn buffer at +8.
+  2. Reads `y1-track-info` first 8 bytes (current track_id from Y1MediaBridge).
+  3. Reads `y1-trampoline-state` 16 bytes (last-synced track_id at bytes 0..7, last RegisterNotification transId at byte 8).
+  4. If the track moved since the last sync, calls `btmtk_avrcp_send_reg_notievent_track_changed_rsp` via PLT 0x3384 with `reason=CHANGED`, `transId=state[8]`, `track_id=&sentinel_ffx8` (same iter16 sentinel — keeps Sonos in poll-on-each-event mode), then writes the new track_id back to state[0..7].
+  5. Returns jboolean(1).
+
+  Trampoline blob grows 580 → 768 bytes; LOAD #1 ends at 0xaf54. The reactive T4 and extended_T2 are unchanged — iter17a layers proactive CHANGEDs on top, so we get both reactive (Sonos polls) and proactive (Y1 changes track) refresh paths. Pending hardware verification.
 
 For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 

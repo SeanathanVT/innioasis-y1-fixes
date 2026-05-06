@@ -167,15 +167,15 @@ The 0x65bc path then runs `str.w lr, [sp, #12]` to pass SIZE to `btmtk_avrcp_sen
 
 Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frames forever because mtkbt was emitting nothing back. Iter7 (only the r0 restore, no lr restore) tested the ELF-extension infrastructure but still didn't generate msg=520 — the lr clobber was the second half of the bug. Iter8 (this version) restores both.
 
-**Iter16 (current): state-tracked CHANGED with sentinel track_id + dynamic trampoline assembly.** The full T4 + extended_T2 trampoline pair lives in the 0xac54 padding region; T2's old in-place stub at 0x72d4 is now a single `b.w extended_T2`. Both trampolines read `/data/data/com.y1.mediabridge/files/y1-track-info` (776 B: 8-byte big-endian track_id + 3 × 256 B Title/Artist/Album) and `…/y1-trampoline-state` (16 B: last-synced track_id + last RegisterNotification transId), and T4 emits `track_changed_rsp CHANGED` whenever the file's track_id has diverged from the state file. **iter16-specific:** the wire-level `track_id` field in INTERIM and CHANGED is hardcoded to `0xFFFFFFFFFFFFFFFF` (AVRCP 1.4 §6.7.2 "not bound to a particular media element"), keeping Sonos in poll-on-each-event mode while still using CHANGED edges to invalidate Sonos's cache on real track changes. iter15's "real track_id in INTERIM" deadlocked Sonos (it stopped polling after the first INTERIM, waiting forever for a CHANGED that only fires inside our reactive trampolines). The trampoline blob is built dynamically from `_thumb2asm.py` + `_iter15_trampolines.py` rather than hand-encoded.
+**Iter17a (current): proactive CHANGED on track change via Java→JNI hook.** Builds on iter16's reactive T4/extended_T2 trampolines (both unchanged) and adds a third trampoline (T5) that fires asynchronously when Y1MediaBridge writes a new track_id, regardless of Sonos's GetElementAttributes polling rate. Y1MediaBridge → `com.android.music.metachanged` → MtkBt's `BTAvrcpMusicAdapter.passNotifyMsg(2, 0)` → `handleKeyMessage` (with the cardinality `if-eqz` NOPed by `patch_mtkbt_odex.py`'s iter17a entry) → `notificationTrackChangedNative` → patched first instruction `b.w T5` lands in our LOAD #1 trampoline → T5 reads `y1-track-info` and `y1-trampoline-state`, compares track_ids, and on change calls `track_changed_rsp` via PLT 0x3384 with `reason=CHANGED`, `transId=state[8]`, `track_id=&sentinel_ffx8`. T5 obtains the AVRCP per-conn struct by re-using the JNI helper at 0x36c0 the stock native already called for the same purpose. Trampoline blob grows from iter16's 580 B to 768 B; LOAD #1 ends at 0xaf54.
 
 **Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
-- offset+16 (`p_filesz`): 0xac54 → 0xae98 (iter16)
-- offset+20 (`p_memsz`):  0xac54 → 0xae98 (iter16)
+- offset+16 (`p_filesz`): 0xac54 → 0xaf54 (iter17a)
+- offset+20 (`p_memsz`):  0xac54 → 0xaf54 (iter17a)
 
 No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5d74443293f663bcd3765721bb690479` (iter16).
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `37ad4394efe7686d367d08f20e6f623b` (iter17a).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -183,14 +183,15 @@ No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic
 
 ## `patch_mtkbt_odex.py`
 
-Patches `MtkBt.odex` with two fixes:
+Patches `MtkBt.odex` with three fixes:
 
 1. **F1** at `0x3e0ea`: `getPreferVersion()` returns 14 (AVRCP 1.4) instead of 10 (BlueAngel internal code for AVRCP 1.3).
 2. **F2** at `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false` — fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts.
+3. **iter17a** at `0x03c530`: `BTAvrcpMusicAdapter.handleKeyMessage` TRACK_CHANGED case (sswitch_1a3) — NOPs the `if-eqz v5, :cond_184` cardinality gate. Java's BitSet of registered events is permanently empty (Java-side AVRCP TG bookkeeping isn't updated by our JNI trampolines), so without this NOP the native `notificationTrackChangedNative` call never fires. With this NOP, the native is invoked on every track-change broadcast from Y1MediaBridge. Pairs with the libextavrcp_jni.so iter17a patch which redirects that native to a state-aware T5 trampoline.
 
 Recomputes the DEX adler32 checksum embedded in the ODEX header.
 
-**MD5s:** Stock `11566bc23001e78de64b5db355238175` → Output `acc578ada5e41e27475340f4df6afa59`.
+**MD5s:** Stock `11566bc23001e78de64b5db355238175` → Output `ca23da7a4d55365e5bcf9245a48eb675` (iter17a).
 
 ---
 
