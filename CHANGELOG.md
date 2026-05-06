@@ -16,6 +16,7 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 ### Removed
 - Legacy patcher scripts: `src/patches/patch_mtkbt.py` (the 11-patch AVRCP 1.4 set: B1-B3 / C1-C3 / A1 / D1 / E3 / E4 / E8), `src/patches/patch_libextavrcp_jni.py` (C2a/b / C3a/b), `src/patches/patch_libextavrcp.py` (C4). All three caused or relied on the broken AVRCP 1.4 wire-protocol attempt and have been superseded by the trampoline chain.
 - `src/patches/patch_adbd.py` (H1/H2/H3 byte patches against `/sbin/adbd`) and `src/patches/patch_bootimg.py` (in-place cpio patcher that wrapped it). Both unwired since v1.7.0; superseded by `src/su/` (setuid `/system/xbin/su`) since v1.8.0. The full failure-mode diagnosis — including why arg-zero kept all bionic bookkeeping intact yet the device still went offline, why `default.prop`'s `ro.secure=0` is inert on this OEM adbd, and why `adb root` is actively harmful — is preserved in `docs/INVESTIGATION.md` §"adbd Root Patches (H1/H2/H3)".
+- `reference/` directory (post-patch snapshot of `/system/build.prop` + `/system/etc/bluetooth/*.conf` from one v3.0.2 device). Not consumed by anything in the bash, not stock baselines, and now stale (had `persist.bluetooth.avrcpversion=avrcp13` which the current `--bluetooth` no longer sets). Restorable from git history if anyone ever wants the snapshot back.
 - `--avrcp-min` flag (renamed to `--avrcp`).
 - Mutual-exclusion check between `--avrcp` and `--avrcp-min` in `apply.bash`.
 

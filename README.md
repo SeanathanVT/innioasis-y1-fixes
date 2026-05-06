@@ -25,7 +25,6 @@ The bash entry-point at the root dispatches into source trees under `src/`:
 - [`src/btlog-dump/`](src/btlog-dump/) — `@btlog` abstract-socket reader (diagnostic; same toolchain as `src/su/`). Build via `cd src/btlog-dump && make`
 - `tools/` — setup, diagnostic, and release helpers
 - `staging/` — default `--artifacts-dir`; drop `rom.zip` here
-- `reference/` — example post-patch state of `/system/build.prop` and `/system/etc/bluetooth/*.conf` from a v3.0.2 device that's been through the bash. Reference snapshot only — not consumed by the build, not stock baselines. Useful for diff'ing against a freshly-patched device to spot drift
 
 ## Quick start
 
@@ -114,7 +113,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. **Read this if working on the metadata pipeline.**
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4/T5), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
 - [docs/PROXY-BUILD.md](docs/PROXY-BUILD.md) — concrete iteration plan and pending work for the AVRCP proxy
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
