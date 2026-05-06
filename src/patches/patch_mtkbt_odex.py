@@ -29,6 +29,29 @@ ODEX structure:
   Confirmed working in logcat: getPreferVersion:14, Support AVRCP1.4,
   _activate_1req version:14 sdpfeature:35.
 
+--- Patch 3: iter17a — cardinality bypass for proactive TRACK_CHANGED ---
+
+  In BTAvrcpMusicAdapter.handleKeyMessage(Message)V, the sparse-switch case
+  for msg.what:34 (ACTION_REG_NOTIFY) → arg1=2 (TRACK_CHANGED) goes:
+
+      iget-object v5, this, mRegisteredEvents:BitSet
+      invoke-virtual v5, vtable@20    ; bitset.get(2) — peer subscription bit
+      move-result v5
+      if-eqz v5, :cond_184            ; <<< if no peer subscribed, skip
+      ; ... build sMusicId, log "songid:N", call notificationTrackChangedNative
+
+  The `if-eqz` is at ODEX file offset 0x03c530, encoded as `38 05 da ff` (4 B).
+  The Java-side BitSet is never populated because the JNI's TG layer doesn't
+  use the Java cardinality bookkeeping (it has its own native conn-state
+  tracking). So Java's view is permanently `cardinality:0` and the
+  notification path always exits early.
+
+  iter17a NOPs out the if-eqz (4 bytes → 4 zero bytes = two `nop` opcodes).
+  Java now always invokes notificationTrackChangedNative when Y1MediaBridge
+  fires a track-change broadcast. The libextavrcp_jni.so half of iter17a
+  redirects that native to a state-aware T5 trampoline that emits
+  track_changed_rsp CHANGED via the same PLT entry our T4 uses.
+
 --- Patch 2: sPlayServiceInterface reset in BluetoothAvrcpService.disable() ---
 
   Root cause: sPlayServiceInterface (field@1267, static boolean) is set true in
@@ -78,7 +101,7 @@ import zlib
 from pathlib import Path
 
 STOCK_MD5  = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5 = "acc578ada5e41e27475340f4df6afa59"
+OUTPUT_MD5 = "ca23da7a4d55365e5bcf9245a48eb675"  # iter17a
 
 DEX_OFFSET     = 0x28
 ADLER_FILE_OFF = 0x30
@@ -89,6 +112,12 @@ PATCHES = [
         "offset": 0x3e0ea,
         "before": bytes([0x0a]),
         "after":  bytes([0x0e]),
+    },
+    {
+        "name":   "[iter17a] handleKeyMessage TRACK_CHANGED cardinality bypass (NOP if-eqz)",
+        "offset": 0x3c530,
+        "before": bytes([0x38, 0x05, 0xda, 0xff]),  # if-eqz v5, +-38 (-> :cond_184)
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
     },
     {
         "name":   "[F2] disable() reset sPlayServiceInterface = false",

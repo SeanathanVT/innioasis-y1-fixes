@@ -126,8 +126,15 @@ from _iter15_trampolines import build as build_iter15_trampolines, T4_VADDR
 from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
 from _thumb2asm import Asm
 
+# iter17a: notificationTrackChangedNative lives at vaddr 0x3bc0 in
+# libextavrcp_jni.so. Java's BTAvrcpMusicAdapter.handleKeyMessage (with the
+# cardinality if-eqz NOPed by patch_mtkbt_odex.py's iter17a entry) calls this
+# native on every track-change broadcast from Y1MediaBridge. We replace its
+# entry instruction with `b.w T5` so it lands in our state-aware trampoline.
+NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
+
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "5d74443293f663bcd3765721bb690479"  # iter16
+OUTPUT_MD5 = "37ad4394efe7686d367d08f20e6f623b"  # iter17a
 
 # ---------------------------------------------------------------- T1
 
@@ -203,10 +210,26 @@ LOAD1_OLD_SIZE = 0xac54
 # ---------------------------------------------------------------- patch list builder
 
 
+def _native_track_changed_stub(t5_vaddr: int) -> bytes:
+    """iter17a: replace the first 4 bytes of notificationTrackChangedNative
+    with `b.w T5`. The remaining 196 bytes of the original function body are
+    unreachable but left in place (they form valid but dead code; harmless)."""
+    a = Asm(NATIVE_TRACK_CHANGED_VADDR)
+    a.labels["target"] = t5_vaddr
+    a.b_w("target")
+    return a.resolve()
+
+
+# Stock first 4 bytes of notificationTrackChangedNative — the prologue's
+# `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` instruction.
+NATIVE_TRACK_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF0, 0x47])
+
+
 def build_patches() -> tuple[list[dict], int]:
     """Build the patch list. Returns (patches, new_load1_size)."""
     blob, addrs = build_iter15_trampolines()
     extended_t2_vaddr = addrs["extended_T2"]
+    t5_vaddr = addrs["T5"]
     new_load1_size = T4_VADDR + len(blob)
 
     patches = [
@@ -221,6 +244,15 @@ def build_patches() -> tuple[list[dict], int]:
             "offset": 0x7308,
             "before": TESTPARMNUM_STOCK,
             "after":  T1_TRAMPOLINE,
+        },
+        {
+            "name": (
+                f"iter17a: notificationTrackChangedNative @ 0x{NATIVE_TRACK_CHANGED_VADDR:x}"
+                f" → b.w T5 (0x{t5_vaddr:x}) — proactive CHANGED on track change"
+            ),
+            "offset": NATIVE_TRACK_CHANGED_VADDR,
+            "before": NATIVE_TRACK_CHANGED_STOCK_PROLOGUE,
+            "after":  _native_track_changed_stub(t5_vaddr),
         },
         {
             "name": (

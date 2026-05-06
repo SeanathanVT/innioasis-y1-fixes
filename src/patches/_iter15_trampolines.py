@@ -71,6 +71,12 @@ PLT_track_changed_rsp          = 0x3384
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
 UNKNOW_INDICATION = 0x65bc   # original "unknow indication" path
 
+# iter17a — JNI helper that returns the BluetoothAvrcpService's per-conn struct.
+# Same helper called by the original notificationTrackChangedNative at file
+# offset 0x3bda; we re-use it from T5 to obtain the conn buffer (which lives
+# at +8 inside the returned struct).
+JNI_GET_AVRCP_STATE = 0x36c0
+
 # Stack frame layout inside T4 (after sub.w sp, sp, #FRAME_LEN):
 #   sp+0   .. +15   = outgoing stack args for get_element_attributes_rsp (16 B)
 #   sp+16  .. +31   = state buffer (16 B; bytes 0..7 = last_seen track_id,
@@ -375,6 +381,168 @@ def _emit_extended_t2(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_t5(a: Asm) -> None:
+    """T5: proactive CHANGED-emit trampoline for iter17a.
+
+    Entered via `b.w T5` from the patched libextavrcp_jni.so::
+    notificationTrackChangedNative stub at file offset 0x3bc0. Java's
+    handleKeyMessage path (with the cardinality if-eqz NOPed in MtkBt.odex)
+    invokes the native method on every track-change broadcast from
+    Y1MediaBridge — this lands here, asynchronously to any inbound AVRCP
+    command from Sonos.
+
+    On entry:
+      - r0 = JNIEnv*  (Java native arg 0)
+      - r1 = jobject this  (BluetoothAvrcpService instance)
+      - r2..r3 = jbyte arg1, arg2  (ignored — Java passes 0, 0)
+      - sp[0..7] = jlong arg3  (ignored — Java passes sMusicId, but we read
+                                 the canonical track_id from y1-track-info)
+      - lr = caller's return address (Java framework / interpreter)
+
+    Returns: jboolean in r0 (always 1 — JNI return value, but the caller
+    ignores it per the smali at sswitch_1a3).
+
+    Logic:
+      1. Call the same JNI helper at 0x36c0 the original native used to
+         obtain the BluetoothAvrcpService's per-conn struct (used for the
+         conn buffer at +8).
+      2. Read y1-track-info first 8 bytes (= current track_id).
+      3. Read y1-trampoline-state 16 bytes (state[0..7] = last-synced
+         track_id, state[8] = last RegisterNotification transId).
+      4. If state[0..7] != file[0..7], emit a track_changed_rsp with
+         reason=CHANGED, transId=state[8], track_id=&sentinel_ffx8 (the
+         iter16 sentinel — same wire-level identity as INTERIM so Sonos
+         stays in poll-on-each-event mode), then write file[0..7] back to
+         state[0..7] in y1-trampoline-state so we don't re-emit until the
+         track moves again.
+
+    The 16-byte state buf and 8-byte file_tid buf live in T5's own stack
+    frame — no shared memory with the reactive T4 trampoline (they read
+    the same files independently).
+    """
+    a.label("T5")
+
+    # ---- prologue: save callee-saves we'll trash ----
+    # Thumb T1 push: encoding 0xB400 | (LR<<8) | regs[r0..r7]
+    # We need r4 + r5 + lr saved.  push {r4, r5, lr} = 0xB430.
+    a.raw(bytes([0x30, 0xB5]))                # push {r4, r5, lr}
+
+    # ---- get the BluetoothAvrcpService internal struct ----
+    # The helper at JNI_GET_AVRCP_STATE expects r0=env, r1=this — both still
+    # set up from the Java native ABI when we entered.
+    a.bl_w("jni_get_avrcp_state")             # r0 = struct ptr
+    a.mov_lo_lo(4, 0)                         # r4 = struct ptr (preserved)
+
+    # ---- allocate locals: 16 B state buf @ sp+0..15 + 8 B file_tid buf @ sp+16..23 ----
+    a.subw(13, 13, 24)                        # sub.w sp, sp, #24
+
+    # ---- read y1-track-info first 8 bytes into file_tid buf (sp+16..23) ----
+    # Default 0×8 (in case open/read fails).
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, 16)
+    a.str_sp_imm(0, 20)
+
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t5_skip_track_read")
+    a.mov_lo_lo(5, 0)                         # r5 = fd
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, 16)                       # r1 = file_tid buf
+    a.movs_imm8(2, 8)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t5_skip_track_read")
+
+    # ---- read y1-trampoline-state 16 bytes into state buf (sp+0..15) ----
+    # Default 0×16.
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, 0)
+    a.str_sp_imm(0, 4)
+    a.str_sp_imm(0, 8)
+    a.str_sp_imm(0, 12)
+
+    a.adr_w(0, "path_state")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t5_skip_state_read")
+    a.mov_lo_lo(5, 0)
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, 0)                        # r1 = state buf
+    a.movs_imm8(2, 16)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t5_skip_state_read")
+
+    # ---- compare state[0..7] vs file_tid[0..7] ----
+    a.ldr_sp_imm(0, 0)                        # state[0..3]
+    a.ldr_sp_imm(1, 16)                       # file_tid[0..3]
+    a.cmp_w(0, 1)
+    a.bne("t5_changed")
+    a.ldr_sp_imm(0, 4)                        # state[4..7]
+    a.ldr_sp_imm(1, 20)                       # file_tid[4..7]
+    a.cmp_w(0, 1)
+    a.beq("t5_no_change")
+
+    a.label("t5_changed")
+    # ---- emit CHANGED via track_changed_rsp ----
+    # r0 = conn buffer (= struct + 8); r1 = state[8] (transId saved by
+    # extended_T2 on the most recent RegisterNotification); r2 = REASON_CHANGED;
+    # r3 = &sentinel_ffx8 (so wire-level track_id stays the iter16 sentinel).
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8
+    a.ldrb_w(1, 13, 8)                        # r1 = state[8]
+    a.movs_imm8(2, REASON_CHANGED)
+    a.adr_w(3, "sentinel_ffx8")
+    a.blx_imm(PLT_track_changed_rsp)
+
+    # ---- update state in-memory: state[0..7] = file_tid[0..7] ----
+    a.ldr_sp_imm(0, 16)
+    a.str_sp_imm(0, 0)
+    a.ldr_sp_imm(0, 20)
+    a.str_sp_imm(0, 4)
+
+    # ---- write 16-byte state buf back to y1-trampoline-state ----
+    # O_WRONLY|O_TRUNC, no O_CREAT — Y1MediaBridge.prepareTrackInfoDir()
+    # creates the file at startup with the right permissions.
+    a.adr_w(0, "path_state")
+    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t5_no_change")                     # open failed → skip write, still return success
+    a.mov_lo_lo(5, 0)
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, 0)                        # r1 = state buf
+    a.movs_imm8(2, 16)
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t5_no_change")
+    # ---- epilogue: return jboolean true ----
+    a.movs_imm8(0, 1)
+    a.addw(13, 13, 24)                        # add.w sp, sp, #24
+    # pop {r4, r5, pc} — Thumb T1 pop: 0xBC00 | (PC<<8) | regs[r0..r7]
+    # PC bit is bit 8.  pop {r4, r5, pc} = 0xBD30.
+    a.raw(bytes([0x30, 0xBD]))
+
+
 def build() -> tuple[bytes, dict[str, int]]:
     """Build the iter15 LOAD-#1-padding code blob.
 
@@ -386,12 +554,14 @@ def build() -> tuple[bytes, dict[str, int]]:
     """
     a = Asm(T4_VADDR)
 
-    # External landmarks — pre-register so b_w resolves them to absolute targets.
+    # External landmarks — pre-register so b_w / bl_w resolve to absolute targets.
     a.labels["t4_to_unknown"] = UNKNOW_INDICATION
     a.labels["t4_to_epilogue"] = EPILOGUE
+    a.labels["jni_get_avrcp_state"] = JNI_GET_AVRCP_STATE
 
     _emit_t4(a)
     _emit_extended_t2(a)
+    _emit_t5(a)
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)
@@ -412,7 +582,8 @@ def build() -> tuple[bytes, dict[str, int]]:
 
     blob = a.resolve()
     addrs = {k: v for k, v in a.labels.items()
-             if k not in ("t4_to_unknown", "t4_to_epilogue")}
+             if k not in ("t4_to_unknown", "t4_to_epilogue",
+                          "jni_get_avrcp_state")}
     return blob, addrs
 
 
