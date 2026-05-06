@@ -21,13 +21,24 @@
 
 set -u
 
-case "${1:-}" in
-    -h|--help)
-        cat <<EOF
-Usage: ./tools/dual-capture.sh [<out_dir>]
+UNFILTERED=0
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            cat <<EOF
+Usage: ./tools/dual-capture.sh [--unfiltered] [<out_dir>]
 
 Capture mtkbt's @btlog stream AND logcat simultaneously, with per-line
 timestamps in both for post-hoc correlation.
+
+Options:
+    --unfiltered   capture every logcat tag (no '*:S' silence). Use this
+                   when investigating non-AVRCP behavior — e.g. the Y1
+                   music app's 'DebugY1  <Class>' Timber tags, which the
+                   default filter cannot match because logcat's tag-arg
+                   parser collapses embedded whitespace through adb's
+                   shell layer. Output is ~5-10x bigger.
 
 Output (in <out_dir>):
     btlog.bin         — raw @btlog stream (parse with tools/btlog-parse.py)
@@ -42,9 +53,19 @@ Pre-req: --root flashed (script needs su access for the @btlog socket).
 While capturing: drive the AVRCP scenario on the device (toggle BT
 off/on, pair/connect, change tracks, etc.). Ctrl-C to stop.
 EOF
-        exit 0
-        ;;
-esac
+            exit 0
+            ;;
+        --unfiltered)
+            UNFILTERED=1
+            shift
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${ARGS[@]:-}"
 
 OUT="${1:-/tmp/koensayr-dual-$(date -u +%Y%m%dT%H%M%SZ)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,27 +105,23 @@ echo "When done, press Ctrl-C to stop."
 echo
 
 # Start logcat in background. -v threadtime → per-line timestamps for cross-stream
-# correlation. Tag filter: AVRCP-related tags + Bluetooth framework + the
-# music app's Timber-prefixed `DebugY1  <ClassName>` tags + catch-all silenced
-# by '*:S'. The Y1 music app routes everything through Timber and prepends
-# "DebugY1  " (two spaces) before the class name — see
-# Y1Application$TimberTree.smali — so the logcat tag is e.g.
-# 'DebugY1  BaseActivity', not 'DebugY1'. logcat tag filters are exact-match,
-# so we have to list each sub-tag explicitly with the embedded two spaces.
-# `BaseActivity` carries `播放状态切换 <N>` (the icon-state observable);
-# `BasePlayerActivity` carries the track-change emits Y1MediaBridge tails for
-# its broadcast path; `restore` carries Static.setPlayValue's
-# "图标更改 <state> 来源 <source>  当前播放 <Playing>" emit so we can correlate
-# state-change source.
-adb logcat -v threadtime -b main -b system -b radio \
-    Y1MediaBridge:V MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V \
-    BWS_AVRCP:V EXTADP_AVRCP:V \
-    'DebugY1  BaseActivity:V' 'DebugY1  BasePlayerActivity:V' \
-    'DebugY1  restore:V' \
-    BluetoothAvrcpService:V BluetoothAvrcpServiceJni:V \
-    Bluetooth:V BluetoothManagerService:V BluetoothAdapterService:V \
-    bt_btif:V bt_hci:V mtkbt:V \
-    '*:S' > "$OUT/logcat.txt" 2>&1 &
+# correlation. Default tag filter: AVRCP-related tags + Bluetooth framework
+# + Y1MediaBridge, with everything else silenced by '*:S'. The music app's
+# `DebugY1  <Class>` Timber tags can't be filter-matched here because the tag
+# string contains two embedded spaces and adb's shell layer collapses them on
+# the way to logcat — pass --unfiltered to capture them (and everything else).
+if [ "$UNFILTERED" = "1" ]; then
+    adb logcat -v threadtime -b main -b system -b radio \
+        > "$OUT/logcat.txt" 2>&1 &
+else
+    adb logcat -v threadtime -b main -b system -b radio \
+        Y1MediaBridge:V MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V \
+        BWS_AVRCP:V EXTADP_AVRCP:V \
+        BluetoothAvrcpService:V BluetoothAvrcpServiceJni:V \
+        Bluetooth:V BluetoothManagerService:V BluetoothAdapterService:V \
+        bt_btif:V bt_hci:V mtkbt:V \
+        '*:S' > "$OUT/logcat.txt" 2>&1 &
+fi
 LOGCAT_PID=$!
 
 # Start btlog capture. The remote `su -c /path/to/btlog-dump` runs under the
