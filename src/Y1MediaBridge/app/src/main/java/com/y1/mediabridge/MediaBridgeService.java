@@ -626,7 +626,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=12 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=13 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1163,7 +1163,7 @@ public class MediaBridgeService extends Service {
             mCurrentAlbum    = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
             String dur       = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
             mCurrentDuration = dur != null ? Long.parseLong(dur) : 0;
-            mCurrentAudioId  = -1;
+            mCurrentAudioId  = syntheticAudioId(path);
             mCurrentAlbumId  = -1;
             mCurrentArtistId = -1;
             byte[] art = r.getEmbeddedPicture();
@@ -1183,7 +1183,7 @@ public class MediaBridgeService extends Service {
             mCurrentArtist   = "";
             mCurrentAlbum    = "";
             mCurrentAlbumArt = null;
-            mCurrentAudioId  = -1;
+            mCurrentAudioId  = syntheticAudioId(path);
             mCurrentAlbumId  = -1;
             mCurrentArtistId = -1;
             return false;
@@ -1232,6 +1232,30 @@ public class MediaBridgeService extends Service {
         int s = 1;
         while ((h / (s * 2)) >= maxPx && (w / (s * 2)) >= maxPx) s *= 2;
         return s;
+    }
+
+    /**
+     * Stable synthetic track_id derived from the file path, for the case where
+     * MediaStore hasn't populated yet so we don't have a real {@code _ID}.
+     *
+     * The trampoline state machine in libextavrcp_jni.so (T5 / extended_T2)
+     * detects "track changed since last register/notify" by comparing bytes
+     * 0..7 of {@code y1-track-info} against bytes 0..7 of
+     * {@code y1-trampoline-state}. If we leave audioId at {@code -1} for every
+     * track (the iter18c symptom — readTagsDirectly success path bypasses
+     * MediaStore), bytes 0..7 stay at {@code 0xFFFFFFFFFFFFFFFF} forever and
+     * T5 never detects a change → no proactive CHANGED → Sonos's UI relies
+     * solely on its polling cadence to refresh, which is enough for skips
+     * but not for the very first track of a session.
+     *
+     * Wire-level track_id is independently pinned to the {@code 0xFF×8}
+     * sentinel in the trampoline (per AVRCP §6.7.2), so this internal-only
+     * id never reaches the peer device. Synthetic ids OR'd with bit 32 to
+     * keep them distinct from MediaStore _IDs (typically small integers).
+     */
+    private static long syntheticAudioId(String path) {
+        if (path == null) return 0x100000000L;
+        return ((long) path.hashCode() & 0xFFFFFFFFL) | 0x100000000L;
     }
 
     private String stripExtension(String path) {
