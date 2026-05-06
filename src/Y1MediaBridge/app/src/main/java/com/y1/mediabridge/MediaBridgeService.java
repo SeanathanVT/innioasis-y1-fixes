@@ -625,7 +625,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=9 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=10 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -901,30 +901,42 @@ public class MediaBridgeService extends Service {
         mStateChangeTime = SystemClock.elapsedRealtime();
 
         if (!queryMetadataFromStore(path)) {
-            // Not indexed yet — scan this single file, then retry.
-            if (path.equals(mPendingScanPath)) {
-                Log.d(TAG, "MediaStore miss for " + path + " — scan already in progress, skipping");
-                return;
-            }
-            Log.d(TAG, "MediaStore miss for " + path + " — triggering scan");
-            mPendingScanPath = path;
-            MediaScannerConnection.scanFile(this, new String[]{ path }, null,
-                    new MediaScannerConnection.OnScanCompletedListener() {
-                        @Override
-                        public void onScanCompleted(String p, Uri uri) {
-                            final String finalPath = p;
-                            mMainHandler.post(new Runnable() {
-                                @Override public void run() {
-                                    mPendingScanPath = null;
-                                    if (!queryMetadataFromStore(finalPath)) {
-                                        readTagsDirectly(finalPath);
+            // MediaStore miss is the common case here — the Y1 player navigates
+            // to files MediaStore hasn't indexed (or whose path encoding
+            // doesn't match). Waiting on MediaScannerConnection.scanFile to
+            // populate the DB takes 0.7–2s on this device; readTagsDirectly
+            // (MediaMetadataRetriever) reads ID3 tags from the file head in
+            // ~50ms, which is the difference between a Sonos refresh that
+            // feels instant and one the user calls out as laggy.
+            //
+            // We still kick the scanner fire-and-forget so future plays of
+            // this file hit MediaStore (canonical _ID, album-art lookup, etc.).
+            // The current track is already on the wire by then — no second
+            // broadcast is fired, which keeps msg=544 traffic at one CHANGED
+            // per Y1 track change.
+            readTagsDirectly(path);
+            if (!path.equals(mPendingScanPath)) {
+                Log.d(TAG, "MediaStore miss for " + path
+                        + " — broadcasting direct tags + kicking async scan");
+                mPendingScanPath = path;
+                MediaScannerConnection.scanFile(this, new String[]{ path }, null,
+                        new MediaScannerConnection.OnScanCompletedListener() {
+                            @Override
+                            public void onScanCompleted(String p, Uri uri) {
+                                final String finalPath = p;
+                                mMainHandler.post(new Runnable() {
+                                    @Override public void run() {
+                                        if (finalPath.equals(mPendingScanPath)) {
+                                            mPendingScanPath = null;
+                                        }
                                     }
-                                    broadcastTrackAndState();
-                                }
-                            });
-                        }
-                    });
-            return;
+                                });
+                            }
+                        });
+            } else {
+                Log.d(TAG, "MediaStore miss for " + path
+                        + " — broadcasting direct tags (scan already running)");
+            }
         }
         broadcastTrackAndState();
     }
