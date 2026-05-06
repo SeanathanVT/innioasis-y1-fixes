@@ -610,7 +610,7 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
 
   echo "Configuring build.prop for Bluetooth fixes.."
   # persist.bluetooth.avrcpversion is intentionally NOT set — see
-  # INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
+  # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
   # AVRCP 1.4 advertisement that mtkbt can't actually deliver, regressing
   # the working AVRCP 1.0 PASSTHROUGH. The remaining properties are
   # essential for car/peer pairing and stay regardless of AVRCP version.

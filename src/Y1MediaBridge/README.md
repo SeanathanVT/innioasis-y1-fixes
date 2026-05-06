@@ -1,6 +1,6 @@
 # Y1MediaBridge
 
-Single-APK AVRCP metadata bridge for the Innioasis Y1. Implements the in-Android-OS half of the metadata-forwarding pipe (`IBTAvrcpMusic` + `IMediaPlaybackService` Binder, plus an `RemoteControlClient` publish path). The bridge implementation itself is verified-correct (see [INVESTIGATION.md](../../INVESTIGATION.md) "Verified true"); end-to-end metadata delivery is currently blocked by the native `mtkbt` daemon not relaying inbound AVRCP COMMANDs at the layer that would call into this bridge — see top-level [Status](../../README.md#status).
+Single-APK AVRCP metadata bridge for the Innioasis Y1. Implements the in-Android-OS half of the metadata-forwarding pipe (`IBTAvrcpMusic` + `IMediaPlaybackService` Binder, plus an `RemoteControlClient` publish path). The bridge implementation itself is verified-correct (see [INVESTIGATION.md](../../docs/INVESTIGATION.md) "Verified true"); end-to-end metadata delivery is currently blocked by the native `mtkbt` daemon not relaying inbound AVRCP COMMANDs at the layer that would call into this bridge — see top-level [Status](../../README.md#status).
 
 ## Architecture
 
@@ -213,5 +213,5 @@ work identically.
 
 - [`../../README.md`](../../README.md) — project overview
 - [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — per-patch byte-level reference for the firmware binaries this APK pairs with
-- [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — full AVRCP investigation narrative
+- [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) — full AVRCP investigation narrative
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog

@@ -1,6 +1,6 @@
 # Proxy Build — User-Space AVRCP TG Plan
 
-Concrete plan for delivering AVRCP metadata to peers (Sonos, cars). Builds on the empirics from Trace #12 in [INVESTIGATION.md](../INVESTIGATION.md).
+Concrete plan for delivering AVRCP metadata to peers (Sonos, cars). Builds on the empirics from Trace #12 in [INVESTIGATION.md](INVESTIGATION.md).
 
 ## Why a proxy is needed
 
@@ -140,4 +140,4 @@ Recommend the file approach for first pass — simpler than wiring up native sys
 - T4 (with Y1MediaBridge plumbing): another 2–3 days.
 - Outbound notifications: 2–4 days.
 
-Total: 1–2 weeks of focused work. Consistent with INVESTIGATION.md's earlier estimate.
+Total: 1–2 weeks of focused work. Consistent with [INVESTIGATION.md](INVESTIGATION.md)'s earlier estimate.

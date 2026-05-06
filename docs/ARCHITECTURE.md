@@ -5,7 +5,7 @@ How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer co
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.4 responses on the wire.
 
 For **per-patch byte details**: see [`PATCHES.md`](PATCHES.md).
-For **investigation history** (how we got here): see [`../INVESTIGATION.md`](../INVESTIGATION.md).
+For **investigation history** (how we got here): see [`INVESTIGATION.md`](INVESTIGATION.md).
 For **iteration plans and pending work**: see [`PROXY-BUILD.md`](PROXY-BUILD.md).
 
 ---
@@ -442,5 +442,5 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
 
 - [`PROXY-BUILD.md`](PROXY-BUILD.md) — concrete iteration plan, status checkboxes, pending work.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
-- [`../INVESTIGATION.md`](../INVESTIGATION.md) — chronological investigation history including the gdbserver capture iterations and dead-end paths.
+- [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture iterations and dead-end paths.
 - `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1/T1/T2/T4. Header comments and PATCHES list are the source of truth for byte-level details.

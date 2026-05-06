@@ -15,12 +15,14 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ### Removed
 - Legacy patcher scripts: `src/patches/patch_mtkbt.py` (the 11-patch AVRCP 1.4 set: B1-B3 / C1-C3 / A1 / D1 / E3 / E4 / E8), `src/patches/patch_libextavrcp_jni.py` (C2a/b / C3a/b), `src/patches/patch_libextavrcp.py` (C4). All three caused or relied on the broken AVRCP 1.4 wire-protocol attempt and have been superseded by the trampoline chain.
+- `src/patches/patch_adbd.py` (H1/H2/H3 byte patches against `/sbin/adbd`) and `src/patches/patch_bootimg.py` (in-place cpio patcher that wrapped it). Both unwired since v1.7.0; superseded by `src/su/` (setuid `/system/xbin/su`) since v1.8.0. The full failure-mode diagnosis — including why arg-zero kept all bionic bookkeeping intact yet the device still went offline, why `default.prop`'s `ro.secure=0` is inert on this OEM adbd, and why `adb root` is actively harmful — is preserved in `docs/INVESTIGATION.md` §"adbd Root Patches (H1/H2/H3)".
 - `--avrcp-min` flag (renamed to `--avrcp`).
 - Mutual-exclusion check between `--avrcp` and `--avrcp-min` in `apply.bash`.
 
-### Renamed
+### Renamed / Moved
 - `src/patches/patch_mtkbt_minimal.py` → `src/patches/patch_mtkbt.py` (now the canonical mtkbt patcher).
 - `src/patches/patch_libextavrcp_jni_minimal.py` → `src/patches/patch_libextavrcp_jni.py` (now the canonical libextavrcp_jni.so patcher).
+- `INVESTIGATION.md` → `docs/INVESTIGATION.md`. Long-form investigation history now lives alongside `docs/ARCHITECTURE.md` / `docs/PATCHES.md` / `docs/PROXY-BUILD.md`. `README.md` and `CHANGELOG.md` stay at the repo root by GitHub-UI convention. All cross-references updated (root README, `docs/*`, `src/patches/README.md`, `src/Y1MediaBridge/README.md`, `src/btlog-dump/README.md`, `src/su/README.md`, `apply.bash` comments, `tools/btlog-parse.py` docstring, patcher docstrings).
 
 ### Fixed
 - **iter17b: T4 multi-attribute single-frame regression.** iter17a hardware test (2026-05-06) showed the proactive CHANGED layer working but Sonos rendering metadata field-by-field with visible flicker. Diagnosed from logcat msg-id ratio (1299 msg=540 ÷ ~433 inbound GetElementAttributes ≈ 3:1) as a regression of the iter12 bug iter13 had originally fixed: T4's three calls to `btmtk_avrcp_send_get_element_attributes_rsp` were passing `arg2=transId, arg3=0`, which takes the function's legacy `arg3==0 → EMIT each call` path and emits 3 separate frames per query. Restored iter13 semantics (`arg2 = attribute index 0..2`, `arg3 = 3`) so calls 1+2 accumulate and call 3 packs Title+Artist+Album into a single msg=540 outbound. Trampoline blob shrinks 768 → 760 B; LOAD #1 ends at `0xaf4c`. Stock `fd2ce74db9389980b55bccf3d8f15660` → `91833d6f41021df23a8aa50999fcab9a`.

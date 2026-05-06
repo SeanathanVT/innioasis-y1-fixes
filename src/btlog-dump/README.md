@@ -67,7 +67,7 @@ Severities seen: `0x12` (xlog text — `[AVRCP]`, `[AVCTP]`, `[L2CAP]`, `[ME]`, 
 ## Trade-offs
 
 - **No supply chain beyond GCC + this source.** Mirrors `src/su/`'s policy.
-- **`@btlog` is undocumented** — the framing was reverse-engineered by inspection (Trace #9 in `INVESTIGATION.md` / the live brief). Future MTK firmware revisions could change it; if `tools/btlog-parse.py` produces empty output after a firmware bump, re-derive from the binary stream.
+- **`@btlog` is undocumented** — the framing was reverse-engineered by inspection (Trace #9 in `../../docs/INVESTIGATION.md` / the live brief). Future MTK firmware revisions could change it; if `tools/btlog-parse.py` produces empty output after a firmware bump, re-derive from the binary stream.
 - **Sustained captures fill `/sdcard` fast.** ~80% of typical capture volume is per-byte HCI logging (`[BT]GetByte:`/`[BT]PutByte:`); filter post-hoc with `btlog-parse.py --tag-exclude '[BT] '` or take short captures around the specific scenario you're investigating.
 
 ## See also
@@ -77,5 +77,5 @@ Severities seen: `0x12` (xlog text — `[AVRCP]`, `[AVCTP]`, `[L2CAP]`, `[ME]`, 
 - [`../../tools/btlog-parse.py`](../../tools/btlog-parse.py) — frame decoder
 - [`../../tools/probe-postroot.sh`](../../tools/probe-postroot.sh) — post-root sanity probe (PIE base, `/proc/net/unix`, ptrace policy, etc.)
 - [`../su/`](../su/) — sister no-libc ARM ELF; same toolchain + style
-- [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — AVRCP investigation context
+- [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) — AVRCP investigation context
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog

@@ -77,7 +77,7 @@ Post-root tools for investigating AVRCP behaviour on hardware. None are invoked 
 - **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, MTK debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets. Re-run against any new `KNOWN_FIRMWARES` entry.
 - **gdbserver attach to mtkbt** — `tools/install-gdbserver.sh` + `tools/attach-mtkbt-gdb.sh`. The installer fetches a pinned ARM 32-bit static `gdbserver` binary from AOSP prebuilts (~186 KB, sha256-verified) into `tools/gdbserver`. The attach script pushes it to `/data/local/tmp/`, attaches to the live mtkbt PID, computes the PIE base from `/proc/<pid>/maps`, and generates a gdb command file with breakpoints at the AVCTP-RX classifier (file offsets `0x6db7c` / `0x6dc36` / `0x6dc52`) plus the dispatcher arms (`0x515ca` / `0x51622`) — all translated to live addresses. Used to settle which event-code path PASSTHROUGH vs VENDOR_DEPENDENT inbound frames take.
 
-Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`INVESTIGATION.md`](INVESTIGATION.md).
+Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 ## Status
 
@@ -89,7 +89,7 @@ The breakthrough is a chain of binary trampolines patched into `libextavrcp_jni.
 
 `--bluetooth` covers only pairing-essential config edits — it does not modify SDP/AVRCP behavior; that's all under `--avrcp`.
 
-Full investigation history including refuted hypotheses and the path to the current architecture: [`INVESTIGATION.md`](INVESTIGATION.md).
+Full investigation history including refuted hypotheses and the path to the current architecture: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 ## Stock firmware manifest
 
@@ -117,7 +117,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. **Read this if working on the metadata pipeline.**
 - [docs/PROXY-BUILD.md](docs/PROXY-BUILD.md) — concrete iteration plan and pending work for the AVRCP proxy
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
-- [INVESTIGATION.md](INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
+- [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/DEX.md](docs/DEX.md) — DEX-level analysis for `patch_y1_apk.py`'s smali patches
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
 

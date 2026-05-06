@@ -10,7 +10,7 @@ AV/C commands through msg 519 with size=9.
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
 Output md5:        (recomputed each build — set OUTPUT_MD5 below)
 
---- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
+--- Background (per docs/INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
 The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (body at file
 0x5f0c) dispatches inbound CMD_FRAME_IND on frame size:
@@ -76,7 +76,7 @@ zero padding, so we can grow LOAD #1 freely up to that limit.
 
 iter4 (J1 cmp lr,#8 → cmp lr,#9 at 0x6526): rolled back. Routed
 VENDOR_DEPENDENT through size==8 PASSTHROUGH dispatch and didn't reach
-the right Java callback. See INVESTIGATION.md Trace #12.
+the right Java callback. See docs/INVESTIGATION.md Trace #12.
 
 iter5..iter13: T1 + T2 + T4 progressively built. iter13 hardware-verified
 Title + Artist + Album displayed on Sonos — but only for the first track:

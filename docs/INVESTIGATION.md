@@ -774,7 +774,7 @@ The Browsing bit (6) was deliberately omitted at brief-writing time because `Add
 
 ## adbd Root Patches (H1/H2/H3) — Closed 2026-05-03 (failed on hardware), superseded by setuid `/system/xbin/su`
 
-> **Status: closed.** Both attempted revisions caused "device offline" on hardware. `--root` flag removed from `apply.bash` in v1.7.0 then reintroduced in v1.8.0 against `/system/xbin/su` instead. The standalone `patch_adbd.py` and `patch_bootimg.py` scripts are kept in the tree as historical record with warning banners; their analysis below is preserved for whoever picks up the root pass with a different mechanism.
+> **Status: closed.** Both attempted revisions caused "device offline" on hardware. `--root` flag removed from `apply.bash` in v1.7.0 then reintroduced in v1.8.0 against `/system/xbin/su` instead. The standalone `patch_adbd.py` and `patch_bootimg.py` scripts (kept in the tree until v2.0.0) were removed in v2.1.0; the analysis below is preserved for whoever picks up the root pass with a different mechanism.
 
 The OEM adbd has stripped the standard AOSP `should_drop_privileges()` gating. `strings adbd` returns ZERO references to `ro.secure`. The drop_privileges block at vaddr `0x94b8` runs unconditionally on every adbd startup.
 
