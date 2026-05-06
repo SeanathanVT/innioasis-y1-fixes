@@ -9,9 +9,9 @@ Emits five trampolines into the LOAD #1 page-padding area starting at vaddr
     - Reads y1-trampoline-state (16B: last_synced track_id [0..7] + transId [8])
     - If state[0..7] != file[0..7] (the track has actually changed since the
       last CHANGED we emitted) → calls track_changed_rsp with reason=CHANGED,
-      transId=state[8], **track_id=0xFF×8 (hardcoded sentinel)**, then writes
-      file[0..7] back into state[0..7] so we don't re-emit until Y1MediaBridge
-      moves the track_id again.
+      arg1=0 (success path), **track_id=&file[0..7] (real synthetic
+      audioId, iter19b)**, then writes file[0..7] back into state[0..7] so
+      we don't re-emit until Y1MediaBridge moves the track_id again.
     - Replies with 3× get_element_attributes_rsp (Title/Artist/Album)
       using iter13's multi-attribute calling convention (arg2=index 0..2,
       arg3=total 3) so the function accumulates calls 1+2 and only emits
@@ -20,12 +20,12 @@ Emits five trampolines into the LOAD #1 page-padding area starting at vaddr
       the legacy single-shot path and emitting 3 separate frames per query.
 
   extended_T2 (RegisterNotification(TRACK_CHANGED), PDU 0x31, event 0x02):
-    - Reads y1-track-info first 8 bytes (track_id) into a stack buffer — used
-      ONLY to seed state[0..7] so T4's first comparison succeeds; not sent to
-      the peer.
-    - Writes [file_track_id || transId || pad] to y1-trampoline-state.
-    - Replies track_changed_rsp with reason=INTERIM, **track_id=0xFF×8
-      (hardcoded sentinel)**.
+    - Reads y1-track-info first 8 bytes (track_id) into a stack buffer.
+    - Writes [file_track_id || transId || pad] to y1-trampoline-state so
+      T4's later compare doesn't spuriously detect a change against a
+      cold-boot zero state file.
+    - Replies track_changed_rsp with reason=INTERIM, **track_id=&stack
+      buf (real synthetic audioId from y1-track-info, iter19b)**.
 
   T2 stub at 0x72d4 is rewritten to a single `b.w extended_T2`.
 
@@ -53,14 +53,27 @@ a reject-shape path that omits the event payload. We had been hitting the
 reject path on every TRACK_CHANGED notification — Sonos polled regardless,
 masking the bug; the Bolt depends on the CHANGED edge and didn't.
 
-iter16 design rationale: iter15 sent the file's real track_id in INTERIM,
-which flipped Sonos into "stable identity, only refresh on CHANGED" mode.
-T4 only fires when Sonos polls GetElementAttributes; Sonos won't poll until
-it gets CHANGED — deadlock confirmed by 14 minutes of zero AVRCP traffic
-during testing. iter16 keeps INTERIM/CHANGED's wire-level track_id at the
-"no stable identity" sentinel so Sonos stays in the iter14c-style polling
-mode (~50 GetElementAttributes per minute) AND adds CHANGED edges on real
-track changes so Sonos invalidates its 0xFF×8-keyed cache and re-renders.
+iter16 → iter19b history of the wire-level track_id field:
+  - iter15: real track_id in INTERIM — flipped Sonos into "stable identity,
+    only refresh on CHANGED" mode. T4 was reactive only (fires on inbound
+    GetElementAttributes); Sonos waited for CHANGED that never came because
+    Sonos wouldn't poll. 14-min deadlock confirmed on hardware.
+  - iter16: 0xFF×8 sentinel (AVRCP §6.7.2 "not bound to a particular media
+    element") — Sonos stayed in poll-on-each-event mode, T4 fired on each
+    poll, T4's compare against state file detected real track changes and
+    emitted CHANGED. Worked.
+  - iter17a: T5 added — proactive CHANGED on every Y1 track change via the
+    Java→native hook, regardless of CT polling.
+  - iter19a: r1=0 fix on track_changed_rsp arg layout (was r1=transId,
+    hitting the response builder's reject-shape path; spec-correct emission
+    requires r1=0 = success path).
+  - iter19b: real track_id (back to iter15's idea) BUT with T5 in place to
+    preempt the iter15 deadlock — Sonos can enter "refresh-on-CHANGED" mode
+    safely because T5 provides the CHANGED edges proactively. Bolt EV is
+    a strict CT that only re-fetches when the CHANGED's track_id differs
+    from what it cached; the sentinel kept Bolt in a one-shot fetch mode
+    (first CHANGED honored, all subsequent ignored). Real track_ids let
+    Bolt see real changes per CHANGED edge.
 
 Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   r5 = JNI instance pointer (conn buffer = r5+8)
@@ -254,15 +267,16 @@ def _emit_t4(a: Asm) -> None:
     a.beq("t4_no_change")
 
     a.label("t4_track_changed")
-    # track_changed_rsp(conn, 0, REASON_CHANGED, &SENTINEL_FFx8)
-    # iter16: track_id field is the 0xFF×8 sentinel, NOT the real track_id.
-    # See top-of-file rationale.
+    # track_changed_rsp(conn, 0, REASON_CHANGED, &file_track_id)
     # iter19a: r1=0 (was state[8] transId). r1 is the response builder's
     # reject_code arg, not transId — see extended_T2's matching comment.
+    # iter19b: track_id is &file[0..7] (the real 8 B we just read from
+    # y1-track-info), not the iter16 0xFF×8 sentinel. See extended_T2's
+    # matching comment for the rationale.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
+    a.add_sp_imm(3, T4_OFF_FILE_TID)          # r3 = &file[0..7] = real track_id
     a.blx_imm(PLT_track_changed_rsp)
 
     # Update state in-memory: state[0..7] = file[0..7]
@@ -424,17 +438,24 @@ def _emit_extended_t2(a: Asm) -> None:
     a.label("ext2_after_state_write")
 
     # ---- reply track_changed_rsp INTERIM ----
-    # iter16: the wire-level track_id is the 0xFF×8 sentinel (not the real
-    # id we just stashed in state). See top-of-file rationale.
     # iter19a: r1=0 (was r1=transId). Disassembly of the response builder at
     # libextavrcp.so:0x2458 shows `cbnz r5, reject_path` on r1; r1==0 is the
     # spec-correct path that emits reasonCode + event_id + track_id; r1!=0
     # writes a reject-shape frame that omits the event payload. transId is
     # auto-extracted from conn[17] regardless.
+    # iter19b: track_id is the real 8 B from y1-track-info (we already have
+    # it on the stack at T2_OFF_TID), not the iter16 0xFF×8 sentinel. The
+    # sentinel was iter15's deadlock-avoidance: real track_id flipped Sonos
+    # into "stable identity, refresh on CHANGED" mode, but T4 was reactive
+    # only so no CHANGED ever fired (Sonos wouldn't poll). T5 (iter17a)
+    # makes CHANGED proactive — every Y1 track change emits a CHANGED on
+    # the wire regardless of CT polling — so real track_ids are safe again,
+    # and strict CTs (Bolt EV) that gate refresh on the track_id actually
+    # changing now see real changes per CHANGED edge.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_INTERIM)
-    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
+    a.add_sp_imm(3, T2_OFF_TID)               # r3 = &(real 8 B track_id on stack)
     a.blx_imm(PLT_track_changed_rsp)
 
     # Restore stack and branch to epilogue.
@@ -563,11 +584,12 @@ def _emit_t5(a: Asm) -> None:
     # ---- emit CHANGED via track_changed_rsp ----
     # r0 = conn buffer (= struct + 8); r1 = 0 (success — see top-of-file
     # iter19a note about the response builder's r1 dispatch); r2 = REASON_CHANGED;
-    # r3 = &sentinel_ffx8 (so wire-level track_id stays the iter16 sentinel).
+    # r3 = &file_tid_buf (the real 8 B we just read from y1-track-info into
+    # T5's stack frame at sp+16; iter19b — was &sentinel_ffx8 in iter19a).
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.adr_w(3, "sentinel_ffx8")
+    a.add_sp_imm(3, 16)                       # r3 = &file_tid_buf (sp+16)
     a.blx_imm(PLT_track_changed_rsp)
 
     # ---- update state in-memory: state[0..7] = file_tid[0..7] ----

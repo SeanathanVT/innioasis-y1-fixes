@@ -134,7 +134,7 @@ Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frame
 
 **Iter17b: T4 multi-attribute single-frame fix.** Hardware test of iter17a showed the protocol/proactive layer working but Sonos rendering metadata field-by-field with visible flicker — Title appearing intermittently while Artist/Album swapped in/out. Diagnosed from logcat msg-id ratio (1299 msg=540 ÷ 433 GetElementAttributes ≈ 3 outbound frames per inbound query) as a regression of the iter12 bug that iter13 had originally fixed: T4's three calls to `btmtk_avrcp_send_get_element_attributes_rsp` were passing `arg2=transId, arg3=0`, which takes the function's legacy `arg3==0 → EMIT each call` path. Restored iter13 semantics: `arg2 = attribute index (0,1,2)`, `arg3 = 3` so only the third call (where `arg2+1 == arg3`) emits, packing all three attributes into one frame. Trampoline blob shrinks 768 → 760 B; LOAD #1 ends at 0xaf4c.
 
-**Iter19a (current): Phase A0 — Inform PDUs + TRACK_CHANGED wire-shape correctness.** Two coupled changes that together close the Bolt EV failure pattern observed in `/work/logs/dual-bolt-iter18d/` and reduce the gap to AVRCP 1.3 spec compliance per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md):
+**Iter19a: Phase A0 — Inform PDUs + TRACK_CHANGED wire-shape correctness.** Two coupled changes that together close the Bolt EV failure pattern observed in `/work/logs/dual-bolt-iter18d/` and reduce the gap to AVRCP 1.3 spec compliance per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md):
 
 1. **Two new trampolines** for the spec's CT→TG informational PDU pair:
    - `T_charset` for **PDU 0x17 InformDisplayableCharacterSet** → calls `inform_charsetset_rsp` via PLT 0x3588 with `arg1=0` (success). 14 B.
@@ -144,15 +144,23 @@ Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frame
 
 2. **TRACK_CHANGED wire-shape correctness fix** in extended_T2 + T4 (CHANGED on track edge) + T5 (proactive CHANGED). All three sites previously passed `r1=transId` to `track_changed_rsp`. Disassembly of the response builder at libextavrcp.so:0x2458 (and confirmed across all `reg_notievent_*_rsp` builders in the same family) shows it dispatches on r1: `r1==0` writes the spec-correct event payload (reasonCode + event_id + track_id memcpy); `r1!=0` writes a reject-shape frame omitting the event payload. We had been hitting the reject path on every TRACK_CHANGED notification — Sonos polled for metadata regardless, masking the bug; the Bolt depends on the CHANGED edge and didn't. Fix: `movs r1, #0` in all three sites. Saves 6 B (4-byte `ldrb.w` → 2-byte `movs_imm8`) but the trampoline grows because we add T_charset+T_battery+dispatch.
 
-Trampoline blob 760 → 800 B (cumulative); LOAD #1 ends at 0xaf74. Compliance scorecard: mandatory PDUs handled goes 3→5 (0x10/0x20/0x31 + new 0x17/0x18); PDUs spec-correct goes 2→5 (TRACK_CHANGED notification's wire shape was malformed pre-iter19a, now correct).
+Trampoline blob 760 → 800 B (cumulative); LOAD #1 ends at 0xaf74.
+
+**Iter19b (current): drop the iter16 0xFF×8 sentinel; pass real synthetic track_id (from `y1-track-info[0..7]`) on the wire in INTERIM and CHANGED.** iter19a hardware test on the Chevrolet Bolt EV (`/work/logs/dual-bolt-iter19a/`) confirmed the wire-shape fix worked for the **first** CHANGED edge (Bolt sent GetElementAttributes 197ms after the first T5-driven CHANGED) but not for the four subsequent track changes (Yellowcard / No Use for a Name / AFI / Authority Zero — Bolt registered TRACK_CHANGED every 3s but never re-fetched). Diagnosis: the Bolt is a strict CT that compares the CHANGED's `track_id` against its cached value and only re-fetches when they differ. With every CHANGED carrying the same `0xFF×8` sentinel, the Bolt sees "same identity, no real change" and ignores. iter19b switches the wire-level `track_id` argument to `track_changed_rsp` from `&sentinel_ffx8` to the real 8 B from `y1-track-info[0..7]` (= `Y1MediaBridge.mCurrentAudioId`, which iter18d made unique per track via `path.hashCode() | 0x100000000L`). Three sites: extended_T2 INTERIM, T4 CHANGED-on-edge, T5 proactive CHANGED. Each `adr_w(r3, "sentinel_ffx8")` (4 B) becomes `add_sp_imm(r3, <local-offset>)` (2 B) pointing at the relevant on-stack track_id buffer.
+
+**Why this is safe for Sonos despite iter15's deadlock:** iter15 did the same thing (real track_id on wire) and deadlocked Sonos because once Sonos got a real track_id in INTERIM it switched to "stable identity, refresh on CHANGED" mode, but T4 was reactive only — Sonos waited for a CHANGED edge that never came (Sonos wouldn't poll). T5 (iter17a) makes CHANGED proactive: every Y1 track change fires a CHANGED on the wire regardless of whether the CT is polling. The deadlock pre-condition is gone, so we can deliver real track_ids.
+
+Trampoline blob shrinks 800 → 792 B (saved 8 B from the `adr_w → add_sp_imm` instruction-size delta; sentinel data block kept in place harmlessly for future use). LOAD #1 ends at 0xaf6c.
 
 **Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
-- offset+16 (`p_filesz`): 0xac54 → 0xaf74 (iter19a; was 0xaf4c in iter17b, 0xaf54 in iter17a)
-- offset+20 (`p_memsz`):  0xac54 → 0xaf74 (iter19a)
+- offset+16 (`p_filesz`): 0xac54 → 0xaf6c (iter19b; was 0xaf74 in iter19a, 0xaf4c in iter17b)
+- offset+20 (`p_memsz`):  0xac54 → 0xaf6c (iter19b)
 
 No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `b96978584bcd05762610b8b1131a6125` (iter19a).
+Compliance scorecard unchanged from iter19a (5 mandatory PDUs handled, 5 spec-correct) — this is a behavior correctness change for an existing PDU, not a new PDU. But it's a meaningful win for strict-CT compatibility.
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `0349474128bb83cbcd5487a8b956c74d` (iter19b).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
