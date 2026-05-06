@@ -334,6 +334,61 @@ void btmtk_avrcp_send_get_capabilities_rsp(
 
 iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `02` (TRACK_CHANGED only, count=1) because Sonos aborts the entire registration loop on the first NOT_IMPLEMENTED reply — a side-effect we discovered empirically once iter9's "unknow indication" path actually started flowing rejects.
 
+### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, planned T6 — Phase B)
+
+Discovered 2026-05-06 from disassembly of `libextavrcp.so:0x2354` plus cross-reference with the stock JNI caller `_Z46BluetoothAvrcpService_getPlayerstatusRspNativeP7_JNIEnvP8_jobjectaiia` at `libextavrcp_jni.so:0x5680`.
+
+```c
+void btmtk_avrcp_send_get_playstatus_rsp(
+    void* conn,           // r0 = r5+8
+    uint8_t arg1,         // r1 = 0 for the success path that writes the
+                          //      song_length / song_position / play_status fields.
+                          //      Non-zero takes a path that only sets sp+10/+11 in
+                          //      the IPC frame (interpreted by mtkbt as a reject).
+    uint32_t song_length, // r2 = track duration in milliseconds
+    uint32_t song_position,// r3 = current playback position in milliseconds
+    uint8_t play_status   // sp[0] = 0x00 STOPPED / 0x01 PLAYING / 0x02 PAUSED /
+                          //         0x03 FWD_SEEK / 0x04 REV_SEEK / 0xFF ERROR
+);
+```
+
+Outbound IPC: `msg_id=542`, frame size 20 B. transId auto-extracted from `conn[17]` and written at frame offset 5. song_length at offset 8 (u32), song_position at offset 12 (u32), play_status at offset 16 (u8). The stock JNI (`PlayerstatusRspNative`) always passes `arg1=0` and stores a `getSavedSeqId(541)` result into `conn[25]` before the call — we don't need the latter because the conn struct is set up by mtkbt's inbound dispatch already, not by Java.
+
+### Calling pattern for `…send_reg_notievent_playback_rsp` (PLT 0x339c, planned T8 — Phase A)
+
+```c
+void btmtk_avrcp_send_reg_notievent_playback_rsp(
+    void* conn,           // r0 = r5+8
+    uint8_t arg1,         // r1 = 0 for success (the path that writes reasonCode +
+                          //      play_status into the frame); non-zero takes the
+                          //      reject path.
+    uint8_t reasonCode,   // r2 = 0x0F (INTERIM) or 0x0D (CHANGED)
+    uint8_t play_status   // r3 = 0=STOPPED, 1=PLAYING, 2=PAUSED, 3=FWD_SEEK,
+                          //      4=REV_SEEK, 0xFF=ERROR
+);
+```
+
+Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at offset 8; event_id constant `0x01` at offset 9 (function bakes this in — distinguishes from track_changed_rsp's `0x02` and pos_changed_rsp's `0x05`); play_status at offset 10.
+
+### Calling pattern for `…send_reg_notievent_pos_changed_rsp` (PLT 0x3360, planned T8 — Phase A)
+
+```c
+void btmtk_avrcp_send_reg_notievent_pos_changed_rsp(
+    void* conn,           // r0 = r5+8
+    uint8_t arg1,         // r1 = 0 for success
+    uint8_t reasonCode,   // r2 = 0x0F INTERIM / 0x0D CHANGED
+    uint32_t position_ms  // r3 = current playback position in milliseconds (u32)
+);
+```
+
+Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at offset 8; event_id constant `0x05` at offset 9; position_ms u32 at offset 36 (note the offset jump — pos_changed buffers the u32 near the tail of the 40-byte frame, unlike track_changed which puts the 8-byte track_id at offset 11).
+
+### Note on the arg1==0 / arg1!=0 dispatch shared by all `reg_notievent_*_rsp` functions
+
+All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the same shape (40-byte buffer, msg=544, conn[17]→transId at sp+9). Each function bakes in its event-specific constant at sp+13 (1=playback, 2=track_changed, 5=pos_changed, ...). The `cbnz` test on r1 is shared: r1==0 = "write event payload", r1!=0 = "write reject flag (sp+10=1) + reject code (sp+11=arg1) and skip event payload".
+
+The current iter17b T2 trampoline passes `r1 = transId` (which is usually non-zero), so it's been hitting the second path. Empirically Sonos still receives a TRACK_CHANGED notification of some kind and falls back to GetElementAttributes polling for metadata, which is why iter15+ has been working despite this. To be spec-correct (and to actually deliver the embedded track_id), iter19 should pass `r1=0` in T2/T5/T6/T8 across the board. **Treat as a known issue to fix when making the Phase A/B trampoline pass; verify on hardware that it doesn't regress current Sonos rendering.**
+
 ---
 
 ## Patch summary (iter17b)
