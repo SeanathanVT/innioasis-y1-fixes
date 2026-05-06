@@ -26,6 +26,7 @@ import android.view.KeyEvent;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -625,7 +626,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=10 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=11 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1126,8 +1127,21 @@ public class MediaBridgeService extends Service {
 
     private void readTagsDirectly(String path) {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
+        FileInputStream fis = null;
         try {
-            r.setDataSource(path);
+            // setDataSource(String) IPCs the path to the mediaserver process
+            // (uid 1013), which on this Y1 firmware can't open
+            // /storage/sdcard0/Music/... — the resulting RuntimeException
+            // arrives here with a null message and every miss-path track
+            // was falling through to filename-only display (iter18a hardware
+            // capture, "MediaMetadataRetriever error: null" on every miss).
+            //
+            // Open the file in our own process (uid 10000, sdcard_r group
+            // grants read on /storage/sdcard0/) and pass the FileDescriptor:
+            // mediaserver receives the dup'd FD over binder and reads from
+            // it directly, no re-open and no permission check on its side.
+            fis = new FileInputStream(path);
+            r.setDataSource(fis.getFD());
             mCurrentTitle    = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE);
             mCurrentArtist   = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST);
             mCurrentAlbum    = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
@@ -1144,7 +1158,7 @@ public class MediaBridgeService extends Service {
             if (mCurrentAlbum  == null) mCurrentAlbum  = "";
             Log.d(TAG, "Direct tags: " + mCurrentTitle + " / " + mCurrentArtist);
         } catch (Exception e) {
-            Log.e(TAG, "MediaMetadataRetriever error: " + e.getMessage());
+            Log.e(TAG, "MediaMetadataRetriever error: " + e);
             mCurrentTitle    = stripExtension(path);
             mCurrentArtist   = "";
             mCurrentAlbum    = "";
@@ -1154,6 +1168,7 @@ public class MediaBridgeService extends Service {
             mCurrentArtistId = -1;
         } finally {
             try { r.release(); } catch (Exception ignored) {}
+            if (fis != null) try { fis.close(); } catch (Exception ignored) {}
         }
     }
 
