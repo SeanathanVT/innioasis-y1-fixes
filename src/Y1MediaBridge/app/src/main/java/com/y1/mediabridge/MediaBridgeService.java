@@ -25,12 +25,8 @@ import android.util.Log;
 import android.view.KeyEvent;
 
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -899,66 +895,6 @@ public class MediaBridgeService extends Service {
         sendMusicBroadcast("com.android.music.metachanged");
         notifyTrackChanged(mCurrentAudioId);
         notifyPlaybackStatus(mIsPlaying ? (byte) 2 : (byte) 3);
-        writeTrackInfoFile();
-    }
-
-    // =======================================================================
-    // Track-info file for the AVRCP T4 trampoline (in libextavrcp_jni.so)
-    //
-    // Java-side AVRCP is a stub on this firmware (cardinality:0 — no peer
-    // subscriptions tracked, getElementAttributesRspNative declared but never
-    // called). To deliver metadata, --avrcp-min patches a native trampoline
-    // chain into libextavrcp_jni.so that handles inbound AVRCP commands
-    // directly. The T4 trampoline (PDU 0x20 GetElementAttributes) reads
-    // /data/local/tmp/y1-track-info via open(2) + read(2) syscall, then calls
-    // btmtk_avrcp_send_get_element_attributes_rsp via PLT 0x3570 with the
-    // strings as arguments. See docs/ARCHITECTURE.md in the y1-mods repo.
-    //
-    // File format (768 bytes total, fixed layout, null-padded UTF-8):
-    //   bytes 0..255   = title
-    //   bytes 256..511 = artist
-    //   bytes 512..767 = album
-    //
-    // Each field is null-padded; we truncate to FIELD_LEN-1 bytes max so each
-    // 256-byte slot has at least one trailing 0x00 — the trampoline calls
-    // strlen() on each slot start, and the trailing null bounds the read.
-    //
-    // Atomic write: write to .tmp then rename. setReadable(true, false) makes
-    // the file world-readable so the JNI process (Bluetooth uid) can open it.
-    private static final String TRACK_INFO_PATH = "/data/local/tmp/y1-track-info";
-    private static final int FIELD_LEN = 256;
-    private static final int TOTAL_LEN = FIELD_LEN * 3;
-
-    private void writeTrackInfoFile() {
-        byte[] buf = new byte[TOTAL_LEN];  // zero-initialized
-        putUtf8Padded(buf, 0,           FIELD_LEN, mCurrentTitle);
-        putUtf8Padded(buf, FIELD_LEN,   FIELD_LEN, mCurrentArtist);
-        putUtf8Padded(buf, FIELD_LEN*2, FIELD_LEN, mCurrentAlbum);
-
-        File tmp = new File(TRACK_INFO_PATH + ".tmp");
-        try {
-            FileOutputStream fos = new FileOutputStream(tmp);
-            try { fos.write(buf); } finally { fos.close(); }
-        } catch (IOException e) {
-            Log.w(TAG, "writeTrackInfoFile(open/write): " + e.getMessage());
-            return;
-        }
-        File target = new File(TRACK_INFO_PATH);
-        if (!tmp.renameTo(target)) {
-            Log.w(TAG, "writeTrackInfoFile(rename): failed");
-            tmp.delete();
-            return;
-        }
-        // World-readable so the BT process (uid bluetooth) can open it.
-        target.setReadable(true, false);
-    }
-
-    private static void putUtf8Padded(byte[] dst, int off, int slot, String s) {
-        if (s == null) return;
-        byte[] src = s.getBytes(StandardCharsets.UTF_8);
-        // Truncate to slot-1 to guarantee at least one trailing null byte for strlen.
-        int n = src.length < slot ? src.length : slot - 1;
-        System.arraycopy(src, 0, dst, off, n);
     }
 
     // =======================================================================

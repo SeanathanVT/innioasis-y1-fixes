@@ -24,19 +24,13 @@ mtkbt is compiled internally as **AVRCP 1.0** (compile-time tag, runtime `regist
 
 But the C response-builder functions exist and are correct:
 
-| PLT @  | Symbol                                                  | Purpose |
-|--------|---------------------------------------------------------|---------|
-| 0x33d8 | `close`                                                 | T4 file I/O |
-| 0x33fc | `memset`                                                | T4 buffer zero before read |
-| 0x3384 | `btmtk_avrcp_send_reg_notievent_track_changed_rsp`      | T2 — msg=544 RegisterNotification(TRACK_CHANGED) INTERIM |
-| 0x339c | `btmtk_avrcp_send_reg_notievent_playback_rsp`           | (unused; reserved for future T3 PLAYBACK_STATUS) |
-| 0x34d4 | `strlen`                                                | T4 — string length per attribute |
-| 0x3570 | `btmtk_avrcp_send_get_element_attributes_rsp`           | T4 — msg=540 GetElementAttributes response (multi-attribute) |
-| 0x35dc | `btmtk_avrcp_send_get_capabilities_rsp`                 | T1 — msg=522 GetCapabilities response |
-| 0x3624 | `btmtk_avrcp_send_pass_through_rsp`                     | (called from original 0x65bc fall-through) |
-| 0x363c | `open`                                                  | T4 file I/O |
-
-`read(2)` is **not** in the PLT — T4 uses Linux ARM syscall #3 directly: `movs r7, #3; svc 0`.
+| PLT @  | Symbol                                                  | What it sends |
+|--------|---------------------------------------------------------|---------------|
+| 0x35dc | `btmtk_avrcp_send_get_capabilities_rsp`                 | msg=522 — GetCapabilities response |
+| 0x3384 | `btmtk_avrcp_send_reg_notievent_track_changed_rsp`      | msg=544 — RegisterNotification(TRACK_CHANGED) INTERIM |
+| 0x339c | `btmtk_avrcp_send_reg_notievent_playback_rsp`           | msg=544 — RegisterNotification(PLAYBACK_STATUS_CHANGED) INTERIM |
+| 0x3570 | `btmtk_avrcp_send_get_element_attributes_rsp`           | msg=540 — GetElementAttributes response (multi-attribute capable) |
+| 0x3624 | `btmtk_avrcp_send_pass_through_rsp`                     | msg=520 — PASSTHROUGH ack / NOT_IMPLEMENTED reject |
 
 The trampolines call these directly. No new IPC, no Java surgery for the core handshake.
 
@@ -353,8 +347,8 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc |
 | T2 | jni 0x72d0 (48 B) | Overwrites `classInitNative` (4-byte return-0 stub at start). PDU 0x31 + event 0x02 → calls `reg_notievent_track_changed_rsp` via PLT 0x3384 |
-| T4 | jni 0xac54 (236 B) | NEW LOAD #1 extension. PDU 0x20 → memset(buf,0,768) + open(`/data/local/tmp/y1-track-info`, O_RDONLY) + Linux syscall read (SVC #3, since `read` isn't in the PLT) + close + 3 sequential calls to `get_element_attributes_rsp` via PLT 0x3570 with strlen-derived lengths from the file content. Falls through gracefully to "unknow indication" if the file is missing. |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xad40` (extends executable mapping over T4) |
+| T4 | jni 0xac54 (148 B) | NEW LOAD #1 extension. PDU 0x20 → 3 sequential calls to `get_element_attributes_rsp` via PLT 0x3570 (idx=0/1/2, total=3) for hardcoded Title/Artist/Album |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xace8` (extends executable mapping over T4) |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.

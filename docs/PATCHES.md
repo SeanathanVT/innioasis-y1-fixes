@@ -177,7 +177,7 @@ No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic
 
 **Pending follow-ups (T3 + full T4):** PlaybackStatus response + actual GetElementAttributes response with track strings (read from `/data/local/tmp/y1-track-info` written by Y1MediaBridge). See `docs/PROXY-BUILD.md`.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `86a3d52c03baa94898491a6e9764d69a` (iter14).
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `56d9d8514f30a12aaf2303b7a7f6a067` (iter13).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

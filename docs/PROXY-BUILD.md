@@ -28,10 +28,8 @@ Done:
 
 The architectural work is **done**. Remaining iterations are pure data plumbing:
 
-- [x] **iter14: Y1MediaBridge writes `/data/local/tmp/y1-track-info`; T4 reads it.** T4 grows from 148 to 236 bytes — adds memset(buf, 0, 768) + open(O_RDONLY) + Linux syscall read(fd, buf, 768) (read isn't in the JNI's PLT, so SVC #3 is used) + close(fd) + 3× strlen-then-call. File format: 768 bytes fixed-width = 256 bytes title + 256 artist + 256 album, each null-padded UTF-8 (Y1MediaBridge truncates to FIELD_LEN-1 to guarantee a trailing null for strlen safety). LOAD #1 grows to 0xad40. If the file is missing/unreadable, T4 falls through gracefully to the unknow-indication path → msg=520 NOT_IMPLEMENTED, never crashes. **Pending hardware verification.** Output md5: `86a3d52c03baa94898491a6e9764d69a`.
-
 Pending (this document is the plan):
-- [ ] Hardware test iter14 — verify Sonos shows real track metadata from Y1MediaBridge instead of "Y1 Title"/"Y1 Artist"/"Y1 Album". Y1MediaBridge writes the file in `broadcastTrackAndState()` after every track change.
+- [ ] iter14: Y1MediaBridge writes `/data/local/tmp/y1-track-info` on every track change; T4 reads it via open/read/close instead of using hardcoded strings. Trampoline grows ~80 bytes for the file I/O. (~4128 bytes available in LOAD #1 padding.) File format: simple fixed-width binary (256 bytes title + 256 artist + 256 album = 768 bytes, null-padded UTF-8). Y1MediaBridge runs as system, can write to `/data/local/tmp/`.
 - [ ] iter15: outbound CHANGED notification when track actually changes (so Sonos refreshes display without re-querying). Currently T2's track_id is hardcoded `0xFF`×8 ("no track / metadata unavailable" per AVRCP spec), which keeps Sonos polling.
 - [ ] iter16: real per-track unique track_id in T2's INTERIM TRACK_CHANGED so Sonos can cache metadata properly across track changes.
 - [ ] Trampoline T3 — call `btmtk_avrcp_send_reg_notievent_playback_rsp` for inbound RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED). Optional unless Sonos blocks on it.
