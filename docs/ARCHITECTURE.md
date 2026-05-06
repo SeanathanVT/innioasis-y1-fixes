@@ -1,6 +1,6 @@
 # AVRCP Metadata Architecture
 
-How the Innioasis Y1 delivers AVRCP 1.4 metadata (Title/Artist/Album) to peer controllers like Sonos, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands.
+How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer controllers like Sonos, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt_minimal.py` V1/V2 — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31. AVRCP 1.4's browsing channel, Now Playing list, and advanced player-application settings are not implemented.)
 
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.4 responses on the wire.
 
@@ -12,7 +12,7 @@ For **iteration plans and pending work**: see [`PROXY-BUILD.md`](PROXY-BUILD.md)
 
 ## TL;DR
 
-Sonos sends a stock AVRCP 1.4 GetElementAttributes request → mtkbt routes it through msg-519 (P1 patch) → `libextavrcp_jni.so::saveRegEventSeqId` is intercepted at file 0x6538 (R1 patch) → a chain of three trampolines (T1, T2, T4) inspects the inbound PDU byte and calls the matching `btmtk_avrcp_send_*_rsp` PLT entry directly → mtkbt builds a real AVRCP 1.4 response frame and emits it on the wire → Sonos displays the metadata.
+Sonos sends a stock AVRCP 1.3+ GetElementAttributes request (PDU 0x20 — same wire format in 1.3 and 1.4) → mtkbt routes it through msg-519 (P1 patch) → `libextavrcp_jni.so::saveRegEventSeqId` is intercepted at file 0x6538 (R1 patch) → a chain of three trampolines (T1, T2, T4) inspects the inbound PDU byte and calls the matching `btmtk_avrcp_send_*_rsp` PLT entry directly → mtkbt builds a real AVRCP 1.3 metadata response frame and emits it on the wire → Sonos displays the metadata.
 
 The trampolines live in unused/repurposed JNI debug methods (`testparmnum`, `classInitNative`) and in the page-alignment padding past the original LOAD #1 segment end (extended via `FileSiz`/`MemSiz` program-header surgery).
 

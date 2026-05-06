@@ -68,12 +68,13 @@ image's `app/` directory uses the flat layout). Mode `644`, owner `root:root`.
 See [`../../apply.bash`](../../apply.bash) for the full system.img patch +
 flash flow.
 
-Ship alongside the patched binaries:
+Ship alongside the patched binaries (current `--avrcp-min` stack — advertises **AVRCP 1.3** over AVCTP 1.2, since `mtkbt`'s shipped command-handling layer is internally 1.0 and 1.3 is the highest version where SDP advertisement, AVCTP, and trampoline coverage all line up):
 
-- Patched `/system/bin/mtkbt` — AVRCP 1.4 SDP record + runtime fixes (11 patches: B1-B3 AVCTP 1.0→1.3 in three SDP groups, C1-C3 AVRCP 1.0/1.3→1.4 in three ProfileDescList entries, A1 runtime SDP MOVW immediate, D1 NOP the registration guard, E3/E4 SupportedFeatures `0x0001/0x0021 → 0x0033`, E8 NOP the op_code=4 dispatcher slot-0 sign gate)
-- Patched `/system/lib/libextavrcp_jni.so` — 4 patches (C2a/b in `BluetoothAvrcpService_activateConfig_3req` at `0x375c`: hardcode `g_tg_feature = 0x0e` and `sdpfeature = 0x23`; C3a/b in `getCapabilitiesRspNative` at `0x5e56`/`0x5e5c`: raise the EventList cap from 13 to 14)
-- Patched `/system/lib/libextavrcp.so` — C4 (AVRCP version constant at `0x002e3b`, `0x0103 → 0x0104`)
-- Patched `/system/app/MtkBt.odex` — F1 (`getPreferVersion()` returns `0x0e` (1.4) instead of `10`); F2 (resets `sPlayServiceInterface = false` in `BluetoothAvrcpService.disable()`). DEX adler32 recomputed.
+- Patched `/system/bin/mtkbt` — V1 (AVRCP 1.0→1.3 SDP), V2 (AVCTP 1.0→1.2 SDP), S1 (replace `0x0311` SupportedFeatures slot with `0x0100` ServiceName), P1 (force fn 0x144bc op_code dispatch into the msg-519 emit path so VENDOR_DEPENDENT frames reach our trampolines)
+- Patched `/system/lib/libextavrcp_jni.so` — R1 (redirect at 0x6538), T1 GetCapabilities trampoline at 0x7308, T2 stub at 0x72d4, and the iter16 T4 + extended_T2 trampoline blob in the LOAD #1 page-padding region at 0xac54 (state-tracked TRACK_CHANGED CHANGED + 3-attribute GetElementAttributes responses with strings read from `/data/data/com.y1.mediabridge/files/y1-track-info`)
+- Patched `/system/app/MtkBt.odex` — F1 (`getPreferVersion()`), F2 (reset `sPlayServiceInterface` on disable). DEX adler32 recomputed. Both fixes are independent of the AVRCP version negotiation.
+
+(The legacy `--avrcp` flag tried to advertise 1.4 with `0x0033` features but the byte-patch path cannot make `mtkbt`'s daemon process 1.3+ COMMANDs end-to-end. See [`../../INVESTIGATION.md`](../../INVESTIGATION.md) "Conclusion (2026-05-04)".)
 
 Per-patch byte-level reference: [`../../docs/PATCHES.md`](../../docs/PATCHES.md).
 
