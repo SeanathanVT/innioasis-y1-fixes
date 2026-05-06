@@ -29,7 +29,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
+import java.io.UnsupportedEncodingException;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -991,7 +991,14 @@ public class MediaBridgeService extends Service {
 
     private static void putUtf8Padded(byte[] dst, int off, int slot, String s) {
         if (s == null) return;
-        byte[] src = s.getBytes(StandardCharsets.UTF_8);
+        byte[] src;
+        try {
+            // String form for API 17 compat; java.nio.charset.StandardCharsets is API 19+.
+            src = s.getBytes("UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            // UTF-8 is always supported by the JVM — this branch is unreachable.
+            return;
+        }
         // Truncate to slot-1 to guarantee at least one trailing null byte for strlen.
         int n = src.length < slot ? src.length : slot - 1;
         System.arraycopy(src, 0, dst, off, n);
@@ -1050,13 +1057,13 @@ public class MediaBridgeService extends Service {
                     MediaStore.Audio.Media.DATA + "=?",
                     new String[]{ path }, null);
             if (cursor != null && cursor.moveToFirst()) {
-                mCurrentTitle    = cursor.getString(cursor.getColumnIndex(MediaStore.Audio.Media.TITLE));
-                mCurrentArtist   = cursor.getString(cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST));
-                mCurrentAlbum    = cursor.getString(cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM));
-                mCurrentDuration = cursor.getLong(cursor.getColumnIndex(MediaStore.Audio.Media.DURATION));
-                mCurrentAlbumId  = cursor.getLong(cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID));
-                mCurrentArtistId = cursor.getLong(cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST_ID));
-                mCurrentAudioId  = cursor.getLong(cursor.getColumnIndex(MediaStore.Audio.Media._ID));
+                mCurrentTitle    = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE));
+                mCurrentArtist   = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST));
+                mCurrentAlbum    = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM));
+                mCurrentDuration = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION));
+                mCurrentAlbumId  = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID));
+                mCurrentArtistId = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST_ID));
+                mCurrentAudioId  = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID));
                 if ("<unknown>".equals(mCurrentArtist)) mCurrentArtist = "";
                 if ("<unknown>".equals(mCurrentAlbum))  mCurrentAlbum  = "";
                 mCurrentAlbumArt = loadAlbumArt(mCurrentAlbumId);
