@@ -77,12 +77,13 @@ T_battery — iter19a, structurally identical to T_charset but for
      CT notifies us of its battery state; we ack. Y1 has no CT-battery API
      surface to feed the value into; the ack alone is what the spec requires.
 
-The T4 + extended_T2 + path strings blob is built dynamically by
-_iter15_trampolines.py using a tiny Thumb-2 assembler (_thumb2asm.py).
-LOAD #1's filesz/memsz is extended to cover the blob, which lets the
-kernel map it as R+E at runtime — the 4276-byte page-alignment gap
-between LOAD #1's stock end (0xac54) and LOAD #2's start (0xbc08) is
-zero padding, so we can grow LOAD #1 freely up to that limit.
+The T4 + extended_T2 + T5 + T_charset + T_battery blob is built
+dynamically by _trampolines.py using a tiny Thumb-2 assembler
+(_thumb2asm.py). LOAD #1's filesz/memsz is extended to cover the blob,
+which lets the kernel map it as R+E at runtime — the 4276-byte
+page-alignment gap between LOAD #1's stock end (0xac54) and LOAD #2's
+start (0xbc08) is zero padding, so we can grow LOAD #1 freely up to
+that limit.
 
 --- History ---
 
@@ -141,9 +142,9 @@ import os
 import sys
 from pathlib import Path
 
-# Allow `from _iter15_trampolines import ...` when invoked from any cwd.
+# Allow `from _trampolines import ...` when invoked from any cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _iter15_trampolines import build as build_iter15_trampolines, T4_VADDR
+from _trampolines import build as build_trampolines, T4_VADDR
 from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
 from _thumb2asm import Asm
 
@@ -248,7 +249,7 @@ NATIVE_TRACK_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF0, 0x47])
 
 def build_patches() -> tuple[list[dict], int]:
     """Build the patch list. Returns (patches, new_load1_size)."""
-    blob, addrs = build_iter15_trampolines()
+    blob, addrs = build_trampolines()
     extended_t2_vaddr = addrs["extended_T2"]
     t5_vaddr = addrs["T5"]
     new_load1_size = T4_VADDR + len(blob)
@@ -286,7 +287,7 @@ def build_patches() -> tuple[list[dict], int]:
         },
         {
             "name": (
-                f"iter15 trampoline blob @ 0x{T4_VADDR:x} ({len(blob)} bytes "
+                f"trampoline blob @ 0x{T4_VADDR:x} ({len(blob)} bytes "
                 f"in LOAD #1 padding; final vaddr 0x{new_load1_size:x})"
             ),
             "offset": T4_VADDR,

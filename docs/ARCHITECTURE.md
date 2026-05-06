@@ -411,7 +411,7 @@ The current iter17b T2 trampoline passes `r1 = transId` (which is usually non-ze
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
 
-The JNI trampoline blob is built dynamically by `src/patches/_iter15_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
+The JNI trampoline blob is built dynamically by `src/patches/_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
 
 **Wire-level `track_id` history (iter15 → iter16 → iter19b):**
 

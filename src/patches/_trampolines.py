@@ -1,8 +1,9 @@
 """
-iter19 trampoline assembly for libextavrcp_jni.so.
+Trampoline assembly for libextavrcp_jni.so.
 
-Emits five trampolines into the LOAD #1 page-padding area starting at vaddr
-0xac54 (iter16 + iter17a + iter19 cumulative):
+Builds the dynamically-assembled trampoline blob that ships at vaddr 0xac54
+in the LOAD #1 page-padding area. Cumulative across iterations — currently
+five trampolines (iter16 + iter17a + iter19a/b):
 
   T4 (GetElementAttributes, PDU 0x20):
     - Reads y1-track-info (776B: 8B track_id + 3 × 256B Title/Artist/Album)
@@ -670,7 +671,7 @@ def _emit_t_battery(a: Asm) -> None:
 
 
 def build() -> tuple[bytes, dict[str, int]]:
-    """Build the iter15 LOAD-#1-padding code blob.
+    """Build the LOAD-#1-padding trampoline code blob.
 
     Returns:
         (bytes, label_addresses)

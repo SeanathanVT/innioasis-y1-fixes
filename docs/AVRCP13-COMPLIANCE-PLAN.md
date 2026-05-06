@@ -130,7 +130,7 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 **No Y1MediaBridge changes. No music-app patches.** The Inform PDUs are pure CT→TG informational acks with no data flow back to the Y1.
 
 **Files touched:**
-- `src/patches/_iter15_trampolines.py` — add T_charset + T_battery emitters; replace `r1=transId` with `r1=0` in T2 and T5 emitters (~80 lines)
+- `src/patches/_trampolines.py` — add T_charset + T_battery emitters; replace `r1=transId` with `r1=0` in T2 and T5 emitters (~80 lines)
 - `src/patches/patch_libextavrcp_jni.py` — bump LOAD #1 filesz/memsz (~5 lines)
 
 **Estimated effort:** 2 hours.
@@ -161,10 +161,10 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 - Event 0x05 should NOT have proactive CHANGED — emitting at 1Hz minimum would burn battery. CTs that subscribe to 0x05 typically poll-via-CHANGED-cycle: TG sends CHANGED only when the position is no longer monotonic (seek/track-edge). Our T5 already covers track-edge. Seek requires hooking `PlayerService.seekTo()` (Phase B sub-piece — see below).
 
 **Files touched:**
-- `src/patches/_iter15_trampolines.py` — add T8 emitter (~150 lines: switch on event_id, per-event arg shape)
+- `src/patches/_trampolines.py` — add T8 emitter (~150 lines: switch on event_id, per-event arg shape)
 - `src/patches/patch_libextavrcp_jni.py` — bump LOAD #1 filesz/memsz (~5 lines)
 - `src/Y1MediaBridge/.../MediaBridgeService.java` — extend `writeTrackInfoFile()` to write the new fields; add proactive PLAYBACK_STATUS notification emit hook (~80 lines)
-- T1 update (in `_iter15_trampolines.py`) — `EventsSupported` array grows from `[0x02]` to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (8 bytes); count parameter to `get_capabilities_rsp` becomes 7
+- T1 update (in `_trampolines.py`) — `EventsSupported` array grows from `[0x02]` to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (8 bytes); count parameter to `get_capabilities_rsp` becomes 7
 
 **Estimated effort:** 2-3 days. Mostly trampoline assembly + schema design.
 
@@ -179,7 +179,7 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 **No music-app patch needed.** All required state is in `MediaBridgeService` already.
 
 **Files touched:**
-- `src/patches/_iter15_trampolines.py` — T6 (~80 lines)
+- `src/patches/_trampolines.py` — T6 (~80 lines)
 - `src/patches/patch_libextavrcp_jni.py` — filesz bump
 - `src/Y1MediaBridge/.../MediaBridgeService.java` — extend schema with duration_ms field if Phase A didn't already
 
@@ -211,7 +211,7 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the same broadcast receivers.
 
 **Files touched:**
-- `src/patches/_iter15_trampolines.py` — T7 family (~400 lines, the largest single addition)
+- `src/patches/_trampolines.py` — T7 family (~400 lines, the largest single addition)
 - `src/patches/patch_libextavrcp_jni.py` — filesz bump
 - `src/patches/patch_y1_apk.py` — two new smali patches (D, E for shuffle/repeat)
 - `src/Y1MediaBridge/.../MediaBridgeService.java` — receivers + schema (~120 lines)
@@ -376,5 +376,5 @@ We don't have to commit to the full 1.3 build up front. Each iter ships an incre
 - [`PATCHES.md`](PATCHES.md) — per-patch byte detail.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes.
 - [`PROXY-BUILD.md`](PROXY-BUILD.md) — original iter5-iter13 build plan; superseded by this doc for future work.
-- `src/patches/_iter15_trampolines.py` — current trampoline blob assembler; the file each phase will extend.
+- `src/patches/_trampolines.py` — current trampoline blob assembler; the file each phase will extend.
 - `src/patches/_thumb2asm.py` — Thumb-2 mini-assembler; may need new instruction encodings for some Phase A/C trampolines.
