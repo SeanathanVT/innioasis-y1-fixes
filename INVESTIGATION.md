@@ -1429,13 +1429,23 @@ The reverse-engineered argument layout is now empirically confirmed correct. The
 
 **Iter14 → 14b → 14c (data plumbing).** Y1MediaBridge writes `Title\0…Artist\0…Album\0…` (768 B fixed-layout) to a file; T4 opens, syscall-reads, and uses the strings instead of the hardcoded ones. Iter14 (`/data/local/tmp/y1-track-info`) regressed Y1MediaBridge — uid 10000 has no write permission to `/data/local/tmp/` (mode 0771 owner=shell), and the silent EACCES on `FileOutputStream` opening propagated past the IOException catch and killed the service. Iter14b moved the path to `/data/data/com.y1.mediabridge/files/y1-track-info`, with a `setExecutable(true,false)` chmod on the dir at startup so the BT process (uid bluetooth) could traverse and read. Iter14c added `__android_log_print` after `open()` to surface the fd/errno, which confirmed `T4` was firing successfully on every poll — but Sonos's display still showed first-track strings on track change. The actual diagnosis: **Sonos caches GetElementAttributes responses keyed by the TRACK_CHANGED INTERIM track_id**. Since T2 always sent `0xFF×8`, Sonos thought it was the same track forever, even though our T4 was happily delivering fresh strings.
 
-**Iter15 — state-tracked CHANGED notifications (current).** Output md5 `92bcac1ab99d7fd0e263b712f9abb2d4`. Three architectural changes:
+**Iter15 — state-tracked CHANGED notifications.** Output md5 `92bcac1ab99d7fd0e263b712f9abb2d4`. Three architectural changes:
 
 1. **File format**: y1-track-info grows to 776 B with the `mCurrentAudioId` (big-endian) at bytes 0..7 ahead of the 3 × 256 B Title/Artist/Album slots. Y1MediaBridge writes the track_id alongside the strings.
 2. **State file**: a 16 B y1-trampoline-state file (mode 0666, pre-created by Y1MediaBridge at startup) lets the BT process remember (a) the last track_id we told Sonos about (bytes 0..7) and (b) the last RegisterNotification transId (byte 8). The `extended_T2` trampoline writes both fields on every RegisterNotification(TRACK_CHANGED); the `T4` trampoline reads them on every GetElementAttributes.
 3. **Trampoline rewrite**: T2's logic moves out of the cramped 44-byte `classInitNative` slot into LOAD #1's page-padding region. T2 stub at 0x72d4 becomes a single `b.w extended_T2`. extended_T2 dispatches PDU/event-id internally and falls through to T4 for PDU 0x20 or to 0x65bc otherwise. T4 is rewritten cleanly (memset → open/read y1-track-info → open/read y1-trampoline-state → cmp track_id → conditionally emit `track_changed_rsp CHANGED` with state[8] as transId + write new state → 3× `get_element_attributes_rsp`). The whole blob is now built dynamically from a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py` + `_iter15_trampolines.py`, rather than hand-encoded as a hex array. Total 572 bytes of trampoline + paths; LOAD #1 grows from 0xac54 → 0xae90 (still well under the 0xbc08 LOAD #2 boundary).
 
-Pending hardware verification.
+**Hardware-tested 2026-05-06: deadlocked Sonos.** Returning the file's real `track_id` in the INTERIM(TRACK_CHANGED) response flipped Sonos into "stable identity per track, only refresh on CHANGED" mode. Our `T4` only fires when Sonos polls `GetElementAttributes`; Sonos won't poll until it sees a `CHANGED`. After the first `RegisterNotification` (transId=0x00, track_id=0x147), Sonos went silent for 14+ minutes despite 10 track changes. Forensics confirm:
+
+- `y1-trampoline-state` mtime 14 min before capture-end; bytes 0..7 = 0x147 (audioId 327)
+- `y1-track-info` track_id at capture time = 0x151 (audioId 337) — 10 tracks ahead
+- 0 inbound VENDOR_DEPENDENT commands across 60 s capture (vs 2,933 in iter14c)
+- AVCTP control channel up; only PASSTHROUGH (PLAY/PAUSE) flowed
+- Sonos display: "No Content" / "Unknown Content" / stale "Trouble Maker" cached from the previous iter14c session
+
+Cause: AVRCP 1.4 §6.7.2 — peer behaviour depends critically on whether the TG advertises a stable track identity. With a real id we entered a CT/TG handshake that requires us to push asynchronous CHANGED edges, but our trampolines are reactive only.
+
+**Iter16 — same architecture, INTERIM/CHANGED track_id pinned to 0xFF×8.** Output md5 `5d74443293f663bcd3765721bb690479`. The change-detection bookkeeping (file bytes 0..7 vs state bytes 0..7) is preserved; only the wire-level `track_id` field in the response is hardcoded to the `0xFFFFFFFFFFFFFFFF` "not bound to a particular media element" sentinel. Implementation: an 8-byte 0xFF constant labelled `sentinel_ffx8` is appended after the path strings; `extended_T2`'s INTERIM emit and `T4`'s CHANGED emit both `ADR.W r3, sentinel_ffx8` instead of computing a stack address. Trampoline blob grows 572 → 580 bytes; LOAD #1 ends at 0xae98. Pending hardware verification.
 
 For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 

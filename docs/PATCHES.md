@@ -167,15 +167,15 @@ The 0x65bc path then runs `str.w lr, [sp, #12]` to pass SIZE to `btmtk_avrcp_sen
 
 Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frames forever because mtkbt was emitting nothing back. Iter7 (only the r0 restore, no lr restore) tested the ELF-extension infrastructure but still didn't generate msg=520 — the lr clobber was the second half of the bug. Iter8 (this version) restores both.
 
-**Iter15 (current): state-tracked CHANGED + dynamic trampoline assembly.** The full T4 + extended_T2 trampoline pair lives in the 0xac54 padding region; T2's old in-place stub at 0x72d4 is now a single `b.w extended_T2`. Both trampolines read `/data/data/com.y1.mediabridge/files/y1-track-info` (776 B: 8-byte big-endian track_id + 3 × 256 B Title/Artist/Album) and `…/y1-trampoline-state` (16 B: last-seen track_id + last RegisterNotification transId), and T4 emits `track_changed_rsp CHANGED` whenever the file's track_id has diverged from the state file — which is what Sonos needs to refresh its display when the track on the Y1 changes. The trampoline blob is built dynamically from `_thumb2asm.py` + `_iter15_trampolines.py` rather than hand-encoded.
+**Iter16 (current): state-tracked CHANGED with sentinel track_id + dynamic trampoline assembly.** The full T4 + extended_T2 trampoline pair lives in the 0xac54 padding region; T2's old in-place stub at 0x72d4 is now a single `b.w extended_T2`. Both trampolines read `/data/data/com.y1.mediabridge/files/y1-track-info` (776 B: 8-byte big-endian track_id + 3 × 256 B Title/Artist/Album) and `…/y1-trampoline-state` (16 B: last-synced track_id + last RegisterNotification transId), and T4 emits `track_changed_rsp CHANGED` whenever the file's track_id has diverged from the state file. **iter16-specific:** the wire-level `track_id` field in INTERIM and CHANGED is hardcoded to `0xFFFFFFFFFFFFFFFF` (AVRCP 1.4 §6.7.2 "not bound to a particular media element"), keeping Sonos in poll-on-each-event mode while still using CHANGED edges to invalidate Sonos's cache on real track changes. iter15's "real track_id in INTERIM" deadlocked Sonos (it stopped polling after the first INTERIM, waiting forever for a CHANGED that only fires inside our reactive trampolines). The trampoline blob is built dynamically from `_thumb2asm.py` + `_iter15_trampolines.py` rather than hand-encoded.
 
 **Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
-- offset+16 (`p_filesz`): 0xac54 → 0xae90 (iter15)
-- offset+20 (`p_memsz`):  0xac54 → 0xae90 (iter15)
+- offset+16 (`p_filesz`): 0xac54 → 0xae98 (iter16)
+- offset+20 (`p_memsz`):  0xac54 → 0xae98 (iter16)
 
 No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `92bcac1ab99d7fd0e263b712f9abb2d4` (iter15).
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `5d74443293f663bcd3765721bb690479` (iter16).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

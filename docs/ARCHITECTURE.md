@@ -334,7 +334,7 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 
 ---
 
-## Patch summary (iter15)
+## Patch summary (iter16)
 
 | Patch | File / addr | Description |
 |-------|-------------|-------------|
@@ -347,13 +347,15 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
-| extended_T2 + T4 | jni 0xac54 (572 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** handles RegisterNotification(TRACK_CHANGED): reads track_id from y1-track-info, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM. **T4** handles GetElementAttributes: reads y1-track-info (776 B) + y1-trampoline-state (16 B); if track_id changed since last seen, emits track_changed_rsp CHANGED with state[8] as transId and writes the new track_id back to the state file; then replies 3× get_element_attributes_rsp for Title (file+8) / Artist (file+264) / Album (file+520). Both trampolines fall through to "unknow indication" (0x65bc) for unsupported PDUs. |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xae90` (extends executable mapping over T4 + extended_T2 + path strings) |
+| extended_T2 + T4 | jni 0xac54 (580 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** handles RegisterNotification(TRACK_CHANGED): reads track_id from y1-track-info, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM **with track_id=0xFF×8 sentinel** (the file's real id is kept in the state file but never sent on the wire — see iter16 rationale below). **T4** handles GetElementAttributes: reads y1-track-info (776 B) + y1-trampoline-state (16 B); if state[0..7] != file[0..7], emits track_changed_rsp CHANGED **with track_id=0xFF×8 sentinel** and transId=state[8], then writes the new track_id back to the state file; then replies 3× get_element_attributes_rsp for Title (file+8) / Artist (file+264) / Album (file+520). Both trampolines fall through to "unknow indication" (0x65bc) for unsupported PDUs. |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xae98` (extends executable mapping over T4 + extended_T2 + path strings + 8-byte sentinel) |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
 
 The JNI trampoline blob is built dynamically by `src/patches/_iter15_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni_minimal.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
+
+**Why both INTERIM and CHANGED carry track_id = 0xFF×8 (iter16):** AVRCP 1.4 §6.7.2 specifies `0xFFFFFFFFFFFFFFFF` as the sentinel meaning "this information is not bound to a particular media element". CTs interpret this as "no stable track identity, refresh on each event" and continue polling `GetElementAttributes` regularly (Sonos in iter14c sent ~50/min). With a real track_id, Sonos enters "stable identity per track, only refresh on CHANGED" mode — and our trampolines are reactive, so Sonos's first INTERIM with a real id can put us in a deadlock where Sonos waits for CHANGED while T4 waits for Sonos to poll. iter15 hit that exact deadlock on hardware (2026-05-06: 14 minutes of zero AVRCP traffic post-INTERIM). iter16 keeps the change-detection bookkeeping (state file's bytes 0..7 = file's last-synced track_id) but pins the wire-level track_id field to the sentinel. CHANGED edges still fire on real track changes — which is what invalidates Sonos's `0xFF×8`-keyed cache and lets the new metadata render.
 
 ### Y1MediaBridge ↔ trampoline file contract
 
