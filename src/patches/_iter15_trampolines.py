@@ -1,24 +1,37 @@
 """
-iter15 trampoline assembly for libextavrcp_jni.so.
+iter16 trampoline assembly for libextavrcp_jni.so.
 
 Emits two trampolines into the LOAD #1 page-padding area starting at vaddr
 0xac54:
 
   T4 (GetElementAttributes, PDU 0x20):
     - Reads y1-track-info (776B: 8B track_id + 3 × 256B Title/Artist/Album)
-    - Reads y1-trampoline-state (16B: last_seen track_id [0..7] + transId [8])
-    - If track_id changed since last seen → emits track_changed_rsp CHANGED
-      using state[8] as transId, then rewrites state[0..7] to current track_id
+    - Reads y1-trampoline-state (16B: last_synced track_id [0..7] + transId [8])
+    - If state[0..7] != file[0..7] (the track has actually changed since the
+      last CHANGED we emitted) → calls track_changed_rsp with reason=CHANGED,
+      transId=state[8], **track_id=0xFF×8 (hardcoded sentinel)**, then writes
+      file[0..7] back into state[0..7] so we don't re-emit until Y1MediaBridge
+      moves the track_id again.
     - Replies with 3× get_element_attributes_rsp (Title/Artist/Album)
 
   extended_T2 (RegisterNotification(TRACK_CHANGED), PDU 0x31, event 0x02):
-    - Reads y1-track-info first 8 bytes (track_id only)
-    - Writes [track_id || transId || pad] to y1-trampoline-state
-      (so future T4 calls see state[0..7]==file[0..7] until track changes,
-       and state[8] holds the transId we'd need for any CHANGED to use)
-    - Replies track_changed_rsp INTERIM with the current track_id
+    - Reads y1-track-info first 8 bytes (track_id) into a stack buffer — used
+      ONLY to seed state[0..7] so T4's first comparison succeeds; not sent to
+      the peer.
+    - Writes [file_track_id || transId || pad] to y1-trampoline-state.
+    - Replies track_changed_rsp with reason=INTERIM, **track_id=0xFF×8
+      (hardcoded sentinel)**.
 
   T2 stub at 0x72d4 is rewritten to a single `b.w extended_T2`.
+
+iter16 design rationale: iter15 sent the file's real track_id in INTERIM,
+which flipped Sonos into "stable identity, only refresh on CHANGED" mode.
+T4 only fires when Sonos polls GetElementAttributes; Sonos won't poll until
+it gets CHANGED — deadlock confirmed by 14 minutes of zero AVRCP traffic
+during testing. iter16 keeps INTERIM/CHANGED's wire-level track_id at the
+"no stable identity" sentinel so Sonos stays in the iter14c-style polling
+mode (~50 GetElementAttributes per minute) AND adds CHANGED edges on real
+track changes so Sonos invalidates its 0xFF×8-keyed cache and re-renders.
 
 Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   r5 = JNI instance pointer (conn buffer = r5+8)
@@ -189,11 +202,13 @@ def _emit_t4(a: Asm) -> None:
     a.beq("t4_no_change")
 
     a.label("t4_track_changed")
-    # track_changed_rsp(conn, transId, REASON_CHANGED, &file_track_id)
+    # track_changed_rsp(conn, transId, REASON_CHANGED, &SENTINEL_FFx8)
+    # iter16: track_id field is the 0xFF×8 sentinel, NOT the real track_id.
+    # See top-of-file rationale.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.ldrb_w(1, 13, T4_OFF_STATE + 8)         # r1 = state[8] = last register transId
     a.movs_imm8(2, REASON_CHANGED)
-    a.add_sp_imm(3, T4_OFF_FILE_TID)          # r3 = &file_track_id
+    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
     a.blx_imm(PLT_track_changed_rsp)
 
     # Update state in-memory: state[0..7] = file[0..7]
@@ -280,16 +295,23 @@ def _emit_extended_t2(a: Asm) -> None:
     a.b_w("T4")
 
     a.label("ext2_track_changed")
-    # ---- allocate small frame for track_id buffer ----
+    # ---- allocate small frame: stack scratch for state-file write ----
+    # sp+0..7  : will hold file's track_id (read below; persisted to state[0..7]
+    #            so T4's next compare sees no change unless Y1MediaBridge moves
+    #            the track_id again)
+    # sp+8     : transId (set below)
+    # sp+9..15 : padding (zeroed below)
     a.subw(13, 13, T2_FRAME)                  # sub.w sp, sp, #16
 
-    # Default track_id = 0xFF×8 (sentinel "metadata not available").
-    a.mvn_imm(0, 0)                           # r0 = -1 = 0xFFFFFFFF
+    # Default track_id = 0×8 (in case file read fails — keeps state file in a
+    # well-defined "no synced track" state rather than 0xFF×8 which would later
+    # cause T4 to spuriously detect "changed" against a real-id file).
+    a.movs_imm8(0, 0)
     a.str_sp_imm(0, T2_OFF_TID + 0)
     a.str_sp_imm(0, T2_OFF_TID + 4)
 
     # Open + read 8 B + close from y1-track-info. On failure, leave the
-    # default 0xFF×8 in place.
+    # default 0×8 in place.
     a.adr_w(0, "path_track_info")
     a.movs_imm8(1, O_RDONLY)
     a.movs_imm8(2, 0)
@@ -340,10 +362,12 @@ def _emit_extended_t2(a: Asm) -> None:
     a.label("ext2_after_state_write")
 
     # ---- reply track_changed_rsp INTERIM ----
+    # iter16: the wire-level track_id is the 0xFF×8 sentinel (not the real
+    # id we just stashed in state). See top-of-file rationale.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.ldrb_w(1, 13, T2_TRANSID_CALLER_OFF)    # r1 = transId
     a.movs_imm8(2, REASON_INTERIM)
-    a.add_sp_imm(3, T2_OFF_TID)               # r3 = &track_id
+    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
     a.blx_imm(PLT_track_changed_rsp)
 
     # Restore stack and branch to epilogue.
@@ -377,6 +401,14 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.label("path_state")
     a.asciiz("/data/data/com.y1.mediabridge/files/y1-trampoline-state")
     a.align(4)
+
+    # iter16 sentinel: 8 bytes of 0xFF passed as the track_id pointer to
+    # btmtk_avrcp_send_reg_notievent_track_changed_rsp for both INTERIM and
+    # CHANGED responses. AVRCP 1.4 spec §6.7.2 — track_id 0xFFFFFFFFFFFFFFFF
+    # means "this information is not bound to a particular media element",
+    # which keeps the CT in poll-on-each-event mode.
+    a.label("sentinel_ffx8")
+    a.raw(b"\xFF" * 8)
 
     blob = a.resolve()
     addrs = {k: v for k, v in a.labels.items()

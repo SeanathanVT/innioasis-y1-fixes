@@ -91,8 +91,19 @@ change but Sonos still showed the cached first-track metadata.
 iter15: state-tracked CHANGED notifications. extended_T2 saves the
 RegisterNotification transId; T4 detects track_id changes against a
 state file and emits a CHANGED with the saved transId before replying
-to GetElementAttributes. Sonos sees the CHANGED, re-subscribes, and
-its display refreshes.
+to GetElementAttributes. INTERIM/CHANGED both carried the file's real
+track_id. Hardware-tested 2026-05-06 — DEADLOCKED Sonos: returning a
+real track_id flips Sonos into "stable identity, only refresh on
+CHANGED" mode; T4 fires only when Sonos polls; Sonos won't poll until
+it sees a CHANGED. 14 minutes of zero AVRCP traffic confirmed.
+
+iter16: same architecture as iter15 but INTERIM/CHANGED's track_id
+field is hardcoded to the 0xFF×8 sentinel ("not bound to a particular
+media element" per AVRCP 1.4 §6.7.2). State file's bytes 0..7 still
+hold the file's last-synced track_id — that's what T4 compares against
+to know when to emit CHANGED. Restores iter14c-style polling
+behaviour and adds CHANGED edges on real track changes so Sonos
+invalidates its 0xFF×8-keyed cache and re-renders.
 
 Mutually exclusive with patch_libextavrcp_jni.py (the v2.0.0 4-patch set);
 both target overlapping code regions.
@@ -116,7 +127,7 @@ from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
 from _thumb2asm import Asm
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "92bcac1ab99d7fd0e263b712f9abb2d4"  # iter15
+OUTPUT_MD5 = "5d74443293f663bcd3765721bb690479"  # iter16
 
 # ---------------------------------------------------------------- T1
 
