@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="9"
-    android:versionName="1.2">
+    android:versionCode="12"
+    android:versionName="1.5">
 
     <!--
         READ_LOGS is signatureOrSystem on Android 4.2.
@@ -13,6 +13,19 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!--
+        WRITE_MEDIA_STORAGE is signatureOrSystem on Android 4.2 and grants
+        AID_MEDIA_RW (1023) — the supplementary group that owns the actual
+        file ACL on /storage/sdcard0 on this Y1 firmware. Without it,
+        FileInputStream("/storage/sdcard0/Music/...") fails with EACCES
+        (Permission denied) — confirmed in the iter18b hardware capture
+        where every direct-read miss path errored out. READ_EXTERNAL_STORAGE
+        was nominally added in API 16 but is not enforced as a positive grant
+        on this 4.2 build; the file ACL is what gates open(2). Apps in
+        /system/app/ get signatureOrSystem perms at install time without
+        platform signing.
+    -->
+    <uses-permission android:name="android.permission.WRITE_MEDIA_STORAGE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application

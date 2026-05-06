@@ -626,7 +626,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=11 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=12 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -901,45 +901,57 @@ public class MediaBridgeService extends Service {
         mPositionAtStateChange = 0;
         mStateChangeTime = SystemClock.elapsedRealtime();
 
-        if (!queryMetadataFromStore(path)) {
-            // MediaStore miss is the common case here — the Y1 player navigates
-            // to files MediaStore hasn't indexed (or whose path encoding
-            // doesn't match). Waiting on MediaScannerConnection.scanFile to
-            // populate the DB takes 0.7–2s on this device; readTagsDirectly
-            // (MediaMetadataRetriever) reads ID3 tags from the file head in
-            // ~50ms, which is the difference between a Sonos refresh that
-            // feels instant and one the user calls out as laggy.
-            //
-            // We still kick the scanner fire-and-forget so future plays of
-            // this file hit MediaStore (canonical _ID, album-art lookup, etc.).
-            // The current track is already on the wire by then — no second
-            // broadcast is fired, which keeps msg=544 traffic at one CHANGED
-            // per Y1 track change.
-            readTagsDirectly(path);
-            if (!path.equals(mPendingScanPath)) {
-                Log.d(TAG, "MediaStore miss for " + path
-                        + " — broadcasting direct tags + kicking async scan");
-                mPendingScanPath = path;
-                MediaScannerConnection.scanFile(this, new String[]{ path }, null,
-                        new MediaScannerConnection.OnScanCompletedListener() {
-                            @Override
-                            public void onScanCompleted(String p, Uri uri) {
-                                final String finalPath = p;
-                                mMainHandler.post(new Runnable() {
-                                    @Override public void run() {
-                                        if (finalPath.equals(mPendingScanPath)) {
-                                            mPendingScanPath = null;
-                                        }
-                                    }
-                                });
+        if (queryMetadataFromStore(path)) {
+            // MediaStore had it cached — fast path, single broadcast.
+            broadcastTrackAndState();
+            return;
+        }
+
+        // MediaStore miss. Try a direct ID3 read (~50ms) so Sonos sees real
+        // metadata immediately rather than the filename. Whether or not that
+        // succeeds, we always kick the scanner so future plays of this file
+        // hit MediaStore — and on firmwares where the direct read fails with
+        // EACCES (mediaserver/our-uid lacking read on /storage/sdcard0), we
+        // re-broadcast canonical metadata when the scanner completes. Worst
+        // case the user sees filename → canonical metadata in ~1s instead of
+        // filename forever.
+        boolean directReadOk = readTagsDirectly(path);
+        broadcastTrackAndState();
+
+        // Stage 2: scanner-completion follow-up. Skip if the direct read
+        // already gave us real metadata, or a scan is already in flight.
+        if (directReadOk) return;
+        if (path.equals(mPendingScanPath)) {
+            Log.d(TAG, "MediaStore miss for " + path
+                    + " — direct read empty, scan already in progress");
+            return;
+        }
+        Log.d(TAG, "MediaStore miss for " + path
+                + " — kicking scanner; will re-broadcast on completion");
+        mPendingScanPath = path;
+        MediaScannerConnection.scanFile(this, new String[]{ path }, null,
+                new MediaScannerConnection.OnScanCompletedListener() {
+                    @Override
+                    public void onScanCompleted(String p, Uri uri) {
+                        final String finalPath = p;
+                        mMainHandler.post(new Runnable() {
+                            @Override public void run() {
+                                if (finalPath.equals(mPendingScanPath)) {
+                                    mPendingScanPath = null;
+                                }
+                                // Track may have changed since we kicked the
+                                // scan — only re-broadcast if this is still
+                                // the active path.
+                                if (!finalPath.equals(mCurrentPath)) return;
+                                if (queryMetadataFromStore(finalPath)) {
+                                    Log.d(TAG, "Scanner-completion re-broadcast: "
+                                            + mCurrentTitle + " / " + mCurrentArtist);
+                                    broadcastTrackAndState();
+                                }
                             }
                         });
-            } else {
-                Log.d(TAG, "MediaStore miss for " + path
-                        + " — broadcasting direct tags (scan already running)");
-            }
-        }
-        broadcastTrackAndState();
+                    }
+                });
     }
 
     private void broadcastTrackAndState() {
@@ -1125,21 +1137,25 @@ public class MediaBridgeService extends Service {
         return false;
     }
 
-    private void readTagsDirectly(String path) {
+    /**
+     * Try to read ID3 tags directly from the file head. Returns true if we
+     * obtained a real Title and at least one of Artist/Album; false on any
+     * failure (EACCES, missing file, parser error) or when the resulting
+     * tags are empty enough that the caller should treat it as a miss and
+     * fall back on the scanner-completion re-broadcast path.
+     */
+    private boolean readTagsDirectly(String path) {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         FileInputStream fis = null;
         try {
-            // setDataSource(String) IPCs the path to the mediaserver process
-            // (uid 1013), which on this Y1 firmware can't open
-            // /storage/sdcard0/Music/... — the resulting RuntimeException
-            // arrives here with a null message and every miss-path track
-            // was falling through to filename-only display (iter18a hardware
-            // capture, "MediaMetadataRetriever error: null" on every miss).
-            //
-            // Open the file in our own process (uid 10000, sdcard_r group
-            // grants read on /storage/sdcard0/) and pass the FileDescriptor:
-            // mediaserver receives the dup'd FD over binder and reads from
-            // it directly, no re-open and no permission check on its side.
+            // setDataSource(String) IPCs the path to mediaserver (uid 1013).
+            // Opening via FileInputStream first runs the open(2) in our own
+            // process so the access check uses our supplementary groups,
+            // not mediaserver's. With WRITE_MEDIA_STORAGE granted (system
+            // app in /system/app/), AID_MEDIA_RW is in our group set and
+            // /storage/sdcard0/Music is readable. On firmwares where the
+            // permission isn't actually granted we still get EACCES — the
+            // caller schedules the scanner and re-broadcasts on completion.
             fis = new FileInputStream(path);
             r.setDataSource(fis.getFD());
             mCurrentTitle    = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE);
@@ -1152,11 +1168,15 @@ public class MediaBridgeService extends Service {
             mCurrentArtistId = -1;
             byte[] art = r.getEmbeddedPicture();
             mCurrentAlbumArt = art != null ? decodeSampled(art, MAX_ART_PX) : null;
-            if (mCurrentTitle == null || mCurrentTitle.isEmpty())
-                mCurrentTitle = stripExtension(path);
+            boolean realTitle = mCurrentTitle != null && !mCurrentTitle.isEmpty();
+            boolean realArtist = mCurrentArtist != null && !mCurrentArtist.isEmpty();
+            boolean realAlbum  = mCurrentAlbum  != null && !mCurrentAlbum.isEmpty();
+            if (!realTitle) mCurrentTitle = stripExtension(path);
             if (mCurrentArtist == null) mCurrentArtist = "";
             if (mCurrentAlbum  == null) mCurrentAlbum  = "";
-            Log.d(TAG, "Direct tags: " + mCurrentTitle + " / " + mCurrentArtist);
+            Log.d(TAG, "Direct tags: " + mCurrentTitle + " / " + mCurrentArtist
+                    + " / " + mCurrentAlbum);
+            return realTitle && (realArtist || realAlbum);
         } catch (Exception e) {
             Log.e(TAG, "MediaMetadataRetriever error: " + e);
             mCurrentTitle    = stripExtension(path);
@@ -1166,6 +1186,7 @@ public class MediaBridgeService extends Service {
             mCurrentAudioId  = -1;
             mCurrentAlbumId  = -1;
             mCurrentArtistId = -1;
+            return false;
         } finally {
             try { r.release(); } catch (Exception ignored) {}
             if (fis != null) try { fis.close(); } catch (Exception ignored) {}
