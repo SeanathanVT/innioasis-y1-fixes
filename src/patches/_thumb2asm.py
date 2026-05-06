@@ -1,6 +1,6 @@
 """
 Tiny Thumb-2 assembler — only the instructions used by the iter15 AVRCP
-trampolines (T4 + extended_T2) in patch_libextavrcp_jni_minimal.py.
+trampolines (T4 + extended_T2) in patch_libextavrcp_jni.py.
 
 Two-pass: emit() builds the instruction stream with placeholders; resolve()
 patches in pc-relative offsets once every label has a known address.

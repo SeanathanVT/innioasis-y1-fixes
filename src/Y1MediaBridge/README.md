@@ -68,13 +68,11 @@ image's `app/` directory uses the flat layout). Mode `644`, owner `root:root`.
 See [`../../apply.bash`](../../apply.bash) for the full system.img patch +
 flash flow.
 
-Ship alongside the patched binaries (current `--avrcp-min` stack — advertises **AVRCP 1.3** over AVCTP 1.2, since `mtkbt`'s shipped command-handling layer is internally 1.0 and 1.3 is the highest version where SDP advertisement, AVCTP, and trampoline coverage all line up):
+Ship alongside the patched binaries (current `--avrcp` stack — advertises **AVRCP 1.3** over AVCTP 1.2, since `mtkbt`'s shipped command-handling layer is internally 1.0 and 1.3 is the highest version where SDP advertisement, AVCTP, and trampoline coverage all line up):
 
 - Patched `/system/bin/mtkbt` — V1 (AVRCP 1.0→1.3 SDP), V2 (AVCTP 1.0→1.2 SDP), S1 (replace `0x0311` SupportedFeatures slot with `0x0100` ServiceName), P1 (force fn 0x144bc op_code dispatch into the msg-519 emit path so VENDOR_DEPENDENT frames reach our trampolines)
-- Patched `/system/lib/libextavrcp_jni.so` — R1 (redirect at 0x6538), T1 GetCapabilities trampoline at 0x7308, T2 stub at 0x72d4, and the iter16 T4 + extended_T2 trampoline blob in the LOAD #1 page-padding region at 0xac54 (state-tracked TRACK_CHANGED CHANGED + 3-attribute GetElementAttributes responses with strings read from `/data/data/com.y1.mediabridge/files/y1-track-info`)
-- Patched `/system/app/MtkBt.odex` — F1 (`getPreferVersion()`), F2 (reset `sPlayServiceInterface` on disable). DEX adler32 recomputed. Both fixes are independent of the AVRCP version negotiation.
-
-(The legacy `--avrcp` flag tried to advertise 1.4 with `0x0033` features but the byte-patch path cannot make `mtkbt`'s daemon process 1.3+ COMMANDs end-to-end. See [`../../INVESTIGATION.md`](../../INVESTIGATION.md) "Conclusion (2026-05-04)".)
+- Patched `/system/lib/libextavrcp_jni.so` — R1 (redirect at 0x6538), T1 GetCapabilities trampoline at 0x7308, T2 stub at 0x72d4, and the iter17b T4 + extended_T2 + T5 trampoline blob in the LOAD #1 page-padding region at 0xac54 (state-tracked TRACK_CHANGED CHANGED + multi-attribute single-frame GetElementAttributes responses with strings read from `/data/data/com.y1.mediabridge/files/y1-track-info`, plus proactive CHANGED on Y1 track changes via the patched `notificationTrackChangedNative`)
+- Patched `/system/app/MtkBt.odex` — F1 (`getPreferVersion()`), F2 (reset `sPlayServiceInterface` on disable), iter17a (NOP `if-eqz` cardinality gate at `0x3c530` so `notificationTrackChangedNative` fires on every track-change broadcast). DEX adler32 recomputed.
 
 Per-patch byte-level reference: [`../../docs/PATCHES.md`](../../docs/PATCHES.md).
 

@@ -5,7 +5,7 @@ Concrete plan for delivering AVRCP metadata to peers (Sonos, cars). Builds on th
 ## Why a proxy is needed
 
 mtkbt is a 1.0-class AVRCP TG. It:
-- Receives 1.3+ COMMANDs (now demonstrated end-to-end with `--avrcp-min`).
+- Receives 1.3+ COMMANDs (now demonstrated end-to-end with `--avrcp`).
 - Has the L2CAP/AVCTP plumbing that gets bytes on the wire.
 - Has working response-builder C functions in `libextavrcp.so` (`btmtk_avrcp_send_get_capabilities_rsp` etc.) that mtkbt's *own* dispatcher never calls for non-PASSTHROUGH inbound.
 
@@ -87,7 +87,7 @@ No usable zero-runs in `.text` (it's contiguous 0x3660–0x7764). Three viable o
 
 ## Trampoline T1 (GetCapabilities) — final
 
-Implementation in `src/patches/patch_libextavrcp_jni_minimal.py`. Two patches:
+Implementation in `src/patches/patch_libextavrcp_jni.py`. Two patches:
 
 - **R1 (redirect)** at file `0x6538`: 4 bytes `40 d1 09 25` (`bne.n 0x65bc; movs r5, #9`) → `00 f0 e6 fe` (`bl.w 0x7308`).
 - **T1 (trampoline)** at file `0x7308`, 40 bytes (overwrites `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa`):

@@ -10,6 +10,24 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 
 ## [Unreleased]
 
+### Changed
+- **`--avrcp` consolidated.** The historical `--avrcp` flag (legacy AVRCP 1.4 byte-patch attempt that regressed PASSTHROUGH without delivering metadata) is gone; `--avrcp-min` (the working AVRCP 1.3 SDP shape + JNI trampoline chain pipeline) has been promoted to `--avrcp`. The flag now applies `patch_mtkbt.py` (V1/V2/S1/P1) + `patch_libextavrcp_jni.py` (R1/T1/T2 stub/extended_T2/T4/T5 trampoline chain) + `patch_mtkbt_odex.py` (F1/F2/iter17a) + Y1MediaBridge.apk install. Excluded from `--all` because it requires a Y1MediaBridge gradle build first (analogous to `--root` requiring `src/su/` built).
+
+### Removed
+- Legacy patcher scripts: `src/patches/patch_mtkbt.py` (the 11-patch AVRCP 1.4 set: B1-B3 / C1-C3 / A1 / D1 / E3 / E4 / E8), `src/patches/patch_libextavrcp_jni.py` (C2a/b / C3a/b), `src/patches/patch_libextavrcp.py` (C4). All three caused or relied on the broken AVRCP 1.4 wire-protocol attempt and have been superseded by the trampoline chain.
+- `--avrcp-min` flag (renamed to `--avrcp`).
+- Mutual-exclusion check between `--avrcp` and `--avrcp-min` in `apply.bash`.
+
+### Renamed
+- `src/patches/patch_mtkbt_minimal.py` → `src/patches/patch_mtkbt.py` (now the canonical mtkbt patcher).
+- `src/patches/patch_libextavrcp_jni_minimal.py` → `src/patches/patch_libextavrcp_jni.py` (now the canonical libextavrcp_jni.so patcher).
+
+### Fixed
+- **iter17b: T4 multi-attribute single-frame regression.** iter17a hardware test (2026-05-06) showed the proactive CHANGED layer working but Sonos rendering metadata field-by-field with visible flicker. Diagnosed from logcat msg-id ratio (1299 msg=540 ÷ ~433 inbound GetElementAttributes ≈ 3:1) as a regression of the iter12 bug iter13 had originally fixed: T4's three calls to `btmtk_avrcp_send_get_element_attributes_rsp` were passing `arg2=transId, arg3=0`, which takes the function's legacy `arg3==0 → EMIT each call` path and emits 3 separate frames per query. Restored iter13 semantics (`arg2 = attribute index 0..2`, `arg3 = 3`) so calls 1+2 accumulate and call 3 packs Title+Artist+Album into a single msg=540 outbound. Trampoline blob shrinks 768 → 760 B; LOAD #1 ends at `0xaf4c`. Stock `fd2ce74db9389980b55bccf3d8f15660` → `91833d6f41021df23a8aa50999fcab9a`.
+
+### Added
+- **iter17a: proactive CHANGED on track change via Java→JNI hook.** Two patches that pair: (A) `MtkBt.odex` @ `0x03c530` NOPs the cardinality `if-eqz v5, :cond_184` in `BTAvrcpMusicAdapter.handleKeyMessage`'s sswitch_1a3 (TRACK_CHANGED case). Java was permanently `cardinality:0` because the JNI bypasses Java's BitSet bookkeeping; with the NOP, every Y1MediaBridge `com.android.music.metachanged` broadcast → MtkBt's `passNotifyMsg(2, 0)` → `handleKeyMessage` reaches the `notificationTrackChangedNative` invoke. (B) `libextavrcp_jni.so` @ `0x3bc0` replaces the native's first instruction with `b.w T5`. T5 is a new trampoline in LOAD #1 padding alongside T4/extended_T2: calls the JNI helper at `0x36c0` to obtain the AVRCP per-conn struct, reads `y1-track-info` first 8 bytes + `y1-trampoline-state`, on track_id divergence emits `track_changed_rsp` with `reason=CHANGED`, `transId=state[8]`, `track_id=&sentinel_ffx8`, updates state file, returns `jboolean(1)`. Bridges Sonos's idle GetElementAttributes polling cadence (too slow for shuffle) to the speed of `Y1MediaBridge.broadcastTrackAndState()`.
+
 ## [2.0.0] - 2026-05-04
 ### Added
 - **`src/btlog-dump/`** — minimal no-libc ARM ELF that taps `mtkbt`'s undocumented `@btlog` abstract `SOCK_STREAM` socket (created by `socket_local_server("btlog", ABSTRACT, SOCK_STREAM)` at mtkbt vaddr `0x6b4d4`). Connecting to it as root yields a stream of `mtkbt`'s `__xlog_buf_printf` output (every `[AVRCP]` / `[AVCTP]` / `[L2CAP]` / `[ME]` / `SdpUuidCmp:` log line that is otherwise invisible to `logcat`) **plus** decoded HCI command/event traffic. Replaces both the conventional `persist.bt.virtualsniff` btsnoop knob (which breaks BT init on this device) and the `__xlog_buf_printf → logcat` redirect attempts (G1/G2 in `INVESTIGATION.md` — both crashed mtkbt). Same direct-syscall toolchain as `src/su/`, and the entry stub is reused (`Makefile` references `../su/start.S`). Build with `cd src/btlog-dump && make` → `src/btlog-dump/build/btlog-dump` (~1 KB, statically linked, no `NEEDED` entries). Build dir `.gitignore`d to match `src/su/build/`. Diagnostic-only — not invoked by any flag of the bash flow.

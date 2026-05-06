@@ -1336,7 +1336,7 @@ Built `tools/install-gdbserver.sh` (fetches a sha256-pinned ARM 32-bit static gd
 - After mtkbt SIGSEGV mid-debug, gdbserver wedges with the dead PID's ptrace slot. Fix: clean up stale gdbserver via `/proc` walk before each attach, drop the adb forward.
 - mtkbt respawns automatically on crash; BT off→on resets cleanly.
 
-### What `--avrcp-min` (V1+V2+S1) shows
+### What `--avrcp` (V1+V2+S1, then `--avrcp-min` in the historical iter1) shows
 
 With AVRCP 1.3 + AVCTP 1.2 + a `0x0100` ServiceName attribute on the served SDP record, Sonos sends a real **AV/C VENDOR_DEPENDENT GetCapabilities** (op_code 0x00, vendor BT-SIG `0x001958`, PDU 0x10, capability_id 0x02 = EVENTS_SUPPORTED). Confirmed by gdb breakpoint dumps of the inbound L2CAP frame bytes. This contradicts the earlier 2026-05-04 reading of Trace #10's capture, which assumed the inbound was a malformed/dropped command — it was actually a 14-byte real GetCapabilities all along.
 
@@ -1368,7 +1368,7 @@ Two-byte rewrite of `cmp r3, #0x30` → `b.n 0x14528`:
 
 Forces all AV/C frames through the bl `0x10404` → msg 519 emit path regardless of op_code. Hardware-verified 2026-05-05: **VENDOR_DEPENDENT GetCapabilities now reaches JNI as `MSG_ID_BT_AVRCP_CMD_FRAME_IND size:9 rawkey:0 data_len:9`** with the AV/C-body bytes intact.
 
-Ships as the fourth patch in `src/patches/patch_mtkbt_minimal.py`. Stock mtkbt md5 `3af1d4ad8f955038186696950430ffda` → output `a37d56c91beb00b021c55f7324f2cc09`.
+Ships as the fourth patch in `src/patches/patch_mtkbt.py`. Stock mtkbt md5 `3af1d4ad8f955038186696950430ffda` → output `a37d56c91beb00b021c55f7324f2cc09`.
 
 ### What's NOT yet solved — the JNI's "unknow indication" path
 
@@ -1384,7 +1384,7 @@ The candidate next patch is at file `0x6526` of `libextavrcp_jni.so`: `cmp.w lr,
 
 A clean patch will require static-analyzing what `0x65a4+` actually does (whether it reaches Java or just logs+returns) before committing to a byte rewrite.
 
-**2026-05-05 follow-up.** The single-byte J1 (cmp 8 → 9) was tried and rolled back — it routed size-9 frames through the PASSTHROUGH dispatch, generating fake `key=1 isPress=0` events and never reaching Java. Path forward (now in `patch_libextavrcp_jni_minimal.py`) is **trampoline T1**: redirect `bne.n 0x65bc` at file 0x6538 to a code-cave at file 0x7308 (overwriting the unused JNI debug method `testparmnum`). The trampoline checks the PDU byte at sp+382, and on `0x10` (GetCapabilities) calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT 0x35dc, then exits.
+**2026-05-05 follow-up.** The single-byte J1 (cmp 8 → 9) was tried and rolled back — it routed size-9 frames through the PASSTHROUGH dispatch, generating fake `key=1 isPress=0` events and never reaching Java. Path forward (now in `patch_libextavrcp_jni.py`) is **trampoline T1**: redirect `bne.n 0x65bc` at file 0x6538 to a code-cave at file 0x7308 (overwriting the unused JNI debug method `testparmnum`). The trampoline checks the PDU byte at sp+382, and on `0x10` (GetCapabilities) calls `btmtk_avrcp_send_get_capabilities_rsp` directly via PLT 0x35dc, then exits.
 
 **Iter5 capture (2026-05-05) — T1 confirmed working.** `/work/logs/dual-sonos-avrcp-min-iter5/` shows: 1 size:9 inbound (GetCapabilities) → 1 outbound msg=522 (size 30, the response) → 4 size:13 inbound (Sonos's first-ever follow-up VENDOR_DEPENDENT commands, 2-second retry pattern indicating RegisterNotification with no INTERIM ACK). For comparison, iter4 (J1) had the same size:9 inbound but msg=520 NOT_IMPLEMENTED instead of msg=522, and zero size:13 follow-ups — Sonos gave up. T1 is the first patch that gets Sonos past the GetCapabilities gate.
 

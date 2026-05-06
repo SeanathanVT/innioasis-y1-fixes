@@ -1,6 +1,6 @@
 # AVRCP Metadata Architecture
 
-How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer controllers like Sonos, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt_minimal.py` V1/V2 — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31. AVRCP 1.4's browsing channel, Now Playing list, and advanced player-application settings are not implemented.)
+How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer controllers like Sonos, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt.py` V1/V2 — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31. AVRCP 1.4's browsing channel, Now Playing list, and advanced player-application settings are not implemented.)
 
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.4 responses on the wire.
 
@@ -340,12 +340,12 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 
 | Patch | File / addr | Description |
 |-------|-------------|-------------|
-| **mtkbt patches** (in `patch_mtkbt_minimal.py`) ||| 
+| **mtkbt patches** (in `patch_mtkbt.py`) ||| 
 | V1 | mtkbt 0x0eba58 | AVRCP version SDP attribute: 1.0 → 1.3 |
 | V2 | mtkbt 0x0eba6d | AVCTP version SDP attribute: 1.0 → 1.2 |
 | S1 | mtkbt 0x0f97ec | Replace 0x0311 SupportedFeatures slot with 0x0100 ServiceName pointing at "Advanced Audio" |
 | P1 | mtkbt 0x144e8  | `cmp r3, #0x30` → `b.n 0x14528` (route VENDOR_DEPENDENT through msg-519 emit instead of silent-drop) |
-| **JNI patches** (in `patch_libextavrcp_jni_minimal.py`) ||| 
+| **JNI patches** (in `patch_libextavrcp_jni.py`) ||| 
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
@@ -356,7 +356,7 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
 
-The JNI trampoline blob is built dynamically by `src/patches/_iter15_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni_minimal.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
+The JNI trampoline blob is built dynamically by `src/patches/_iter15_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
 
 **Why both INTERIM and CHANGED carry track_id = 0xFF×8 (iter16):** AVRCP 1.4 §6.7.2 specifies `0xFFFFFFFFFFFFFFFF` as the sentinel meaning "this information is not bound to a particular media element". CTs interpret this as "no stable track identity, refresh on each event" and continue polling `GetElementAttributes` regularly (Sonos in iter14c sent ~50/min). With a real track_id, Sonos enters "stable identity per track, only refresh on CHANGED" mode — and our trampolines are reactive, so Sonos's first INTERIM with a real id can put us in a deadlock where Sonos waits for CHANGED while T4 waits for Sonos to poll. iter15 hit that exact deadlock on hardware (2026-05-06: 14 minutes of zero AVRCP traffic post-INTERIM). iter16 keeps the change-detection bookkeeping (state file's bytes 0..7 = file's last-synced track_id) but pins the wire-level track_id field to the sentinel. CHANGED edges still fire on real track changes — which is what invalidates Sonos's `0xFF×8`-keyed cache and lets the new metadata render.
 
@@ -443,4 +443,4 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
 - [`PROXY-BUILD.md`](PROXY-BUILD.md) — concrete iteration plan, status checkboxes, pending work.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
 - [`../INVESTIGATION.md`](../INVESTIGATION.md) — chronological investigation history including the gdbserver capture iterations and dead-end paths.
-- `src/patches/patch_libextavrcp_jni_minimal.py` — the patcher containing R1/T1/T2/T4. Header comments and PATCHES list are the source of truth for byte-level details.
+- `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1/T1/T2/T4. Header comments and PATCHES list are the source of truth for byte-level details.

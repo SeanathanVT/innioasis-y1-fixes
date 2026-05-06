@@ -23,53 +23,48 @@ venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
-  --avrcp        KNOWN BROKEN. Patches the AVRCP 1.4 binaries + installs
-                 Y1MediaBridge.apk. Empirically regresses stock AVRCP 1.0
-                 PASSTHROUGH (play/pause from car/headset stops working) and
-                 does not deliver 1.4 metadata as intended — mtkbt's compiled
-                 AVRCP layer is 1.0-only and the byte-patch path can shape
-                 the SDP advertisement but cannot make the daemon process
-                 1.3+ commands. See INVESTIGATION.md "Conclusion (2026-05-04)"
-                 and the Diagnostics section of README.md. Excluded from
-                 --all. Available as an opt-in for the user-space proxy
-                 work that aims to fix the underlying issue. Build first:
-                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
-  --avrcp-min    RESEARCH PROBE (iterating). Targets the empirically-working
-                 Pixel-1.3 SDP shape with Java-side AVRCP 1.4 activation, to
-                 test whether routing inbound GetCapabilities through the
-                 existing JNI msg_id 519 path (rather than mtkbt's auto-
-                 reject) is enough to deliver metadata.
+  --avrcp        AVRCP 1.3 metadata pipeline (Pixel-1.3 SDP shape + AVCTP 1.2
+                 + JNI trampoline chain in libextavrcp_jni.so + proactive
+                 CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex
+                 + Y1MediaBridge.apk metadata bridge). Replaces an earlier
+                 "byte-patch the AVRCP 1.4 SDP advertisement" approach that
+                 regressed stock PASSTHROUGH without delivering metadata; the
+                 trampoline chain (T1/T2/T4/T5) bypasses mtkbt's compiled-1.0
+                 command dispatcher and synthesises the 1.3 responses inside
+                 the JNI library directly.
 
                  Components:
-                   - patch_mtkbt_minimal.py (V1: AVRCP 1.0->1.3 SDP, V2:
-                     AVCTP 1.0->1.2 SDP, S1: replace 0x0311 entry with
-                     0x0100 ServiceName, P1: force fn 0x144bc op_code
-                     dispatch to msg 519 emit path for VENDOR_DEPENDENT)
-                   - patch_libextavrcp_jni_minimal.py (J1: route size-9
-                     msg 519 frames into the JNI's BT-SIG VENDOR path
-                     instead of the "unknow indication" default-reject)
-                   - patch_mtkbt_odex.py (F1: getPreferVersion -> 14, F2:
-                     disable() resets sPlayServiceInterface)
-                   - Y1MediaBridge.apk install
+                   - patch_mtkbt.py (V1: AVRCP 1.0->1.3 SDP, V2: AVCTP
+                     1.0->1.2 SDP, S1: replace 0x0311 entry with 0x0100
+                     ServiceName, P1: force fn 0x144bc op_code dispatch
+                     to msg 519 emit for VENDOR_DEPENDENT)
+                   - patch_libextavrcp_jni.py (R1 + T1/T2/T4/T5 trampoline
+                     chain in LOAD #1 page-padding extension; iter17b)
+                   - patch_mtkbt_odex.py (F1: getPreferVersion -> 14;
+                     F2: disable() resets sPlayServiceInterface; iter17a:
+                     NOPs handleKeyMessage cardinality gate so Java fires
+                     notificationTrackChangedNative on every track change)
+                   - Y1MediaBridge.apk install (track_id + Title/Artist/
+                     Album written to /data/data/com.y1.mediabridge/files/)
 
-                 NOT included (vs --avrcp): C1, C3 (other AVRCP version
-                 patches at 1.4), B2/B3 (other AVCTP version patches), A1
-                 (runtime SDP MOVW), D1 (registration guard NOP), E3/E4
-                 (features 0x0033), E8 (op_code=4 dispatcher gate), C2a/b
-                 + C3a/b (libextavrcp_jni hardcodes), C4 (libextavrcp
-                 version constant). Mutually exclusive with --avrcp.
-                 Excluded from --all. Build Y1MediaBridge first:
+                 Excluded from --all because it requires a Y1MediaBridge
+                 build step. Build first:
                    cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+
+                 See docs/ARCHITECTURE.md for the trampoline chain reference.
   --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
                  + build.prop entries that are essential for car/peer pairing.
-                 Does NOT set persist.bluetooth.avrcpversion — that property
-                 is dropped pending the AVRCP wire-protocol work.
+                 Does NOT set persist.bluetooth.avrcpversion — the AVRCP
+                 version advertised on the wire is shaped by --avrcp's
+                 SDP patches instead.
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
   --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
-                 NOT --avrcp (see warning above).
+                 --avrcp is excluded because it requires building
+                 Y1MediaBridge first (analogous to --root needing
+                 src/su/ built).
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed
@@ -91,7 +86,6 @@ EOF
 FLAG_ADB=false
 FLAG_ANY_SPECIFIED=false
 FLAG_AVRCP=false
-FLAG_AVRCP_MIN=false
 FLAG_BLUETOOTH=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
@@ -134,20 +128,6 @@ while [[ $# -gt 0 ]]; do
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
-      echo "WARNING: --avrcp is known-broken on this device. It regresses stock" >&2
-      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/" >&2
-      echo "         headset) without delivering the AVRCP 1.4 metadata it" >&2
-      echo "         intends to enable. mtkbt is internally a 1.0 implementation" >&2
-      echo "         and byte-patches cannot make it process 1.3+ commands." >&2
-      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the" >&2
-      echo "         full negative result and the user-space proxy path that" >&2
-      echo "         aims to fix this. Continuing only because you asked." >&2
-      echo "" >&2
-      shift
-      ;;
-    --avrcp-min)
-      FLAG_AVRCP_MIN=true
-      FLAG_ANY_SPECIFIED=true
       shift
       ;;
     --bluetooth)
@@ -171,8 +151,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      # --avrcp is intentionally excluded — known broken; opt-in only via
-      # explicit --avrcp. See apply.bash --help.
+      # --avrcp is intentionally excluded — it requires the Y1MediaBridge
+      # gradle build to have run first. Opt in explicitly when ready.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
@@ -203,13 +183,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "$FLAG_AVRCP" == true && "$FLAG_AVRCP_MIN" == true ]]; then
-  echo "ERROR: --avrcp and --avrcp-min are mutually exclusive — they patch" >&2
-  echo "       overlapping byte ranges in mtkbt (0x0eba58, 0x0eba6d, the" >&2
-  echo "       0x0311 entry slot at 0x0f97ec). Pick one." >&2
-  exit 1
-fi
 
 # --artifacts-dir falls back to ./staging/ inside the repo if not given.
 # Lets the common case skip the flag: `cp rom.zip staging/ && ./apply.bash --all`.
@@ -601,9 +574,11 @@ if [[ "$FLAG_ROOT" == true ]]; then
   fi
 fi
 
-# Apply AVRCP 1.4 patches (KNOWN BROKEN — see warning at flag-parse and INVESTIGATION.md)
+# Apply AVRCP 1.3 metadata pipeline (SDP shape + JNI trampoline chain +
+# Y1MediaBridge metadata bridge). See docs/ARCHITECTURE.md for the full
+# trampoline chain reference.
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Applying AVRCP 1.4 patches (known broken; opt-in only).."
+  echo "Applying AVRCP 1.3 metadata pipeline (--avrcp).."
 
   src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
   if [[ ! -f "$src_y1mb" ]]; then
@@ -620,47 +595,7 @@ if [[ "$FLAG_AVRCP" == true ]]; then
 
   patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
-  patch_in_place_bytes "lib/libextavrcp.so"      "patch_libextavrcp.py"       644
   patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni.py"   644
-fi
-
-# Apply minimum AVRCP probe (research, iterating).
-#
-# Iteration 1 (commit 1cc94bb): SDP-only patches against stock mtkbt.
-#   Result: Sonos engages and sends VENDOR_DEPENDENT GetCapabilities (14-byte
-#   AVCTP frame) — but mtkbt's compiled-1.0 dispatcher auto-rejects it without
-#   forwarding to JNI (no MSG_ID_BT_AVRCP_CMD_FRAME_IND in logcat).
-#
-# Iteration 2 (this commit): Add F1 (Java getPreferVersion -> 14) + F2
-#   (disable() resets sPlayServiceInterface) + Y1MediaBridge.apk install.
-#   Hypothesis: F1 makes Java activate as 1.4, mtkbt's dispatch logic might
-#   then forward inbound 1.3+ COMMANDs to JNI as msg_id 519 instead of auto-
-#   rejecting. If so, Y1MediaBridge can respond via its existing IBTAvrcpMusic
-#   binder. If not, we need the binary-level trampoline.
-#
-# Distinct from --avrcp: skips C1/C3 (other AVRCP 1.4 patches), B2/B3 (other
-# AVCTP version patches), A1 (runtime SDP MOVW), D1 (registration guard NOP),
-# E3/E4 (features 0x0033), E8 (op_code=4 gate), C2a/b/C3a/b/C4 (JNI/lib
-# 1.4-specific patches). Mutually exclusive with --avrcp.
-if [[ "$FLAG_AVRCP_MIN" == true ]]; then
-  echo "Applying minimum AVRCP probe (--avrcp-min; SDP + F1/F2 + bridge).."
-
-  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
-  if [[ ! -f "$src_y1mb" ]]; then
-    echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
-    exit 1
-  fi
-
-  echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
-    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
-    exit 1
-  fi
-
-  patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
-  patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt_minimal.py"     755
-  patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni_minimal.py" 644
 fi
 
 # Configure Bluetooth fixes
