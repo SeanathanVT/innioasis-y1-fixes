@@ -11,6 +11,7 @@ prose detail on any entry, see `git log` (commits are 1:1 with these bullets).
 ## [Unreleased]
 
 ### Changed
+- **GitHub repository renamed `y1-mods` → `koensayr`.** Reverses the v2.0.0 hybrid pattern (project name `Koensayr`, repo name `y1-mods` for SEO discoverability). The hybrid is confusing in practice — referring to the same project by two names — and the project is hopefully going to be known by its name as it matures. GitHub auto-redirects the old URL for existing clones, but new clones should use `git clone git@github.com:SeanathanVT/koensayr.git`. Existing clones can update their remote with `git remote set-url origin git@github.com:SeanathanVT/koensayr.git` (the redirect would keep working but explicit is cleaner). No code/build/flag impact; the only in-tree mention of `y1-mods` was a single comment in `MediaBridgeService.java` which has been updated.
 - **`--avrcp` consolidated.** The historical `--avrcp` flag (legacy AVRCP 1.4 byte-patch attempt that regressed PASSTHROUGH without delivering metadata) is gone; `--avrcp-min` (the working AVRCP 1.3 SDP shape + JNI trampoline chain pipeline) has been promoted to `--avrcp`. The flag now applies `patch_mtkbt.py` (V1/V2/S1/P1) + `patch_libextavrcp_jni.py` (R1/T1/T2 stub/extended_T2/T4/T5 trampoline chain) + `patch_mtkbt_odex.py` (F1/F2/iter17a) + Y1MediaBridge.apk install. Excluded from `--all` because it requires a Y1MediaBridge gradle build first (analogous to `--root` requiring `src/su/` built).
 
 ### Removed

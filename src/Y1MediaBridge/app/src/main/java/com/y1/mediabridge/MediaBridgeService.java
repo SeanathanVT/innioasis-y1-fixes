@@ -978,7 +978,7 @@ public class MediaBridgeService extends Service {
     // directly. The T4 trampoline (PDU 0x20 GetElementAttributes) reads this
     // file via open(2) + read(2) syscall, then calls
     // btmtk_avrcp_send_get_element_attributes_rsp via PLT 0x3570 with the
-    // strings as arguments. See docs/ARCHITECTURE.md in the y1-mods repo.
+    // strings as arguments. See docs/ARCHITECTURE.md in the koensayr repo.
     //
     // Path is the app's private getFilesDir() rather than /data/local/tmp/
     // because Y1MediaBridge runs as uid 10000 (regular app uid, not system)
