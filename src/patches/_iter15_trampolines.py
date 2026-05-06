@@ -13,6 +13,11 @@ Emits two trampolines into the LOAD #1 page-padding area starting at vaddr
       file[0..7] back into state[0..7] so we don't re-emit until Y1MediaBridge
       moves the track_id again.
     - Replies with 3× get_element_attributes_rsp (Title/Artist/Album)
+      using iter13's multi-attribute calling convention (arg2=index 0..2,
+      arg3=total 3) so the function accumulates calls 1+2 and only emits
+      a single packed msg=540 frame on call 3. iter17b restored this from
+      an iter15 regression that had passed arg2=transId/arg3=0 — taking
+      the legacy single-shot path and emitting 3 separate frames per query.
 
   extended_T2 (RegisterNotification(TRACK_CHANGED), PDU 0x31, event 0x02):
     - Reads y1-track-info first 8 bytes (track_id) into a stack buffer — used
@@ -244,22 +249,30 @@ def _emit_t4(a: Asm) -> None:
 
     a.label("t4_no_change")
 
-    # ---- 3× get_element_attributes_rsp(conn, 0, transId, 0,
+    # ---- 3× get_element_attributes_rsp(conn, 0, idx, 3,
     #                                    [attr_id, charset=0x6a, len, ptr]) ----
-    for label_suffix, attr_id, str_offset in (
+    # Per iter13 disassembly of the rsp function (libextavrcp.so:0x2188):
+    #   arg2 = attribute INDEX in the response (0..N-1)
+    #   arg3 = TOTAL number of attributes
+    #   EMIT trigger: (arg2+1 == arg3) AND (arg3 != 0)
+    # transId is read by the function itself from conn[17]; we don't pass it.
+    # iter15/16/17 regression: arg2=transId, arg3=0 took the legacy "arg3==0
+    # → EMIT every call" path, producing 3 separate msg=540 frames per query.
+    # Sonos rendered each one in turn → flashing/iterative metadata updates.
+    for idx, (label_suffix, attr_id, str_offset) in enumerate((
         ("title",  0x01, T4_OFF_FILE_TITLE),
         ("artist", 0x02, T4_OFF_FILE_ARTIST),
         ("album",  0x03, T4_OFF_FILE_ALBUM),
-    ):
+    )):
         a.label(f"t4_reply_{label_suffix}")
         a.add_sp_imm(0, str_offset)           # r0 = string ptr
         a.blx_imm(PLT_strlen)                 # r0 = strlen
         a.mov_lo_lo(6, 0)                     # r6 = strlen
 
         a.add_imm_t3(0, 5, 8)                 # r0 = conn
-        a.movs_imm8(1, 0)                     # r1 = 0 (string-follows flag)
-        a.ldrb_w(2, 13, T4_TRANSID_OFF)       # r2 = transId
-        a.movs_imm8(3, 0)                     # r3 = 0
+        a.movs_imm8(1, 0)                     # r1 = 0 (with-string flag)
+        a.movs_imm8(2, idx)                   # r2 = attribute index (0,1,2)
+        a.movs_imm8(3, 3)                     # r3 = total attributes (3)
         a.movs_imm8(4, attr_id)
         a.str_sp_imm(4, T4_OFF_ARGS + 0)      # sp[0]  = attr_id
         a.movs_imm8(4, 0x6A)

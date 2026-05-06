@@ -134,7 +134,7 @@ from _thumb2asm import Asm
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "37ad4394efe7686d367d08f20e6f623b"  # iter17a
+OUTPUT_MD5 = "91833d6f41021df23a8aa50999fcab9a"  # iter17b — T4 multi-attribute single-frame fix
 
 # ---------------------------------------------------------------- T1
 
