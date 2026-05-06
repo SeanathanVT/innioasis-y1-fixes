@@ -1,8 +1,8 @@
 """
-iter16 trampoline assembly for libextavrcp_jni.so.
+iter19 trampoline assembly for libextavrcp_jni.so.
 
-Emits two trampolines into the LOAD #1 page-padding area starting at vaddr
-0xac54:
+Emits five trampolines into the LOAD #1 page-padding area starting at vaddr
+0xac54 (iter16 + iter17a + iter19 cumulative):
 
   T4 (GetElementAttributes, PDU 0x20):
     - Reads y1-track-info (776B: 8B track_id + 3 × 256B Title/Artist/Album)
@@ -28,6 +28,30 @@ Emits two trampolines into the LOAD #1 page-padding area starting at vaddr
       (hardcoded sentinel)**.
 
   T2 stub at 0x72d4 is rewritten to a single `b.w extended_T2`.
+
+  T_charset (PDU 0x17 InformDisplayableCharacterSet, iter19a — Phase A0):
+    - Branched from T4's pre-check when PDU == 0x17.
+    - Calls inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success).
+    - Tail-jumps to t4_to_epilogue. No state side-effects; the spec-defined
+      response is a bare 8-byte ack frame.
+    - Bolt EV /work/logs/dual-bolt-iter18d/ confirmed this PDU is sent at
+      connection setup; we previously NACKed (msg=520 NOT_IMPLEMENTED) and
+      Bolt subsequently degraded its metadata-fetch behavior. iter19a closes.
+
+  T_battery (PDU 0x18 InformBatteryStatusOfCT, iter19a — Phase A0):
+    - Branched from T4's pre-check when PDU == 0x18.
+    - Calls battery_status_rsp via PLT 0x357c with arg1=0 (success).
+    - Same shape as T_charset; the response builder is structurally identical
+      apart from outbound msg_id (538 vs 536).
+
+iter19a also: T2 (extended_T2) and T5 trampolines now pass `r1=0` to
+track_changed_rsp (was `r1=transId`). Disassembly of the response builder at
+libextavrcp.so:0x2458 (and confirmed across all reg_notievent_*_rsp builders
+in the same family) shows the function dispatches on r1: r1==0 takes the
+spec-correct path that writes reasonCode + event_id + track_id; r1!=0 takes
+a reject-shape path that omits the event payload. We had been hitting the
+reject path on every TRACK_CHANGED notification — Sonos polled regardless,
+masking the bug; the Bolt depends on the CHANGED edge and didn't.
 
 iter16 design rationale: iter15 sent the file's real track_id in INTERIM,
 which flipped Sonos into "stable identity, only refresh on CHANGED" mode.
@@ -71,6 +95,9 @@ PLT_memset                     = 0x33fc
 PLT_write                      = 0x3630
 PLT_get_element_attributes_rsp = 0x3570
 PLT_track_changed_rsp          = 0x3384
+# iter19a — Phase A0
+PLT_inform_charsetset_rsp      = 0x3588
+PLT_battery_status_rsp         = 0x357c
 
 # Function-internal landmarks in saveRegEventSeqId.
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
@@ -135,10 +162,24 @@ def _emit_t4(a: Asm) -> None:
     """
     a.label("T4")
 
-    # ---- pre-check: only PDU 0x20 (GetElementAttributes) goes through us ----
+    # ---- pre-check: dispatch on PDU ----
+    # PDU 0x20 → GetElementAttributes (T4 main body)
+    # PDU 0x17 → InformDisplayableCharacterSet (T_charset, iter19a)
+    # PDU 0x18 → InformBatteryStatusOfCT (T_battery, iter19a)
+    # else     → restore lr canary + r0 and fall through to "unknow indication"
     a.ldrb_w(0, 13, T4_PDU_OFF_ENTRY)         # r0 = PDU
     a.cmp_imm8(0, 0x20)
     a.beq("t4_main")
+    # PDU 0x17 / 0x18 dispatch via bne+b.w because T_charset / T_battery live
+    # past the end of the T4 body (~600 B forward), beyond beq's ±256 B range.
+    a.cmp_imm8(0, 0x17)
+    a.bne("t4_after_charset")
+    a.b_w("T_charset")
+    a.label("t4_after_charset")
+    a.cmp_imm8(0, 0x18)
+    a.bne("t4_after_battery")
+    a.b_w("T_battery")
+    a.label("t4_after_battery")
     # Anything else: restore lr canary and fall through to original
     # "unknow indication" path (which expects r0 = conn).
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
@@ -213,11 +254,13 @@ def _emit_t4(a: Asm) -> None:
     a.beq("t4_no_change")
 
     a.label("t4_track_changed")
-    # track_changed_rsp(conn, transId, REASON_CHANGED, &SENTINEL_FFx8)
+    # track_changed_rsp(conn, 0, REASON_CHANGED, &SENTINEL_FFx8)
     # iter16: track_id field is the 0xFF×8 sentinel, NOT the real track_id.
     # See top-of-file rationale.
+    # iter19a: r1=0 (was state[8] transId). r1 is the response builder's
+    # reject_code arg, not transId — see extended_T2's matching comment.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
-    a.ldrb_w(1, 13, T4_OFF_STATE + 8)         # r1 = state[8] = last register transId
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
     a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
     a.blx_imm(PLT_track_changed_rsp)
@@ -383,8 +426,13 @@ def _emit_extended_t2(a: Asm) -> None:
     # ---- reply track_changed_rsp INTERIM ----
     # iter16: the wire-level track_id is the 0xFF×8 sentinel (not the real
     # id we just stashed in state). See top-of-file rationale.
+    # iter19a: r1=0 (was r1=transId). Disassembly of the response builder at
+    # libextavrcp.so:0x2458 shows `cbnz r5, reject_path` on r1; r1==0 is the
+    # spec-correct path that emits reasonCode + event_id + track_id; r1!=0
+    # writes a reject-shape frame that omits the event payload. transId is
+    # auto-extracted from conn[17] regardless.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
-    a.ldrb_w(1, 13, T2_TRANSID_CALLER_OFF)    # r1 = transId
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_INTERIM)
     a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
     a.blx_imm(PLT_track_changed_rsp)
@@ -513,11 +561,11 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_changed")
     # ---- emit CHANGED via track_changed_rsp ----
-    # r0 = conn buffer (= struct + 8); r1 = state[8] (transId saved by
-    # extended_T2 on the most recent RegisterNotification); r2 = REASON_CHANGED;
+    # r0 = conn buffer (= struct + 8); r1 = 0 (success — see top-of-file
+    # iter19a note about the response builder's r1 dispatch); r2 = REASON_CHANGED;
     # r3 = &sentinel_ffx8 (so wire-level track_id stays the iter16 sentinel).
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8
-    a.ldrb_w(1, 13, 8)                        # r1 = state[8]
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
     a.adr_w(3, "sentinel_ffx8")
     a.blx_imm(PLT_track_changed_rsp)
@@ -556,6 +604,49 @@ def _emit_t5(a: Asm) -> None:
     a.raw(bytes([0x30, 0xBD]))
 
 
+def _emit_t_charset(a: Asm) -> None:
+    """T_charset (iter19a — Phase A0): PDU 0x17 InformDisplayableCharacterSet.
+
+    Branched from T4's pre-check when the inbound PDU byte is 0x17. The CT is
+    declaring its accepted charsets to us; we ack with success and continue
+    sending UTF-8 (which we already do — there's no spec requirement that we
+    actually honor the CT's charset preference, just that we ack the
+    declaration).
+
+    Response builder layout (libextavrcp.so:0x2138 — disassembly 2026-05-06):
+      void btmtk_avrcp_send_inform_charsetset_rsp(
+          void* conn,         // r0
+          uint8_t reject,     // r1 = 0 for success
+          void* unused        // r2 — pushed but never read
+      );
+      // Outbound msg_id=536, 8-byte ack frame (transId from conn[17] at
+      //  offset 5; rest zeroed).
+    """
+    a.label("T_charset")
+    a.add_imm_t3(0, 5, 8)                     # r0 = conn (= r5+8)
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
+    a.blx_imm(PLT_inform_charsetset_rsp)
+    a.b_w("t4_to_epilogue")
+
+
+def _emit_t_battery(a: Asm) -> None:
+    """T_battery (iter19a — Phase A0): PDU 0x18 InformBatteryStatusOfCT.
+
+    Branched from T4's pre-check when the inbound PDU byte is 0x18. The CT is
+    notifying us of its current battery state; we ack. We don't surface this
+    state anywhere — Y1 doesn't have a CT-battery API to feed.
+
+    Response builder at libextavrcp.so:0x2160 is structurally identical to
+    inform_charsetset_rsp (same 8-byte ack frame, same r1 dispatch on success
+    vs reject); only the outbound msg_id differs (538 vs 536).
+    """
+    a.label("T_battery")
+    a.add_imm_t3(0, 5, 8)                     # r0 = conn
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
+    a.blx_imm(PLT_battery_status_rsp)
+    a.b_w("t4_to_epilogue")
+
+
 def build() -> tuple[bytes, dict[str, int]]:
     """Build the iter15 LOAD-#1-padding code blob.
 
@@ -575,6 +666,8 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t4(a)
     _emit_extended_t2(a)
     _emit_t5(a)
+    _emit_t_charset(a)                        # iter19a — Phase A0
+    _emit_t_battery(a)                        # iter19a — Phase A0
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)

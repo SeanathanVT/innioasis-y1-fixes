@@ -26,7 +26,7 @@ indication" branch. We need to handle 1.3+ commands here, since mtkbt's own
 dispatcher is compiled against AVRCP 1.0 and never invokes the response
 builder for 1.3+ COMMANDs.
 
---- Trampoline chain (R1 + T1 + T2 stub + extended_T2 + T4) ---
+--- Trampoline chain (R1 + T1 + T2 stub + extended_T2 + T4 + T5 + T_charset + T_battery) ---
 
 R1 — at file 0x6538: replace `bne.n 0x65bc; movs r5, #9` (40 d1 09 25)
      with `bl.w 0x7308` (00 f0 e6 fe). Branches to T1 for all size!=3 cases.
@@ -57,13 +57,25 @@ T4 — in LOAD #1 padding at vaddr 0xac54.
        1. memset file buffer (776 B) on stack, read y1-track-info into it.
        2. Read y1-trampoline-state (16 B) into a state buffer on stack.
        3. If state[0..7] != file[0..7] (track changed since we last said so):
-            - Emit track_changed_rsp CHANGED with state[8] as transId
+            - Emit track_changed_rsp CHANGED (iter19a: with arg1=0)
             - Update state[0..7] = file[0..7] and write back to state file
        4. Reply 3× get_element_attributes_rsp for Title (file+8) / Artist
-          (file+264) / Album (file+520) using the GetElementAttributes
-          inbound transId.
-     Non-0x20 PDUs fall through to 0x65bc (original "unknow indication"
-     path → msg 520 NOT_IMPLEMENTED).
+          (file+264) / Album (file+520).
+     iter19a: T4's pre-check now also dispatches PDU 0x17 → T_charset
+     and PDU 0x18 → T_battery before falling through to "unknow indication".
+
+T_charset — iter19a, in LOAD #1 padding past the T4/extended_T2/T5 blob.
+     Handles InformDisplayableCharacterSet (PDU 0x17). Calls
+     inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success). Bare 8-byte
+     ack frame; the spec doesn't require us to honor the CT's charset
+     declaration, just to acknowledge it. Bolt EV head unit sends this once
+     at connect; iter19a stops the previous msg=520 NOT_IMPLEMENTED reject
+     that was likely degrading Bolt's metadata-fetch behavior.
+
+T_battery — iter19a, structurally identical to T_charset but for
+     InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via PLT 0x357c.
+     CT notifies us of its battery state; we ack. Y1 has no CT-battery API
+     surface to feed the value into; the ack alone is what the spec requires.
 
 The T4 + extended_T2 + path strings blob is built dynamically by
 _iter15_trampolines.py using a tiny Thumb-2 assembler (_thumb2asm.py).
@@ -105,6 +117,18 @@ to know when to emit CHANGED. Restores iter14c-style polling
 behaviour and adds CHANGED edges on real track changes so Sonos
 invalidates its 0xFF×8-keyed cache and re-renders.
 
+iter17a/b: proactive CHANGED via T5 + Java-side cardinality bypass +
+single-frame multi-attribute response fix (T4 calling convention).
+
+iter19a (Phase A0 of docs/AVRCP13-COMPLIANCE-PLAN.md): adds T_charset
+and T_battery for PDUs 0x17 and 0x18 (CT→TG informational pair, both
+spec-mandated, both rejected pre-iter19a → caused Bolt EV failure per
+/work/logs/dual-bolt-iter18d/), and fixes the existing T2/T5 wire shape
+for TRACK_CHANGED notifications (was passing r1=transId which hits the
+response builder's reject-shape path; now r1=0 for spec-correct
+emission of reasonCode + event_id + track_id). Compliance scorecard
+goes 3→5 mandatory PDUs handled and 2→5 spec-correct.
+
 Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so --output /tmp/jni.patched
@@ -131,7 +155,7 @@ from _thumb2asm import Asm
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "91833d6f41021df23a8aa50999fcab9a"  # iter17b — T4 multi-attribute single-frame fix
+OUTPUT_MD5 = "b96978584bcd05762610b8b1131a6125"  # iter19 — Phase A0 (Inform PDUs + TRACK_CHANGED wire-shape fix)
 
 # ---------------------------------------------------------------- T1
 

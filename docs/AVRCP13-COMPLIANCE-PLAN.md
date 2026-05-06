@@ -114,11 +114,32 @@ If we ever do exhaust LOAD #1 padding, we have a known fallback: extend the tric
 
 ## 4. Implementation phases
 
-Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain.
+Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain. Phases were re-factored 2026-05-06 after the Bolt EV capture established that PDU 0x17 InformDisplayableCharacterSet was the dominant blocker — splitting Phase A0 (Inform PDUs + the wire-shape correctness fix for our existing TRACK_CHANGED implementation) out of the original Phase A/C buckets gives a coherent compliance unit small enough to ship in hours rather than days.
 
-### Phase A — Notification expansion (T8)
+### Phase A0 — Inform PDUs + TRACK_CHANGED wire-shape fix (iter19)
 
-**Why first:** Cheap; high probability of being the Bolt fix. Cars commonly subscribe to PLAYBACK_STATUS_CHANGED (event 0x01) before any metadata, and treat NACK on the subscription as "no AVRCP TG present, give up." Sonos/Samsung tolerate the NACK; many cars don't.
+**Why first:** Smallest coherent compliance slice that closes a real-world CT failure. PDUs 0x17 and 0x18 are the spec's "CT→TG informational" pair (CT tells the TG a fact, TG acks); they share a near-identical 8-byte ack-frame response shape and don't require Y1MediaBridge data plumbing or music-app patches. Plus this phase fixes the existing T2/T5 wire-shape regression (passing `r1=transId` hits the response builder's reject-shape path; should pass `r1=0`) so existing TRACK_CHANGED notifications go out spec-correct.
+
+**What it adds:**
+- **T_charset trampoline** for PDU 0x17 InformDisplayableCharacterSet → calls `inform_charsetset_rsp` via PLT 0x3588 with `r1=0` (success).
+- **T_battery trampoline** for PDU 0x18 InformBatteryStatusOfCT → calls `battery_status_rsp` via PLT 0x357c with `r1=0` (success).
+- **T2/T5 r1 fix**: replace `ldrb.w r1, [sp, #368]` (transId) with `movs r1, #0` (success path). Saves 2 bytes per site.
+
+**Bolt EV capture confirms 0x17 is the blocker:** `/work/logs/dual-bolt-iter18d/` shows the Bolt sending PDU 0x17 once at connection setup; we currently NACK with msg=520; afterwards the Bolt registers TRACK_CHANGED 30 times but only ever issues a single GetElementAttributes — consistent with both "the TG won't acknowledge my charset declaration so I distrust subsequent metadata" and "your CHANGED notifications are reject-shaped so I'm not re-fetching." iter19 fixes both.
+
+**No Y1MediaBridge changes. No music-app patches.** The Inform PDUs are pure CT→TG informational acks with no data flow back to the Y1.
+
+**Files touched:**
+- `src/patches/_iter15_trampolines.py` — add T_charset + T_battery emitters; replace `r1=transId` with `r1=0` in T2 and T5 emitters (~80 lines)
+- `src/patches/patch_libextavrcp_jni.py` — bump LOAD #1 filesz/memsz (~5 lines)
+
+**Estimated effort:** 2 hours.
+
+**Compliance delta:** mandatory PDUs handled goes 3→5; PDUs spec-correct goes 2→5 (both inform PDUs added + TRACK_CHANGED's existing implementation made spec-correct).
+
+### Phase A1 — Notification expansion (T8)
+
+**Why second:** Cars and headphones commonly subscribe to PLAYBACK_STATUS_CHANGED (event 0x01) at connect, and treat NACK on the subscription as "this TG doesn't support state notifications, fall back to polling — or give up." Sonos/Samsung tolerate the NACK; many cars don't.
 
 **What it adds:** A new T8 trampoline branched from the extended_T2 unknown-event arm. T8 reads the inbound event_id and dispatches to the appropriate `reg_notievent_*_rsp` PLT for events 0x01, 0x03, 0x04, 0x05, 0x06, 0x07. Each call emits an INTERIM with current value pulled from `y1-track-info` extended schema.
 
@@ -166,9 +187,9 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 
 ### Phase C — PlayerApplicationSettings (T7 family)
 
-**Why third:** Spec-mandated but rarely a metadata gate. Defer until Phases A+B don't fix the Bolt. Largest single phase by code volume.
+**Why third:** Spec-mandated but rarely a metadata gate. Defer until Phases A0+A1+B don't fix the next strict CT. Largest single phase by code volume.
 
-**What it adds:** A T7 trampoline that branches into 8 sub-trampolines for PDUs 0x11–0x18. Each sub-trampoline reads from y1-track-info extended fields (shuffle / repeat / ...), constructs the appropriate response, and calls the matching PLT.
+**What it adds:** A T7 trampoline that branches into 6 sub-trampolines for PDUs 0x11–0x16 (the configurational sub-set; 0x17 and 0x18 are now in Phase A0). Each sub-trampoline reads from y1-track-info extended fields (shuffle / repeat / ...), constructs the appropriate response, and calls the matching PLT.
 
 **Music-app patches needed (`patch_y1_apk.py`):**
 - Hook `SharedPreferencesUtils.setShuffle(Z)V` to broadcast `com.y1.mediabridge.SHUFFLE_CHANGED` with `extra:bool`. ~10 smali instructions.
@@ -313,14 +334,15 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 
 ## 9. Effort summary
 
-| Phase | Trampoline LOC | Schema bump | Music-app patch | New docs | Estimated effort |
-|---|---|---|---|---|---|
-| A — Notifications | ~150 | yes | no | ARCH update | 2–3 days |
-| B — GetPlayStatus | ~80 | (rolled into A) | no | ARCH update | 1–2 days |
-| C — PlayerAppSettings | ~400 | yes | yes | DEX.md + ARCH | 5–7 days |
-| D — Continuation | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
-| E — Audit | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
-| **Total** | **~830** | one schema bump | two new smali patches | two doc updates | **11–17 days** |
+| Phase | iter | Trampoline LOC | Schema bump | Music-app patch | New docs | Estimated effort |
+|---|---|---|---|---|---|---|
+| A0 — Inform PDUs + wire-shape | iter19 | ~50 | no | no | ARCH update | 2 hours |
+| A1 — Notifications | iter20 | ~150 | yes | no | ARCH update | 2–3 days |
+| B — GetPlayStatus | iter20 (paired) | ~80 | (rolled into A1) | no | ARCH update | 1–2 days |
+| C — PlayerAppSettings (0x11–0x16) | iter21 | ~350 | yes | yes | DEX.md + ARCH | 5–7 days |
+| D — Continuation | iter22 | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
+| E — Audit | iter22 (paired) | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
+| **Total** | iter19–iter22 | **~860** | two schema bumps | two new smali patches | three doc updates | **11–17 days** |
 
 Compared with the cumulative effort from iter1 through iter18d (already shipped: ~6 weeks of focused work for the metadata core), full 1.3 compliance is a 2–3 week extension on top, not a re-architecture. The trampoline chain pattern scales linearly with PDU count.
 
@@ -330,11 +352,12 @@ Compared with the cumulative effort from iter1 through iter18d (already shipped:
 
 These let us short-circuit phases when a CT actually works:
 
-- **After Phase A:** retest Bolt. If metadata renders → ship; defer Phase B+C as nice-to-haves. (Phase A is the most likely fix.)
-- **After Phase B:** retest Bolt. If metadata renders → defer Phase C. PApp Settings rarely gates metadata in real-world cars.
-- **After Phase C:** Bolt should render or we have a fundamentally different bug (charset, fragmentation, or AVRCP version negotiation). Phase D/E address those.
+- **After Phase A0 (iter19):** retest Bolt. PDU 0x17 NACK is closed and TRACK_CHANGED is now spec-correct on the wire — most likely fixes the Bolt directly. If yes → defer A1+B as the next compliance increment rather than urgent fixes.
+- **After Phase A1+B (iter20):** retest against any new strict CT that surfaced. By this point we cover all 8 RegisterNotification events the spec mandates plus GetPlayStatus, which together account for the bulk of CT compatibility issues we know about.
+- **After Phase C (iter21):** PApp Settings is mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
+- **After Phase D+E (iter22):** full 1.3 spec compliance achieved.
 
-We don't have to commit to the full 1.3 build up front. The branch order is chosen so each phase is shippable on its own and meaningfully reduces the risk surface.
+We don't have to commit to the full 1.3 build up front. Each iter ships an incremental compliance milestone that's coherent on its own.
 
 ---
 
