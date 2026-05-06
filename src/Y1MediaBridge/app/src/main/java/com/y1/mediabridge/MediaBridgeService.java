@@ -639,6 +639,10 @@ public class MediaBridgeService extends Service {
      * trampoline (running in the Bluetooth process, uid bluetooth) can open
      * /data/data/com.y1.mediabridge/files/y1-track-info.
      *
+     * Also ensure y1-trampoline-state exists, owned by us but world-rw, so
+     * the BT process can stash its "last seen track_id" + "last register
+     * transId" between AVRCP exchanges. See iter15 in docs/ARCHITECTURE.md.
+     *
      * Default Android filesDir mode is 0700 (owner-only). We chmod to add
      * world execute (traversal). The file we write inside is then made
      * world-readable via setReadable(true, false).
@@ -646,11 +650,26 @@ public class MediaBridgeService extends Service {
     private void prepareTrackInfoDir() {
         try {
             File dir = getFilesDir();
-            if (dir != null) {
-                boolean ok = dir.setExecutable(true, false);
-                Log.d(TAG, "prepareTrackInfoDir: setExecutable on " + dir.getPath()
-                        + " → " + ok);
+            if (dir == null) return;
+            boolean ok = dir.setExecutable(true, false);
+            Log.d(TAG, "prepareTrackInfoDir: setExecutable on " + dir.getPath()
+                    + " → " + ok);
+
+            // Create y1-trampoline-state if missing. 16 zero bytes:
+            //   bytes 0..7  = last_seen_track_id (0 forces a CHANGED on first
+            //                 GetElementAttributes, which Sonos drops as bogus
+            //                 if transId is also 0 — but real subscriptions
+            //                 update transId before T4 ever fires)
+            //   byte  8     = last RegisterNotification transId
+            //   bytes 9..15 = padding
+            File state = new File(dir, TRAMPOLINE_STATE_FILENAME);
+            if (!state.exists()) {
+                FileOutputStream fos = new FileOutputStream(state);
+                try { fos.write(new byte[STATE_LEN]); } finally { fos.close(); }
             }
+            // World rw: BT process (uid bluetooth) must read AND write.
+            state.setReadable(true, false);
+            state.setWritable(true, false);
         } catch (Throwable t) {
             Log.w(TAG, "prepareTrackInfoDir: " + t);
         }
@@ -942,13 +961,17 @@ public class MediaBridgeService extends Service {
     // permission there. Our private files dir is owned by us; we chmod it
     // world-x at startup (prepareTrackInfoDir) and the file world-r here.
     //
-    // File format (768 bytes total, fixed layout, null-padded UTF-8):
-    //   bytes 0..255   = title
-    //   bytes 256..511 = artist
-    //   bytes 512..767 = album
+    // File format (776 bytes total, fixed layout, null-padded UTF-8) — iter15:
+    //   bytes 0..7     = track_id (mCurrentAudioId, big-endian) — used by
+    //                    extended_T2 to answer RegisterNotification(TRACK_CHANGED)
+    //                    and by T4 to detect when the track has changed since
+    //                    the last CHANGED notification we sent
+    //   bytes 8..263   = title  (255 UTF-8 bytes max + trailing null)
+    //   bytes 264..519 = artist (same)
+    //   bytes 520..775 = album  (same)
     //
-    // Each field is null-padded; we truncate to FIELD_LEN-1 (255) bytes max
-    // so each 256-byte slot has at least one trailing 0x00 — the trampoline
+    // Each string field is null-padded; we truncate to FIELD_LEN-1 (255) bytes
+    // max so each 256-byte slot has at least one trailing 0x00 — the trampoline
     // calls strlen() on each slot start, and the trailing null bounds the read.
     //
     // Defensive: every code path is wrapped in try/catch(Throwable) so a write
@@ -956,15 +979,26 @@ public class MediaBridgeService extends Service {
     // service. iter14 lost Y1MediaBridge to a silent crash when an EACCES
     // exception propagated past my IOException catch.
     private static final String TRACK_INFO_FILENAME = "y1-track-info";
+    private static final String TRAMPOLINE_STATE_FILENAME = "y1-trampoline-state";
+    private static final int TRACK_ID_LEN = 8;
     private static final int FIELD_LEN = 256;
-    private static final int TOTAL_LEN = FIELD_LEN * 3;
+    private static final int TITLE_OFFSET  = TRACK_ID_LEN;            // 8
+    private static final int ARTIST_OFFSET = TITLE_OFFSET + FIELD_LEN; // 264
+    private static final int ALBUM_OFFSET  = ARTIST_OFFSET + FIELD_LEN; // 520
+    private static final int TOTAL_LEN     = ALBUM_OFFSET + FIELD_LEN; // 776
+    private static final int STATE_LEN     = 16;
 
     private void writeTrackInfoFile() {
         try {
             byte[] buf = new byte[TOTAL_LEN];  // zero-initialized
-            putUtf8Padded(buf, 0,           FIELD_LEN, mCurrentTitle);
-            putUtf8Padded(buf, FIELD_LEN,   FIELD_LEN, mCurrentArtist);
-            putUtf8Padded(buf, FIELD_LEN*2, FIELD_LEN, mCurrentAlbum);
+            // 8-byte big-endian track_id at offset 0.
+            long id = mCurrentAudioId;
+            for (int i = 0; i < TRACK_ID_LEN; i++) {
+                buf[i] = (byte) ((id >> (56 - i * 8)) & 0xFF);
+            }
+            putUtf8Padded(buf, TITLE_OFFSET,  FIELD_LEN, mCurrentTitle);
+            putUtf8Padded(buf, ARTIST_OFFSET, FIELD_LEN, mCurrentArtist);
+            putUtf8Padded(buf, ALBUM_OFFSET,  FIELD_LEN, mCurrentAlbum);
 
             File dir = getFilesDir();
             if (dir == null) {

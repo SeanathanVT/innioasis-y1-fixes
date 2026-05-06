@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni_minimal.py — Trampolines T1 (GetCapabilities), T2
-(RegisterNotification(EVENT_TRACK_CHANGED)), and T4 stub (placeholder for
-GetElementAttributes response, currently just restores r0 and falls through
-to the original "unknow indication" path so unhandled PDUs at least
-generate msg=520 NOT_IMPLEMENTED).
+patch_libextavrcp_jni_minimal.py — minimal AVRCP TG/Target trampoline chain
+patched into libextavrcp_jni.so so this firmware (where Java-side AVRCP is a
+no-op stub) can answer Sonos's metadata queries directly from native code.
 
 Pairs with patch_mtkbt_minimal.py's P1 patch which routes inbound
 VENDOR_DEPENDENT AV/C commands through msg 519 with size=9.
 
-The T4 stub lives at vaddr 0xac54 — beyond the original LOAD #1 segment
-end. The patcher extends LOAD #1's FileSiz/MemSiz from 0xac54 to 0xac5c,
-which makes the kernel map those bytes as R+E at runtime. The 4276 bytes
-between LOAD #1's old end (0xac54) and LOAD #2's start (0xbc08) are zero
-padding for page alignment, so we can grow LOAD #1 freely up to that limit
-(this gives us headroom for the eventual full T4 with file-based metadata
-plumbing — see docs/PROXY-BUILD.md).
-
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        af7238ebd44ffd34ee15f63f1863822b
+Output md5:        (recomputed each build — set OUTPUT_MD5 below)
 
 --- Background (per INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
 
@@ -32,84 +22,77 @@ The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (body at file
 
 P1 (in patch_mtkbt_minimal.py) routes VENDOR_DEPENDENT frames into the msg-519
 emit path with size=9, so the JNI sees size!=8 and falls into the "unknow
-indication" branch. We need to handle GetCapabilities (PDU 0x10) here, since
-mtkbt's own dispatcher is compiled-1.0 and never invokes the response builder
-for inbound 1.3+ COMMANDs.
+indication" branch. We need to handle 1.3+ commands here, since mtkbt's own
+dispatcher is compiled against AVRCP 1.0 and never invokes the response
+builder for 1.3+ COMMANDs.
 
---- Patches (R1 + T1 + T2) ---
+--- Trampoline chain (R1 + T1 + T2 stub + extended_T2 + T4) ---
 
-R1 — redirect: at file 0x6538, replace `bne.n 0x65bc; movs r5, #9`
-     (4 bytes: 40 d1 09 25) with `bl.w 0x7308` (4 bytes: 00 f0 e6 fe).
-     Branches to the T1 trampoline at 0x7308 for all size!=3 cases.
-     Destroys the size==8 fall-through head (`movs r5, #9`) — acceptable
-     because mtkbt-as-1.0 never legitimately produces size==8 frames on
-     this device.
+R1 — at file 0x6538: replace `bne.n 0x65bc; movs r5, #9` (40 d1 09 25)
+     with `bl.w 0x7308` (00 f0 e6 fe). Branches to T1 for all size!=3 cases.
 
-T1 — GetCapabilities trampoline at 0x7308 (overwrites unused JNI debug
-     method `testparmnum`, 48 bytes).
-       0x7308: ldrb.w r0, [sp, #382]   ; PDU byte (AV/C body offset 4)
-       0x730c: cmp    r0, #0x10        ; GetCapabilities?
-       0x730e: bne.n  0x732c           ; no → bridge to T2 stage 2
-       0x7310: adr    r3, 0x7324       ; events_data ptr
-       0x7312: add.w  r0, r5, #8       ; r0 = conn buffer (r5 from prologue)
-       0x7316: movs   r1, #0
-       0x7318: movs   r2, #5           ; events count = 5
-       0x731a: blx    0x35dc           ; PLT → btmtk_avrcp_send_get_capabilities_rsp
-       0x731e: b.w    0x712a           ; mov r9,#1; canary; epilogue
-       0x7322: nop
-       0x7324: 01 02 09 0a 0b 00 00 00 ; supported events: PLAYBACK_STATUS,
-                                       ;   TRACK, NOW_PLAYING_CONTENT,
-                                       ;   AVAIL_PLAYERS, ADDR_PLAYER
-       0x732c: b.w    0x72d4           ; bridge → T2 stage 2
+T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
+     bytes): GetCapabilities (PDU 0x10) — answers with EVENT_TRACK_CHANGED
+     in the supported-events list and falls through (b.w 0x72d4) to the
+     T2 stub for everything else.
 
-T2 — classInitNative stub + RegisterNotification(TRACK_CHANGED) trampoline
-     at 0x72d0, overwriting the JNI debug method `classInitNative` (48 bytes).
-     classInitNative is purely two `__android_log_print` calls + return 0;
-     the 4-byte stub at 0x72d0 preserves its return-0 contract (without
-     logging), and the remaining 44 bytes hold the T2 logic + track_id_data.
+T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
+     8 of 48 bytes):
+       0x72d0: classInitNative `return 0` stub (4 bytes preserves contract)
+       0x72d4: b.w extended_T2 (4 bytes)
+       0x72d8..0x72ff: padding (40 bytes; unreachable, kept zero)
 
-       0x72d0: 00 20 70 47              ; classInitNative stub
-                                        ;   movs r0, #0; bx lr
-       ; T2 stage 2 (entered from T1's bridge at 0x732c):
-       0x72d4: cmp    r0, #0x31         ; PDU still in r0; RegisterNotification?
-       0x72d6: bne.n  0x72f4            ; no → unknown_pdu (b.w 0x65bc)
-       0x72d8: ldrb.w r0, [sp, #386]    ; event_id (clobber PDU)
-       0x72dc: cmp    r0, #0x02         ; EVENT_TRACK_CHANGED?
-       0x72de: bne.n  0x72f4            ; no → unknown
-       0x72e0: add.w  r0, r5, #8        ; conn buffer
-       0x72e4: ldrb.w r1, [sp, #368]    ; transId
-       0x72e8: movs   r2, #0x0f         ; INTERIM reasonCode
-       0x72ea: adr    r3, 0x72f8        ; track_id_data ptr
-       0x72ec: blx    0x3384            ; PLT → btmtk_avrcp_send_reg_notievent_track_changed_rsp
-       0x72f0: b.w    0x712a            ; epilogue
-       0x72f4: b.w    0x65bc            ; unknown PDU/event → original "unknow indication"
-       0x72f8: ff ff ff ff ff ff ff ff  ; track_id = 0xFFFFFFFFFFFFFFFF
-                                        ;   ("Identifier not allocated, metadata not available")
+extended_T2 — in LOAD #1 padding area, at vaddr derived from T4 layout.
+     Handles RegisterNotification(EVENT_TRACK_CHANGED, PDU 0x31, event 0x02):
+       1. Read first 8 bytes of /data/data/com.y1.mediabridge/files/y1-track-info
+          (the track_id Y1MediaBridge wrote there). On read failure: 0xFF×8.
+       2. Write [track_id (8) || transId (1) || pad (7)] to y1-trampoline-state
+          (so T4 can later check whether the track has changed and use the
+          right transId in any CHANGED notification it emits).
+       3. Reply track_changed_rsp INTERIM with the current track_id.
+     Other PDUs/events fall through to T4 (PDU 0x20) or 0x65bc (unknown).
 
-     PLT 0x3384 → GOT 0xcf0c → btmtk_avrcp_send_reg_notievent_track_changed_rsp
-     (verified via objdump -R + cross-reference with notificationTrackChanged
-      Native at 0x3bc0 which calls this PLT with same arg shape:
-      r0=conn_buffer, r1=transId, r2=reasonCode, r3=ptr_to_8byte_track_id).
+T4 — in LOAD #1 padding at vaddr 0xac54.
+     Handles GetElementAttributes (PDU 0x20):
+       1. memset file buffer (776 B) on stack, read y1-track-info into it.
+       2. Read y1-trampoline-state (16 B) into a state buffer on stack.
+       3. If state[0..7] != file[0..7] (track changed since we last said so):
+            - Emit track_changed_rsp CHANGED with state[8] as transId
+            - Update state[0..7] = file[0..7] and write back to state file
+       4. Reply 3× get_element_attributes_rsp for Title (file+8) / Artist
+          (file+264) / Album (file+520) using the GetElementAttributes
+          inbound transId.
+     Non-0x20 PDUs fall through to 0x65bc (original "unknow indication"
+     path → msg 520 NOT_IMPLEMENTED).
 
-     PLAYBACK_STATUS_CHANGED (event 0x01), NOW_PLAYING_CONTENT_CHANGED
-     (0x09), AVAIL_PLAYERS_CHANGED (0x0a), ADDR_PLAYER_CHANGED (0x0b) all
-     fall through to the unknown branch (b.w 0x65bc) → mtkbt sends
-     NOT_IMPLEMENTED. Sonos retries each event ~4× then gives up; metadata
-     handshake (TRACK_CHANGED is what gates GetElementAttributes) still
-     proceeds.
-
-     Hardware-verified iter5 (2026-05-05): T1 alone elicited a 30-byte
-     msg=522 outbound (consistent with GetCapabilities response) and Sonos
-     started sending size:13 RegisterNotification frames at 2-second
-     intervals — confirming T1 fires correctly. T2 is the next move.
+The T4 + extended_T2 + path strings blob is built dynamically by
+_iter15_trampolines.py using a tiny Thumb-2 assembler (_thumb2asm.py).
+LOAD #1's filesz/memsz is extended to cover the blob, which lets the
+kernel map it as R+E at runtime — the 4276-byte page-alignment gap
+between LOAD #1's stock end (0xac54) and LOAD #2's start (0xbc08) is
+zero padding, so we can grow LOAD #1 freely up to that limit.
 
 --- History ---
 
-J1 (cmp.w lr,#8 -> cmp.w lr,#9 at 0x6526) was tried 2026-05-05 (iter4) and
-rolled back — it routed VENDOR_DEPENDENT through the size==8 PASSTHROUGH
-dispatch which generated fake key=1 PASSTHROUGH events and didn't reach the
-intended Java callback (BT-SIG halfword check at sp+382 failed due to size-9
-stack misalignment). See INVESTIGATION.md Trace #12.
+iter4 (J1 cmp lr,#8 → cmp lr,#9 at 0x6526): rolled back. Routed
+VENDOR_DEPENDENT through size==8 PASSTHROUGH dispatch and didn't reach
+the right Java callback. See INVESTIGATION.md Trace #12.
+
+iter5..iter13: T1 + T2 + T4 progressively built. iter13 hardware-verified
+Title + Artist + Album displayed on Sonos — but only for the first track:
+Sonos caches metadata by TRACK_CHANGED INTERIM track_id, and our T2 always
+sent 0xFF×8.
+
+iter14/14b/14c: Y1MediaBridge wrote real metadata into a file; T4 reads
+it. iter14b found the right path (/data/data/com.y1.mediabridge/files/);
+iter14c added diagnostic logging that confirmed T4 was firing on track
+change but Sonos still showed the cached first-track metadata.
+
+iter15: state-tracked CHANGED notifications. extended_T2 saves the
+RegisterNotification transId; T4 detects track_id changes against a
+state file and emits a CHANGED with the saved transId before replying
+to GetElementAttributes. Sonos sees the CHANGED, re-subscribes, and
+its display refreshes.
 
 Mutually exclusive with patch_libextavrcp_jni.py (the v2.0.0 4-patch set);
 both target overlapping code regions.
@@ -122,22 +105,26 @@ Usage:
 
 import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
 
-STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "af7238ebd44ffd34ee15f63f1863822b"
+# Allow `from _iter15_trampolines import ...` when invoked from any cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _iter15_trampolines import build as build_iter15_trampolines, T4_VADDR
+from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
+from _thumb2asm import Asm
 
-# T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48 bytes).
-#
-# iter10 change: advertise only EVENT_TRACK_CHANGED (0x02), not the full set
-# 01/02/09/0a/0b. Sonos's empirical behaviour (iter9) is to RegisterNotification
-# events one at a time; on the first NOT_IMPLEMENTED reply it aborts the entire
-# registration sequence. Pre-iter9 the unknow-indication path was broken (no
-# response emitted), so Sonos timed out on event 0x01 and accidentally tried
-# 0x02 anyway. Now that msg=520 actually flows, Sonos respects it and stops —
-# meaning it would never reach event 0x02 unless we either ack 0x01 too (= T3,
-# more cave use) or just don't advertise 0x01. Latter is simpler.
+STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
+OUTPUT_MD5 = "92bcac1ab99d7fd0e263b712f9abb2d4"  # iter15
+
+# ---------------------------------------------------------------- T1
+
+# T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
+# bytes). Advertise only EVENT_TRACK_CHANGED (0x02) — Sonos requests events
+# one at a time and aborts the registration sequence on the first
+# NOT_IMPLEMENTED response, so anything we can't actually answer must be
+# omitted from the supported-events list.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -151,11 +138,11 @@ T1_TRAMPOLINE = bytes([
     0x00, 0xBF,                               # nop
     0x02, 0x00, 0x00, 0x00, 0x00,            # events: TRACK_CHANGED only
     0x00, 0x00, 0x00,                         # padding
-    0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stage 2 entry)
+    0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40
 
-# Stock testparmnum first 40 bytes (unused JNI debug method).
+# Stock testparmnum first 40 bytes.
 TESTPARMNUM_STOCK = bytes([
     0x10, 0xB5, 0x04, 0x20, 0x07, 0x4C, 0x08, 0x4A,
     0x7C, 0x44, 0x21, 0x46, 0x7A, 0x44, 0xFB, 0xF7,
@@ -165,112 +152,7 @@ TESTPARMNUM_STOCK = bytes([
 ])
 assert len(TESTPARMNUM_STOCK) == 40
 
-# T2 — classInitNative stub (4 bytes) + RegisterNotification(TRACK_CHANGED)
-# trampoline (44 bytes) at 0x72d0. Total 48 bytes overwriting classInitNative.
-T2_BLOCK = bytes([
-    # 0x72d0: classInitNative stub — preserves "return 0" contract
-    0x00, 0x20,                               # movs r0, #0
-    0x70, 0x47,                               # bx lr
-    # 0x72d4: T2 stage 2 entry (called from T1's bridge at 0x732c)
-    0x31, 0x28,                               # cmp r0, #0x31  (RegisterNotification?)
-    0x0D, 0xD1,                               # bne.n 0x72f4 (unknown)
-    0x9D, 0xF8, 0x82, 0x01,                  # ldrb.w r0, [sp, #386]  (event_id)
-    0x02, 0x28,                               # cmp r0, #0x02  (TRACK_CHANGED?)
-    0x09, 0xD1,                               # bne.n 0x72f4 (unknown)
-    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8  (conn buffer)
-    0x9D, 0xF8, 0x70, 0x11,                  # ldrb.w r1, [sp, #368]  (transId)
-    0x0F, 0x22,                               # movs r2, #0x0f  (INTERIM)
-    0x03, 0xA3,                               # adr r3, 0x72f8  (track_id_data)
-    0xFC, 0xF7, 0x4A, 0xE8,                  # blx 0x3384 (PLT: track_changed_rsp)
-    0xFF, 0xF7, 0x1B, 0xBF,                  # b.w 0x712a (epilogue)
-    # 0x72f4: unknown — bridge to T4 stub at 0xac54 (in extended LOAD #1)
-    0x03, 0xF0, 0xAE, 0xBC,                  # b.w 0xac54 (T4 stub)
-    # 0x72f8: track_id_data — 0xFFFFFFFFFFFFFFFF
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-])
-assert len(T2_BLOCK) == 48
-
-# T4 — full GetElementAttributes response trampoline at vaddr 0xac54.
-# Lives in the LOAD #1 page-alignment padding (4276 zero bytes between LOAD #1
-# and LOAD #2). Patcher extends LOAD #1's filesz/memsz so the kernel maps
-# these bytes as R+E. T2's "unknown" branch at 0x72f4 jumps here.
-#
-# iter11 (single Title "Y1 Test") proved the argument layout:
-#   r0 = conn (= r5+8)
-#   r1 = 0 (string-follows flag)
-#   r2 = transId (jbyte at caller_sp+368)
-#   r3 = 0 (placeholder — meaning unknown; works as 0)
-#   sp[0]  = attribute_id LSB (1=Title, 2=Artist, ...)
-#   sp[4]  = 0x6a (UTF-8 charset)
-#   sp[8]  = string length (in bytes)
-#   sp[12] = pointer to UTF-8 string data
-# Hardware-verified: Sonos displayed "Y1 Test" on its Now Playing screen.
-#
-# iter12 expansion: parse the inbound size:45 GetElementAttributes COMMAND
-# (PDU 0x20) to find which attributes Sonos requested, dispatch on each
-# attribute_id LSB to the matching hardcoded string, and call the response
-# builder once per supported attribute. Supported: Title (0x01), Artist
-# (0x02), Album (0x03). Other attributes (TrackNumber, TotalTracks, Genre,
-# PlayingTime) are skipped silently.
-#
-# Inbound frame layout at caller's sp+378 (45 bytes total for size:45):
-#   sp+378: op_code (0x00 VENDOR_DEPENDENT)
-#   sp+379-381: company_id (0x00 0x19 0x58 BE)
-#   sp+382: PDU (0x20)
-#   sp+383: packet_type
-#   sp+384-385: param_length BE
-#   sp+386-393: identifier (8 bytes BE — track_id from RegisterNotification)
-#   sp+394: num_attributes
-#   sp+395-422: 7 × 4 bytes attribute_ids BE
-# After the trampoline's `sub sp, #16`, all caller offsets shift +16:
-#   num_attrs at sp+410, attribute_id #i LSB at sp+398+4i+16 = sp+414+4i.
-#
-# r4-r7 are callee-saved per AAPCS but saveRegEventSeqId's prologue saves them
-# and the epilogue at 0x7154 restores via `pop {r4-r9, sl, fp, pc}`. So we
-# can trash r4 (num_attrs), r6 (attr_id ptr), r7 (loop counter) without local
-# push/pop — they'll be restored when the function returns to its caller.
-T4_STUB_VADDR = 0xac54
-# 308 bytes — iter14c diagnostic build with __android_log_print after open()
-# to surface fd/errno values to logcat. iter14b dropped msg=540 to 0 even
-# though Y1MediaBridge wrote the file correctly (verified via shell cat),
-# so we need to see exactly what the trampoline's open() returns. Logcat
-# tag "Y1AVRCP" format "T4 open=%d errno=%d".
-#
-# After diagnosis, iter14d will revert the logging block (~52 bytes saved)
-# and apply whatever fix the errno reveals.
-T4_STUB = bytes([
-    0x9D, 0xF8, 0x7E, 0x01, 0x20, 0x28, 0x05, 0xD0, 0xBD, 0xF8, 0x76, 0xE1, 0x05, 0xF1, 0x08, 0x00,
-    0xFB, 0xF7, 0xAA, 0xBC, 0x50, 0xB4, 0xAD, 0xF2, 0x10, 0x3D, 0x04, 0xA8, 0x00, 0x21, 0x40, 0xF2,
-    0x00, 0x32, 0xF8, 0xF7, 0xC2, 0xEB, 0x36, 0xA0, 0x00, 0x21, 0xF8, 0xF7, 0xDE, 0xEC, 0x04, 0x46,
-    0xF8, 0xF7, 0xDE, 0xEB, 0x06, 0x68, 0x2B, 0xA1, 0x2C, 0xA2, 0x23, 0x46, 0x00, 0x96, 0x04, 0x20,
-    0xF8, 0xF7, 0x34, 0xEB, 0x20, 0x46, 0x00, 0x28, 0x08, 0xDA, 0x0D, 0xF2, 0x10, 0x3D, 0x50, 0xBC,
-    0xBD, 0xF8, 0x76, 0xE1, 0x05, 0xF1, 0x08, 0x00, 0xFB, 0xF7, 0x86, 0xBC, 0x04, 0xA9, 0x40, 0xF2,
-    0x00, 0x32, 0x03, 0x27, 0x00, 0xDF, 0x20, 0x46, 0xF8, 0xF7, 0x8C, 0xEB, 0x04, 0xA8, 0xF8, 0xF7,
-    0x08, 0xEC, 0x06, 0x46, 0x05, 0xF1, 0x08, 0x00, 0x00, 0x21, 0x00, 0x22, 0x03, 0x23, 0x01, 0x24,
-    0x00, 0x94, 0x6A, 0x24, 0x01, 0x94, 0x02, 0x96, 0x04, 0xAC, 0x03, 0x94, 0xF8, 0xF7, 0x46, 0xEC,
-    0x44, 0xA8, 0xF8, 0xF7, 0xF6, 0xEB, 0x06, 0x46, 0x05, 0xF1, 0x08, 0x00, 0x00, 0x21, 0x01, 0x22,
-    0x03, 0x23, 0x02, 0x24, 0x00, 0x94, 0x6A, 0x24, 0x01, 0x94, 0x02, 0x96, 0x44, 0xAC, 0x03, 0x94,
-    0xF8, 0xF7, 0x34, 0xEC, 0x84, 0xA8, 0xF8, 0xF7, 0xE4, 0xEB, 0x06, 0x46, 0x05, 0xF1, 0x08, 0x00,
-    0x00, 0x21, 0x02, 0x22, 0x03, 0x23, 0x03, 0x24, 0x00, 0x94, 0x6A, 0x24, 0x01, 0x94, 0x02, 0x96,
-    0x84, 0xAC, 0x03, 0x94, 0xF8, 0xF7, 0x22, 0xEC, 0x0D, 0xF2, 0x10, 0x3D, 0x50, 0xBC, 0xFC, 0xF7,
-    0xFA, 0xB9, 0x00, 0x00, 0x59, 0x31, 0x41, 0x56, 0x52, 0x43, 0x50, 0x00, 0x54, 0x34, 0x20, 0x6F,
-    0x70, 0x65, 0x6E, 0x3D, 0x25, 0x64, 0x20, 0x65, 0x72, 0x72, 0x6E, 0x6F, 0x3D, 0x25, 0x64, 0x00,
-    0x2F, 0x64, 0x61, 0x74, 0x61, 0x2F, 0x64, 0x61, 0x74, 0x61, 0x2F, 0x63, 0x6F, 0x6D, 0x2E, 0x79,
-    0x31, 0x2E, 0x6D, 0x65, 0x64, 0x69, 0x61, 0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x2F, 0x66, 0x69,
-    0x6C, 0x65, 0x73, 0x2F, 0x79, 0x31, 0x2D, 0x74, 0x72, 0x61, 0x63, 0x6B, 0x2D, 0x69, 0x6E, 0x66,
-    0x6F, 0x00, 0x00, 0x00,
-])
-assert len(T4_STUB) == 308
-
-# Stock bytes at 0xac54..0xad88 — all zero (LOAD #1 page padding).
-T4_STUB_STOCK = bytes([0x00] * 308)
-
-# LOAD #1 program-header bookkeeping
-LOAD1_PHDR_OFFSET = 0x54
-LOAD1_FILESZ_OFFSET = LOAD1_PHDR_OFFSET + 16
-LOAD1_MEMSZ_OFFSET  = LOAD1_PHDR_OFFSET + 20
-LOAD1_OLD_SIZE = 0xac54
-LOAD1_NEW_SIZE = T4_STUB_VADDR + len(T4_STUB)  # 0xac60
+# ---------------------------------------------------------------- T2 stub
 
 # Stock classInitNative (48 bytes) — entry + body + literal pool.
 CLASSINITNATIVE_STOCK = bytes([
@@ -283,53 +165,96 @@ CLASSINITNATIVE_STOCK = bytes([
 ])
 assert len(CLASSINITNATIVE_STOCK) == 48
 
-PATCHES = [
-    {
-        "name": "R1: redirect bne.n 0x65bc → bl.w 0x7308 (T1 trampoline) at 0x6538",
-        "offset": 0x6538,
-        "before": bytes([0x40, 0xD1, 0x09, 0x25]),  # bne.n 0x65bc; movs r5, #9
-        "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
-    },
-    {
-        "name": "T1: GetCapabilities trampoline (overwrites testparmnum) at 0x7308",
-        "offset": 0x7308,
-        "before": TESTPARMNUM_STOCK,
-        "after":  T1_TRAMPOLINE,
-    },
-    {
-        "name": "T2: classInitNative stub + RegisterNotification(TRACK_CHANGED) at 0x72d0",
-        "offset": 0x72d0,
-        "before": CLASSINITNATIVE_STOCK,
-        "after":  T2_BLOCK,
-    },
-    {
-        "name": f"T4: stub @ 0x{T4_STUB_VADDR:x} ({len(T4_STUB)} bytes appended into LOAD #1 padding)",
-        "offset": T4_STUB_VADDR,
-        "before": T4_STUB_STOCK,
-        "after":  T4_STUB,
-    },
-    {
-        "name": f"LOAD #1 filesz: 0x{LOAD1_OLD_SIZE:x} → 0x{LOAD1_NEW_SIZE:x} (cover T4 stub)",
-        "offset": LOAD1_FILESZ_OFFSET,
-        "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
-        "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),
-    },
-    {
-        "name": f"LOAD #1 memsz: 0x{LOAD1_OLD_SIZE:x} → 0x{LOAD1_NEW_SIZE:x} (cover T4 stub)",
-        "offset": LOAD1_MEMSZ_OFFSET,
-        "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
-        "after":  LOAD1_NEW_SIZE.to_bytes(4, "little"),
-    },
-]
+
+def _t2_stub(extended_t2_vaddr: int) -> bytes:
+    """Build the 48-byte block at 0x72d0:
+        0x72d0: movs r0, #0; bx lr      (classInitNative `return 0` stub)
+        0x72d4: b.w extended_T2         (the only T2 logic; everything else
+                                         is dispatched inside extended_T2)
+        0x72d8..0x72ff: zero filler (unreachable)
+    """
+    a = Asm(0x72d0)
+    a.raw(bytes([0x00, 0x20, 0x70, 0x47]))   # movs r0, #0; bx lr
+    a.labels["target"] = extended_t2_vaddr
+    a.b_w("target")
+    while len(a.buf) < 48:
+        a.buf.append(0x00)
+    return a.resolve()
+
+
+# ---------------------------------------------------------------- LOAD #1 phdr
+
+LOAD1_PHDR_OFFSET = 0x54
+LOAD1_FILESZ_OFFSET = LOAD1_PHDR_OFFSET + 16
+LOAD1_MEMSZ_OFFSET  = LOAD1_PHDR_OFFSET + 20
+LOAD1_OLD_SIZE = 0xac54
+
+# ---------------------------------------------------------------- patch list builder
+
+
+def build_patches() -> tuple[list[dict], int]:
+    """Build the patch list. Returns (patches, new_load1_size)."""
+    blob, addrs = build_iter15_trampolines()
+    extended_t2_vaddr = addrs["extended_T2"]
+    new_load1_size = T4_VADDR + len(blob)
+
+    patches = [
+        {
+            "name": "R1: redirect bne.n 0x65bc → bl.w 0x7308 (T1) at 0x6538",
+            "offset": 0x6538,
+            "before": bytes([0x40, 0xD1, 0x09, 0x25]),  # bne.n 0x65bc; movs r5, #9
+            "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
+        },
+        {
+            "name": "T1: GetCapabilities trampoline (testparmnum) at 0x7308",
+            "offset": 0x7308,
+            "before": TESTPARMNUM_STOCK,
+            "after":  T1_TRAMPOLINE,
+        },
+        {
+            "name": (
+                f"T2 stub: classInitNative stub + b.w 0x{extended_t2_vaddr:x}"
+                " (extended_T2) at 0x72d0"
+            ),
+            "offset": 0x72d0,
+            "before": CLASSINITNATIVE_STOCK,
+            "after":  _t2_stub(extended_t2_vaddr),
+        },
+        {
+            "name": (
+                f"iter15 trampoline blob @ 0x{T4_VADDR:x} ({len(blob)} bytes "
+                f"in LOAD #1 padding; final vaddr 0x{new_load1_size:x})"
+            ),
+            "offset": T4_VADDR,
+            "before": bytes([0x00] * len(blob)),  # stock LOAD #1 padding is zeros
+            "after":  blob,
+        },
+        {
+            "name": f"LOAD #1 filesz: 0x{LOAD1_OLD_SIZE:x} → 0x{new_load1_size:x}",
+            "offset": LOAD1_FILESZ_OFFSET,
+            "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+            "after":  new_load1_size.to_bytes(4, "little"),
+        },
+        {
+            "name": f"LOAD #1 memsz: 0x{LOAD1_OLD_SIZE:x} → 0x{new_load1_size:x}",
+            "offset": LOAD1_MEMSZ_OFFSET,
+            "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+            "after":  new_load1_size.to_bytes(4, "little"),
+        },
+    ]
+    return patches, new_load1_size
+
+
+# ---------------------------------------------------------------- I/O helpers
 
 
 def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
+def verify(data: bytes, mode: str, patches: list[dict]) -> tuple[bool, list[dict]]:
     results = []
-    for p in PATCHES:
+    for p in patches:
         expected = p[mode]
         actual = bytes(data[p["offset"]: p["offset"] + len(expected)])
         results.append({**p, "actual": actual, "ok": actual == expected})
@@ -349,7 +274,7 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
     print("-" * 72)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Minimum JNI patch — route size-9 msg-519 frames to BT-SIG VENDOR path"
     )
@@ -387,11 +312,13 @@ def main():
         print("       larger --avrcp set). Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
-    pre_ok, pre_results = verify(data, "before")
+    patches, new_load1_size = build_patches()
+
+    pre_ok, pre_results = verify(data, "before", patches)
     print_results("Pre-patch verification (stock)", pre_results, "before")
 
     if not pre_ok:
-        post_ok, post_results = verify(data, "after")
+        post_ok, post_results = verify(data, "after", patches)
         print_results("Already-patched check", post_results, "after")
         if post_ok:
             print("\nBinary is already patched. Nothing to do.")
@@ -403,10 +330,10 @@ def main():
         print("\nVerify-only — no output written.")
         sys.exit(0)
 
-    for p in PATCHES:
+    for p in patches:
         data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
-    post_ok, post_results = verify(data, "after")
+    post_ok, post_results = verify(data, "after", patches)
     print_results("Post-patch verification", post_results, "after")
 
     if not post_ok:
