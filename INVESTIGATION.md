@@ -1462,7 +1462,16 @@ Cause: AVRCP 1.4 §6.7.2 — peer behaviour depends critically on whether the TG
   4. If the track moved since the last sync, calls `btmtk_avrcp_send_reg_notievent_track_changed_rsp` via PLT 0x3384 with `reason=CHANGED`, `transId=state[8]`, `track_id=&sentinel_ffx8` (same iter16 sentinel — keeps Sonos in poll-on-each-event mode), then writes the new track_id back to state[0..7].
   5. Returns jboolean(1).
 
-  Trampoline blob grows 580 → 768 bytes; LOAD #1 ends at 0xaf54. The reactive T4 and extended_T2 are unchanged — iter17a layers proactive CHANGEDs on top, so we get both reactive (Sonos polls) and proactive (Y1 changes track) refresh paths. Pending hardware verification.
+  Trampoline blob grows 580 → 768 bytes; LOAD #1 ends at 0xaf54. The reactive T4 and extended_T2 are unchanged — iter17a layers proactive CHANGEDs on top, so we get both reactive (Sonos polls) and proactive (Y1 changes track) refresh paths.
+
+**Iter17a hardware test (2026-05-06): proactive layer working, T4 multi-attribute regression discovered.** Capture under `/work/logs/dual-sonos-avrcp-min-iter17a/`. The proactive CHANGED path is firing — msg=544 outbound count reached 4172 over the test window vs ~30 in iter16 — confirming the Java cardinality NOP + `notificationTrackChangedNative` → T5 chain works end-to-end. But Sonos is rendering metadata field-by-field with visible flicker (Title appearing intermittently while Artist/Album swap in/out). Diagnosed from logcat: 1299 outbound msg=540 (`get_element_attributes_rsp`) for ~433 inbound `GetElementAttributes` queries — exactly 3:1 — meaning T4 is emitting *three separate msg=540 frames* per query instead of one frame containing all three attributes packed in. This is the iter12 bug that iter13 had originally fixed: T4's three calls to PLT 0x3570 had `arg2 = transId, arg3 = 0`, hitting the function's legacy `arg3 == 0 → EMIT each call` path. The dynamically-assembled T4 in `_iter15_trampolines.py` regressed it during iter15's rewrite. The reactive change-detection logic, the file I/O, the proactive CHANGED via T5 — all working. Just the response packing is wrong.
+
+**Iter17b: T4 multi-attribute single-frame fix.** Restored iter13's calling convention in `_iter15_trampolines.py::_emit_t4`:
+  - `r1 = 0` (with-string flag, accumulate)
+  - `r2 = idx` (per-iteration: 0, 1, 2 — was `transId`)
+  - `r3 = 3` (total attribute count — was `0`)
+
+  The function only emits when `(arg2+1) == arg3 AND arg3 != 0`, so calls 1+2 accumulate into the internal 644-byte buffer and call 3 packs Title+Artist+Album into a single msg=540 outbound. Trampoline blob shrinks 768 → 760 B (the 4-byte `ldrb.w` to load transId becomes a 2-byte `movs r2, #imm`); LOAD #1 ends at 0xaf4c. Stock `fd2ce74db9389980b55bccf3d8f15660` → `91833d6f41021df23a8aa50999fcab9a`. The multi-attribute calling convention is documented in `docs/ARCHITECTURE.md` "Reverse-engineered semantics: btmtk_avrcp_send_get_element_attributes_rsp"; the iter17b commit message in this section's git history explains the diagnosis. Pending hardware verification.
 
 For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 

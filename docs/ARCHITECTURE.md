@@ -306,6 +306,8 @@ send_rsp(conn, arg1=0, idx=2, total=3, attr=3, len=8, "Y1 Album");   // (idx+1==
 
 **One** msg=540 IPC frame outbound containing all three attributes.
 
+> **iter15/16/17a regression (2026-05-06):** the dynamically-assembled T4 was passing `arg2 = transId, arg3 = 0` — taking the `arg3 == 0` legacy path on every call and emitting 3 separate msg=540 frames per query. Sonos rendered each one in turn (visible flicker: Title appearing intermittently while Artist/Album swapped in/out). Diagnosed from the logcat ratio of 1299 msg=540 outbound to ~433 GetElementAttributes inbound during the iter17a hardware test. Fixed in iter17b by restoring the iter13 calling pattern above.
+
 ### Calling pattern for `…send_reg_notievent_track_changed_rsp` (PLT 0x3384, used by T2)
 
 ```c
@@ -334,7 +336,7 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 
 ---
 
-## Patch summary (iter17a)
+## Patch summary (iter17b)
 
 | Patch | File / addr | Description |
 |-------|-------------|-------------|
@@ -347,9 +349,9 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
-| extended_T2 + T4 + T5 | jni 0xac54 (768 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** (reactive RegisterNotification): reads track_id from y1-track-info, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM with track_id=0xFF×8 sentinel. **T4** (reactive GetElementAttributes): reads both files; if state[0..7] != file[0..7], emits track_changed_rsp CHANGED with sentinel + state[8] transId + writes new state, then replies 3× get_element_attributes_rsp for Title (file+8) / Artist (file+264) / Album (file+520). **T5** (proactive on Y1 track change, iter17a): entered via b.w from the patched `notificationTrackChangedNative`; calls the JNI helper at 0x36c0 to obtain the per-conn struct, reads both files, emits CHANGED with sentinel + state[8] transId on track_id divergence, updates state. Returns jboolean(1). Both reactive trampolines fall through to "unknow indication" (0x65bc) for unsupported PDUs. |
+| extended_T2 + T4 + T5 | jni 0xac54 (760 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** (reactive RegisterNotification): reads track_id from y1-track-info, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM with track_id=0xFF×8 sentinel. **T4** (reactive GetElementAttributes): reads both files; if state[0..7] != file[0..7], emits track_changed_rsp CHANGED with sentinel + state[8] transId + writes new state, then replies *one* multi-attribute get_element_attributes_rsp frame containing Title (file+8) + Artist (file+264) + Album (file+520) — see [Reverse-engineered semantics: `btmtk_avrcp_send_get_element_attributes_rsp`](#reverse-engineered-semantics-btmtk_avrcp_send_get_element_attributes_rsp). **T5** (proactive on Y1 track change, iter17a): entered via b.w from the patched `notificationTrackChangedNative`; calls the JNI helper at 0x36c0 to obtain the per-conn struct, reads both files, emits CHANGED with sentinel + state[8] transId on track_id divergence, updates state. Returns jboolean(1). Both reactive trampolines fall through to "unknow indication" (0x65bc) for unsupported PDUs. |
 | iter17a JNI native stub | jni 0x3bc0 (4 B) | First instruction of `notificationTrackChangedNative` rewritten to `b.w T5`. The Java side (after the MtkBt.odex iter17a NOP) calls this native on every Y1MediaBridge track-change broadcast; T5 emits CHANGED on the AVRCP wire asynchronously to any inbound query. The remaining 196 B of the original native body are unreachable. |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xaf54` (extends executable mapping over the iter17a trampoline blob) |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xaf4c` (extends executable mapping over the iter17b trampoline blob) |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
@@ -383,7 +385,7 @@ Y1MediaBridge's `prepareTrackInfoDir()` is what ensures the BT process can reach
 | `testparmnum` | 0x7308 | 48 bytes | T1 (40 bytes used) |
 | `classInitNative` | 0x72d0 | 48 bytes | T2 stub (8 bytes used; remaining 40 zero-filled, unreachable) |
 | `notificationTrackChangedNative` | 0x3bc0 | 200 bytes | iter17a stub (4 bytes `b.w T5` used; remaining 196 unreachable) |
-| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | T4 (~324 B) + extended_T2 (~140 B) + T5 (~180 B) + path strings (~108 B) + sentinel (8 B) = 768 B used, ~3508 free |
+| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | T4 (~316 B) + extended_T2 (~140 B) + T5 (~180 B) + path strings (~108 B) + sentinel (8 B) = 760 B used, ~3516 free |
 | `getPlayerId` | 0x7300 | 4 bytes | (preserved, returns 0 — not touched) |
 | `getMaxPlayerNum` | 0x7304 | 4 bytes | (preserved, returns 20 — not touched) |
 
