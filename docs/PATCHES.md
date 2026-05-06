@@ -167,17 +167,15 @@ The 0x65bc path then runs `str.w lr, [sp, #12]` to pass SIZE to `btmtk_avrcp_sen
 
 Iter5/iter6 confirmed the symptom: Sonos retried unhandled size:13/size:45 frames forever because mtkbt was emitting nothing back. Iter7 (only the r0 restore, no lr restore) tested the ELF-extension infrastructure but still didn't generate msg=520 — the lr clobber was the second half of the bug. Iter8 (this version) restores both.
 
-**Future:** the same 0xac54 entry will host the full T4 GetElementAttributes response — currently a stub but expandable into the 4276-byte padding region. That's the path forward for live track metadata via Y1MediaBridge.
+**Iter15 (current): state-tracked CHANGED + dynamic trampoline assembly.** The full T4 + extended_T2 trampoline pair lives in the 0xac54 padding region; T2's old in-place stub at 0x72d4 is now a single `b.w extended_T2`. Both trampolines read `/data/data/com.y1.mediabridge/files/y1-track-info` (776 B: 8-byte big-endian track_id + 3 × 256 B Title/Artist/Album) and `…/y1-trampoline-state` (16 B: last-seen track_id + last RegisterNotification transId), and T4 emits `track_changed_rsp CHANGED` whenever the file's track_id has diverged from the state file — which is what Sonos needs to refresh its display when the track on the Y1 changes. The trampoline blob is built dynamically from `_thumb2asm.py` + `_iter15_trampolines.py` rather than hand-encoded.
 
 **Program-header surgery:** the patcher updates LOAD #1's program header at file 0x54:
-- offset+16 (`p_filesz`): 0xac54 → 0xac60
-- offset+20 (`p_memsz`):  0xac54 → 0xac60
+- offset+16 (`p_filesz`): 0xac54 → 0xae90 (iter15)
+- offset+20 (`p_memsz`):  0xac54 → 0xae90 (iter15)
 
 No other section/segment offsets shift, so `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more of the file into the R+E segment.
 
-**Pending follow-ups (T3 + full T4):** PlaybackStatus response + actual GetElementAttributes response with track strings (read from `/data/local/tmp/y1-track-info` written by Y1MediaBridge). See `docs/PROXY-BUILD.md`.
-
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `b39ba1f4aca8b80b85f5001a7beff793` (iter14b).
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `92bcac1ab99d7fd0e263b712f9abb2d4` (iter15).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

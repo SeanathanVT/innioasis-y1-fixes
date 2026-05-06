@@ -1427,6 +1427,16 @@ The function maintains an internal 644-byte static buffer that's reset when (`ar
 
 The reverse-engineered argument layout is now empirically confirmed correct. The architectural work is done. Remaining work is pure data plumbing — replacing the hardcoded "Y1 Title"/"Y1 Artist"/"Y1 Album" strings with real metadata from Y1MediaBridge (iter14: file-based plumbing via `/data/local/tmp/y1-track-info`).
 
+**Iter14 → 14b → 14c (data plumbing).** Y1MediaBridge writes `Title\0…Artist\0…Album\0…` (768 B fixed-layout) to a file; T4 opens, syscall-reads, and uses the strings instead of the hardcoded ones. Iter14 (`/data/local/tmp/y1-track-info`) regressed Y1MediaBridge — uid 10000 has no write permission to `/data/local/tmp/` (mode 0771 owner=shell), and the silent EACCES on `FileOutputStream` opening propagated past the IOException catch and killed the service. Iter14b moved the path to `/data/data/com.y1.mediabridge/files/y1-track-info`, with a `setExecutable(true,false)` chmod on the dir at startup so the BT process (uid bluetooth) could traverse and read. Iter14c added `__android_log_print` after `open()` to surface the fd/errno, which confirmed `T4` was firing successfully on every poll — but Sonos's display still showed first-track strings on track change. The actual diagnosis: **Sonos caches GetElementAttributes responses keyed by the TRACK_CHANGED INTERIM track_id**. Since T2 always sent `0xFF×8`, Sonos thought it was the same track forever, even though our T4 was happily delivering fresh strings.
+
+**Iter15 — state-tracked CHANGED notifications (current).** Output md5 `92bcac1ab99d7fd0e263b712f9abb2d4`. Three architectural changes:
+
+1. **File format**: y1-track-info grows to 776 B with the `mCurrentAudioId` (big-endian) at bytes 0..7 ahead of the 3 × 256 B Title/Artist/Album slots. Y1MediaBridge writes the track_id alongside the strings.
+2. **State file**: a 16 B y1-trampoline-state file (mode 0666, pre-created by Y1MediaBridge at startup) lets the BT process remember (a) the last track_id we told Sonos about (bytes 0..7) and (b) the last RegisterNotification transId (byte 8). The `extended_T2` trampoline writes both fields on every RegisterNotification(TRACK_CHANGED); the `T4` trampoline reads them on every GetElementAttributes.
+3. **Trampoline rewrite**: T2's logic moves out of the cramped 44-byte `classInitNative` slot into LOAD #1's page-padding region. T2 stub at 0x72d4 becomes a single `b.w extended_T2`. extended_T2 dispatches PDU/event-id internally and falls through to T4 for PDU 0x20 or to 0x65bc otherwise. T4 is rewritten cleanly (memset → open/read y1-track-info → open/read y1-trampoline-state → cmp track_id → conditionally emit `track_changed_rsp CHANGED` with state[8] as transId + write new state → 3× `get_element_attributes_rsp`). The whole blob is now built dynamically from a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py` + `_iter15_trampolines.py`, rather than hand-encoded as a hex array. Total 572 bytes of trampoline + paths; LOAD #1 grows from 0xac54 → 0xae90 (still well under the 0xbc08 LOAD #2 boundary).
+
+Pending hardware verification.
+
 For full architectural detail (ELF segment-extension trick, calling conventions, msg-id taxonomy, Thumb-2 encoding gotchas), see `docs/ARCHITECTURE.md`.
 
 ### Empirics + tooling for the next session

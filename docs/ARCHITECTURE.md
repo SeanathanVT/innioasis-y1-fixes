@@ -334,7 +334,7 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 
 ---
 
-## Patch summary (iter13)
+## Patch summary (iter15)
 
 | Patch | File / addr | Description |
 |-------|-------------|-------------|
@@ -345,21 +345,41 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 | P1 | mtkbt 0x144e8  | `cmp r3, #0x30` → `b.n 0x14528` (route VENDOR_DEPENDENT through msg-519 emit instead of silent-drop) |
 | **JNI patches** (in `patch_libextavrcp_jni_minimal.py`) ||| 
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
-| T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc |
-| T2 | jni 0x72d0 (48 B) | Overwrites `classInitNative` (4-byte return-0 stub at start). PDU 0x31 + event 0x02 → calls `reg_notievent_track_changed_rsp` via PLT 0x3384 |
-| T4 | jni 0xac54 (256 B) | NEW LOAD #1 extension. PDU 0x20 → memset(buf,0,768) + open(`/data/data/com.y1.mediabridge/files/y1-track-info`, O_RDONLY) + Linux syscall read (SVC #3, since `read` isn't in the PLT) + close + 3 sequential calls to `get_element_attributes_rsp` via PLT 0x3570 with strlen-derived lengths from the file content. Falls through gracefully to "unknow indication" if the file is missing/unreadable. Y1MediaBridge writes the file in `MediaBridgeService.broadcastTrackAndState()` on every track change. |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xad54` (extends executable mapping over T4) |
+| T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
+| T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
+| extended_T2 + T4 | jni 0xac54 (572 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** handles RegisterNotification(TRACK_CHANGED): reads track_id from y1-track-info, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM. **T4** handles GetElementAttributes: reads y1-track-info (776 B) + y1-trampoline-state (16 B); if track_id changed since last seen, emits track_changed_rsp CHANGED with state[8] as transId and writes the new track_id back to the state file; then replies 3× get_element_attributes_rsp for Title (file+8) / Artist (file+264) / Album (file+520). Both trampolines fall through to "unknow indication" (0x65bc) for unsupported PDUs. |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xae90` (extends executable mapping over T4 + extended_T2 + path strings) |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
+
+The JNI trampoline blob is built dynamically by `src/patches/_iter15_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni_minimal.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
+
+### Y1MediaBridge ↔ trampoline file contract
+
+Two files, both in `/data/data/com.y1.mediabridge/files/`:
+
+- **y1-track-info** (776 B, written by Y1MediaBridge on every `broadcastTrackAndState()`):
+  - bytes 0..7   = `mCurrentAudioId` big-endian
+  - bytes 8..263  = Title (UTF-8, max 255 + trailing `\0`)
+  - bytes 264..519 = Artist (same)
+  - bytes 520..775 = Album (same)
+  - mode 0644 (world-readable so the BT process can open it)
+- **y1-trampoline-state** (16 B, pre-created by Y1MediaBridge at startup, updated by the trampolines):
+  - bytes 0..7  = last track_id we told Sonos about (updated by T4 after emitting CHANGED, and by extended_T2 every RegisterNotification)
+  - byte 8     = last RegisterNotification transId (updated by extended_T2)
+  - bytes 9..15 = padding
+  - mode 0666 (world-rw so the BT process can rewrite it)
+
+Y1MediaBridge's `prepareTrackInfoDir()` is what ensures the BT process can reach both files: `setExecutable(true, false)` on the dir adds world-x for traversal; the y1-track-info file gets `setReadable(true, false)`; the y1-trampoline-state file gets both `setReadable` and `setWritable`.
 
 ### Code-cave inventory
 
 | Region | Address | Size | Used by |
 |--------|---------|------|---------|
 | `testparmnum` | 0x7308 | 48 bytes | T1 (40 bytes used) |
-| `classInitNative` | 0x72d0 | 48 bytes | T2 + 4-byte stub (48 bytes used) |
-| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | T4 (148 bytes used, ~4128 free) |
+| `classInitNative` | 0x72d0 | 48 bytes | T2 stub (8 bytes used; remaining 40 zero-filled, unreachable) |
+| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | T4 (~324 B) + extended_T2 (~140 B) + path strings (~108 B) = 572 B used, ~3704 free |
 | `getPlayerId` | 0x7300 | 4 bytes | (preserved, returns 0 — not touched) |
 | `getMaxPlayerNum` | 0x7304 | 4 bytes | (preserved, returns 20 — not touched) |
 
