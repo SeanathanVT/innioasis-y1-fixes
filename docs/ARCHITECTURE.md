@@ -347,8 +347,8 @@ iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `0
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc |
 | T2 | jni 0x72d0 (48 B) | Overwrites `classInitNative` (4-byte return-0 stub at start). PDU 0x31 + event 0x02 → calls `reg_notievent_track_changed_rsp` via PLT 0x3384 |
-| T4 | jni 0xac54 (148 B) | NEW LOAD #1 extension. PDU 0x20 → 3 sequential calls to `get_element_attributes_rsp` via PLT 0x3570 (idx=0/1/2, total=3) for hardcoded Title/Artist/Album |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xace8` (extends executable mapping over T4) |
+| T4 | jni 0xac54 (256 B) | NEW LOAD #1 extension. PDU 0x20 → memset(buf,0,768) + open(`/data/data/com.y1.mediabridge/files/y1-track-info`, O_RDONLY) + Linux syscall read (SVC #3, since `read` isn't in the PLT) + close + 3 sequential calls to `get_element_attributes_rsp` via PLT 0x3570 with strlen-derived lengths from the file content. Falls through gracefully to "unknow indication" if the file is missing/unreadable. Y1MediaBridge writes the file in `MediaBridgeService.broadcastTrackAndState()` on every track change. |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xad54` (extends executable mapping over T4) |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.

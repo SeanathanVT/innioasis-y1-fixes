@@ -28,12 +28,15 @@ Done:
 
 The architectural work is **done**. Remaining iterations are pure data plumbing:
 
+- [x] **iter14 attempted (path: `/data/local/tmp/y1-track-info`) — REVERTED.** Y1MediaBridge runs as uid 10000 (regular app, not system) and `/data/local/tmp/` is mode 0771 owner shell — uid 10000 has no write permission. The `FileOutputStream` failed and somehow Y1MediaBridge entered a restart loop (3 PIDs in 27s). Reverted to iter13 hardcoded strings.
+
+- [x] **iter14b: path moved to Y1MediaBridge's private files dir** (`/data/data/com.y1.mediabridge/files/y1-track-info`). Y1MediaBridge `setExecutable(true, false)` on `getFilesDir()` at service startup makes the dir traversable by other uids; the file is `setReadable(true, false)` to be world-readable. `writeTrackInfoFile()` is wrapped in `catch(Throwable)` so any failure mode never kills the service. T4 size grows from 148 → 256 bytes (longer filename string). Output md5: `b39ba1f4aca8b80b85f5001a7beff793`. **Pending hardware verification.**
+
 Pending (this document is the plan):
-- [ ] iter14: Y1MediaBridge writes `/data/local/tmp/y1-track-info` on every track change; T4 reads it via open/read/close instead of using hardcoded strings. Trampoline grows ~80 bytes for the file I/O. (~4128 bytes available in LOAD #1 padding.) File format: simple fixed-width binary (256 bytes title + 256 artist + 256 album = 768 bytes, null-padded UTF-8). Y1MediaBridge runs as system, can write to `/data/local/tmp/`.
-- [ ] iter15: outbound CHANGED notification when track actually changes (so Sonos refreshes display without re-querying). Currently T2's track_id is hardcoded `0xFF`×8 ("no track / metadata unavailable" per AVRCP spec), which keeps Sonos polling.
+- [ ] Hardware test iter14b — Sonos should display real track metadata from Y1MediaBridge instead of hardcoded "Y1 Title"/"Y1 Artist"/"Y1 Album". Y1MediaBridge stays alive (1 stable PID, not a restart loop).
+- [ ] iter15: outbound CHANGED notification when track actually changes (so Sonos refreshes display without re-querying). Currently T2's track_id is hardcoded `0xFF`×8, which keeps Sonos polling.
 - [ ] iter16: real per-track unique track_id in T2's INTERIM TRACK_CHANGED so Sonos can cache metadata properly across track changes.
-- [ ] Trampoline T3 — call `btmtk_avrcp_send_reg_notievent_playback_rsp` for inbound RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED). Optional unless Sonos blocks on it.
-- [ ] Trampoline T4 — call `btmtk_avrcp_send_get_element_attributes_rsp` for inbound GetElementAttributes (needs current track info from Y1MediaBridge — see "Track-data plumbing" below). **This is what actually puts metadata on Sonos's screen.**
+- [ ] Trampoline T3 — `btmtk_avrcp_send_reg_notievent_playback_rsp` for RegisterNotification(EVENT_PLAYBACK_STATUS_CHANGED). Optional unless Sonos blocks on it.
 
 ## Concrete addresses (stock libextavrcp_jni.so md5 `fd2ce74db9389980b55bccf3d8f15660`)
 
