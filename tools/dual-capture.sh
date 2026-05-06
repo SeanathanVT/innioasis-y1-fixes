@@ -84,11 +84,23 @@ echo "When done, press Ctrl-C to stop."
 echo
 
 # Start logcat in background. -v threadtime → per-line timestamps for cross-stream
-# correlation. Tag filter: AVRCP-related tags + Bluetooth framework + catch-all
-# silenced by '*:S'.
+# correlation. Tag filter: AVRCP-related tags + Bluetooth framework + the
+# music app's Timber-prefixed `DebugY1  <ClassName>` tags + catch-all silenced
+# by '*:S'. The Y1 music app routes everything through Timber and prepends
+# "DebugY1  " (two spaces) before the class name — see
+# Y1Application$TimberTree.smali — so the logcat tag is e.g.
+# 'DebugY1  BaseActivity', not 'DebugY1'. logcat tag filters are exact-match,
+# so we have to list each sub-tag explicitly with the embedded two spaces.
+# `BaseActivity` carries `播放状态切换 <N>` (the icon-state observable);
+# `BasePlayerActivity` carries the track-change emits Y1MediaBridge tails for
+# its broadcast path; `restore` carries Static.setPlayValue's
+# "图标更改 <state> 来源 <source>  当前播放 <Playing>" emit so we can correlate
+# state-change source.
 adb logcat -v threadtime -b main -b system -b radio \
-    DebugY1:V Y1MediaBridge:V MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V \
+    Y1MediaBridge:V MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V \
     BWS_AVRCP:V EXTADP_AVRCP:V \
+    'DebugY1  BaseActivity:V' 'DebugY1  BasePlayerActivity:V' \
+    'DebugY1  restore:V' \
     BluetoothAvrcpService:V BluetoothAvrcpServiceJni:V \
     Bluetooth:V BluetoothManagerService:V BluetoothAdapterService:V \
     bt_btif:V bt_hci:V mtkbt:V \
