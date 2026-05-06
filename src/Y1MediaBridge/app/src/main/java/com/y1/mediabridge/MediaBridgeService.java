@@ -626,7 +626,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=13 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=14 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -955,6 +955,20 @@ public class MediaBridgeService extends Service {
     }
 
     private void broadcastTrackAndState() {
+        // iter19c: write y1-track-info FIRST, before any cross-process notification
+        // dispatch. The native AVRCP T5 trampoline (libextavrcp_jni.so, reached via
+        // the patched notificationTrackChangedNative) reads y1-track-info and
+        // compares its first 8 bytes against y1-trampoline-state to decide whether
+        // to emit a CHANGED edge on the wire. T5 fires inside MtkBt's process when
+        // it receives the metachanged broadcast we send below — if writeTrackInfoFile
+        // hadn't run yet, T5 would read the previous track's bytes, see no change,
+        // and skip the CHANGED. iter19b dual-bolt-iter19b capture caught this exact
+        // race on track 4 (Jimmy Eat World) — broadcast at .821 / MtkBt receive at
+        // .836 / T5 invocation around the same window, all before our file write
+        // completed. Tracks 1-3 happened to win the race; track 4 lost it.
+        // Reorder so the file write completes before the broadcast can possibly
+        // round-trip through ActivityManager → MtkBt → handleKeyMessage → T5.
+        writeTrackInfoFile();
         Log.d(TAG, "broadcastTrackAndState title=" + safeString(mCurrentTitle)
                 + " artist=" + safeString(mCurrentArtist)
                 + " audioId=" + mCurrentAudioId
@@ -965,7 +979,6 @@ public class MediaBridgeService extends Service {
         sendMusicBroadcast("com.android.music.metachanged");
         notifyTrackChanged(mCurrentAudioId);
         notifyPlaybackStatus(mIsPlaying ? (byte) 2 : (byte) 3);
-        writeTrackInfoFile();
     }
 
     // =======================================================================
