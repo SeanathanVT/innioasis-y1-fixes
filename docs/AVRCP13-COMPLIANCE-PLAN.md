@@ -388,7 +388,6 @@ We don't have to commit to the full 1.3 build up front. Each iter ships an incre
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — proxy architecture and existing trampoline chain.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte detail.
-- [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes.
-- [`PROXY-BUILD.md`](PROXY-BUILD.md) — original iter5-iter13 build plan; superseded by this doc for future work.
+- [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes (iter5–iter13 proxy bring-up empirical history).
 - `src/patches/_trampolines.py` — current trampoline blob assembler; the file each phase will extend.
 - `src/patches/_thumb2asm.py` — Thumb-2 mini-assembler; may need new instruction encodings for some Phase A/C trampolines.

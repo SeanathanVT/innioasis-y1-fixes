@@ -6,7 +6,7 @@ This document covers the **full proxy architecture**: the trampoline chain that 
 
 For **per-patch byte details**: see [`PATCHES.md`](PATCHES.md).
 For **investigation history** (how we got here): see [`INVESTIGATION.md`](INVESTIGATION.md).
-For **iteration plans and pending work**: see [`PROXY-BUILD.md`](PROXY-BUILD.md).
+For **future spec-compliance work**: see [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md).
 
 ---
 
@@ -503,7 +503,7 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
 
 ## See also
 
-- [`PROXY-BUILD.md`](PROXY-BUILD.md) — concrete iteration plan, status checkboxes, pending work.
+- [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) — staged plan for remaining AVRCP 1.3 spec-compliance work (Phases A–E).
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture iterations and dead-end paths.
 - `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1/T1/T2/T4. Header comments and PATCHES list are the source of truth for byte-level details.

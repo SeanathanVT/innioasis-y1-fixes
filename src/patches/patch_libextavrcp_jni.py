@@ -10,7 +10,7 @@ AV/C commands through msg 519 with size=9.
 Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
 Output md5:        (recomputed each build — set OUTPUT_MD5 below)
 
---- Background (per docs/INVESTIGATION.md Trace #12 + docs/PROXY-BUILD.md) ---
+--- Background (per docs/INVESTIGATION.md Trace #12 + docs/ARCHITECTURE.md) ---
 
 The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (body at file
 0x5f0c) dispatches inbound CMD_FRAME_IND on frame size:
