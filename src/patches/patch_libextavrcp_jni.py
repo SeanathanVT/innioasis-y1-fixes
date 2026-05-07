@@ -418,6 +418,15 @@ def main() -> None:
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    # Already-at-expected-output fast path. MD5 over the whole file is
+    # strictly stronger evidence than verifying a handful of patch sites,
+    # so when the input already hashes to OUTPUT_MD5 there's nothing to do.
+    if OUTPUT_MD5 is not None and input_md5 == OUTPUT_MD5:
+        print(f"Input:  {input_path}  ({len(data):,} bytes)")
+        print(f"MD5:    {input_md5}  [OK — already at expected output]")
+        print("Nothing to do.")
+        sys.exit(0)
+
     if args.skip_md5:
         md5_tag = "(stock check skipped)"
     elif input_md5 == STOCK_MD5:
@@ -430,24 +439,31 @@ def main() -> None:
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
         print("ERROR: input is not the expected stock build.")
-        print("       This patcher targets stock libextavrcp_jni.so only — it is not")
-        print("       compatible with the output of patch_libextavrcp_jni.py (the")
-        print("       larger --avrcp set). Use --skip-md5 for alternate stock builds.")
+        if OUTPUT_MD5 is not None:
+            print(f"       Expected stock ({STOCK_MD5}) or already-patched ({OUTPUT_MD5}).")
+        print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
     patches, new_load1_size = build_patches()
 
-    pre_ok, pre_results = verify(data, "before", patches)
-    print_results("Pre-patch verification (stock)", pre_results, "before")
+    # Site-level verification is only informative when MD5 alone isn't
+    # sufficient: alternate stock build (--skip-md5) or development mode
+    # where OUTPUT_MD5 isn't pinned yet. On the normal happy path the
+    # input-MD5 and output-MD5 checks already cover every byte in the file.
+    show_sites = args.skip_md5 or OUTPUT_MD5 is None
 
-    if not pre_ok:
-        post_ok, post_results = verify(data, "after", patches)
-        print_results("Already-patched check", post_results, "after")
-        if post_ok:
-            print("\nBinary is already patched. Nothing to do.")
-            sys.exit(0)
-        print("\nERROR: patch site matches neither stock nor patched.")
-        sys.exit(1)
+    if show_sites:
+        pre_ok, pre_results = verify(data, "before", patches)
+        print_results("Pre-patch verification (stock)", pre_results, "before")
+
+        if not pre_ok:
+            post_ok, post_results = verify(data, "after", patches)
+            print_results("Already-patched check", post_results, "after")
+            if post_ok:
+                print("\nBinary is already patched. Nothing to do.")
+                sys.exit(0)
+            print("\nERROR: patch site matches neither stock nor patched.")
+            sys.exit(1)
 
     if args.verify_only:
         print("\nVerify-only — no output written.")
@@ -456,12 +472,18 @@ def main() -> None:
     for p in patches:
         data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
-    post_ok, post_results = verify(data, "after", patches)
-    print_results("Post-patch verification", post_results, "after")
+    output_md5 = md5(data)
+    output_md5_mismatch = OUTPUT_MD5 is not None and output_md5 != OUTPUT_MD5
 
-    if not post_ok:
-        print("\nERROR: post-patch verification failed — output not written.")
-        sys.exit(1)
+    # Post-patch site verification fires either when we're already in a
+    # site-aware mode (developer / alternate stock) or as a diagnostic when
+    # the produced output doesn't hash to the pinned expected value.
+    if show_sites or output_md5_mismatch:
+        post_ok, post_results = verify(data, "after", patches)
+        print_results("Post-patch verification", post_results, "after")
+        if not post_ok:
+            print("\nERROR: post-patch verification failed — output not written.")
+            sys.exit(1)
 
     if args.output:
         output_path = Path(args.output)
@@ -470,16 +492,13 @@ def main() -> None:
         output_dir.mkdir(exist_ok=True)
         output_path = output_dir / "libextavrcp_jni.so.patched"
     output_path.write_bytes(data)
-    output_md5 = md5(data)
 
-    output_md5_mismatch = False
     if OUTPUT_MD5 is None:
         out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
     elif output_md5 == OUTPUT_MD5:
         out_tag = "[OK — matches expected]"
     else:
         out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
-        output_md5_mismatch = True
 
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")
