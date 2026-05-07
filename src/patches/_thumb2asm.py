@@ -1,6 +1,6 @@
 """
-Tiny Thumb-2 assembler — only the instructions used by the iter15 AVRCP
-trampolines (T4 + extended_T2) in patch_libextavrcp_jni.py.
+Tiny Thumb-2 assembler — only the instructions used by the AVRCP
+trampoline blob (T-family) in patch_libextavrcp_jni.py.
 
 Two-pass: emit() builds the instruction stream with placeholders; resolve()
 patches in pc-relative offsets once every label has a known address.
@@ -352,7 +352,6 @@ if __name__ == "__main__":
     a.ldrb_w(0, 13, 382)
     assert a.resolve() == bytes.fromhex("9DF87E01"), a.resolve().hex()
     # `subw sp, sp, #784` → AD F2 10 3D (LE for hw1=0xF2AD hw2=0x3D10).
-    # This matches the existing iter14c T4_STUB byte sequence at offset 22.
     a = Asm(0)
     a.subw(13, 13, 784)
     assert a.resolve() == bytes.fromhex("ADF2103D"), a.resolve().hex()

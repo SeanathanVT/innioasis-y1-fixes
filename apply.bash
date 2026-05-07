@@ -38,12 +38,15 @@ FLAGS:
                      1.0->1.2 SDP, S1: replace 0x0311 entry with 0x0100
                      ServiceName, P1: force fn 0x144bc op_code dispatch
                      to msg 519 emit for VENDOR_DEPENDENT)
-                   - patch_libextavrcp_jni.py (R1 + T1/T2/T4/T5 trampoline
-                     chain in LOAD #1 page-padding extension; iter17b)
+                   - patch_libextavrcp_jni.py (R1 + T1/T2/extended_T2/T4/
+                     T5/T_charset/T_battery/T6/T8/T9 trampoline chain in
+                     LOAD #1 page-padding extension + U1 kernel auto-repeat
+                     NOP)
                    - patch_mtkbt_odex.py (F1: getPreferVersion -> 14;
-                     F2: disable() resets sPlayServiceInterface; iter17a:
-                     NOPs handleKeyMessage cardinality gate so Java fires
-                     notificationTrackChangedNative on every track change)
+                     F2: disable() resets sPlayServiceInterface; two
+                     cardinality NOPs in handleKeyMessage so Java fires
+                     notificationTrackChangedNative + notification-
+                     PlayStatusChangedNative on every Y1 broadcast)
                    - Y1MediaBridge.apk install (track_id + Title/Artist/
                      Album written to /data/data/com.y1.mediabridge/files/)
 

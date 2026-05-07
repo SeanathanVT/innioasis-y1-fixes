@@ -372,7 +372,7 @@ public class MediaBridgeService extends Service {
             // Note: IBTAvrcpMusic code 6 = play, NOT pause (differs from
             // IMediaPlaybackService which uses 6=pause, 7=play).
             //
-            // iter22d: route play/pause/resume through KEYCODE_MEDIA_PLAY_PAUSE
+            // We route play/pause/resume through KEYCODE_MEDIA_PLAY_PAUSE
             // (85) instead of distinct MEDIA_PLAY (126) / MEDIA_PAUSE (127).
             // The Y1 player's `PlayControllerReceiver` matches against
             // `KeyMap.KEY_PLAY` which is hardwired to 85 (KEYCODE_MEDIA_PLAY_PAUSE);
@@ -656,7 +656,8 @@ public class MediaBridgeService extends Service {
      *
      * Also ensure y1-trampoline-state exists, owned by us but world-rw, so
      * the BT process can stash its "last seen track_id" + "last register
-     * transId" between AVRCP exchanges. See iter15 in docs/ARCHITECTURE.md.
+     * transId" between AVRCP exchanges. See docs/ARCHITECTURE.md for the
+     * trampoline-state schema.
      *
      * Default Android filesDir mode is 0700 (owner-only). We chmod to add
      * world execute (traversal). The file we write inside is then made
@@ -704,11 +705,10 @@ public class MediaBridgeService extends Service {
             if (ACTION_SHUTDOWN.equals(action)) {
                 mIsPlaying = false;
                 mStateChangeTime = SystemClock.elapsedRealtime();
-                // iter22c: writeTrackInfoFile before any cross-process broadcast
-                // so T6 GetPlayStatus polls and T9 PLAYBACK_STATUS_CHANGED CHANGED
-                // emits both see the new playing_flag. Same fix as the
-                // onStateDetected play/pause path -- this shutdown path was
-                // covered by the same iter19c-symmetry audit.
+                // writeTrackInfoFile before any cross-process broadcast so
+                // T6 GetPlayStatus polls and T9 PLAYBACK_STATUS_CHANGED
+                // CHANGED emits both see the new playing_flag. Same
+                // ordering as the onStateDetected play/pause path.
                 writeTrackInfoFile();
                 publishState();
                 sendMusicBroadcast("com.android.music.playstatechanged");
@@ -909,18 +909,16 @@ public class MediaBridgeService extends Service {
         mPositionAtStateChange = computePosition();
         mStateChangeTime = SystemClock.elapsedRealtime();
         mIsPlaying = playing;
-        // iter22c: refresh the playing_flag byte at y1-track-info[792] BEFORE
-        // any broadcast fires. Same race fix iter19c applied to onTrackDetected
-        // / broadcastTrackAndState (track-change path), now extended to the
-        // play/pause path. Per AVRCP 1.3 §5.4.1 GetPlayStatus must report
+        // Refresh the playing_flag byte at y1-track-info[792] BEFORE any
+        // broadcast fires. Per AVRCP 1.3 §5.4.1 GetPlayStatus must report
         // the current play_status, and per §5.4.2 (Table 5.29
         // EVENT_PLAYBACK_STATUS_CHANGED) the CHANGED frame must reflect
-        // the post-edge value. Both T6 (GetPlayStatus, iter20a) and T9
-        // (PLAYBACK_STATUS_CHANGED proactive, iter22b) read y1-track-info[792]
+        // the post-edge value. Both T6 (GetPlayStatus) and T9
+        // (PLAYBACK_STATUS_CHANGED proactive) read y1-track-info[792]
         // for that source-of-truth value; without this writeTrackInfoFile()
-        // call the file stays stale across play/pause toggles within a track,
-        // and a CT polling GetPlayStatus or subscribed to event 0x01 sees the
-        // pre-edge value indefinitely.
+        // call the file stays stale across play/pause toggles within a
+        // track, and a CT polling GetPlayStatus or subscribed to event
+        // 0x01 sees the pre-edge value indefinitely.
         writeTrackInfoFile();
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");
@@ -988,19 +986,17 @@ public class MediaBridgeService extends Service {
     }
 
     private void broadcastTrackAndState() {
-        // iter19c: write y1-track-info FIRST, before any cross-process notification
-        // dispatch. The native AVRCP T5 trampoline (libextavrcp_jni.so, reached via
-        // the patched notificationTrackChangedNative) reads y1-track-info and
-        // compares its first 8 bytes against y1-trampoline-state to decide whether
-        // to emit a CHANGED edge on the wire. T5 fires inside MtkBt's process when
-        // it receives the metachanged broadcast we send below — if writeTrackInfoFile
-        // hadn't run yet, T5 would read the previous track's bytes, see no change,
-        // and skip the CHANGED. iter19b dual-bolt-iter19b capture caught this exact
-        // race on track 4 (Jimmy Eat World) — broadcast at .821 / MtkBt receive at
-        // .836 / T5 invocation around the same window, all before our file write
-        // completed. Tracks 1-3 happened to win the race; track 4 lost it.
-        // Reorder so the file write completes before the broadcast can possibly
-        // round-trip through ActivityManager → MtkBt → handleKeyMessage → T5.
+        // Write y1-track-info FIRST, before any cross-process notification
+        // dispatch. The native AVRCP T5 trampoline (libextavrcp_jni.so,
+        // reached via the patched notificationTrackChangedNative) reads
+        // y1-track-info and compares its first 8 bytes against
+        // y1-trampoline-state to decide whether to emit a CHANGED edge on
+        // the wire. T5 fires inside MtkBt's process when it receives the
+        // metachanged broadcast we send below — if writeTrackInfoFile
+        // hadn't run yet, T5 would read the previous track's bytes, see
+        // no change, and skip the CHANGED. Reorder so the file write
+        // completes before the broadcast can possibly round-trip through
+        // ActivityManager → MtkBt → handleKeyMessage → T5.
         writeTrackInfoFile();
         Log.d(TAG, "broadcastTrackAndState title=" + safeString(mCurrentTitle)
                 + " artist=" + safeString(mCurrentArtist)
@@ -1042,7 +1038,7 @@ public class MediaBridgeService extends Service {
     //   bytes 776..779  = duration_ms              u32 BE  (T6, T4 attr 7)
     //   bytes 780..783  = pos_at_state_change_ms  u32 BE  (T6, T8 event 0x05)
     //   bytes 784..787  = state_change_time_sec   u32 BE  (T6 live-position
-    //                                                       extrapolation, iter22d)
+    //                                                       extrapolation)
     //   bytes 788..791  = pad                                                    (reserved)
     //   bytes 792       = playing_flag             u8     (T6, T8/T9 event 0x01)
     //   bytes 793..799  = pad                                                    (reserved Phase C)
@@ -1057,14 +1053,15 @@ public class MediaBridgeService extends Service {
     // numeric fields are big-endian on disk; T6 byte-swaps via REV before
     // passing to btmtk_avrcp_send_get_playstatus_rsp.
     //
-    // Schema is append-only across iters so older trampolines keep working
-    // when run against a newer file (T6/T8/T9 only read up to offset 792 and
-    // are unaffected by attrs 4-7 being appended past 800).
+    // Schema is append-only so older trampolines keep working when run
+    // against a newer file (T6/T8/T9 only read up to offset 792 and are
+    // unaffected by attrs 4-7 being appended past 800).
     //
-    // Defensive: every code path is wrapped in try/catch(Throwable) so a write
-    // failure (e.g., disk-full, EACCES, weird OS state) never crashes the
-    // service. iter14 lost Y1MediaBridge to a silent crash when an EACCES
-    // exception propagated past my IOException catch.
+    // Defensive: every code path is wrapped in try/catch(Throwable) so a
+    // write failure (e.g., disk-full, EACCES, weird OS state) never
+    // crashes the service. An earlier silent IOException-vs-Throwable
+    // bug took the entire Y1MediaBridge down on EACCES; the catch is
+    // intentionally broad.
     private static final String TRACK_INFO_FILENAME = "y1-track-info";
     private static final String TRAMPOLINE_STATE_FILENAME = "y1-trampoline-state";
     private static final int TRACK_ID_LEN = 8;
@@ -1099,7 +1096,7 @@ public class MediaBridgeService extends Service {
             putUtf8Padded(buf, ARTIST_OFFSET, FIELD_LEN, mCurrentArtist);
             putUtf8Padded(buf, ALBUM_OFFSET,  FIELD_LEN, mCurrentAlbum);
 
-            // iter20a — duration_ms / position / play_status for T6 GetPlayStatus.
+            // duration_ms / position / play_status for T6 GetPlayStatus.
             // Big-endian u32 to match the existing track_id encoding; T6 byte-swaps
             // before passing to the response builder. AVRCP 1.3 §5.4.1
             // Table 5.26 notes "If TG does not support SongLength And
@@ -1175,10 +1172,10 @@ public class MediaBridgeService extends Service {
         System.arraycopy(src, 0, dst, off, n);
     }
 
-    /** Big-endian u32 store. Used by writeTrackInfoFile for the iter20a GetPlayStatus
-     *  fields (duration_ms / position_at_state_change_ms / state_change_time_sec).
-     *  Matches the existing track_id BE encoding so the T6 trampoline can REV-swap
-     *  uniformly. */
+    /** Big-endian u32 store. Used by writeTrackInfoFile for the
+     *  GetPlayStatus fields (duration_ms / position_at_state_change_ms /
+     *  state_change_time_sec). Matches the existing track_id BE encoding
+     *  so the T6 trampoline can REV-swap uniformly. */
     private static void putBE32(byte[] dst, int off, int v) {
         dst[off]     = (byte) ((v >> 24) & 0xFF);
         dst[off + 1] = (byte) ((v >> 16) & 0xFF);
@@ -1427,12 +1424,13 @@ public class MediaBridgeService extends Service {
      * The trampoline state machine in libextavrcp_jni.so (T5 / extended_T2)
      * detects "track changed since last register/notify" by comparing bytes
      * 0..7 of {@code y1-track-info} against bytes 0..7 of
-     * {@code y1-trampoline-state}. If we leave audioId at {@code -1} for every
-     * track (the iter18c symptom — readTagsDirectly success path bypasses
-     * MediaStore), bytes 0..7 stay at {@code 0xFFFFFFFFFFFFFFFF} forever and
-     * T5 never detects a change → no proactive CHANGED → CTs that don't
-     * subscribe to event 0x02 must rely on their polling cadence for any
-     * UI refresh, which is enough for mid-session track skips but not for
+     * {@code y1-trampoline-state}. If we leave audioId at {@code -1} for
+     * every track (which would happen if the readTagsDirectly success
+     * path bypassed MediaStore without computing a synthetic id), bytes
+     * 0..7 stay at {@code 0xFFFFFFFFFFFFFFFF} forever and T5 never
+     * detects a change → no proactive CHANGED → CTs that don't subscribe
+     * to event 0x02 must rely on their polling cadence for any UI
+     * refresh, which is enough for mid-session track skips but not for
      * the very first track after a connection hand-shake.
      *
      * Wire-level track_id is independently pinned to the {@code 0xFF×8}

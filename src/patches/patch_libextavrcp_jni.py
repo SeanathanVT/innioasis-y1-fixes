@@ -26,13 +26,13 @@ indication" branch. We need to handle 1.3+ commands here, since mtkbt's own
 dispatcher is compiled against AVRCP 1.0 and never invokes the response
 builder for 1.3+ COMMANDs.
 
---- Trampoline chain (R1 + U1 + T1 + T2 stub + extended_T2 + T4 + T5 + T_charset + T_battery) ---
+--- Trampoline chain ---
 
 R1 — at file 0x6538: replace `bne.n 0x65bc; movs r5, #9` (40 d1 09 25)
      with `bl.w 0x7308` (00 f0 e6 fe). Branches to T1 for all size!=3 cases.
 
-U1 (iter23) — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf
-     00 bf) inside the AVRCP uinput init (0x73c8, called via the exported
+U1 — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf 00 bf)
+     inside the AVRCP uinput init (0x73c8, called via the exported
      `avrcp_input_init` and ultimately registering the keyboard observed at
      /dev/input/event4 named "AVRCP" with BUS_BLUETOOTH=5). The NOP'd call
      is the third in a four-call UI_SET_EVBIT sequence — specifically the
@@ -40,26 +40,20 @@ U1 (iter23) — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf
      input_register_device() in the kernel never enables soft auto-repeat
      for this device, so a dropped PASSTHROUGH RELEASE no longer leads to
      the kernel auto-firing KEY_xxx REPEAT at REP_PERIOD=33ms (~25 Hz)
-     until something else cancels the held-key state. Confirmed via
-     `getevent -lt` against iter22d hardware: a single PASSTHROUGH FORWARD
-     produced 458 KEY_NEXTSONG REPEAT events at strict 40 ms intervals,
-     each of which propagated into Android's media-key dispatch and fired
-     haptic feedback (perceived as a vibration loop). The other three
+     until something else cancels the held-key state. The other three
      UI_SET_EVBIT calls (EV_KEY at 0x74d4, the EV_REL vendor typo at
      0x74e0, EV_SYN at 0x74f2) are left intact; the device still emits
-     key/syn events normally, just without kernel-side auto-repeat. This
-     is also more spec-correct: AVRCP 1.3 §4.6.1 (PASS THROUGH command,
-     defined in AV/C Panel Subunit Specification [ref 2 of AVRCP 1.3]) puts
-     the periodic-resend responsibility for held buttons on the CT — the
-     TG forwards one event per frame, not synthesizing extras at the input
-     layer. Pairs with iter21's PlayerService cap as a defense-in-depth
-     (iter21 since reverted in iter24 because U1 closed the actual root
-     cause and the in-app cap was bounding local hardware-button hold-FF).
+     key/syn events normally, just without kernel-side auto-repeat.
+     Spec-correct per AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined
+     in AV/C Panel Subunit Specification [ref 2 of AVRCP 1.3]): the CT
+     owns the periodic-resend responsibility for held buttons; the TG
+     forwards one event per frame, not synthesizing extras at the input
+     layer.
 
 T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
-     bytes): GetCapabilities (PDU 0x10) — answers with EVENT_TRACK_CHANGED
-     in the supported-events list and falls through (b.w 0x72d4) to the
-     T2 stub for everything else.
+     bytes): GetCapabilities (PDU 0x10) — answers with the supported-events
+     list (events 0x01..0x07) and falls through (b.w 0x72d4) to the T2 stub
+     for everything else.
 
 T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
      8 of 48 bytes):
@@ -70,91 +64,73 @@ T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
 extended_T2 — in LOAD #1 padding area, at vaddr derived from T4 layout.
      Handles RegisterNotification(EVENT_TRACK_CHANGED, PDU 0x31, event 0x02):
        1. Read first 8 bytes of /data/data/com.y1.mediabridge/files/y1-track-info
-          (the track_id Y1MediaBridge wrote there). On read failure: 0xFF×8.
+          (the track_id Y1MediaBridge wrote there).
        2. Write [track_id (8) || transId (1) || pad (7)] to y1-trampoline-state
-          (so T4 can later check whether the track has changed and use the
-          right transId in any CHANGED notification it emits).
-       3. Reply track_changed_rsp INTERIM with the current track_id.
-     Other PDUs/events fall through to T4 (PDU 0x20) or 0x65bc (unknown).
+          (so T4 can later check whether the track has changed).
+       3. Reply track_changed_rsp INTERIM with the 0xFF×8 sentinel
+          ("not bound to a particular media element" per AVRCP 1.3 §5.4.2
+          Table 5.30 + ESR07 §2.2 clarification of the 8-byte form
+          against AVRCP 1.5 §6.7.2).
+     PDU 0x31 + event ≠ 0x02 → b.w T8 (RegisterNotification dispatcher
+     for the rest of the events). Other PDUs fall through to T4 (PDU 0x20).
 
 T4 — in LOAD #1 padding at vaddr 0xac54.
      Handles GetElementAttributes (PDU 0x20):
-       1. memset file buffer (776 B) on stack, read y1-track-info into it.
+       1. memset file buffer (1104 B) on stack, read y1-track-info into it.
        2. Read y1-trampoline-state (16 B) into a state buffer on stack.
        3. If state[0..7] != file[0..7] (track changed since we last said so):
-            - Emit track_changed_rsp CHANGED (iter19a: with arg1=0)
+            - Emit track_changed_rsp CHANGED with arg1=0
             - Update state[0..7] = file[0..7] and write back to state file
-       4. Reply 3× get_element_attributes_rsp for Title (file+8) / Artist
-          (file+264) / Album (file+520).
-     iter19a: T4's pre-check now also dispatches PDU 0x17 → T_charset
-     and PDU 0x18 → T_battery before falling through to "unknow indication".
+       4. Reply 7× get_element_attributes_rsp covering all AVRCP 1.3 §5.3.4
+          attribute IDs 0x01..0x07: Title (file+8) / Artist (file+264) /
+          Album (file+520) / TrackNumber (file+800) / TotalNumberOfTracks
+          (file+816) / Genre (file+848) / PlayingTime (file+832).
+     T4's pre-check also dispatches PDU 0x17 → T_charset, PDU 0x18 →
+     T_battery, PDU 0x30 → T6 before falling through to "unknow indication".
 
-T_charset — iter19a, in LOAD #1 padding past the T4/extended_T2/T5 blob.
-     Handles InformDisplayableCharacterSet (PDU 0x17). Calls
-     inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success). Bare 8-byte
-     ack frame; the spec doesn't require us to honor the CT's charset
-     declaration, just to acknowledge it. A strict CT sends this once
-     at connect; iter19a stops the previous msg=520 NOT_IMPLEMENTED reject
-     that was likely degrading the strict CT's metadata-fetch behavior.
+T5 — proactive TRACK_CHANGED. Entered via `b.w T5` from the patched first
+     instruction of `notificationTrackChangedNative` (libextavrcp_jni.so:
+     0x3bc0). Reads y1-track-info + y1-trampoline-state, on track-id
+     divergence emits track_changed_rsp CHANGED with the 0xFF×8 sentinel
+     and updates state.
 
-T_battery — iter19a, structurally identical to T_charset but for
-     InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via PLT 0x357c.
-     CT notifies us of its battery state; we ack. Y1 has no CT-battery API
-     surface to feed the value into; the ack alone is what the spec requires.
+T_charset — InformDisplayableCharacterSet (PDU 0x17) → inform_charsetset_rsp
+     via PLT 0x3588 with arg1=0 (success). Bare 8-byte ack frame; the spec
+     doesn't require us to honor the CT's charset declaration, just to
+     acknowledge it. A strict CT sends this once at connect; without the
+     ack we'd return msg=520 NOT_IMPLEMENTED, which strict CTs interpret
+     as the TG distrusting subsequent metadata.
 
-The T4 + extended_T2 + T5 + T_charset + T_battery blob is built
-dynamically by _trampolines.py using a tiny Thumb-2 assembler
-(_thumb2asm.py). LOAD #1's filesz/memsz is extended to cover the blob,
-which lets the kernel map it as R+E at runtime — the 4276-byte
-page-alignment gap between LOAD #1's stock end (0xac54) and LOAD #2's
-start (0xbc08) is zero padding, so we can grow LOAD #1 freely up to
-that limit.
+T_battery — InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via
+     PLT 0x357c. Structurally identical to T_charset; the CT notifies us of
+     its battery state and we ack. Y1 has no CT-battery API surface to
+     feed the value into; the ack alone is what the spec requires.
 
---- History ---
+T6 — GetPlayStatus (PDU 0x30) → get_playstatus_rsp via PLT 0x3564. Reads
+     y1-track-info[776..795] (duration_ms / pos_at_state_change_ms /
+     state_change_time_sec / playing_flag, all big-endian on disk),
+     byte-swaps the u32s to host order via Thumb-2 REV. When playing,
+     calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` to extrapolate live
+     position from the saved freeze-point.
 
-iter4 (J1 cmp lr,#8 → cmp lr,#9 at 0x6526): rolled back. Routed
-VENDOR_DEPENDENT through size==8 PASSTHROUGH dispatch and didn't reach
-the right Java callback. See docs/INVESTIGATION.md Trace #12.
+T8 — RegisterNotification dispatcher for events ≠ 0x02. INTERIM-only (the
+     proactive CHANGED edges live in T5 / T9). Reads y1-track-info for
+     event payloads and dispatches on event_id, calling the matching
+     reg_notievent_*_rsp PLT entry for events 0x01/0x03/0x04/0x05/0x06/0x07.
 
-iter5..iter13: T1 + T2 + T4 progressively built. iter13 hardware-verified
-Title + Artist + Album displayed on permissive CTs — but only for the first track:
-permissive CTs cache metadata by TRACK_CHANGED INTERIM track_id, and our T2 always
-sent 0xFF×8.
+T9 — proactive PLAYBACK_STATUS_CHANGED. Entered via `b.w T9` from the
+     patched first instruction of `notificationPlayStatusChangedNative`
+     (libextavrcp_jni.so:0x3c88). Reads y1-track-info[792] (play_status),
+     compares against y1-trampoline-state[9] (last_play_status), emits
+     CHANGED via reg_notievent_playback_rsp on edge.
 
-iter14/14b/14c: Y1MediaBridge wrote real metadata into a file; T4 reads
-it. iter14b found the right path (/data/data/com.y1.mediabridge/files/);
-iter14c added diagnostic logging that confirmed T4 was firing on track
-change but permissive CTs still showed the cached first-track metadata.
-
-iter15: state-tracked CHANGED notifications. extended_T2 saves the
-RegisterNotification transId; T4 detects track_id changes against a
-state file and emits a CHANGED with the saved transId before replying
-to GetElementAttributes. INTERIM/CHANGED both carried the file's real
-track_id. Hardware-tested 2026-05-06 — DEADLOCKED permissive CTs: returning a
-real track_id flips permissive CTs into "stable identity, only refresh on
-CHANGED" mode; T4 fires only when permissive CTs poll; permissive CTs won't poll until
-it sees a CHANGED. 14 minutes of zero AVRCP traffic confirmed.
-
-iter16: same architecture as iter15 but INTERIM/CHANGED's track_id
-field is hardcoded to the 0xFF×8 sentinel ("not bound to a particular
-media element" per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 clarification
-of the 8-byte form against AVRCP 1.5 §6.7.2). State file's bytes 0..7 still
-hold the file's last-synced track_id — that's what T4 compares against
-to know when to emit CHANGED. Restores iter14c-style polling
-behaviour and adds CHANGED edges on real track changes so permissive CTs
-invalidates its 0xFF×8-keyed cache and re-renders.
-
-iter17a/b: proactive CHANGED via T5 + Java-side cardinality bypass +
-single-frame multi-attribute response fix (T4 calling convention).
-
-iter19a (Phase A0 of docs/AVRCP13-COMPLIANCE-PLAN.md): adds T_charset
-and T_battery for PDUs 0x17 and 0x18 (CT→TG informational pair, both
-spec-mandated, both rejected pre-iter19a → caused strict CTs failure per
-the strict-CT iter18d capture), and fixes the existing T2/T5 wire shape
-for TRACK_CHANGED notifications (was passing r1=transId which hits the
-response builder's reject-shape path; now r1=0 for spec-correct
-emission of reasonCode + event_id + track_id). Compliance scorecard
-goes 3→5 mandatory PDUs handled and 2→5 spec-correct.
+The trampoline blob (extended_T2 + T4 + T5 + T_charset + T_battery + T6 +
+T8 + T9 + path strings + sentinel data) is built dynamically by
+_trampolines.py using a tiny Thumb-2 assembler (_thumb2asm.py). LOAD #1's
+filesz/memsz is extended to cover the blob, which lets the kernel map it
+as R+E at runtime — the 4276-byte page-alignment gap between LOAD #1's
+stock end (0xac54) and LOAD #2's start (0xbc08) is zero padding, so we
+can grow LOAD #1 freely up to that limit.
 
 Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so
@@ -174,20 +150,20 @@ from _trampolines import build as build_trampolines, T4_VADDR
 from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
 from _thumb2asm import Asm
 
-# iter17a: notificationTrackChangedNative lives at vaddr 0x3bc0 in
-# libextavrcp_jni.so. Java's BTAvrcpMusicAdapter.handleKeyMessage (with the
-# cardinality if-eqz NOPed by patch_mtkbt_odex.py's iter17a entry) calls this
-# native on every track-change broadcast from Y1MediaBridge. We replace its
-# entry instruction with `b.w T5` so it lands in our state-aware trampoline.
+# notificationTrackChangedNative lives at vaddr 0x3bc0 in libextavrcp_jni.so.
+# Java's BTAvrcpMusicAdapter.handleKeyMessage (with the cardinality if-eqz
+# NOPed by patch_mtkbt_odex.py's TRACK_CHANGED entry) calls this native on
+# every track-change broadcast from Y1MediaBridge. We replace its entry
+# instruction with `b.w T5` so it lands in our state-aware trampoline.
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
-# iter22b: notificationPlayStatusChangedNative at vaddr 0x3c88. Same shape as
-# the TRACK_CHANGED hook above, paired with the iter22b cardinality NOP at
-# 0x3c4fe in MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's
-# nested sparse-switch). Replace entry instruction with `b.w T9` so every
+# notificationPlayStatusChangedNative at vaddr 0x3c88. Same shape as the
+# TRACK_CHANGED hook above, paired with the cardinality NOP at 0x3c4fe in
+# MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's nested
+# sparse-switch). Replace entry instruction with `b.w T9` so every
 # Y1MediaBridge `playstatechanged` broadcast lands in T9, which fires
 # PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
-# Closes the AVRCP 1.3 §5.4.2 spec gap left by iter20b's INTERIM-only T8.
+# Closes the AVRCP 1.3 §5.4.2 spec gap that would otherwise be INTERIM-only.
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
@@ -197,21 +173,17 @@ OUTPUT_MD5 = "bd3554d38486856cfbb17a37c02fd0a0"  # T4 packs all 7 AVRCP 1.3 §5.
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
 # bytes). Advertises every event we actually handle in the trampoline chain:
-#   0x01 PLAYBACK_STATUS_CHANGED       (T8, iter20b)
+#   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
 #   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4/T5 CHANGED)
-#   0x03 TRACK_REACHED_END             (T8, iter20b — INTERIM only)
-#   0x04 TRACK_REACHED_START           (T8, iter20b — INTERIM only)
-#   0x05 PLAYBACK_POS_CHANGED          (T8, iter20b — INTERIM only)
-#   0x06 BATT_STATUS_CHANGED           (T8, iter20b — INTERIM only, canned)
-#   0x07 SYSTEM_STATUS_CHANGED         (T8, iter20b — INTERIM only, canned)
+#   0x03 TRACK_REACHED_END             (T8 — INTERIM only)
+#   0x04 TRACK_REACHED_START           (T8 — INTERIM only)
+#   0x05 PLAYBACK_POS_CHANGED          (T8 — INTERIM only)
+#   0x06 BATT_STATUS_CHANGED           (T8 — INTERIM only, canned NORMAL)
+#   0x07 SYSTEM_STATUS_CHANGED         (T8 — INTERIM only, canned POWERED_ON)
 # Per the spec-compliance rule (feedback_avrcp_spec_compliance.md), advertise
 # only what we actually implement. 0x08 PLAYER_APPLICATION_SETTING_CHANGED is
 # Phase C territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
-# unadvertised until we ship that. Pre-iter20b the array was just `02` count=1
-# for historical reasons (permissive CTs-era exploration; iter10 reduced from 5 events
-# to 1 because permissive CTs abandoned the registration sequence on the first
-# NOT_IMPLEMENTED). Now that we actually handle the events we advertise,
-# strict CTs that gate on coverage will subscribe to all 7.
+# unadvertised until we ship that.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -219,11 +191,11 @@ T1_TRAMPOLINE = bytes([
     0x04, 0xA3,                               # adr r3, 0x7324
     0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
     0x00, 0x21,                               # movs r1, #0
-    0x07, 0x22,                               # movs r2, #7   (events count = 7, iter20b)
+    0x07, 0x22,                               # movs r2, #7   (events count = 7)
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00,  # iter20b — events 0x01..0x07
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00,  # advertised events 0x01..0x07
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40
@@ -279,8 +251,8 @@ LOAD1_OLD_SIZE = 0xac54
 
 
 def _native_track_changed_stub(t5_vaddr: int) -> bytes:
-    """iter17a: replace the first 4 bytes of notificationTrackChangedNative
-    with `b.w T5`. The remaining 196 bytes of the original function body are
+    """Replace the first 4 bytes of notificationTrackChangedNative with
+    `b.w T5`. The remaining 196 bytes of the original function body are
     unreachable but left in place (they form valid but dead code; harmless)."""
     a = Asm(NATIVE_TRACK_CHANGED_VADDR)
     a.labels["target"] = t5_vaddr
@@ -289,8 +261,8 @@ def _native_track_changed_stub(t5_vaddr: int) -> bytes:
 
 
 def _native_play_status_changed_stub(t9_vaddr: int) -> bytes:
-    """iter22b: replace the first 4 bytes of notificationPlayStatusChangedNative
-    with `b.w T9`. The remaining bytes of the original function body are
+    """Replace the first 4 bytes of notificationPlayStatusChangedNative with
+    `b.w T9`. The remaining bytes of the original function body are
     unreachable but left in place (valid dead code; harmless)."""
     a = Asm(NATIVE_PLAY_STATUS_CHANGED_VADDR)
     a.labels["target"] = t9_vaddr
@@ -329,22 +301,21 @@ def build_patches() -> tuple[list[dict], int]:
             "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
         },
         {
-            # U1 (iter23) — disable kernel auto-repeat on the AVRCP /dev/uinput
-            # device. The init at 0x73c8 (called via exported avrcp_input_init,
-            # which opens "/dev/uinput" @ 0xa849 and registers a keyboard with
-            # name "AVRCP" @ 0x828b, BUS_BLUETOOTH=5) issues four UI_SET_EVBIT
+            # U1 — disable kernel auto-repeat on the AVRCP /dev/uinput device.
+            # The init at 0x73c8 (called via exported avrcp_input_init, which
+            # opens "/dev/uinput" @ 0xa849 and registers a keyboard with name
+            # "AVRCP" @ 0x828b, BUS_BLUETOOTH=5) issues four UI_SET_EVBIT
             # ioctls in sequence: EV_KEY, EV_REL (vendor typo, harmless),
             # EV_REP (0x14), EV_SYN. Without EV_REP in the device's evbit,
             # input_register_device() in the kernel won't enable
             # input_enable_softrepeat(), so a dropped PASSTHROUGH RELEASE no
             # longer leads to a 25 Hz KEY_xxx REPEAT cascade and the haptic
-            # loop on permissive/strict CTs goes away. NOPing the blx ioctl@plt
-            # at 0x74e8 is the most surgical option — register/stack contracts
+            # loop on strict CTs goes away. NOPing the blx ioctl@plt at
+            # 0x74e8 is the most surgical option — register/stack contracts
             # are untouched; the next ioctl reloads r1/r2 cleanly. See
-            # docs/INVESTIGATION.md "iter23 / R1 — kernel auto-repeat" for the
-            # getevent(8) trace that drove this (471 KEY_NEXTSONG REPEAT events
-            # at exact 40 ms intervals after a single DOWN).
-            "name": "U1 (iter23): NOP blx ioctl@plt for UI_SET_EVBIT(EV_REP) at 0x74e8 — disable kernel auto-repeat on AVRCP uinput",
+            # docs/INVESTIGATION.md "kernel auto-repeat" for the getevent(8)
+            # trace that drove this.
+            "name": "U1: NOP blx ioctl@plt for UI_SET_EVBIT(EV_REP) at 0x74e8 — disable kernel auto-repeat on AVRCP uinput",
             "offset": 0x74e8,
             "before": bytes([0xFC, 0xF7, 0xB4, 0xE8]),  # blx ioctl@plt
             "after":  bytes([0x00, 0xBF, 0x00, 0xBF]),  # nop ; nop (Thumb-2)
@@ -357,7 +328,7 @@ def build_patches() -> tuple[list[dict], int]:
         },
         {
             "name": (
-                f"iter17a: notificationTrackChangedNative @ 0x{NATIVE_TRACK_CHANGED_VADDR:x}"
+                f"notificationTrackChangedNative @ 0x{NATIVE_TRACK_CHANGED_VADDR:x}"
                 f" → b.w T5 (0x{t5_vaddr:x}) — proactive CHANGED on track change"
             ),
             "offset": NATIVE_TRACK_CHANGED_VADDR,
@@ -366,7 +337,7 @@ def build_patches() -> tuple[list[dict], int]:
         },
         {
             "name": (
-                f"iter22b: notificationPlayStatusChangedNative @"
+                f"notificationPlayStatusChangedNative @"
                 f" 0x{NATIVE_PLAY_STATUS_CHANGED_VADDR:x} → b.w T9 (0x{t9_vaddr:x})"
                 f" — proactive PLAYBACK_STATUS_CHANGED on play/pause edge"
             ),

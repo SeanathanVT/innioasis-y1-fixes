@@ -111,7 +111,7 @@ In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `
 
 T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` and `y1-trampoline-state`, on track-id divergence emits `reg_notievent_track_changed_rsp` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=&sentinel_ffx8`, updates state, returns `jboolean(1)`.
 
-Fired on every Y1MediaBridge `com.android.music.metachanged` broadcast (after the MtkBt.odex iter17a cardinality NOP wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable.
+Fired on every Y1MediaBridge `com.android.music.metachanged` broadcast (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable.
 
 ### T_charset — InformDisplayableCharacterSet (PDU 0x17)
 
@@ -153,7 +153,7 @@ T5's structural twin for event 0x01. Entered via `b.w T9` from the patched first
 | before | `2D E9 F3 41` | function prologue |
 | after  | `[b.w T9 emitted by patcher]` | branch to T9 trampoline |
 
-T9 reads `y1-track-info[792]` (current play_status) and compares against `y1-trampoline-state[9]` (`last_play_status`, previously a pad byte). On inequality, emits `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Updates state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex iter22b cardinality NOP wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers.
+T9 reads `y1-track-info[792]` (current play_status) and compares against `y1-trampoline-state[9]` (`last_play_status`, previously a pad byte). On inequality, emits `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Updates state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers.
 
 ### U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` keyboard
 

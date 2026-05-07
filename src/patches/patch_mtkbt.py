@@ -45,7 +45,7 @@ P1 — Force fn 0x144bc's op_code dispatch to always take the PASSTHROUGH branch
 
 Pairs with patch_libextavrcp_jni.py (handles the inbound-COMMAND response
 side via the trampoline chain in libextavrcp_jni.so) and patch_mtkbt_odex.py
-(F1/F2/iter17a Java-side patches).
+(F1/F2 + cardinality NOP Java-side patches).
 
 Usage:
     python3 patch_mtkbt.py mtkbt

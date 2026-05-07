@@ -1,6 +1,6 @@
 # AVRCP Metadata Architecture
 
-How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer Controllers, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt.py` V1/V2, with ESR07 §2.1 / Erratum 4969 SDP-record clarifications applied — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31, plus the spec-mandated CT→TG informational PDUs `InformDisplayableCharacterSet` 0x17 and `InformBatteryStatusOfCT` 0x18 added in iter19a, plus `GetPlayStatus` 0x30 added in iter20a. AVRCP 1.4's browsing channel, Now Playing list, advanced player-application settings, SetAddressedPlayer 0x60, and SetAbsoluteVolume 0x50 are not implemented; F1's MtkBt-internal-version flip to "1.4" is a dispatcher-unblock flag, not a wire-shape upgrade. See [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0 for spec citation discipline.)
+How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) to peer Controllers, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt.py` V1/V2, with ESR07 §2.1 / Erratum 4969 SDP-record clarifications applied — and implement the 1.3 metadata feature set: `GetCapabilities` 0x10, `InformDisplayableCharacterSet` 0x17, `InformBatteryStatusOfCT` 0x18, `GetElementAttributes` 0x20 (all 7 §5.3.4 attributes), `GetPlayStatus` 0x30, `RegisterNotification` 0x31 with INTERIM coverage of events 0x01..0x07 and proactive CHANGED-on-edge for 0x01 and 0x02. AVRCP 1.4's browsing channel, Now Playing list, advanced player-application settings, SetAddressedPlayer 0x60, and SetAbsoluteVolume 0x50 are not implemented; F1's MtkBt-internal-version flip to "1.4" is a dispatcher-unblock flag, not a wire-shape upgrade. See [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0 for spec citation discipline.)
 
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.3 responses on the wire.
 
@@ -218,7 +218,7 @@ That's why T4's fall-through pre-amble is:
 0xac64: b.w 0x65bc                ; → original unknow indication
 ```
 
-iter7 only restored r0 → msg=520 still didn't flow because pass_through_rsp got `lr=0x653c` (the stale bl return address) as the SIZE arg and silently dropped. iter8/9 added the lr restore → msg=520 flows correctly. The side-effect of this fix was that the AVRCP service stopped restart-looping every 2 seconds (because it was no longer waiting on responses that never came), which made play/pause work for the first time end-to-end.
+Both `r0` and `lr` need to be restored before falling through. Restoring only `r0` leaves `pass_through_rsp` reading `lr=0x653c` (the stale bl return address) as its SIZE arg and silently dropping the response; the AVRCP service then restart-loops every 2 seconds waiting on responses that never come. Restoring `lr` from the saved canary at `[sp+374]` makes msg=520 flow correctly.
 
 ---
 
@@ -293,11 +293,11 @@ send:
 So the function emits an IPC msg=540 frame when:
 - `(arg2 + 1) == arg3 AND arg3 != 0` — last attribute in a multi-attribute response
 - OR `arg1 != 0` — explicit finalize call
-- OR `arg3 == 0` — single-shot / legacy mode (this is what iter11/12 accidentally hit)
+- OR `arg3 == 0` — single-shot / legacy mode (one frame per attribute)
 
 It only **accumulates without emitting** when `arg1 == 0 AND arg3 != 0 AND (arg2+1) < arg3`.
 
-**transId** is NOT one of the args. The function reads it from `conn[17]` (line 0x21f2: `ldrb r2, [r0, #17]`) and copies into the response's wire frame. So passing `arg2 = transId` (as iter11/12 did) was just abusing arg2 as an attribute-INDEX with the value of transId — Title got written to slot[transId] of the buffer with all other slots zero, and the CT found the one valid attribute and used it.
+**transId** is NOT one of the args. The function reads it from `conn[17]` (line 0x21f2: `ldrb r2, [r0, #17]`) and copies into the response's wire frame. Passing `transId` as `arg2` would be miscoding the attribute INDEX as the transId value — Title would land in `slot[transId]` of the response buffer with all other slots zero, leaving the CT to scan for the one valid attribute.
 
 ### Calling pattern for a 7-attribute response (current)
 
@@ -315,8 +315,6 @@ send_rsp(conn, 0, idx=6, total=7, attr=0x07, len, "180000");         // (idx+1==
 Per AVRCP 1.3 §5.3.4 a missing attribute is signalled by `AttributeValueLength=0` — Y1MediaBridge writes empty UTF-8 string slots when the underlying tag is absent (e.g., a flat audio file with no Genre tag), strlen returns 0, and the response builder packs an attribute header with no value bytes for that entry.
 
 **One** msg=540 IPC frame outbound containing all seven attributes.
-
-> **iter15/16/17a regression (2026-05-06):** the dynamically-assembled T4 was passing `arg2 = transId, arg3 = 0` — taking the `arg3 == 0` legacy path on every call and emitting 3 separate msg=540 frames per query. CTs rendered each one in turn (visible flicker: Title appearing intermittently while Artist/Album swapped in/out). Diagnosed from the logcat ratio of 1299 msg=540 outbound to ~433 GetElementAttributes inbound during the iter17a hardware test. Fixed in iter17b by restoring the iter13 calling pattern above.
 
 ### Calling pattern for `…send_reg_notievent_track_changed_rsp` (PLT 0x3384, used by T2)
 
@@ -337,16 +335,16 @@ Cross-referenced with `notificationTrackChangedNative` at libextavrcp_jni.so:0x3
 void btmtk_avrcp_send_get_capabilities_rsp(
     void* conn,         // r0 = r5+8
     uint8_t cap_id,     // r1 = 0 (we always pass 0 — likely capability-id type)
-    uint8_t count,      // r2 = events count (5 in iter5/6/9, 1 in iter10+)
+    uint8_t count,      // r2 = events count (currently 7)
     void* events_ptr    // r3 = pointer to N-byte events array
 );
 ```
 
-iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `02` (TRACK_CHANGED only, count=1) because some CTs abort the entire registration loop on the first NOT_IMPLEMENTED reply — a side-effect discovered empirically once iter9's "unknow indication" path actually started flowing rejects. iter20b later restored a 7-event advertisement [0x01..0x07] paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects no longer fire for advertised events.
+T1 advertises 7 events `[0x01..0x07]`, paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects don't fire for any advertised event. Per the spec-compliance rule we advertise only what we actually implement; event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) is unadvertised because Phase C (PApp Settings PDUs) is not shipped.
 
-### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, planned T6 — Phase B)
+### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, used by T6)
 
-Discovered 2026-05-06 from disassembly of `libextavrcp.so:0x2354` plus cross-reference with the stock JNI caller `_Z46BluetoothAvrcpService_getPlayerstatusRspNativeP7_JNIEnvP8_jobjectaiia` at `libextavrcp_jni.so:0x5680`.
+From disassembly of `libextavrcp.so:0x2354` plus cross-reference with the stock JNI caller `_Z46BluetoothAvrcpService_getPlayerstatusRspNativeP7_JNIEnvP8_jobjectaiia` at `libextavrcp_jni.so:0x5680`.
 
 ```c
 void btmtk_avrcp_send_get_playstatus_rsp(
@@ -415,23 +413,22 @@ All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anyt
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
 | extended_T2 + T4 + T5 + T_charset + T_battery + T6 + T8 + T9 | jni 0xac54 (1480 B) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** (reactive RegisterNotification): reads track_id from y1-track-info into a stack buffer, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM with `arg1=0` + REASON_INTERIM + **&sentinel_ffx8**. PDU 0x31 + event ≠ 0x02 → b.w T8. **T4** (reactive GetElementAttributes): emits track_changed_rsp CHANGED on track-id edge, then **7-attr** get_element_attributes_rsp covering all AVRCP 1.3 §5.3.4 attribute IDs 0x01..0x07 (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Numeric attrs (4/5/7) are pre-formatted as ASCII decimal strings on the Y1MediaBridge side so the trampoline stays a uniform strlen+memcpy loop. **T5** (proactive on Y1 track change): emits CHANGED on track-id divergence. **T_charset / T_battery**: PDU 0x17 / 0x18 ack trampolines. **T6**: PDU 0x30 GetPlayStatus — reads `y1-track-info[776..795]` (duration / position / playing_flag, BE on disk → REV → host order), calls `get_playstatus_rsp` PLT 0x3564, with `clock_gettime(CLOCK_BOOTTIME)` live-position extrapolation when playing. **T8**: RegisterNotification dispatcher for events ≠ 0x02. Reads `y1-track-info` for event payloads (play_status from [792], position from [780..783]), dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT for events 0x01 (PLAYBACK_STATUS_CHANGED → 0x339c), 0x03/0x04 (TRACK_REACHED_END/START → 0x3378/0x336c), 0x05 (PLAYBACK_POS_CHANGED → 0x3360), 0x06 (BATT_STATUS_CHANGED → 0x3354, canned `0x00 NORMAL`), 0x07 (SYSTEM_STATUS_CHANGED → 0x3348, canned `0x00 POWER_ON`). Unknown events fall through to "unknow indication". INTERIM-only via T8 (proactive CHANGED for event 0x01 lives in T9, below). **T9**: proactive PLAYBACK_STATUS_CHANGED on Y1 play/pause edge — entered via `b.w T9` from the patched `notificationPlayStatusChangedNative` first instruction (libextavrcp_jni.so:0x3c88, paired with the sswitch_18a cardinality NOP at MtkBt.odex:0x3c4fe). Reads `y1-track-info[792]` (play_status), compares against `y1-trampoline-state[9]` (last_play_status), emits CHANGED via `reg_notievent_playback_rsp` PLT 0x339c on edge, writes state back. T4's pre-check: 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, else fall through to "unknow indication". |
-| iter17a JNI native stub | jni 0x3bc0 (4 B) | First instruction of `notificationTrackChangedNative` rewritten to `b.w T5`. The Java side (after the MtkBt.odex iter17a NOP) calls this native on every Y1MediaBridge track-change broadcast; T5 emits CHANGED on the AVRCP wire asynchronously to any inbound query. The remaining 196 B of the original native body are unreachable. |
+| Track-change native stub | jni 0x3bc0 (4 B) | First instruction of `notificationTrackChangedNative` rewritten to `b.w T5`. The Java side (after the MtkBt.odex sswitch_1a3 cardinality NOP) calls this native on every Y1MediaBridge track-change broadcast; T5 emits CHANGED on the AVRCP wire asynchronously to any inbound query. The remaining 196 B of the original native body are unreachable. |
+| Play-status native stub | jni 0x3c88 (4 B) | First instruction of `notificationPlayStatusChangedNative` rewritten to `b.w T9`. Paired with the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe so every Y1MediaBridge `playstatechanged` broadcast lands in T9. |
 | LOAD#1 filesz | jni 0x64 | `0xac54 → 0xb21c` (1480 B blob). |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
 
-The JNI trampoline blob is built dynamically by `src/patches/_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good bytes from earlier iterations (b.w, blx, addw, movw, ldrb.w, add immediate T3).
+The JNI trampoline blob is built dynamically by `src/patches/_trampolines.py` using a tiny Thumb-2 assembler in `src/patches/_thumb2asm.py`. Both files are imported by `patch_libextavrcp_jni.py` at run time. Self-tests in `_thumb2asm.py` verify several encodings against known-good byte sequences (b.w, blx, addw, movw, ldrb.w, add immediate T3).
 
-**Wire-level `track_id` history (iter15 → iter16 → iter19b → iter19d):**
+**Wire-level `track_id` choice.**
 
-- **iter15** sent the file's real `track_id` in INTERIM. Permissive CTs read it and switched to "stable identity, refresh on CHANGED" mode (the alternative-mode reading of AVRCP 1.3 §5.4.2 Table 5.30's `Identifier` field, where a stable TG identity keys CT-side metadata caching). T4 was reactive only — fires on inbound `GetElementAttributes` — so it would never produce a CHANGED on its own; the CT waited for a CHANGED that wouldn't come unless it polled, but in "refresh-on-CHANGED" mode it wouldn't poll. Hardware test 2026-05-06 confirmed the deadlock: 14 minutes of zero AVRCP traffic post-INTERIM.
-- **iter16** pinned the wire-level field to the sentinel `0xFF×8` (AVRCP 1.3 §5.4.2 Table 5.30 — "If no track currently selected, then return 0xFFFFFFFF in the INTERIM response"; the printed text in 1.3 is a typo, the field is 8 bytes; ESR07 §2.2 / AVRCP 1.5 §6.7.2 clarifies as `0xFFFFFFFFFFFFFFFF`. Semantic: "not bound to a particular media element"). CTs treat this as "no stable identity, refresh on each event" and keep polling. The state file's bytes 0..7 still hold the real last-synced `track_id` for T4's change detection logic; only the on-the-wire payload changed.
-- **iter17a** added T5 — a proactive CHANGED-emit trampoline reached via the patched `notificationTrackChangedNative`. Every Y1MediaBridge track-change broadcast now produces a CHANGED on the wire regardless of whether the CT is polling. This eliminated iter15's deadlock pre-condition.
-- **iter19b** experimentally dropped the sentinel; restored iter15's "real `track_id` on the wire" behavior. Theoretically safe now because T5 supplies the proactive CHANGED edges that iter15 lacked. Targeted strict CT classes that gate metadata refresh on the `track_id` actually changing — they had been ignoring every iter16/17/19a CHANGED because they all carried the same `0xFF×8`.
-- **iter19d** REVERTED iter19b. Hardware test against a high-subscribe-rate CT class (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for the capture path) showed the CT reacted to real track_ids in INTERIM by entering a tight `RegisterNotification` subscribe storm at ~90 Hz from connection setup forward (3401 inbound `size:13` over 38 seconds, ~7 ms inter-frame). The flood saturated AVCTP and dropped PASSTHROUGH release frames: any held-key event became a "key held down" cascade — held NEXT/PREV fast-forwarded the track at ~32× speed, held PLAY/PAUSE produced haptic-stuck-on symptoms. The strict-CT UI-side block (the original motivation for iter19b) wasn't actually fixed by switching to real track_ids anyway — strict CTs re-fetched on the first CHANGED only and ignored every subsequent one. Sentinel restored per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 / AVRCP 1.5 §6.7.2 (spec-permissible "no media bound" mode). The strict-CT-refresh-on-CHANGED problem moves to iter20+ (Phase A1 + Phase B per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) — `PLAYBACK_STATUS_CHANGED` notification subscription + `GetPlayStatus` PDU, which are the spec-mandated paths most CTs actually use regardless of `track_id`).
+The wire-level `Identifier` field in TRACK_CHANGED notifications is pinned to the `0xFF×8` "not bound to a particular media element" sentinel per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 / AVRCP 1.5 §6.7.2 clarification (`0xFFFFFFFFFFFFFFFF`, 8 bytes — the printed `0xFFFFFFFF` in 1.3 is a known typo). This keeps CTs in "no stable identity, refresh on each event" mode rather than the alternative "stable identity, only refresh on CHANGED" mode that some CTs adopt when given a real synthetic id. The latter mode causes high-subscribe-rate CT classes to enter a tight `RegisterNotification` storm at ~90 Hz that saturates AVCTP and drops PASSTHROUGH release frames; the sentinel mode avoids that entirely while still being spec-conformant.
 
-The state file at `y1-trampoline-state[0..7]` still holds the real synthetic audioId from `Y1MediaBridge.mCurrentAudioId` (= `path.hashCode() | 0x100000000L`, iter18d) — that's used internally by T4 and T5 for change detection. Only the on-the-wire `track_id` field is the sentinel.
+Per-track CHANGED edge information is delivered by T4/T5 detecting divergence between `y1-track-info[0..7]` and `y1-trampoline-state[0..7]` (comparison runs on real track_ids; the emitted wire packet uses the sentinel). The state file at `y1-trampoline-state[0..7]` holds the real synthetic audioId from `Y1MediaBridge.mCurrentAudioId` (= `path.hashCode() | 0x100000000L`) for that internal change-detection logic.
+
+See [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for the empirical observations that drove this design choice.
 
 ### Y1MediaBridge ↔ trampoline file contract
 
@@ -457,8 +454,9 @@ Y1MediaBridge's `prepareTrackInfoDir()` is what ensures the BT process can reach
 |--------|---------|------|---------|
 | `testparmnum` | 0x7308 | 48 bytes | T1 (40 bytes used) |
 | `classInitNative` | 0x72d0 | 48 bytes | T2 stub (8 bytes used; remaining 40 zero-filled, unreachable) |
-| `notificationTrackChangedNative` | 0x3bc0 | 200 bytes | iter17a stub (4 bytes `b.w T5` used; remaining 196 unreachable) |
-| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | T4 (~328 B) + extended_T2 (~140 B) + T5 (~180 B) + T_charset (14 B) + T_battery (14 B) + T6 (~84 B) + T8 (~210 B) + path strings (~108 B) + sentinel (8 B) = 1104 B used (iter20b), ~3172 free |
+| `notificationTrackChangedNative` | 0x3bc0 | 200 bytes | T5 entry stub (4 bytes `b.w T5` used; remaining 196 unreachable) |
+| `notificationPlayStatusChangedNative` | 0x3c88 | 200 bytes | T9 entry stub (4 bytes `b.w T9` used; remaining unreachable) |
+| LOAD #1 padding | 0xac54..0xbc07 | 4276 bytes | trampoline blob (1480 B), ~2540 free |
 | `getPlayerId` | 0x7300 | 4 bytes | (preserved, returns 0 — not touched) |
 | `getMaxPlayerNum` | 0x7304 | 4 bytes | (preserved, returns 20 — not touched) |
 

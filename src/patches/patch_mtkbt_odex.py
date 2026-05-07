@@ -3,7 +3,7 @@
 patch_mtkbt_odex.py — Patch stock MtkBt.odex -> MtkBt.odex.patched
 
 Stock binary md5:  11566bc23001e78de64b5db355238175
-Output md5:        fa2e34b178bee4dfae4a142bc5c1b701  (iter22b)
+Output md5:        fa2e34b178bee4dfae4a142bc5c1b701
 
 ODEX structure:
   ODEX header (0x28 bytes): magic "dey\n036\0", dex_offset=0x28, dex_length=0x98490
@@ -29,7 +29,7 @@ ODEX structure:
   Confirmed working in logcat: getPreferVersion:14, Support AVRCP1.4,
   _activate_1req version:14 sdpfeature:35.
 
---- Patch 3: iter17a — cardinality bypass for proactive TRACK_CHANGED ---
+--- Patch 3: cardinality bypass for proactive TRACK_CHANGED ---
 
   In BTAvrcpMusicAdapter.handleKeyMessage(Message)V, the sparse-switch case
   for msg.what:34 (ACTION_REG_NOTIFY) → arg1=2 (TRACK_CHANGED) goes:
@@ -46,11 +46,11 @@ ODEX structure:
   tracking). So Java's view is permanently `cardinality:0` and the
   notification path always exits early.
 
-  iter17a NOPs out the if-eqz (4 bytes → 4 zero bytes = two `nop` opcodes).
+  This patch NOPs out the if-eqz (4 bytes → 4 zero bytes = two `nop` opcodes).
   Java now always invokes notificationTrackChangedNative when Y1MediaBridge
-  fires a track-change broadcast. The libextavrcp_jni.so half of iter17a
-  redirects that native to a state-aware T5 trampoline that emits
-  track_changed_rsp CHANGED via the same PLT entry our T4 uses.
+  fires a track-change broadcast. The libextavrcp_jni.so side redirects that
+  native to a state-aware T5 trampoline that emits track_changed_rsp CHANGED
+  via the same PLT entry our T4 uses.
 
 --- Patch 2: sPlayServiceInterface reset in BluetoothAvrcpService.disable() ---
 
@@ -101,7 +101,7 @@ import zlib
 from pathlib import Path
 
 STOCK_MD5  = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5 = "fa2e34b178bee4dfae4a142bc5c1b701"  # iter22b — sswitch_18a cardinality NOP for PLAYBACK_STATUS_CHANGED
+OUTPUT_MD5 = "fa2e34b178bee4dfae4a142bc5c1b701"  # F1 + F2 + sswitch_18a/sswitch_18a cardinality NOPs for TRACK_CHANGED + PLAYBACK_STATUS_CHANGED
 
 DEX_OFFSET     = 0x28
 ADLER_FILE_OFF = 0x30
@@ -114,15 +114,15 @@ PATCHES = [
         "after":  bytes([0x0e]),
     },
     {
-        "name":   "[iter17a] handleKeyMessage TRACK_CHANGED cardinality bypass (NOP if-eqz)",
+        "name":   "handleKeyMessage TRACK_CHANGED cardinality bypass (NOP if-eqz at 0x3c530)",
         "offset": 0x3c530,
         "before": bytes([0x38, 0x05, 0xda, 0xff]),  # if-eqz v5, +-38 (-> :cond_184)
         "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
     },
     {
-        "name":   "[iter22b] handleKeyMessage PLAYBACK_STATUS_CHANGED cardinality bypass (NOP if-eqz)",
+        "name":   "handleKeyMessage PLAYBACK_STATUS_CHANGED cardinality bypass (NOP if-eqz at 0x3c4fe)",
         # sswitch_18a / event 0x01 case in handleKeyMessage's nested
-        # sparse-switch (the same idiom as iter17a's NOP on event 0x02).
+        # sparse-switch (same idiom as the TRACK_CHANGED NOP above).
         # Without this NOP the JNI's notificationPlayStatusChangedNative is
         # never invoked because the Java BitSet of registered events is
         # permanently empty (TG bookkeeping isn't updated by our

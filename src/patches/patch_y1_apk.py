@@ -173,12 +173,9 @@ APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"  # apktool 2.9.3
 #     require reworking the patcher's DEX-extraction step.
 #   - apktool 2.9.3's bundled smali assembler (smali 2.5.x, baksmali 2.5.x)
 #     does NOT support Java 22+ JVMs reliably — historical observation:
-#     against Java 25, it silently dropped one of iter21's two FF/RW lambda
-#     edits during DEX assembly while preserving the other. iter21 was
-#     reverted in iter24 (kernel-level fix in `patch_libextavrcp_jni.py`'s
-#     U1 patch closed the AVRCP-side root cause it was guarding against),
-#     so this is no longer load-bearing. Java 22+ may still be problematic
-#     for unrelated reasons; pin to 11–21 if you hit assembler weirdness.
+#     against Java 25, it silently dropped DEX-assembly edits in pairs of
+#     similar lambda methods while preserving one of them. Pin to Java
+#     11–21 if you hit assembler weirdness.
 #
 # Practical recommendation: run the patcher under Java 11–21. If your flash
 # box is on Java 22+, install OpenJDK 21 alongside (Debian/Ubuntu:
@@ -376,12 +373,10 @@ java = find_java()
 print(f"  Java:     {java}")
 
 # JVM version detection. apktool 2.9.3's bundled smali assembler is
-# JVM-version-sensitive on Java 22+ -- historical observation: Java 25
-# silently dropped one of iter21's two FF/RW lambda edits during DEX
-# reassembly while preserving the other. iter21 was reverted in iter24
-# (kernel-level fix in patch_libextavrcp_jni.py's U1 patch), so we no
-# longer have a known smali pattern that triggers this. Warn anyway --
-# Java 22+ may still have other compat issues with apktool 2.9.3's smali.
+# JVM-version-sensitive on Java 22+ -- Java 25 has been observed to
+# silently drop one of a pair of similar lambda-method edits during DEX
+# reassembly while preserving the other. Warn so the user can pin to
+# Java 11-21 if they hit unexpected behavior.
 try:
     java_ver_proc = subprocess.run([java, "--version"], capture_output=True, text=True)
     java_ver_str = (java_ver_proc.stdout or java_ver_proc.stderr).strip().splitlines()
@@ -841,7 +836,7 @@ with open(repo_path, 'w') as f:
 print("  Patch C: Y1Repository -- songDao field changed from private to public")
 
 # ============================================================
-# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE/STOP coverage  (iter22d, refined iter25, +STOP iter27)
+# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE/STOP coverage
 # ============================================================
 #
 # Background
@@ -870,7 +865,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
 # /dev/uinput) maps these to the Linux input event keycodes (verified against
-# /system/usr/keylayout/AVRCP.kl + getevent capture on iter23 hardware):
+# /system/usr/keylayout/AVRCP.kl + getevent capture):
 #   - 0x44 PLAY  → Linux KEY_PLAYCD (200)  → Android KEYCODE_MEDIA_PLAY (126)
 #   - 0x45 STOP  → Linux KEY_STOPCD (166)  → Android KEYCODE_MEDIA_STOP (86)
 #   - 0x46 PAUSE → Linux KEY_PAUSECD (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
@@ -908,23 +903,20 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       mask defaults p2=true on every observed callsite); we pass true
 #       explicitly to match.
 #
-#   - KEYCODE_MEDIA_STOP (0x56, 86) — discrete STOP (iter27):
+#   - KEYCODE_MEDIA_STOP (0x56, 86) — discrete STOP:
 #       call `stop()V` (no args). AV/C Panel Subunit Spec STOP (op_id 0x45)
 #       transitions the player to STOPPED state. PlayerService.stop() is
 #       `public final stop()V .locals 4` and calls IjkMediaPlayer.stop() +
 #       reset() + MediaPlayer.stop() — releasing the media position.
 #       Spec-mandated for any TG advertising PASS THROUGH Cat 1, per the
 #       AVRCP ICS Table 8 item 20 (`docs/spec/AVRCP.ICS.p17.pdf` §1.5).
-#       Pre-iter27, KEYCODE_MEDIA_STOP fell through to the receiver's
-#       no-match path → silently dropped.
 #
-# iter22d's first attempt routed all three keycodes to playOrPause()
-# (toggle). That was empirically wrong for a strict CT: hardware capture
-# (see `docs/INVESTIGATION.md` "Hardware test history per CT") showed a
-# strict CT issuing 5 discrete PLAY (0x44) presses while Y1 was already
-# PLAYING — playOrPause() toggled to PAUSED on each press, the opposite
-# of what the CT asked for, and the CT's UI reported the button as
-# unresponsive. iter25 splits the join label into three discrete arms.
+# Why the four-arm split: routing all three discrete keycodes to
+# playOrPause() (toggle) was empirically wrong for a strict CT. Hardware
+# capture (see `docs/INVESTIGATION.md` "Hardware test history per CT")
+# showed a strict CT issuing 5 discrete PLAY (0x44) presses while Y1 was
+# already PLAYING — toggle would invert the CT's intent on each press, and
+# the CT's UI reported the button as unresponsive.
 #
 # Stock smali at PlayControllerReceiver.smali:cond_c:
 #   :cond_c
@@ -934,7 +926,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   if-ne v2, p1, :cond_e
 #   ... (playOrPause action — single arm)
 #
-# Patched (iter27):
+# Patched:
 #   :cond_c
 #   sget-object p1, KeyMap;->INSTANCE
 #   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
@@ -945,7 +937,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   const/16 p1, 0x7f
 #   if-eq v2, p1, :cond_pause_strict         # MEDIA_PAUSE (127) → pause()
 #   const/16 p1, 0x56
-#   if-eq v2, p1, :cond_stop_strict          # MEDIA_STOP (86) → stop()  [iter27]
+#   if-eq v2, p1, :cond_stop_strict          # MEDIA_STOP (86) → stop()
 #   goto :cond_e                             # nothing matched, keep walking
 #
 #   :cond_play_pause_toggle
@@ -971,7 +963,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   invoke-virtual {p1, v0, v3}, PlayerService;->pause(IZ)V
 #   goto :goto_5
 #
-#   :cond_stop_strict                        # iter27
+#   :cond_stop_strict
 #   sget-object p1, Y1Application$Companion
 #   invoke-virtual {p1}, ->getPlayerService()...
 #   move-result-object p1
@@ -1120,7 +1112,7 @@ play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 
 with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
-    "  Patch E (iter27): PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
+    "  Patch E: PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
     "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AV/C Panel Subunit op 0x44]; "
     "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per op 0x46]; "
     "KEYCODE_MEDIA_STOP (86) → stop() [discrete STOP per op 0x45 — ICS Table 8 item 20 mandatory]"
