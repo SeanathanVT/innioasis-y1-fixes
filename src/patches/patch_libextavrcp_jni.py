@@ -26,10 +26,33 @@ indication" branch. We need to handle 1.3+ commands here, since mtkbt's own
 dispatcher is compiled against AVRCP 1.0 and never invokes the response
 builder for 1.3+ COMMANDs.
 
---- Trampoline chain (R1 + T1 + T2 stub + extended_T2 + T4 + T5 + T_charset + T_battery) ---
+--- Trampoline chain (R1 + U1 + T1 + T2 stub + extended_T2 + T4 + T5 + T_charset + T_battery) ---
 
 R1 — at file 0x6538: replace `bne.n 0x65bc; movs r5, #9` (40 d1 09 25)
      with `bl.w 0x7308` (00 f0 e6 fe). Branches to T1 for all size!=3 cases.
+
+U1 (iter23) — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf
+     00 bf) inside the AVRCP uinput init (0x73c8, called via the exported
+     `avrcp_input_init` and ultimately registering the keyboard observed at
+     /dev/input/event4 named "AVRCP" with BUS_BLUETOOTH=5). The NOP'd call
+     is the third in a four-call UI_SET_EVBIT sequence — specifically the
+     one passing EV_REP (0x14). Dropping that claim means
+     input_register_device() in the kernel never enables soft auto-repeat
+     for this device, so a dropped PASSTHROUGH RELEASE no longer leads to
+     the kernel auto-firing KEY_xxx REPEAT at REP_PERIOD=33ms (~25 Hz)
+     until something else cancels the held-key state. Confirmed via
+     `getevent -lt` against iter22d hardware: a single PASSTHROUGH FORWARD
+     produced 458 KEY_NEXTSONG REPEAT events at strict 40 ms intervals,
+     each of which propagated into Android's media-key dispatch and fired
+     haptic feedback (perceived as a vibration loop). The other three
+     UI_SET_EVBIT calls (EV_KEY at 0x74d4, the EV_REL vendor typo at
+     0x74e0, EV_SYN at 0x74f2) are left intact; the device still emits
+     key/syn events normally, just without kernel-side auto-repeat. This
+     is also more spec-correct: AVRCP 1.4 §6.4.1.4 requires the CT to
+     periodically re-send PASSTHROUGH PRESS frames during a held button,
+     so we should be forwarding one event per frame, not synthesizing
+     extras at the input layer. Pairs with iter21's PlayerService cap as
+     a defense-in-depth.
 
 T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
      bytes): GetCapabilities (PDU 0x10) — answers with EVENT_TRACK_CHANGED
@@ -165,7 +188,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "e2790518d258e87326c8a65ad7b8f5c8"  # iter22d — T6 live position extrapolation via clock_gettime(CLOCK_BOOTTIME)
+OUTPUT_MD5 = "e920b136fdf28b95d95d17ae6e383709"  # iter23 — U1 NOPs UI_SET_EVBIT(EV_REP) at 0x74e8 (kernel auto-repeat off on AVRCP uinput)
 
 # ---------------------------------------------------------------- T1
 
@@ -301,6 +324,27 @@ def build_patches() -> tuple[list[dict], int]:
             "offset": 0x6538,
             "before": bytes([0x40, 0xD1, 0x09, 0x25]),  # bne.n 0x65bc; movs r5, #9
             "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
+        },
+        {
+            # U1 (iter23) — disable kernel auto-repeat on the AVRCP /dev/uinput
+            # device. The init at 0x73c8 (called via exported avrcp_input_init,
+            # which opens "/dev/uinput" @ 0xa849 and registers a keyboard with
+            # name "AVRCP" @ 0x828b, BUS_BLUETOOTH=5) issues four UI_SET_EVBIT
+            # ioctls in sequence: EV_KEY, EV_REL (vendor typo, harmless),
+            # EV_REP (0x14), EV_SYN. Without EV_REP in the device's evbit,
+            # input_register_device() in the kernel won't enable
+            # input_enable_softrepeat(), so a dropped PASSTHROUGH RELEASE no
+            # longer leads to a 25 Hz KEY_xxx REPEAT cascade and the haptic
+            # loop on permissive/strict CTs goes away. NOPing the blx ioctl@plt
+            # at 0x74e8 is the most surgical option — register/stack contracts
+            # are untouched; the next ioctl reloads r1/r2 cleanly. See
+            # docs/INVESTIGATION.md "iter23 / R1 — kernel auto-repeat" for the
+            # getevent(8) trace that drove this (471 KEY_NEXTSONG REPEAT events
+            # at exact 40 ms intervals after a single DOWN).
+            "name": "U1 (iter23): NOP blx ioctl@plt for UI_SET_EVBIT(EV_REP) at 0x74e8 — disable kernel auto-repeat on AVRCP uinput",
+            "offset": 0x74e8,
+            "before": bytes([0xFC, 0xF7, 0xB4, 0xE8]),  # blx ioctl@plt
+            "after":  bytes([0x00, 0xBF, 0x00, 0xBF]),  # nop ; nop (Thumb-2)
         },
         {
             "name": "T1: GetCapabilities trampoline (testparmnum) at 0x7308",

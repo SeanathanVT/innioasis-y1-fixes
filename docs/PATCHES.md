@@ -10,6 +10,7 @@ Byte-level detail for every patch shipped (or attempted) by this repo. Patches a
 | **S1** | `mtkbt` | Replace the `0x0311` SupportedFeatures attribute slot at `0x0f97ec` with a `0x0100` ServiceName entry pointing at the existing "Advanced Audio" SDP string. Pixel-1.3-shape SDP record. |
 | **P1** | `mtkbt` | Force fn `0x144bc` op_code dispatch to PASSTHROUGH branch at `0x14528` (`cmp r3, #0x30 → b.n`). Routes inbound VENDOR_DEPENDENT frames into the `bl 0x10404` msg-519 emit path so the JNI trampolines see them. |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` and LOAD #1 page-padding extension. R1 redirects size!=3 dispatch to T1; T1 handles GetCapabilities; T2 stub bridges to extended_T2 (RegisterNotification(TRACK_CHANGED)) which falls through to T4. T4's pre-check dispatches PDU 0x20 → main GetElementAttributes body, PDU 0x17 → T_charset, PDU 0x18 → T_battery, else "unknow indication". T5 (iter17a) is invoked via the patched `notificationTrackChangedNative` and emits proactive CHANGED on Y1MediaBridge track changes. T_charset/T_battery (iter19a) ack the spec-mandated CT→TG informational PDUs. See [`ARCHITECTURE.md`](ARCHITECTURE.md). |
+| **U1** | `libextavrcp_jni.so` | iter23 — at file `0x74e8`: NOP the third `blx ioctl@plt` in the `avrcp_input_init` (real init at `0x73c8`, called from `BluetoothAvrcpService_activate_1req` and `wakeupListenerNative`). That ioctl is `UI_SET_EVBIT(EV_REP)` — claiming EV_REP causes the kernel to enable `input_enable_softrepeat()` for the AVRCP `/dev/input/event4` virtual keyboard with default `REP_DELAY=250ms, REP_PERIOD=33ms`. Confirmed cause of the haptic-loop symptom: a single PASSTHROUGH PRESS whose RELEASE is dropped → `KEY_NEXTSONG DOWN` injected → kernel auto-fires `KEY_NEXTSONG REPEAT` at 25 Hz indefinitely → each REPEAT propagates to InputDispatcher → media-key broadcast → haptic feedback. Without EV_REP in `dev->evbit`, the kernel never schedules the soft-repeat timer and only the actual PRESS frames the CT sends generate events. Other three UI_SET_EVBIT calls (EV_KEY at `0x74d4`, EV_REL vendor-typo at `0x74e0`, EV_SYN at `0x74f2`) are left intact. Pairs with iter21's `PlayerService$startFastForward$1` 5-second cap as defense-in-depth. |
 | **F1** | `MtkBt.odex` | At `0x3e0ea`: `getPreferVersion()` returns `14` (AVRCP 1.4) instead of `10` (BlueAngel internal code for AVRCP 1.3). |
 | **F2** | `MtkBt.odex` | At `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false`. Fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts. |
 | **iter17a (odex)** | `MtkBt.odex` | At `0x03c530`: NOP the `if-eqz v5, :cond_184` cardinality gate in `BTAvrcpMusicAdapter.handleKeyMessage` TRACK_CHANGED case so `notificationTrackChangedNative` fires on every Y1MediaBridge track-change broadcast. Pairs with the libextavrcp_jni.so iter17a/T5 trampoline. |
@@ -204,6 +205,36 @@ Trampoline blob 892 → 1104 B; LOAD #1 ends at 0xb0a4 (was 0xafd0).
 **Compliance scorecard:** PDU 0x31 event coverage 1/8 → 7/8 mandatory events; T1 `EventsSupported` matches actual coverage. Mandatory PDUs handled stays at 6 (no new PDUs — this is just expanding 0x31 sub-coverage).
 
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `28d0129cedeb06e7ba233190f92eefde` (iter20b).
+
+---
+
+**Iter23 (current): U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` virtual keyboard.** A single-instruction NOP, separate from the trampoline chain, but inside the same binary so it ships through `patch_libextavrcp_jni.py`.
+
+**U1 — `UI_SET_EVBIT(EV_REP)` NOP** at file `0x74e8` (4 bytes):
+
+| | bytes | mnemonic |
+|---|---|---|
+| before | `fc f7 b4 e8` | `blx ioctl@plt` |
+| after  | `00 bf 00 bf` | `nop ; nop` (Thumb-2) |
+
+The `avrcp_input_init` real body at file offset `0x73c8` opens `/dev/uinput` (string at `0xa849`, fallback paths follow), `strncpy`s the device name `"AVRCP"` (string at `0x828b`) into a `uinput_user_dev` struct, sets `id.bustype = BUS_BLUETOOTH (5)` at `0x749a`, and issues a four-call `UI_SET_EVBIT` sequence:
+
+| Offset | Bytes | Decoded |
+|---|---|---|
+| `0x74cc` | `23 49 01 22 20 46 7e 44 fc f7 be e8` | `UI_SET_EVBIT, EV_KEY (1)` |
+| `0x74d8` | `20 49 02 22 20 46 fc f7 ba e8` | `UI_SET_EVBIT, EV_REL (2)` (vendor typo, harmless) |
+| **`0x74e2`** | **`1e 49 14 22 20 46 fc f7 b4 e8`** | **`UI_SET_EVBIT, EV_REP (0x14)` ← U1 target** |
+| `0x74ec` | `1b 49 00 22 20 46 fc f7 b0 e8` | `UI_SET_EVBIT, EV_SYN (0)` |
+
+NOPing only the third call drops `EV_REP` from `dev->evbit` without disturbing the other event-class claims. The `r0 = fd / r1 = UI_SET_EVBIT cmd / r2 = 0x14` setup before the NOP'd `blx` is harmless — the next iteration at `0x74ec` reloads `r1` and `r2` cleanly. Verified by reading the patched output: surrounding bytes are byte-identical to stock except for the 4-byte NOP.
+
+**Why this fixes the haptic loop:** Linux's `input_register_device()` calls `input_enable_softrepeat(dev, 250, 33)` only if `EV_REP` is set in `dev->evbit`. By NOT claiming EV_REP, the kernel never schedules the soft-repeat timer for this device. Confirmed source via `getevent -lt` against iter22d hardware: a single PASSTHROUGH FORWARD (`0x4B`) press whose RELEASE was dropped produced **458 `KEY_NEXTSONG REPEAT` events at strict 40 ms intervals** (matching `REP_PERIOD=33ms` plus polling jitter) until something else cancelled the held-key state. Each REPEAT propagated to InputDispatcher → media-key broadcast → haptic feedback (perceived as a continuous 25 Hz vibration).
+
+**Spec alignment:** AVRCP 1.4 §6.4.1.4 explicitly requires the CT to periodically re-send PASSTHROUGH PRESS frames during a held button — the TG should forward one event per frame, not synthesize extras at the input layer. Disabling EV_REP makes us spec-correct.
+
+**Pairs with iter21** (`PlayerService$startFastForward$1` 50-iter × 100 ms cap) as defense-in-depth: U1 prevents the held-key state at the kernel input layer; iter21 catches the case where Y1 still enters its FF/RW seek loop from any other source.
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `e920b136fdf28b95d95d17ae6e383709` (iter23, U1 only on top of iter22d).
 
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
