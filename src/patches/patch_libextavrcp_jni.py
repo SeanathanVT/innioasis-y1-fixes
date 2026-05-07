@@ -156,7 +156,7 @@ from _thumb2asm import Asm
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "0349474128bb83cbcd5487a8b956c74d"  # iter19b — real track_id in INTERIM/CHANGED (was 0xFF×8 sentinel)
+OUTPUT_MD5 = "b96978584bcd05762610b8b1131a6125"  # iter19d (= iter19a) — sentinel restored after iter19b's Samsung TV flood
 
 # ---------------------------------------------------------------- T1
 

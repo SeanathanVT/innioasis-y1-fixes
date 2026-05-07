@@ -54,7 +54,7 @@ a reject-shape path that omits the event payload. We had been hitting the
 reject path on every TRACK_CHANGED notification — Sonos polled regardless,
 masking the bug; the Bolt depends on the CHANGED edge and didn't.
 
-iter16 → iter19b history of the wire-level track_id field:
+iter16 → iter19d history of the wire-level track_id field:
   - iter15: real track_id in INTERIM — flipped Sonos into "stable identity,
     only refresh on CHANGED" mode. T4 was reactive only (fires on inbound
     GetElementAttributes); Sonos waited for CHANGED that never came because
@@ -68,13 +68,23 @@ iter16 → iter19b history of the wire-level track_id field:
   - iter19a: r1=0 fix on track_changed_rsp arg layout (was r1=transId,
     hitting the response builder's reject-shape path; spec-correct emission
     requires r1=0 = success path).
-  - iter19b: real track_id (back to iter15's idea) BUT with T5 in place to
-    preempt the iter15 deadlock — Sonos can enter "refresh-on-CHANGED" mode
-    safely because T5 provides the CHANGED edges proactively. Bolt EV is
-    a strict CT that only re-fetches when the CHANGED's track_id differs
-    from what it cached; the sentinel kept Bolt in a one-shot fetch mode
-    (first CHANGED honored, all subsequent ignored). Real track_ids let
-    Bolt see real changes per CHANGED edge.
+  - iter19b: real track_id (back to iter15's idea) — T5 preempts iter15's
+    Sonos deadlock, AND Bolt-EV class strict CTs need real track_ids to
+    re-fetch on CHANGED. Targeted Bolt's "ignored every CHANGED after the
+    first" behavior.
+  - iter19d: REVERTED iter19b. Hardware test against Samsung The Frame Pro
+    (/work/logs/dual-tv-iter19c-playpause/) showed real track_ids triggered
+    a tight RegisterNotification subscribe storm at ~90 Hz from connection
+    setup forward — 3401 size:13 inbound in 38 seconds, sustained. The
+    flood saturated AVCTP, causing PASSTHROUGH release frames to drop:
+    user pressed Next on the TV remote, music app saw "key held down",
+    fast-forwarded the track at ~32× speed (six seekTo() calls each
+    +3280ms in track over 600ms wall clock); same shape as the Play/Pause
+    "vibrate-loop" reported earlier. Bolt's UI-side block (the original
+    motivation) wasn't actually fixed by iter19b anyway, so the revert
+    loses nothing for Bolt. Sentinel restored. Bolt becomes an iter20+
+    Phase A1+B problem (PLAYBACK_STATUS_CHANGED + GetPlayStatus per
+    docs/AVRCP13-COMPLIANCE-PLAN.md).
 
 Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   r5 = JNI instance pointer (conn buffer = r5+8)
@@ -268,16 +278,22 @@ def _emit_t4(a: Asm) -> None:
     a.beq("t4_no_change")
 
     a.label("t4_track_changed")
-    # track_changed_rsp(conn, 0, REASON_CHANGED, &file_track_id)
+    # track_changed_rsp(conn, 0, REASON_CHANGED, &SENTINEL_FFx8)
     # iter19a: r1=0 (was state[8] transId). r1 is the response builder's
     # reject_code arg, not transId — see extended_T2's matching comment.
-    # iter19b: track_id is &file[0..7] (the real 8 B we just read from
-    # y1-track-info), not the iter16 0xFF×8 sentinel. See extended_T2's
-    # matching comment for the rationale.
+    # iter19d: revert iter19b — back to the iter16 0xFF×8 sentinel. iter19b
+    # had switched to the real track_id from y1-track-info[0..7] to fix the
+    # Bolt's "ignored every CHANGED after the first" behavior, but it
+    # destabilized the Samsung TV: ~90 Hz RegisterNotification subscribe
+    # storm from the moment of pairing, AVCTP saturation, and PASSTHROUGH
+    # release frames being dropped (held-key fast-forward on every Next/Prev
+    # press, vibrate-loop on Play/Pause). Bolt's UI-side block was never
+    # actually fixed by iter19b anyway. Sentinel restored; Bolt becomes an
+    # iter20+ Phase A1+B problem.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.add_sp_imm(3, T4_OFF_FILE_TID)          # r3 = &file[0..7] = real track_id
+    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF) — see top-of-file
     a.blx_imm(PLT_track_changed_rsp)
 
     # Update state in-memory: state[0..7] = file[0..7]
@@ -444,19 +460,21 @@ def _emit_extended_t2(a: Asm) -> None:
     # spec-correct path that emits reasonCode + event_id + track_id; r1!=0
     # writes a reject-shape frame that omits the event payload. transId is
     # auto-extracted from conn[17] regardless.
-    # iter19b: track_id is the real 8 B from y1-track-info (we already have
-    # it on the stack at T2_OFF_TID), not the iter16 0xFF×8 sentinel. The
-    # sentinel was iter15's deadlock-avoidance: real track_id flipped Sonos
-    # into "stable identity, refresh on CHANGED" mode, but T4 was reactive
-    # only so no CHANGED ever fired (Sonos wouldn't poll). T5 (iter17a)
-    # makes CHANGED proactive — every Y1 track change emits a CHANGED on
-    # the wire regardless of CT polling — so real track_ids are safe again,
-    # and strict CTs (Bolt EV) that gate refresh on the track_id actually
-    # changing now see real changes per CHANGED edge.
+    # iter19d: revert iter19b — back to the iter16 0xFF×8 sentinel. The
+    # Samsung TV reacted to real track_ids in INTERIM by entering a tight
+    # ~90 Hz RegisterNotification subscribe loop from connection setup
+    # forward. The flood saturated AVCTP and dropped PASSTHROUGH release
+    # frames, so any user button press from the TV remote became a held-key
+    # event — Next/Prev fast-forwarded the track at ~32× speed, Play/Pause
+    # produced a vibrate-loop. Bolt's UI-side metadata block (the original
+    # motivation for iter19b) wasn't actually fixed by switching to real
+    # track_ids, so reverting loses nothing for Bolt; Bolt becomes an
+    # iter20+ Phase A1+B problem (PLAYBACK_STATUS_CHANGED + GetPlayStatus).
+    # See top-of-file "Wire-level track_id history" for the full path.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_INTERIM)
-    a.add_sp_imm(3, T2_OFF_TID)               # r3 = &(real 8 B track_id on stack)
+    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF) — see top-of-file
     a.blx_imm(PLT_track_changed_rsp)
 
     # Restore stack and branch to epilogue.
@@ -585,12 +603,15 @@ def _emit_t5(a: Asm) -> None:
     # ---- emit CHANGED via track_changed_rsp ----
     # r0 = conn buffer (= struct + 8); r1 = 0 (success — see top-of-file
     # iter19a note about the response builder's r1 dispatch); r2 = REASON_CHANGED;
-    # r3 = &file_tid_buf (the real 8 B we just read from y1-track-info into
-    # T5's stack frame at sp+16; iter19b — was &sentinel_ffx8 in iter19a).
+    # r3 = &sentinel_ffx8 (iter19d revert; iter19b had pointed at the on-stack
+    # file_tid_buf at sp+16, but the Samsung TV reacted to real track_ids
+    # with a ~90 Hz RegisterNotification subscribe storm that saturated AVCTP
+    # and dropped PASSTHROUGH release frames — see extended_T2 INTERIM's
+    # matching comment for the full diagnosis).
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.add_sp_imm(3, 16)                       # r3 = &file_tid_buf (sp+16)
+    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
     a.blx_imm(PLT_track_changed_rsp)
 
     # ---- update state in-memory: state[0..7] = file_tid[0..7] ----
