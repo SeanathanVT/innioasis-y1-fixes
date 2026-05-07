@@ -70,7 +70,8 @@ DEPLOYMENT
 WHAT THIS PATCH DOES
 --------------------
   Four smali patches (A/B/C for Artist→Album navigation, E for discrete
-  PASSTHROUGH PLAY/PAUSE coverage), no new files, no Manifest changes.
+  PASSTHROUGH PLAY/PAUSE/STOP coverage per AVRCP 1.3 §4.6.1 + ICS Table 8),
+  no new files, no Manifest changes.
 
   Patch A -- ArtistsActivity.confirm():
     When the user taps an artist row (isShowArtists()==true,
@@ -326,7 +327,7 @@ def get_apk_info(apk_path: str):
 
 # -- Step 0: Pre-flight -------------------------------------------------------
 parser = argparse.ArgumentParser(
-    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + discrete PASSTHROUGH PLAY/PAUSE).",
+    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + discrete PASSTHROUGH PLAY/PAUSE/STOP).",
     epilog="See the docstring at the top of this script for the full per-patch detail."
 )
 parser.add_argument(
@@ -918,10 +919,11 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       no-match path → silently dropped.
 #
 # iter22d's first attempt routed all three keycodes to playOrPause()
-# (toggle). That was empirically wrong for a strict CT: dual-bolt-iter23
-# capture showed Bolt issuing 5 discrete PLAY (0x44) presses while Y1 was
-# already PLAYING — playOrPause() toggled to PAUSED on each press, the
-# opposite of what Bolt asked for, and Bolt's UI reported the button as
+# (toggle). That was empirically wrong for a strict CT: hardware capture
+# (see `docs/INVESTIGATION.md` "Hardware test history per CT") showed a
+# strict CT issuing 5 discrete PLAY (0x44) presses while Y1 was already
+# PLAYING — playOrPause() toggled to PAUSED on each press, the opposite
+# of what the CT asked for, and the CT's UI reported the button as
 # unresponsive. iter25 splits the join label into three discrete arms.
 #
 # Stock smali at PlayControllerReceiver.smali:cond_c:
