@@ -82,7 +82,19 @@ Other PDU/event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset
 
 ### T4 — GetElementAttributes (PDU 0x20)
 
-In the LOAD #1 padding region, reached from extended_T2's PDU-0x20 dispatch arm. Three sequential calls to `btmtk_avrcp_send_get_element_attributes_rsp` via PLT `0x3570` with `arg2=0/1/2`, `arg3=3` — only the third call (where `arg2+1 == arg3`) emits a frame, packing all three attributes (Title/Artist/Album from `y1-track-info[8..775]`) into a single 644-byte response.
+In the LOAD #1 padding region, reached from extended_T2's PDU-0x20 dispatch arm. Seven sequential calls to `btmtk_avrcp_send_get_element_attributes_rsp` via PLT `0x3570` with `arg2=0..6`, `arg3=7` — only the seventh call (where `arg2+1 == arg3`) emits a frame, packing all seven AVRCP 1.3 §5.3.4 attributes into a single response:
+
+| attr_id | Name | Source slot in `y1-track-info` |
+|---|---|---|
+| 0x01 | Title | `[8..263]` |
+| 0x02 | Artist | `[264..519]` |
+| 0x03 | Album | `[520..775]` |
+| 0x04 | TrackNumber | `[800..815]` (UTF-8 ASCII decimal) |
+| 0x05 | TotalNumberOfTracks | `[816..831]` (UTF-8 ASCII decimal) |
+| 0x06 | Genre | `[848..1103]` |
+| 0x07 | PlayingTime | `[832..847]` (UTF-8 ASCII decimal milliseconds) |
+
+All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is signalled by `AttributeValueLength=0`, which is what an empty string slot produces (strlen returns 0, the response builder packs the 8-byte attribute header with no value bytes). The numeric attrs (4/5/7) are stored pre-formatted as ASCII strings on the Y1MediaBridge side rather than binary u16/u32 with a Thumb-2 itoa, keeping the trampoline a uniform strlen+memcpy loop.
 
 T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-trampoline-state[0..7]`) and emits a reactive CHANGED via `reg_notievent_track_changed_rsp` before the GetElementAttributes response, then writes the new track_id back to state.
 
@@ -169,12 +181,12 @@ Spec-correct per AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel 
 
 The patcher writes the trampoline blob into LOAD #1's page-alignment padding (4276 zero bytes between LOAD #1's stock end at file `0xac54` and LOAD #2's start at `0xbc08`) and bumps LOAD #1's `p_filesz` and `p_memsz` to map the new code as R+E:
 
-- offset+16 (`p_filesz`): `0xac54 → 0xb18c`
-- offset+20 (`p_memsz`): `0xac54 → 0xb18c`
+- offset+16 (`p_filesz`): `0xac54 → 0xb21c`
+- offset+20 (`p_memsz`): `0xac54 → 0xb21c`
 
-Current trampoline blob is 1336 bytes (~2940 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
+Current trampoline blob is 1480 bytes (~2540 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `e920b136fdf28b95d95d17ae6e383709`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `bd3554d38486856cfbb17a37c02fd0a0`.
 
 **For the full architectural reference** (data-path diagram, response-builder calling conventions, ELF program-header surgery details, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

@@ -155,12 +155,23 @@ UNKNOW_INDICATION = 0x65bc   # original "unknow indication" path
 JNI_GET_AVRCP_STATE = 0x36c0
 
 # Stack frame layout inside T4 (after sub.w sp, sp, #FRAME_LEN):
-#   sp+0   .. +15   = outgoing stack args for get_element_attributes_rsp (16 B)
-#   sp+16  .. +31   = state buffer (16 B; bytes 0..7 = last_seen track_id,
-#                                         byte 8     = last RegisterNotification transId,
-#                                         bytes 9..15 = padding)
-#   sp+32  .. +807  = file buffer (776 B; track_info file image)
-T4_FRAME           = 808
+#   sp+0   .. +15    = outgoing stack args for get_element_attributes_rsp (16 B)
+#   sp+16  .. +31    = state buffer (16 B; bytes 0..7 = last_seen track_id,
+#                                          byte 8     = last RegisterNotification transId,
+#                                          bytes 9..15 = padding)
+#   sp+32  .. +1135  = file buffer (1104 B; track_info file image)
+#                      0..7    track_id
+#                      8..263  title  (256 B)
+#                      264..519 artist (256 B)
+#                      520..775 album  (256 B)
+#                      776..795 GetPlayStatus fields (T6 reads these)
+#                      796..799 pad (Phase C reserved)
+#                      800..815 TrackNumber  UTF-8 ASCII decimal (16 B)
+#                      816..831 TotalNumberOfTracks (16 B)
+#                      832..847 PlayingTime  UTF-8 ASCII decimal ms (16 B)
+#                      848..1103 Genre (256 B)
+T4_FRAME           = 1136
+T4_FILE_SIZE       = 1104
 T4_OFF_ARGS        = 0
 T4_OFF_STATE       = 16
 T4_OFF_FILE        = 32
@@ -168,6 +179,10 @@ T4_OFF_FILE_TID    = T4_OFF_FILE          # file_buf[0..7] = current track_id
 T4_OFF_FILE_TITLE  = T4_OFF_FILE + 8      # file_buf[8..263]
 T4_OFF_FILE_ARTIST = T4_OFF_FILE + 264    # file_buf[264..519]
 T4_OFF_FILE_ALBUM  = T4_OFF_FILE + 520    # file_buf[520..775]
+T4_OFF_FILE_TRACK_NUM   = T4_OFF_FILE + 800  # file_buf[800..815]
+T4_OFF_FILE_TOTAL_NUM   = T4_OFF_FILE + 816  # file_buf[816..831]
+T4_OFF_FILE_PLAY_TIME   = T4_OFF_FILE + 832  # file_buf[832..847]
+T4_OFF_FILE_GENRE       = T4_OFF_FILE + 848  # file_buf[848..1103]
 
 # Caller-relative offsets shift by T4_FRAME after our SUB SP.
 T4_TRANSID_OFF = 368 + T4_FRAME           # 1176
@@ -317,7 +332,7 @@ def _emit_t4(a: Asm) -> None:
 
     a.label("t4_main")
     # ---- allocate stack frame ----
-    a.subw(13, 13, T4_FRAME)                  # sub.w sp, sp, #808
+    a.subw(13, 13, T4_FRAME)                  # sub.w sp, sp, #1136
 
     # ---- zero-init state buffer (16 B) ----
     a.movs_imm8(0, 0)
@@ -326,10 +341,10 @@ def _emit_t4(a: Asm) -> None:
     a.str_sp_imm(0, T4_OFF_STATE + 8)
     a.str_sp_imm(0, T4_OFF_STATE + 12)
 
-    # ---- memset(file_buf, 0, 776) ----
+    # ---- memset(file_buf, 0, FILE_SIZE) ----
     a.add_sp_imm(0, T4_OFF_FILE)              # r0 = sp+32
     a.movs_imm8(1, 0)                         # r1 = 0
-    a.movw(2, 776)                            # r2 = 776
+    a.movw(2, T4_FILE_SIZE)                   # r2 = 1104
     a.blx_imm(PLT_memset)
 
     # ---- open + syscall_read + close on y1-track-info ----
@@ -343,7 +358,7 @@ def _emit_t4(a: Asm) -> None:
 
     a.mov_lo_lo(0, 4)                         # syscall args: r0=fd
     a.add_sp_imm(1, T4_OFF_FILE)              # r1 = file_buf
-    a.movw(2, 776)                            # r2 = count
+    a.movw(2, T4_FILE_SIZE)                   # r2 = count
     a.movs_imm8(7, NR_read)                   # r7 = SYS_read
     a.svc(0)
 
@@ -428,7 +443,7 @@ def _emit_t4(a: Asm) -> None:
 
     a.label("t4_no_change")
 
-    # ---- 3× get_element_attributes_rsp(conn, 0, idx, 3,
+    # ---- N× get_element_attributes_rsp(conn, 0, idx, total,
     #                                    [attr_id, charset=0x6a, len, ptr]) ----
     # Per iter13 disassembly of the rsp function (libextavrcp.so:0x2188):
     #   arg2 = attribute INDEX in the response (0..N-1)
@@ -438,11 +453,27 @@ def _emit_t4(a: Asm) -> None:
     # iter15/16/17 regression: arg2=transId, arg3=0 took the legacy "arg3==0
     # → EMIT every call" path, producing 3 separate msg=540 frames per query.
     # permissive CTs rendered each one in turn → flashing/iterative metadata updates.
-    for idx, (label_suffix, attr_id, str_offset) in enumerate((
-        ("title",  0x01, T4_OFF_FILE_TITLE),
-        ("artist", 0x02, T4_OFF_FILE_ARTIST),
-        ("album",  0x03, T4_OFF_FILE_ALBUM),
-    )):
+    #
+    # AVRCP 1.3 §5.3.4 attribute IDs:
+    #   0x01 Title              0x05 TotalNumberOfTracks
+    #   0x02 Artist             0x06 Genre
+    #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
+    #   0x04 TrackNumber
+    # All values are UTF-8 (charset 0x006A); per §5.3.4 a missing attribute is
+    # signalled by AttributeValueLength=0, which is what an empty string slot
+    # produces here (strlen returns 0, the response builder packs the 8-byte
+    # header with no value bytes).
+    attr_table = (
+        ("title",       0x01, T4_OFF_FILE_TITLE),
+        ("artist",      0x02, T4_OFF_FILE_ARTIST),
+        ("album",       0x03, T4_OFF_FILE_ALBUM),
+        ("track_num",   0x04, T4_OFF_FILE_TRACK_NUM),
+        ("total_num",   0x05, T4_OFF_FILE_TOTAL_NUM),
+        ("genre",       0x06, T4_OFF_FILE_GENRE),
+        ("play_time",   0x07, T4_OFF_FILE_PLAY_TIME),
+    )
+    total_attrs = len(attr_table)
+    for idx, (label_suffix, attr_id, str_offset) in enumerate(attr_table):
         a.label(f"t4_reply_{label_suffix}")
         a.add_sp_imm(0, str_offset)           # r0 = string ptr
         a.blx_imm(PLT_strlen)                 # r0 = strlen
@@ -450,8 +481,8 @@ def _emit_t4(a: Asm) -> None:
 
         a.add_imm_t3(0, 5, 8)                 # r0 = conn
         a.movs_imm8(1, 0)                     # r1 = 0 (with-string flag)
-        a.movs_imm8(2, idx)                   # r2 = attribute index (0,1,2)
-        a.movs_imm8(3, 3)                     # r3 = total attributes (3)
+        a.movs_imm8(2, idx)                   # r2 = attribute index
+        a.movs_imm8(3, total_attrs)           # r3 = total attributes
         a.movs_imm8(4, attr_id)
         a.str_sp_imm(4, T4_OFF_ARGS + 0)      # sp[0]  = attr_id
         a.movs_imm8(4, 0x6A)

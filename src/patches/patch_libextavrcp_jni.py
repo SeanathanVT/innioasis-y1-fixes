@@ -191,7 +191,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "e920b136fdf28b95d95d17ae6e383709"  # iter23 — U1 NOPs UI_SET_EVBIT(EV_REP) at 0x74e8 (kernel auto-repeat off on AVRCP uinput)
+OUTPUT_MD5 = "bd3554d38486856cfbb17a37c02fd0a0"  # iter28 — T4 GetElementAttributes packs attrs 4-7 (TrackNumber, TotalTracks, Genre, PlayingTime) per AVRCP 1.3 §5.3.4
 
 # ---------------------------------------------------------------- T1
 

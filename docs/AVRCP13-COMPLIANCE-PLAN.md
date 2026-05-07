@@ -70,7 +70,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 16-17 | PApp Setting Attribute/Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | optional; Phase C |
 | 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (iter19a) | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery (iter19a) | — |
-| **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (Title/Artist/Album, single 644-byte frame) | optional: attrs 4–7 (TrackNumber/Total/Genre/PlayingTime) |
+| **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime, single packed frame) | — |
 | **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 (iter20a + iter22d live position) | — |
 | **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2/extended_T2/T8 | — |
 | **23** | Notify EVENT_PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | **M (C.4: M IF GetElementAttributes + RegisterNotification)** | ✓ T8 INTERIM (iter20b) + T9 CHANGED on edge (iter22b) | — |
@@ -177,7 +177,7 @@ Estimated effort per function: 30 min for simple ones, 2 hours for the multi-arg
 
 ### 3b. Code-cave budget
 
-LOAD #1 padding currently used: `0xac54..0xb18c` (1336 B). Free space past `0xb18c` to LOAD #2 at `0xbc08`: **~2940 bytes**. New trampolines average ~80–200 bytes each; budget supports a few dozen more. Not space-constrained.
+LOAD #1 padding currently used: `0xac54..0xb21c` (1480 B). Free space past `0xb21c` to LOAD #2 at `0xbc08`: **~2540 bytes**. New trampolines average ~80–200 bytes each; budget supports a few dozen more. Not space-constrained.
 
 If we ever do exhaust LOAD #1 padding, we have a known fallback: extend the trick to the LOAD #2 padding region by bumping LOAD #2's `p_filesz`/`p_memsz`. Not needed for this plan.
 
@@ -299,20 +299,22 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 
 **Estimated effort:** 5-7 days. Volume + spec-shape + cross-app IPC + 8 sub-PDUs each needing arg-discovery.
 
-### Phase D — Continuation PDUs (T9)
+### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41)
 
-**Why fourth:** Spec-mandated but only relevant if any single response goes >512 bytes. We currently ship 644-byte msg=540 frames packed at the IPC layer; mtkbt likely fragments these to AVCTP under the hood, but we should verify.
+**Why fourth:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response) — but only relevant if any single response goes large enough to trip the response builder's continuation flag. The AVRCP-level continuation mechanism is distinct from AVCTP-layer fragmentation: AVCTP fragments transparently below the AVRCP PDU; continuation only kicks in when the TG sets a "more available" flag in its packet, prompting the CT to come back with PDU 0x40.
 
-**Diagnostic step before implementing:** check if any peer ever sends 0x40/0x41 to us in any capture. If never, demote this to "spec-only; no real-world impact" and document.
+**Diagnostic finding (2026-05-07):** grep across all 43 captures in `/work/logs/dual-*` for the byte signature `00 19 58 40` (Bluetooth SIG OUI + PDU 0x40) and `00 19 58 41` returned **zero** matches across Samsung TV, Kia EV6, Bolt EV, and Sonos test sets — even though the same grep finds 8444 OUI hits, 2868 GetElementAttributes (PDU 0x20), and 5547 RegisterNotification (PDU 0x31) in just the iter23 TV capture alone. **No CT in our test matrix exercises continuation.** This is consistent with the spec mechanics: T4's existing 3-attr response was small enough that `get_element_attributes_rsp` never set the continuation flag, and CTs never got prompted to ask for more.
 
-**If implemented:** T9 handles 0x40/0x41 by re-emitting the buffered response (continuation) or zeroing it (abort). Requires carrying state across PDU dispatches — first time we'd persist intra-AVCTP state in the trampolines.
+**Re-evaluation after iter28 (T4 7-attr expansion):** worst-case packed response with maxed Title/Artist/Album/Genre slots (~256 B each) + numeric attrs is ~1100 B. Whether that trips the response builder's continuation flag depends on its internal threshold, which we have not disassembled. If hardware captures post-iter28 still show zero PDU 0x40 traffic, demote Phase D to a documented spec-only NACK→ack stub. If a CT does start sending 0x40 once responses grow, we ship it.
 
-**Estimated effort:** 2-3 days. May not be needed.
+**If implemented:** a Phase-D trampoline handles 0x40/0x41 by re-emitting the buffered response (continuation) or zeroing it (abort). Requires carrying state across PDU dispatches — first time we'd persist intra-AVCTP state in the trampolines.
+
+**Estimated effort:** 2-3 days if real-world traffic ever requests it; otherwise ~30 minutes for a documented NACK-or-spec-ack stub.
 
 ### Phase E — Audit + cleanup
 
 - **Patch E v3 — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1 — SHIPPED iter25 (PLAY/PAUSE) + iter27 (STOP).** PASSTHROUGH op codes + press/release behavior live in AV/C Panel Subunit Spec (ref [2] of AVRCP 1.3); §4.6.1 in AVRCP 1.3 references that spec. Concrete frame example in AVRCP 1.3 §19.3 (Appendix D, informative) shows op_id 0x44 PLAY with state_flag = 0 / 1 for press / release. Spec semantic: PLAY transitions to PLAYING from any state; PAUSE transitions to PAUSED from any state; STOP transitions to STOPPED from any state. iter22d's first cut wired `KEY_PLAY` (85) + `KEYCODE_MEDIA_PLAY` (126) + `KEYCODE_MEDIA_PAUSE` (127) all through `PlayerService.playOrPause()` (toggle), arguing that toggle is no-op when target state matches current state. Strict-CT hardware capture (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT") refuted that: a strict CT issues discrete PLAY (PASSTHROUGH 0x44 → KEYCODE_MEDIA_PLAY 126) when it wants PLAYING; the toggle inverted the CT's intent on each press while Y1 was already PLAYING. **iter25** split the join arm into three labeled blocks — KEY_PLAY (legacy `ACTION_MEDIA_BUTTON` toggle) keeps `playOrPause()`; KEYCODE_MEDIA_PLAY routes to `play(Z)V` (bool=false); KEYCODE_MEDIA_PAUSE routes to `pause(IZ)V` (reason=0x12 diagnostic tag, flag=true matching every observed `pause$default` callsite's resolved arg). **iter27** added a fourth arm: KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45 via `KEY_STOPCD`) → `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. Smali-level edits only, in `patch_y1_apk.py`'s Patch E block.
-- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device — SHIPPED iter23.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering — it synthesizes ~25 Hz `KEY_xxx REPEAT` events whenever a `DOWN` arrives without a matching `UP`, which happens whenever a CT-side PASSTHROUGH RELEASE is dropped on a saturated AVCTP channel. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init` (real body at `0x73c8`). Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Confirmed source via `getevent -lt` on iter22d hardware (`/work/logs/dual-tv-iter22d-vibloop/`): single `KEY_NEXTSONG DOWN` → 458 `KEY_NEXTSONG REPEAT` events at strict 40 ms intervals; mtkbt boundary remained at strict 1:1 PASSTHROUGH-PRESS-to-KEY_INFO ratio. Stock `fd2ce74db9389980b55bccf3d8f15660` → `e920b136fdf28b95d95d17ae6e383709`.
+- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device — SHIPPED iter23.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering — it synthesizes ~25 Hz `KEY_xxx REPEAT` events whenever a `DOWN` arrives without a matching `UP`, which happens whenever a CT-side PASSTHROUGH RELEASE is dropped on a saturated AVCTP channel. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init` (real body at `0x73c8`). Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Confirmed source via `getevent -lt` on iter22d hardware (`/work/logs/dual-tv-iter22d-vibloop/`): single `KEY_NEXTSONG DOWN` → 458 `KEY_NEXTSONG REPEAT` events at strict 40 ms intervals; mtkbt boundary remained at strict 1:1 PASSTHROUGH-PRESS-to-KEY_INFO ratio. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `bd3554d38486856cfbb17a37c02fd0a0` (cumulative across all libextavrcp_jni.so patches including U1).
 - T1's `EventsSupported` array maintained in lock-step with what's actually implemented (each phase bumps it).
 - SDP record audit: re-confirm that what we advertise in the served record matches what we actually implement post-Phase A/B/C.
 - Optional 1.4 absolute volume support (PDU 0x50 + event 0x0d). Trivial trampoline (T10), no Y1MediaBridge schema change (volume is system-level). Useful for cars that use Bluetooth for hands-free where AVRCP volume changes the phone's media volume.
@@ -327,23 +329,26 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 
 ## 5. y1-track-info extended schema (cumulative across phases)
 
-| Offset | Field | Size | Phase | Source |
+| Offset | Field | Size | Status | Source |
 |---|---|---|---|---|
-| 0..7 | track_id (synthetic) | 8 | shipped | iter18d |
-| 8..263 | Title | 256 | shipped | iter14b |
-| 264..519 | Artist | 256 | shipped | iter14b |
-| 520..775 | Album | 256 | shipped | iter14b |
-| 776..779 | duration_ms | 4 | A or B | `MediaMetadataRetriever.METADATA_KEY_DURATION` |
-| 780..783 | position_at_state_change_ms | 4 | A | `MediaBridgeService.mPositionAtStateChange` |
-| 784..791 | state_change_time_elapsed_ms | 8 | A | `MediaBridgeService.mStateChangeTime` |
-| 792 | playing_flag | 1 | A | `mIsPlaying` (1=playing, 2=paused, 0=stopped) |
-| 793 | shuffle_flag | 1 | C | broadcast from music app |
-| 794 | repeat_mode | 1 | C | broadcast from music app |
-| 795..796 | track_number | 2 | (optional) | broadcast from music app — `PlayerService.musicIndex+1` |
-| 797..798 | total_tracks | 2 | (optional) | broadcast from music app — `PlayerService.musicList.size()` |
-| 799..1054 | Genre | 256 | (optional) | `MediaMetadataRetriever.METADATA_KEY_GENRE` |
+| 0..7 | track_id (synthetic) | 8 | shipped | `mCurrentAudioId` (MediaStore `_ID` or `syntheticAudioId(path)` fallback) |
+| 8..263 | Title | 256 | shipped | `MediaStore.Audio.Media.TITLE` / `METADATA_KEY_TITLE` |
+| 264..519 | Artist | 256 | shipped | `MediaStore.Audio.Media.ARTIST` / `METADATA_KEY_ARTIST` |
+| 520..775 | Album | 256 | shipped | `MediaStore.Audio.Media.ALBUM` / `METADATA_KEY_ALBUM` |
+| 776..779 | duration_ms (BE u32) | 4 | shipped | `MediaStore.Audio.Media.DURATION` / `METADATA_KEY_DURATION` |
+| 780..783 | position_at_state_change_ms (BE u32) | 4 | shipped | `MediaBridgeService.mPositionAtStateChange` |
+| 784..787 | state_change_time_sec (BE u32) | 4 | shipped | `MediaBridgeService.mStateChangeTime / 1000` (CLOCK_BOOTTIME source — T6 live-position extrapolation) |
+| 788..791 | reserved | 4 | — | (pad) |
+| 792 | playing_flag | 1 | shipped | `mIsPlaying` (1=PLAYING, 2=PAUSED, 0=STOPPED — AVRCP §5.4.1 Tbl 5.26) |
+| 793..799 | reserved | 7 | — | (Phase C shuffle_flag/repeat_mode reservation) |
+| 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
+| 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
+| 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
+| 848..1103 | Genre (UTF-8) | 256 | shipped | `MediaStore.Audio.Genres` / `METADATA_KEY_GENRE` |
 
-Total file size grows from 776 B to up to **1055 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so trampolines from earlier iters keep working.
+Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so trampolines from earlier iters keep working (T6/T8/T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
+
+The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16/u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
 
 `y1-trampoline-state` (16 B, mode 0666) is unchanged; remains the sole writable surface from the BT process side.
 
@@ -425,11 +430,12 @@ Phases A0/A1/B already shipped (see compliance scorecard in §2). Estimated effo
 | A0 — Inform PDUs + wire-shape | **shipped** | ~50 | no | no | — |
 | A1 — Notification expansion | **shipped** | ~150 | yes | no | — |
 | B — GetPlayStatus | **shipped** | ~80 | (with A1) | no | — |
+| GetElementAttributes attrs 4-7 (iter28) | **shipped** | ~140 (T4 grew) | yes (1104 B) | no | — |
 | C — PlayerAppSettings (0x11–0x16) | not shipped | ~350 | yes | yes | 5–7 days |
-| D — Continuation (0x40–0x41) | not shipped | ~200 | no | no | 2–3 days (skip if not needed) |
+| D — Continuation (0x40–0x41) | not shipped — diagnostic shows zero CT exercises across 43 captures | ~200 | no | no | 30 min for spec-only stub; 2–3 days for full implementation if any post-iter28 capture shows traffic |
 | E — Audit + optional 1.4 abs-vol | partial (Patch E + U1 shipped) | ~80 (T10 abs-vol) | no | no | 1–2 days |
 
-Total remaining for full 1.3 compliance + optional E: ~8–12 days. The trampoline chain pattern scales linearly with PDU count; we're not space-constrained.
+Total remaining for full 1.3 compliance + optional E: ~8–12 days (conservative; D may collapse to a stub). The trampoline chain pattern scales linearly with PDU count; we're not space-constrained.
 
 ---
 
@@ -437,9 +443,9 @@ Total remaining for full 1.3 compliance + optional E: ~8–12 days. The trampoli
 
 Shipped phases let us short-circuit further work if compatibility is achieved:
 
-- **A0 + A1 + B (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 8 RegisterNotification events covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position. Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
+- **A0 + A1 + B + iter28 (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 8 RegisterNotification events covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position; **GetElementAttributes packs all 7 §5.3.4 attribute IDs** (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
 - **Phase C (PApp Settings):** mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
-- **Phase D (Continuation):** mandatory per ICS condition C.2 but unobserved in any of our CT captures. Deferable.
+- **Phase D (Continuation):** mandatory per ICS condition C.2 but **diagnostic across all 43 captures shows zero CT exercises 0x40/0x41**. Deferable to a documented spec-only stub unless post-iter28 hardware testing surfaces continuation traffic from the larger 7-attr response.
 - **Phase E (audit + optional 1.4 abs-vol):** Patch E + U1 from Phase E already shipped; SetAbsoluteVolume is a stretch goal and would require claiming PASS THROUGH Cat 2 (not currently advertised).
 
 Each phase ships an incremental compliance milestone that's coherent on its own.

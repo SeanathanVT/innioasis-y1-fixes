@@ -177,10 +177,13 @@ public class MediaBridgeService extends Service {
     private volatile String  mCurrentTitle    = "";
     private volatile String  mCurrentArtist   = "";
     private volatile String  mCurrentAlbum    = "";
+    private volatile String  mCurrentGenre    = "";
     private volatile long    mCurrentDuration = 0;
     private volatile long    mCurrentAudioId  = -1;
     private volatile long    mCurrentAlbumId  = -1;
     private volatile long    mCurrentArtistId = -1;
+    private volatile int     mCurrentTrackNumber = 0;
+    private volatile int     mCurrentTotalTracks = 0;
     private volatile boolean mIsPlaying       = false;
 
     /** Position at last state change; with mStateChangeTime gives us a live
@@ -1029,18 +1032,34 @@ public class MediaBridgeService extends Service {
     // permission there. Our private files dir is owned by us; we chmod it
     // world-x at startup (prepareTrackInfoDir) and the file world-r here.
     //
-    // File format (776 bytes total, fixed layout, null-padded UTF-8) — iter15:
-    //   bytes 0..7     = track_id (mCurrentAudioId, big-endian) — used by
-    //                    extended_T2 to answer RegisterNotification(TRACK_CHANGED)
-    //                    and by T4 to detect when the track has changed since
-    //                    the last CHANGED notification we sent
-    //   bytes 8..263   = title  (255 UTF-8 bytes max + trailing null)
-    //   bytes 264..519 = artist (same)
-    //   bytes 520..775 = album  (same)
+    // y1-track-info file format. Fixed layout, null-padded UTF-8 string slots.
+    //   bytes 0..7      = track_id (mCurrentAudioId, big-endian) — extended_T2
+    //                     answers RegisterNotification(TRACK_CHANGED) with this
+    //                     and T4 compares against last_seen to detect changes.
+    //   bytes 8..263    = title  (255 UTF-8 bytes max + trailing null)
+    //   bytes 264..519  = artist (same)
+    //   bytes 520..775  = album  (same)
+    //   bytes 776..779  = duration_ms              u32 BE  (T6, T4 attr 7)
+    //   bytes 780..783  = pos_at_state_change_ms  u32 BE  (T6, T8 event 0x05)
+    //   bytes 784..787  = state_change_time_sec   u32 BE  (T6 live-position
+    //                                                       extrapolation, iter22d)
+    //   bytes 788..791  = pad                                                    (reserved)
+    //   bytes 792       = playing_flag             u8     (T6, T8/T9 event 0x01)
+    //   bytes 793..799  = pad                                                    (reserved Phase C)
+    //   bytes 800..815  = TrackNumber              UTF-8 ASCII decimal (16 B slot)
+    //   bytes 816..831  = TotalNumberOfTracks      UTF-8 ASCII decimal (16 B slot)
+    //   bytes 832..847  = PlayingTime              UTF-8 ASCII decimal ms (16 B slot)
+    //   bytes 848..1103 = Genre                    UTF-8 (256 B slot)
     //
-    // Each string field is null-padded; we truncate to FIELD_LEN-1 (255) bytes
-    // max so each 256-byte slot has at least one trailing 0x00 — the trampoline
-    // calls strlen() on each slot start, and the trailing null bounds the read.
+    // Each string field is null-padded; we truncate to slot-1 bytes max so each
+    // slot has at least one trailing 0x00 — the trampoline calls strlen() on
+    // each slot start, and the trailing null bounds the read. Multi-byte
+    // numeric fields are big-endian on disk; T6 byte-swaps via REV before
+    // passing to btmtk_avrcp_send_get_playstatus_rsp.
+    //
+    // Schema is append-only across iters so older trampolines keep working
+    // when run against a newer file (T6/T8/T9 only read up to offset 792 and
+    // are unaffected by attrs 4-7 being appended past 800).
     //
     // Defensive: every code path is wrapped in try/catch(Throwable) so a write
     // failure (e.g., disk-full, EACCES, weird OS state) never crashes the
@@ -1050,21 +1069,22 @@ public class MediaBridgeService extends Service {
     private static final String TRAMPOLINE_STATE_FILENAME = "y1-trampoline-state";
     private static final int TRACK_ID_LEN = 8;
     private static final int FIELD_LEN = 256;
-    private static final int TITLE_OFFSET  = TRACK_ID_LEN;            // 8
+    private static final int NUMERIC_STR_LEN = 16;
+    private static final int TITLE_OFFSET  = TRACK_ID_LEN;             // 8
     private static final int ARTIST_OFFSET = TITLE_OFFSET + FIELD_LEN; // 264
     private static final int ALBUM_OFFSET  = ARTIST_OFFSET + FIELD_LEN; // 520
-    // iter20a — Phase B: append GetPlayStatus fields to the y1-track-info
-    // schema. T6 (libextavrcp_jni.so trampoline at vaddr ~0xaf06) reads
-    // these on every inbound PDU 0x30 to build the GetPlayStatus response
-    // per AVRCP 1.3 §5.4.1 (Tables 5.25/5.26). All multi-byte fields are
-    // big-endian on disk;
-    // the trampoline byte-swaps to host order via REV before passing to
-    // btmtk_avrcp_send_get_playstatus_rsp.
     private static final int DURATION_OFFSET    = ALBUM_OFFSET + FIELD_LEN;       // 776 - duration_ms u32 BE
     private static final int POSITION_OFFSET    = DURATION_OFFSET + 4;            // 780 - pos_at_state_change u32 BE
     private static final int STATE_TIME_OFFSET  = POSITION_OFFSET + 4;            // 784 - state_change_time_sec u32 BE (reserved)
     private static final int PLAY_STATUS_OFFSET = STATE_TIME_OFFSET + 8;          // 792 - playing_flag u8
-    private static final int TOTAL_LEN          = PLAY_STATUS_OFFSET + 8;         // 800
+    // GetElementAttributes attrs 4-7. Pre-formatted UTF-8 strings — keeps the
+    // T4 trampoline a uniform strlen+memcpy loop and avoids hand-rolled Thumb-2
+    // itoa for the numeric fields.
+    private static final int TRACK_NUM_OFFSET   = 800;                            // 800 - TrackNumber (attr 4)
+    private static final int TOTAL_TRACKS_OFFSET = TRACK_NUM_OFFSET + NUMERIC_STR_LEN;   // 816 - TotalNumberOfTracks (attr 5)
+    private static final int PLAYING_TIME_OFFSET = TOTAL_TRACKS_OFFSET + NUMERIC_STR_LEN; // 832 - PlayingTime (attr 7)
+    private static final int GENRE_OFFSET       = PLAYING_TIME_OFFSET + NUMERIC_STR_LEN; // 848 - Genre (attr 6)
+    private static final int TOTAL_LEN          = GENRE_OFFSET + FIELD_LEN;       // 1104
     private static final int STATE_LEN          = 16;
 
     private void writeTrackInfoFile() {
@@ -1100,6 +1120,22 @@ public class MediaBridgeService extends Service {
             // maps to 2 (PAUSED). Deeper state (FWD_SEEK / REV_SEEK / ERROR)
             // would require additional Y1MediaBridge plumbing.
             buf[PLAY_STATUS_OFFSET] = (byte) (mIsPlaying ? 0x01 : 0x02);
+
+            // GetElementAttributes attrs 4-7 (AVRCP 1.3 §5.3.4). Store as
+            // pre-formatted UTF-8 strings so T4 ships them with the same
+            // strlen+memcpy machinery it uses for title/artist/album. Per
+            // §5.3.4: "if the requested element attribute does not exist
+            // (e.g., the element does not have a Genre tag), the AttributeID
+            // and CharacterSet are returned but the AttributeValue is the
+            // null string and the AttributeValueLength is 0" — empty string
+            // is the spec-correct sentinel for unknown.
+            putUtf8Padded(buf, TRACK_NUM_OFFSET,    NUMERIC_STR_LEN,
+                    mCurrentTrackNumber > 0 ? Integer.toString(mCurrentTrackNumber) : "");
+            putUtf8Padded(buf, TOTAL_TRACKS_OFFSET, NUMERIC_STR_LEN,
+                    mCurrentTotalTracks > 0 ? Integer.toString(mCurrentTotalTracks) : "");
+            putUtf8Padded(buf, PLAYING_TIME_OFFSET, NUMERIC_STR_LEN,
+                    duration > 0 ? Long.toString(duration) : "");
+            putUtf8Padded(buf, GENRE_OFFSET,        FIELD_LEN, mCurrentGenre);
 
             File dir = getFilesDir();
             if (dir == null) {
@@ -1193,7 +1229,8 @@ public class MediaBridgeService extends Service {
                 MediaStore.Audio.Media.DURATION,
                 MediaStore.Audio.Media.ALBUM_ID,
                 MediaStore.Audio.Media.ARTIST_ID,
-                MediaStore.Audio.Media._ID
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.TRACK
         };
         Cursor cursor = null;
         try {
@@ -1210,10 +1247,19 @@ public class MediaBridgeService extends Service {
                 mCurrentAlbumId  = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID));
                 mCurrentArtistId = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST_ID));
                 mCurrentAudioId  = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID));
+                // MediaStore.TRACK encodes track number as (disc * 1000) + track per
+                // android.provider.MediaStore.Audio.AudioColumns#TRACK. Mod 1000
+                // yields the in-disc track number; we don't surface disc number.
+                int trackRaw = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TRACK));
+                mCurrentTrackNumber = trackRaw > 0 ? trackRaw % 1000 : 0;
                 if ("<unknown>".equals(mCurrentArtist)) mCurrentArtist = "";
                 if ("<unknown>".equals(mCurrentAlbum))  mCurrentAlbum  = "";
                 mCurrentAlbumArt = loadAlbumArt(mCurrentAlbumId);
-                Log.d(TAG, "MediaStore hit: " + mCurrentTitle + " / " + mCurrentArtist);
+                mCurrentGenre = lookupGenreForAudioId(mCurrentAudioId);
+                mCurrentTotalTracks = mCurrentAlbumId > 0 ? lookupTotalTracksForAlbum(mCurrentAlbumId) : 0;
+                Log.d(TAG, "MediaStore hit: " + mCurrentTitle + " / " + mCurrentArtist
+                        + " (track " + mCurrentTrackNumber + "/" + mCurrentTotalTracks
+                        + ", genre=" + mCurrentGenre + ")");
                 return true;
             }
         } catch (Exception e) {
@@ -1222,6 +1268,46 @@ public class MediaBridgeService extends Service {
             if (cursor != null) cursor.close();
         }
         return false;
+    }
+
+    /** Genre lookup via MediaStore.Audio.Genres.Members — single-genre per audio
+     *  is the common case; first match wins on multi-genre files. */
+    private String lookupGenreForAudioId(long audioId) {
+        if (audioId <= 0) return "";
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(
+                    MediaStore.Audio.Genres.getContentUriForAudioId("external", (int) audioId),
+                    new String[]{ MediaStore.Audio.Genres.NAME },
+                    null, null, null);
+            if (c != null && c.moveToFirst()) {
+                String g = c.getString(0);
+                return g != null ? g : "";
+            }
+        } catch (Exception e) {
+            Log.v(TAG, "genre lookup: " + e.getMessage());
+        } finally {
+            if (c != null) c.close();
+        }
+        return "";
+    }
+
+    /** TotalNumberOfTracks (attr 5) = count of audio rows on this album. */
+    private int lookupTotalTracksForAlbum(long albumId) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{ "count(*) AS n" },
+                    MediaStore.Audio.Media.ALBUM_ID + "=?",
+                    new String[]{ Long.toString(albumId) }, null);
+            if (c != null && c.moveToFirst()) return c.getInt(0);
+        } catch (Exception e) {
+            Log.v(TAG, "total-tracks lookup: " + e.getMessage());
+        } finally {
+            if (c != null) c.close();
+        }
+        return 0;
     }
 
     /**
@@ -1250,6 +1336,15 @@ public class MediaBridgeService extends Service {
             mCurrentAlbum    = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
             String dur       = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
             mCurrentDuration = dur != null ? Long.parseLong(dur) : 0;
+            mCurrentGenre    = safeString(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE));
+            // CD_TRACK_NUMBER is "n" or "n/total" depending on the tagger.
+            // ID3v2 TRCK frame uses "n/total"; vorbiscomment uses separate
+            // TRACKNUMBER + TRACKTOTAL but MediaMetadataRetriever only exposes
+            // CD_TRACK_NUMBER, so attr 5 (TotalNumberOfTracks) is best-effort
+            // here and may be 0 when the underlying tag lacks the total.
+            int[] trk = parseTrackNumber(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER));
+            mCurrentTrackNumber = trk[0];
+            mCurrentTotalTracks = trk[1];
             mCurrentAudioId  = syntheticAudioId(path);
             mCurrentAlbumId  = -1;
             mCurrentArtistId = -1;
@@ -1262,13 +1357,17 @@ public class MediaBridgeService extends Service {
             if (mCurrentArtist == null) mCurrentArtist = "";
             if (mCurrentAlbum  == null) mCurrentAlbum  = "";
             Log.d(TAG, "Direct tags: " + mCurrentTitle + " / " + mCurrentArtist
-                    + " / " + mCurrentAlbum);
+                    + " / " + mCurrentAlbum + " (track " + mCurrentTrackNumber
+                    + "/" + mCurrentTotalTracks + ", genre=" + mCurrentGenre + ")");
             return realTitle && (realArtist || realAlbum);
         } catch (Exception e) {
             Log.e(TAG, "MediaMetadataRetriever error: " + e);
             mCurrentTitle    = stripExtension(path);
             mCurrentArtist   = "";
             mCurrentAlbum    = "";
+            mCurrentGenre    = "";
+            mCurrentTrackNumber = 0;
+            mCurrentTotalTracks = 0;
             mCurrentAlbumArt = null;
             mCurrentAudioId  = syntheticAudioId(path);
             mCurrentAlbumId  = -1;
@@ -1356,4 +1455,26 @@ public class MediaBridgeService extends Service {
     }
 
     private static String safeString(String s) { return s == null ? "" : s; }
+
+    /** Parse "n", "n/total", or null into [track, total]. ID3v2 TRCK stores
+     *  "n/total"; vorbiscomment splits across TRACKNUMBER + TRACKTOTAL but
+     *  MediaMetadataRetriever only exposes the combined CD_TRACK_NUMBER field.
+     *  Returns [0, 0] on any parse failure. */
+    private static int[] parseTrackNumber(String s) {
+        int[] out = new int[]{ 0, 0 };
+        if (s == null || s.isEmpty()) return out;
+        try {
+            int slash = s.indexOf('/');
+            if (slash < 0) {
+                out[0] = Integer.parseInt(s.trim());
+            } else {
+                out[0] = Integer.parseInt(s.substring(0, slash).trim());
+                String tail = s.substring(slash + 1).trim();
+                if (!tail.isEmpty()) out[1] = Integer.parseInt(tail);
+            }
+        } catch (NumberFormatException e) {
+            // tolerate junk in tags
+        }
+        return out;
+    }
 }

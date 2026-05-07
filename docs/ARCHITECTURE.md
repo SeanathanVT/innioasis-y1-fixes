@@ -128,14 +128,18 @@ The trampolines call these directly. No new IPC, no Java surgery for the core ha
               │     3 sequential calls to PLT 0x3570     │
               │     (get_element_attributes_rsp):        │
               │                                          │
-              │     Call 1 (idx=0, total=3, attr=Title): │
+              │     Call 1 (idx=0, total=7, attr=Title): │
               │        buffer reset on idx==0,           │
               │        accumulate, no emit yet           │
-              │     Call 2 (idx=1, total=3, attr=Artist):│
+              │     Call 2 (idx=1, total=7, attr=Artist):│
               │        accumulate, no emit               │
-              │     Call 3 (idx=2, total=3, attr=Album): │
+              │     Call 3 (idx=2, total=7, attr=Album)  │
+              │     Call 4 (idx=3, total=7, attr=TrkNum) │
+              │     Call 5 (idx=4, total=7, attr=Total)  │
+              │     Call 6 (idx=5, total=7, attr=Genre)  │
+              │     Call 7 (idx=6, total=7, attr=PlyTime)│
               │        idx+1 == total → EMIT msg=540     │
-              │        with all 3 attributes packed in   │
+              │        with all 7 attributes packed in   │
               │     b.w 0x712a                           │
               │                                          │
               │  else (PDU != 0x20):                     │
@@ -231,9 +235,9 @@ Between LOAD #1's end at file `0xac54` and LOAD #2's start at file `0xbc08`, the
 
 The patcher does this with three PATCHES entries:
 
-1. Write the trampoline blob at file 0xac54. **Current size: 1336 bytes (extended_T2 + T4 + T5 + T_charset + T_battery + T6 + T8 + T9 + path strings + sentinel data); ~2940 bytes still free in the 4276-byte padding region.** Earlier iters were smaller — the blob has grown across iter15/16/17a/17b/19a/19d/20a/20b/22b/22d as new trampolines were added; iter23/U1 is a separate 4-byte NOP elsewhere in the binary that doesn't grow the blob.
-2. Update LOAD #1 program-header `p_filesz` at file 0x64: `0xac54 → 0xb18c` (current).
-3. Update LOAD #1 program-header `p_memsz` at file 0x68: `0xac54 → 0xb18c`.
+1. Write the trampoline blob at file 0xac54. **Current size: 1480 bytes (extended_T2 + T4 + T5 + T_charset + T_battery + T6 + T8 + T9 + path strings + sentinel data); ~2540 bytes still free in the 4276-byte padding region.** Blob has grown across iters as new trampolines and per-PDU attribute coverage have landed; iter23/U1 is a separate 4-byte NOP elsewhere in the binary that doesn't grow the blob.
+2. Update LOAD #1 program-header `p_filesz` at file 0x64: `0xac54 → 0xb21c` (current).
+3. Update LOAD #1 program-header `p_memsz` at file 0x68: `0xac54 → 0xb21c`.
 
 The trampoline at 0xac54 is reachable from the existing trampolines via `b.w` (24-bit signed offset, ±16 MB range — distance from 0x72f4 to 0xac54 is ~0x395c, well within range).
 
@@ -295,16 +299,22 @@ It only **accumulates without emitting** when `arg1 == 0 AND arg3 != 0 AND (arg2
 
 **transId** is NOT one of the args. The function reads it from `conn[17]` (line 0x21f2: `ldrb r2, [r0, #17]`) and copies into the response's wire frame. So passing `arg2 = transId` (as iter11/12 did) was just abusing arg2 as an attribute-INDEX with the value of transId — Title got written to slot[transId] of the buffer with all other slots zero, and the CT found the one valid attribute and used it.
 
-### Calling pattern for a 3-attribute response (iter13)
+### Calling pattern for a 7-attribute response (current)
 
 ```c
-// All three calls share: conn=r5+8, arg1=0, arg3=3, charset=0x6a
-send_rsp(conn, arg1=0, idx=0, total=3, attr=1, len=8, "Y1 Title");   // accumulate
-send_rsp(conn, arg1=0, idx=1, total=3, attr=2, len=9, "Y1 Artist");  // accumulate
-send_rsp(conn, arg1=0, idx=2, total=3, attr=3, len=8, "Y1 Album");   // (idx+1==total) → EMIT
+// All seven calls share: conn=r5+8, arg1=0, arg3=7, charset=0x6a
+send_rsp(conn, 0, idx=0, total=7, attr=0x01, len, "Y1 Title");       // accumulate
+send_rsp(conn, 0, idx=1, total=7, attr=0x02, len, "Y1 Artist");      // accumulate
+send_rsp(conn, 0, idx=2, total=7, attr=0x03, len, "Y1 Album");       // accumulate
+send_rsp(conn, 0, idx=3, total=7, attr=0x04, len, "3");              // accumulate (TrackNumber)
+send_rsp(conn, 0, idx=4, total=7, attr=0x05, len, "12");             // accumulate (TotalNumberOfTracks)
+send_rsp(conn, 0, idx=5, total=7, attr=0x06, len, "Rock");           // accumulate (Genre)
+send_rsp(conn, 0, idx=6, total=7, attr=0x07, len, "180000");         // (idx+1==total) → EMIT
 ```
 
-**One** msg=540 IPC frame outbound containing all three attributes.
+Per AVRCP 1.3 §5.3.4 a missing attribute is signalled by `AttributeValueLength=0` — Y1MediaBridge writes empty UTF-8 string slots when the underlying tag is absent (e.g., a flat audio file with no Genre tag), strlen returns 0, and the response builder packs an attribute header with no value bytes for that entry.
+
+**One** msg=540 IPC frame outbound containing all seven attributes.
 
 > **iter15/16/17a regression (2026-05-06):** the dynamically-assembled T4 was passing `arg2 = transId, arg3 = 0` — taking the `arg3 == 0` legacy path on every call and emitting 3 separate msg=540 frames per query. CTs rendered each one in turn (visible flicker: Title appearing intermittently while Artist/Album swapped in/out). Diagnosed from the logcat ratio of 1299 msg=540 outbound to ~433 GetElementAttributes inbound during the iter17a hardware test. Fixed in iter17b by restoring the iter13 calling pattern above.
 
@@ -404,9 +414,9 @@ All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anyt
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising EVENT_TRACK_CHANGED only |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
-| extended_T2 + T4 + T5 + T_charset + T_battery + T6 + T8 + T9 | jni 0xac54 (1336 B current — iter22b T9 + iter22d T6 live position; iter23/U1 added a separate 4-byte NOP outside the blob, blob unchanged) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** (reactive RegisterNotification): reads track_id from y1-track-info into a stack buffer, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM with `arg1=0` + REASON_INTERIM + **&sentinel_ffx8** (iter16). PDU 0x31 + event ≠ 0x02 → b.w T8 (iter20b — was b.w t4_to_unknown pre-iter20b). **T4** (reactive GetElementAttributes): emits track_changed_rsp CHANGED on track-id edge, then 3-attr get_element_attributes_rsp. **T5** (proactive on Y1 track change, iter17a): emits CHANGED on track-id divergence. **T_charset / T_battery** (iter19a — Phase A0): PDU 0x17 / 0x18 ack trampolines. **T6** (iter20a — Phase B; iter22d adds `clock_gettime(CLOCK_BOOTTIME)` live-position extrapolation): PDU 0x30 GetPlayStatus — reads `y1-track-info[776..795]` (duration / position / playing_flag, BE on disk → REV → host order), calls `get_playstatus_rsp` PLT 0x3564. **T8** (iter20b — Phase A1): RegisterNotification dispatcher for events ≠ 0x02. Reads `y1-track-info` for event payloads (play_status from [792], position from [780..783]), dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT for events 0x01 (PLAYBACK_STATUS_CHANGED → 0x339c), 0x03/0x04 (TRACK_REACHED_END/START → 0x3378/0x336c), 0x05 (PLAYBACK_POS_CHANGED → 0x3360), 0x06 (BATT_STATUS_CHANGED → 0x3354, canned `0x00 NORMAL`), 0x07 (SYSTEM_STATUS_CHANGED → 0x3348, canned `0x00 POWER_ON`). Unknown events fall through to "unknow indication". INTERIM-only via T8 (proactive CHANGED for event 0x01 lives in T9, below). **T9** (iter22b): proactive PLAYBACK_STATUS_CHANGED on Y1 play/pause edge — entered via `b.w T9` from the patched `notificationPlayStatusChangedNative` first instruction (libextavrcp_jni.so:0x3c88, paired with the iter22b sswitch_18a cardinality NOP at MtkBt.odex:0x3c4fe). Reads `y1-track-info[792]` (play_status), compares against `y1-trampoline-state[9]` (last_play_status), emits CHANGED via `reg_notievent_playback_rsp` PLT 0x339c on edge, writes state back. T4's pre-check: 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, else fall through to "unknow indication". |
+| extended_T2 + T4 + T5 + T_charset + T_battery + T6 + T8 + T9 | jni 0xac54 (1480 B current — iter28 grew T4 to 7-attr packing) | NEW LOAD #1 extension, dynamically assembled. **extended_T2** (reactive RegisterNotification): reads track_id from y1-track-info into a stack buffer, writes [track_id\|\|transId\|\|pad] to y1-trampoline-state, replies INTERIM with `arg1=0` + REASON_INTERIM + **&sentinel_ffx8** (iter16). PDU 0x31 + event ≠ 0x02 → b.w T8 (iter20b). **T4** (reactive GetElementAttributes): emits track_changed_rsp CHANGED on track-id edge, then **7-attr** get_element_attributes_rsp covering all AVRCP 1.3 §5.3.4 attribute IDs 0x01..0x07 (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Numeric attrs (4/5/7) are pre-formatted as ASCII decimal strings on the Y1MediaBridge side so the trampoline stays a uniform strlen+memcpy loop. **T5** (proactive on Y1 track change, iter17a): emits CHANGED on track-id divergence. **T_charset / T_battery** (iter19a — Phase A0): PDU 0x17 / 0x18 ack trampolines. **T6** (iter20a — Phase B; iter22d adds `clock_gettime(CLOCK_BOOTTIME)` live-position extrapolation): PDU 0x30 GetPlayStatus — reads `y1-track-info[776..795]` (duration / position / playing_flag, BE on disk → REV → host order), calls `get_playstatus_rsp` PLT 0x3564. **T8** (iter20b — Phase A1): RegisterNotification dispatcher for events ≠ 0x02. Reads `y1-track-info` for event payloads (play_status from [792], position from [780..783]), dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT for events 0x01 (PLAYBACK_STATUS_CHANGED → 0x339c), 0x03/0x04 (TRACK_REACHED_END/START → 0x3378/0x336c), 0x05 (PLAYBACK_POS_CHANGED → 0x3360), 0x06 (BATT_STATUS_CHANGED → 0x3354, canned `0x00 NORMAL`), 0x07 (SYSTEM_STATUS_CHANGED → 0x3348, canned `0x00 POWER_ON`). Unknown events fall through to "unknow indication". INTERIM-only via T8 (proactive CHANGED for event 0x01 lives in T9, below). **T9** (iter22b): proactive PLAYBACK_STATUS_CHANGED on Y1 play/pause edge — entered via `b.w T9` from the patched `notificationPlayStatusChangedNative` first instruction (libextavrcp_jni.so:0x3c88, paired with the iter22b sswitch_18a cardinality NOP at MtkBt.odex:0x3c4fe). Reads `y1-track-info[792]` (play_status), compares against `y1-trampoline-state[9]` (last_play_status), emits CHANGED via `reg_notievent_playback_rsp` PLT 0x339c on edge, writes state back. T4's pre-check: 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, else fall through to "unknow indication". |
 | iter17a JNI native stub | jni 0x3bc0 (4 B) | First instruction of `notificationTrackChangedNative` rewritten to `b.w T5`. The Java side (after the MtkBt.odex iter17a NOP) calls this native on every Y1MediaBridge track-change broadcast; T5 emits CHANGED on the AVRCP wire asynchronously to any inbound query. The remaining 196 B of the original native body are unreachable. |
-| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xb18c` at current iter (iter22d / 1336 B blob); see CHANGELOG for the per-iter growth history. |
+| LOAD#1 filesz | jni 0x64 | `0xac54 → 0xb21c` at current iter (1480 B blob); see CHANGELOG for the per-iter growth history. |
 | LOAD#1 memsz  | jni 0x68 | Same |
 
 Stock md5s and patcher-output md5s are baked into the patcher headers; check them before quoting.
@@ -491,7 +501,7 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
    - Buffer reset condition (when does it `memset` the internal buffer?)
    - Send trigger condition (which args make it call `AVRCP_SendMessage`?)
    - Where transId comes from (usually `conn[17]`, not an arg)
-3. **Allocate cave space** in the LOAD #1 padding region (currently ~2940 bytes free past 0xb18c — the trampoline blob is up to 1336 B at iter22d; the padding region is 4276 B total, ending at LOAD #2's start at 0xbc08).
+3. **Allocate cave space** in the LOAD #1 padding region (currently ~2540 bytes free past 0xb21c — the trampoline blob is 1480 B; the padding region is 4276 B total, ending at LOAD #2's start at 0xbc08).
 4. **Wire it into the chain**: change the previous trampoline's "unknown" branch (the `b.w` to `0x65bc` or to the next trampoline) to point at your new entry.
 5. **End with**:
    - `b.w 0x712a` for the success path (lands on stack-canary check + epilogue).

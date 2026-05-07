@@ -83,14 +83,14 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 `--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
 
-**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see Title/Artist/Album, current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**; `mtkbt`'s shipped command-handling layer is internally AVRCP 1.0 and rejects anything past `PASSTHROUGH` natively, so the trampoline chain in `libextavrcp_jni.so` synthesises the 1.3 responses directly. Implemented PDU set per [`docs/spec/AVRCP_SPEC_V13.pdf`](docs/spec/) (V13 + ESR07 errata):
+**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see all seven §5.3.4 element attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime), current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**; `mtkbt`'s shipped command-handling layer is internally AVRCP 1.0 and rejects anything past `PASSTHROUGH` natively, so the trampoline chain in `libextavrcp_jni.so` synthesises the 1.3 responses directly. Implemented PDU set per [`docs/spec/AVRCP_SPEC_V13.pdf`](docs/spec/) (V13 + ESR07 errata):
 
 | Spec § | PDU | Coverage |
 |---|---|---|
 | §5.1.1 | 0x10 GetCapabilities | full |
 | §5.2.7 | 0x17 InformDisplayableCharacterSet | full |
 | §5.2.8 | 0x18 InformBatteryStatusOfCT | full |
-| §5.3.1 | 0x20 GetElementAttributes | Title/Artist/Album in single-frame response |
+| §5.3.1 / §5.3.4 | 0x20 GetElementAttributes | all 7 attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) in single-frame response |
 | §5.4.1 | 0x30 GetPlayStatus | full, with live position via `clock_gettime(CLOCK_BOOTTIME)` |
 | §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 / 0x02 |
 | §4.6.1 | PASS THROUGH (PLAY/PAUSE/STOP/FORWARD/BACKWARD/etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
