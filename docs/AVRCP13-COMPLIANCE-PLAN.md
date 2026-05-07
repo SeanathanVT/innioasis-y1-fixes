@@ -336,6 +336,7 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 | AVRCP version negotiation: we advertise 1.4 in SDP but our PDU set is 1.3-shape | Low post-Phase E | Phase E adds optional SetAbsoluteVolume + volume_changed_rsp. If a strict 1.4 CT discovers we don't honor abs-vol, falls back to 1.3 polling — Sonos's empirical behavior. |
 | Cross-app broadcasts (Phase C music-app→Y1MediaBridge) get killed by some Android battery saver | Very low (4.2.2 has no doze; both apps are /system/app) | n/a |
 | Continuation PDU 0x40/0x41 (Phase D) requires intra-session state | Medium if we need it | Probably not needed — gate Phase D entirely on whether any peer ever sends 0x40 in our captures. |
+| AVCTP saturation under a CT subscribe storm drops PASSTHROUGH key-release frames; the music app then interprets the held key as a long-press, calls `startFastForward()`/`startRewind()`, and the lambda thread runs forever | Medium (observed against Samsung TV under iter19b real-track_id and iter19c/iter20b sentinel; reduced but not eliminated by Phase A1's 7-event fan-out) | **iter21 / Patch D**: bound `PlayerService$startFastForward$1.invoke()` and `PlayerService$startRewind$1.invoke()` to 50 iterations × 100 ms ≈ 5 s wall clock, then clear `fastForwardLock` and exit. Music-app-side defensive recovery, not a wire-layer change; the AVRCP layer remains spec-compliant. |
 
 ---
 
@@ -346,9 +347,10 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 | A0 — Inform PDUs + wire-shape | iter19 | ~50 | no | no | ARCH update | 2 hours |
 | A1 — Notifications | iter20 | ~150 | yes | no | ARCH update | 2–3 days |
 | B — GetPlayStatus | iter20 (paired) | ~80 | (rolled into A1) | no | ARCH update | 1–2 days |
-| C — PlayerAppSettings (0x11–0x16) | iter21 | ~350 | yes | yes | DEX.md + ARCH | 5–7 days |
-| D — Continuation | iter22 | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
-| E — Audit | iter22 (paired) | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
+| C — PlayerAppSettings (0x11–0x16) | iter22 (was iter21) | ~350 | yes | yes | DEX.md + ARCH | 5–7 days |
+| D — Continuation | iter23 (was iter22) | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
+| E — Audit | iter23 (paired) | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
+| Defensive: bound music-app FF/RW hold-loop | iter21 | 0 (smali only) | no | yes (Patch D) | CHANGELOG + PATCHES.md | 1 day |
 | **Total** | iter19–iter22 | **~860** | two schema bumps | two new smali patches | three doc updates | **11–17 days** |
 
 Compared with the cumulative effort from iter1 through iter18d (already shipped: ~6 weeks of focused work for the metadata core), full 1.3 compliance is a 2–3 week extension on top, not a re-architecture. The trampoline chain pattern scales linearly with PDU count.
@@ -361,8 +363,10 @@ These let us short-circuit phases when a CT actually works:
 
 - **After Phase A0 (iter19):** retest Bolt. PDU 0x17 NACK is closed and TRACK_CHANGED is now spec-correct on the wire — most likely fixes the Bolt directly. If yes → defer A1+B as the next compliance increment rather than urgent fixes.
 - **After Phase A1+B (iter20):** retest against any new strict CT that surfaced. By this point we cover all 8 RegisterNotification events the spec mandates plus GetPlayStatus, which together account for the bulk of CT compatibility issues we know about.
-- **After Phase C (iter21):** PApp Settings is mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
-- **After Phase D+E (iter22):** full 1.3 spec compliance achieved.
+- **After Phase C (iter22, was iter21):** PApp Settings is mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
+- **After Phase D+E (iter23, was iter22):** full 1.3 spec compliance achieved.
+
+> Phase numbering after iter21 slid by one because iter21 was repurposed mid-stream from "Phase C music-app patch" into a defensive bound on the FF/RW hold-loop after the Samsung TV PASSTHROUGH-release-drop / vibrate-loop captures forced it ahead of compliance work. Phase C is now scheduled as iter22.
 
 We don't have to commit to the full 1.3 build up front. Each iter ships an incremental compliance milestone that's coherent on its own.
 

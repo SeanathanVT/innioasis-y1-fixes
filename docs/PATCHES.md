@@ -221,6 +221,24 @@ Recomputes the DEX adler32 checksum embedded in the ODEX header.
 
 ---
 
+## `patch_y1_apk.py`
+
+Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. All four patches are inside two DEX files (`classes.dex` + `classes2.dex`); the original `META-INF/` signature block is retained verbatim because PackageManager rejects an unsigned APK at boot even for system apps. Output goes to `output/com.innioasis.y1_<version>-patched.apk`. See the patcher's docstring for the full DEX-level analysis backing each edit, and [`DEX.md`](DEX.md) for the broader DEX investigation that grounded patches A/B/C.
+
+- **Patch A** in `smali_classes2/com/innioasis/music/ArtistsActivity.smali` (`confirm()` artist-tap branch): replaces the in-place `switchSongSortType()` flat-song-list call with an Intent launching `AlbumsActivity` carrying the `artist_key` extra.
+- **Patch B** in `smali_classes2/com/innioasis/music/AlbumsActivity.smali` (`initView()`): rebuilds the method (`.locals 2` → `.locals 8`) to read the `artist_key` extra and, if present, query `SongDao.getSongsByArtistSortByAlbum(artist)` and feed a deduplicated `ArrayList<String>` of album names through `AlbumListAdapter.setAlbums()`. If absent, falls through to the original `getAlbumListBySort()` path so the standalone Albums screen still works.
+- **Patch C** in `smali/com/innioasis/y1/database/Y1Repository.smali` (field decl): changes `private final songDao` → `public final songDao` so AlbumsActivity (different package) can `iget-object` it without an `IllegalAccessError`. The Kotlin-generated `access$getSongDao$p` exists but exhibits unreliable `NoSuchMethodError` on this device's old Dalvik (API 17).
+- **Patch D** (iter21) — three sub-edits bounding the music app's hold-to-fast-forward / hold-to-rewind cascade so a dropped PASSTHROUGH-release frame (observed against the Samsung TV under AVCTP saturation in `/work/logs/dual-tv-iter19c-playpause/` and `/work/logs/dual-tv-iter20b-noaudio/`) recovers within ~5 s instead of running forever:
+  - **D1** in `smali/com/innioasis/y1/service/PlayerService.smali`: `.field private fastForwardLock:Z` → `.field public fastForwardLock:Z` so the lambda inner classes can `iput-boolean` it directly. No accessor `access$setFastForwardLock$p` exists in the stock DEX; modifying field visibility is the minimal change. Same shape as Patch C's `songDao` flip; field is internal to a system-private service.
+  - **D2** in `smali_classes2/com/innioasis/y1/service/PlayerService$startFastForward$1.smali` (`invoke()V`): rebuilds the loop body (`.locals 6` → `.locals 7`). New register `v6` is the iteration counter (init `const/4 v6, 0x0` outside the loop, increment `add-int/lit8 v6, v6, 0x1` per iteration). After the existing lock-check (`if-eqz v0, :cond_1` returns when lock cleared), a new `const/16 v0, 0x32` + `if-lt v6, v0, :cond_2` skips the cap check while `v6 < 50`. Once the counter reaches 50 (50 × 100 ms `Thread.sleep` ≈ 5 s wall clock), the lambda issues `iput-boolean v1, v0, ...->fastForwardLock:Z` (with `v1=0` and `v0=this$0`) and `return-void`, leaving the lock in cleared state so the next `startFastForward()` call enters cleanly. The position-advance branch (`if-lez v0, :cond_0` / `add-long/2addr v2, v4` / `setCurrentPosition(J)V` / `goto :goto_0`) is unchanged.
+  - **D3** in `smali_classes2/com/innioasis/y1/service/PlayerService$startRewind$1.smali` (`invoke()V`): same edit as D2, except the position-update step is `sub-long/2addr v2, v4` (the only opcode difference between FF and RW lambdas in stock 3.0.2). Both lambdas share the same `fastForwardLock` field — there is no separate `rewindLock` — so D1 covers both.
+
+**Apktool reassembly:** `_patch_workdir/apktool.jar d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are then dropped into a copy of the original APK with `META-INF/` preserved.
+
+**Deployment:** `adb root && adb remount && adb push <apk> /system/app/com.innioasis.y1/com.innioasis.y1.apk && adb reboot`. Do **not** use `adb install` — PackageManager rejects re-signed system app APKs.
+
+---
+
 > **Removed in v2.1.0:** the historical `patch_adbd.py` (H1/H2/H3 byte patches against `/sbin/adbd`) and `patch_bootimg.py` (in-place cpio patcher that wrapped it). Both revisions broke ADB protocol on hardware ("device offline") and have been superseded by `src/su/` since v1.8.0. The full diagnosis of the H1/H2/H3 failure modes — including why arg-zero kept all bionic bookkeeping intact yet the device still went offline, why `default.prop`'s `ro.secure=0` is inert on this OEM adbd (no `should_drop_privileges()` gating), and why `adb root` is actively harmful — is preserved in [`INVESTIGATION.md`](INVESTIGATION.md) §"adbd Root Patches (H1/H2/H3)".
 
 ---
