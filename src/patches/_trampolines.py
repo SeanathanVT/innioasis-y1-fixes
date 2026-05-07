@@ -196,6 +196,25 @@ T8_OFF_FILE_POS      = T8_OFF_FILE + 780   # 780 - pos_at_state_change_ms
 T8_OFF_FILE_PLAYFLAG = T8_OFF_FILE + 792   # 792 - playing_flag (= AVRCP play_status)
 T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 
+# T9 (proactive PLAYBACK_STATUS_CHANGED, iter22b) frame: 16 B state buf at
+# sp+0..15 + 800 B y1-track-info file buf at sp+16..815. The state buf reuses
+# the existing y1-trampoline-state file's previously-unused byte [9] as
+# `last_play_status` (T5 still consumes [0..7] for last_seen track_id and [8]
+# for tc_transId; bytes [9..15] were pad before iter22b). Edge detection:
+# read y1-track-info[792] (iter20a playing_flag), compare against state[9],
+# emit CHANGED on inequality, update state[9], write 16 B back.
+#
+# T5/T9 race acknowledgment: both read+modify+write the full 16 B state file,
+# so a concurrent T5+T9 firing can lose one of the updates. In practice T5
+# fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
+# broadcasts -- they overlap rarely, and worst case is a single missed
+# CHANGED edge which recovers on the next event.
+T9_FRAME              = 816
+T9_OFF_STATE          = 0
+T9_OFF_FILE           = 16
+T9_OFF_FILE_PLAYFLAG  = T9_OFF_FILE + 792    # 808 - playing_flag inside file_buf
+T9_STATE_LAST_PS_OFF  = T9_OFF_STATE + 9     # 9 - last_play_status inside state_buf
+
 # AVRCP §6.7.2 canned values for events we don't have a Y1 data source for.
 # - BATT_STATUS_CHANGED: 0x00 NORMAL is the safe default when we don't have
 #   visibility into the device's battery state. (Spec values: 0=NORMAL,
@@ -1004,6 +1023,170 @@ def _emit_t8(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_t9(a: Asm) -> None:
+    """T9 (iter22b — Phase A1 follow-up): proactive PLAYBACK_STATUS_CHANGED.
+
+    Entered via `b.w T9` from the patched libextavrcp_jni.so::
+    notificationPlayStatusChangedNative stub at file offset 0x3c88. MtkBt's
+    handleKeyMessage path -- with the iter22b cardinality if-eqz NOPed at
+    sswitch_18a (file offset 0x3c4fe in MtkBt.odex; mirrors iter17a's NOP at
+    0x3c530 for sswitch_1a3 / TRACK_CHANGED) -- invokes the native method on
+    every Y1MediaBridge `playstatechanged` broadcast, asynchronously to any
+    inbound AVRCP RegisterNotification.
+
+    Closes the AVRCP §6.7.1 spec gap left by iter20b: T8 handles event 0x01
+    INTERIM-only, never fires the spec-mandated CHANGED frame when the
+    play_status actually flips. Symptom: Kia EV6 head unit subscribes to
+    event 0x01, gets the immediate INTERIM, then never sees CHANGED, so the
+    car-side play/pause icon stays stuck on its initial value even though
+    Y1's audio toggles correctly via the PASSTHROUGH path.
+
+    On entry (Java native ABI for `notificationPlayStatusChangedNative(byte,
+    byte, byte)`):
+      - r0 = JNIEnv*  (Java native arg 0)
+      - r1 = jobject this  (BluetoothAvrcpService instance)
+      - r2 = jbyte arg1  (ignored — Java passes 0)
+      - r3 = jbyte arg2  (ignored — Java passes 0)
+      - sp[0] = jbyte arg3 = current play_status from MtkBt's mPlayStatus
+                              (we ignore this and read from y1-track-info[792]
+                               for consistency with T8's INTERIM data source)
+      - lr = caller's return address
+
+    Returns: jboolean in r0 (always 1; the caller ignores it per the smali
+    at sswitch_18a).
+
+    Logic:
+      1. Call JNI helper at 0x36c0 to obtain the BluetoothAvrcpService's
+         per-conn struct (same helper T5 uses; conn buffer at struct + 8).
+      2. Read y1-track-info into file_buf @ sp+16..815. file[792] = current
+         playing_flag (0=STOPPED, 1=PLAYING, 2=PAUSED — direct AVRCP
+         play_status enum per AVRCP 1.4 §5.4.3.4).
+      3. Read y1-trampoline-state (16 B) into state_buf @ sp+0..15.
+         state[9] = last_play_status (previously pad).
+      4. If file[792] != state[9]: emit CHANGED via
+         reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, file[792]).
+         transId is auto-extracted from conn[17] by the response builder
+         (same pattern T5 uses for track_changed_rsp). Update state[9] =
+         file[792] and write 16 B back.
+
+    Race with T5: both read+modify+write the full 16 B state file. Concurrent
+    firings can lose one update. In practice T5 fires on `metachanged` and
+    T9 fires on `playstatechanged` -- they overlap rarely, and the worst
+    case is a single missed CHANGED that the next event recovers.
+    """
+    a.label("T9")
+
+    # ---- prologue: save callee-saves we'll trash ----
+    # push {r4, r5, lr} = 0xB430.
+    a.raw(bytes([0x30, 0xB5]))
+
+    # ---- get the BluetoothAvrcpService internal struct ----
+    a.bl_w("jni_get_avrcp_state")             # r0 = struct ptr
+    a.mov_lo_lo(4, 0)                         # r4 = struct ptr (preserved)
+
+    # ---- allocate locals: 16 B state buf @ sp+0 + 800 B file buf @ sp+16 ----
+    a.subw(13, 13, T9_FRAME)                  # sub.w sp, sp, #816
+
+    # ---- memset(file_buf, 0, 800) ----
+    # Default everything to 0 so a partial read (file shorter than 800 B
+    # — old Y1MediaBridge from before the iter20a schema bump) gives
+    # play_status=0 (STOPPED) rather than uninit stack garbage.
+    a.add_sp_imm(0, T9_OFF_FILE)
+    a.movs_imm8(1, 0)
+    a.movw(2, 800)
+    a.blx_imm(PLT_memset)
+
+    # ---- memset(state_buf, 0, 16) ----
+    a.add_sp_imm(0, T9_OFF_STATE)
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, 16)
+    a.blx_imm(PLT_memset)
+
+    # ---- open + read y1-track-info into file_buf ----
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t9_skip_track_read")
+    a.mov_lo_lo(5, 0)                         # r5 = fd
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, T9_OFF_FILE)              # r1 = file_buf
+    a.movw(2, 800)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t9_skip_track_read")
+
+    # ---- open + read y1-trampoline-state into state_buf ----
+    a.adr_w(0, "path_state")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t9_skip_state_read")
+    a.mov_lo_lo(5, 0)
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, T9_OFF_STATE)             # r1 = state_buf
+    a.movs_imm8(2, 16)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t9_skip_state_read")
+
+    # ---- compare file[792] (current play_status) vs state[9] (last) ----
+    a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)     # r0 = current play_status
+    a.ldrb_w(1, 13, T9_STATE_LAST_PS_OFF)     # r1 = last_play_status
+    a.cmp_w(0, 1)
+    a.beq("t9_no_change")
+
+    # ---- emit CHANGED via reg_notievent_playback_rsp ----
+    # r0 = conn (= struct + 8); r1 = 0 success; r2 = REASON_CHANGED;
+    # r3 = play_status (from file_buf[792]). transId is auto-extracted from
+    # conn[17] by the response builder (same convention as T5).
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.ldrb_w(3, 13, T9_OFF_FILE_PLAYFLAG)     # r3 = play_status
+    a.blx_imm(PLT_reg_notievent_playback_rsp)
+
+    # ---- update state[9] = file[792] in-memory ----
+    a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)
+    a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
+
+    # ---- write 16-byte state buf back to y1-trampoline-state ----
+    a.adr_w(0, "path_state")
+    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t9_no_change")                     # open failed → skip write, still return success
+    a.mov_lo_lo(5, 0)
+
+    a.mov_lo_lo(0, 5)
+    a.add_sp_imm(1, T9_OFF_STATE)             # r1 = state_buf
+    a.movs_imm8(2, 16)
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 5)
+    a.blx_imm(PLT_close)
+
+    a.label("t9_no_change")
+    # ---- epilogue: return jboolean true ----
+    a.movs_imm8(0, 1)
+    a.addw(13, 13, T9_FRAME)
+    # pop {r4, r5, pc} = 0xBD30.
+    a.raw(bytes([0x30, 0xBD]))
+
+
 def build() -> tuple[bytes, dict[str, int]]:
     """Build the LOAD-#1-padding trampoline code blob.
 
@@ -1027,6 +1210,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t_battery(a)                        # iter19a — Phase A0
     _emit_t6(a)                               # iter20a — Phase B
     _emit_t8(a)                               # iter20b — Phase A1
+    _emit_t9(a)                               # iter22b — proactive PLAYBACK_STATUS_CHANGED
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)

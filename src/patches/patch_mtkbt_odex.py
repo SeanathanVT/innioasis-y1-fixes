@@ -3,7 +3,7 @@
 patch_mtkbt_odex.py — Patch stock MtkBt.odex -> MtkBt.odex.patched
 
 Stock binary md5:  11566bc23001e78de64b5db355238175
-Output md5:        acc578ada5e41e27475340f4df6afa59
+Output md5:        fa2e34b178bee4dfae4a142bc5c1b701  (iter22b)
 
 ODEX structure:
   ODEX header (0x28 bytes): magic "dey\n036\0", dex_offset=0x28, dex_length=0x98490
@@ -101,7 +101,7 @@ import zlib
 from pathlib import Path
 
 STOCK_MD5  = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5 = "ca23da7a4d55365e5bcf9245a48eb675"  # iter17a
+OUTPUT_MD5 = "fa2e34b178bee4dfae4a142bc5c1b701"  # iter22b — sswitch_18a cardinality NOP for PLAYBACK_STATUS_CHANGED
 
 DEX_OFFSET     = 0x28
 ADLER_FILE_OFF = 0x30
@@ -117,6 +117,20 @@ PATCHES = [
         "name":   "[iter17a] handleKeyMessage TRACK_CHANGED cardinality bypass (NOP if-eqz)",
         "offset": 0x3c530,
         "before": bytes([0x38, 0x05, 0xda, 0xff]),  # if-eqz v5, +-38 (-> :cond_184)
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
+    },
+    {
+        "name":   "[iter22b] handleKeyMessage PLAYBACK_STATUS_CHANGED cardinality bypass (NOP if-eqz)",
+        # sswitch_18a / event 0x01 case in handleKeyMessage's nested
+        # sparse-switch (the same idiom as iter17a's NOP on event 0x02).
+        # Without this NOP the JNI's notificationPlayStatusChangedNative is
+        # never invoked because the Java BitSet of registered events is
+        # permanently empty (TG bookkeeping isn't updated by our
+        # trampolines). With the NOP, the native fires on every Y1MediaBridge
+        # `playstatechanged` broadcast and lands in T9 via the
+        # libextavrcp_jni.so hook at 0x3c88.
+        "offset": 0x3c4fe,
+        "before": bytes([0x38, 0x05, 0xf3, 0xff]),  # if-eqz v5, +-13 (-> :cond_184)
         "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
     },
     {

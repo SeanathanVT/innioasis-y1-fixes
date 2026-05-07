@@ -155,8 +155,17 @@ from _thumb2asm import Asm
 # entry instruction with `b.w T5` so it lands in our state-aware trampoline.
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
+# iter22b: notificationPlayStatusChangedNative at vaddr 0x3c88. Same shape as
+# the TRACK_CHANGED hook above, paired with the iter22b cardinality NOP at
+# 0x3c4fe in MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's
+# nested sparse-switch). Replace entry instruction with `b.w T9` so every
+# Y1MediaBridge `playstatechanged` broadcast lands in T9, which fires
+# PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
+# Closes the AVRCP §6.7.1 spec gap left by iter20b's INTERIM-only T8.
+NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
+
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "28d0129cedeb06e7ba233190f92eefde"  # iter20b — Phase A1 (T8 events 0x01/0x03-0x07 + T1 EventsSupported [0x01..0x07])
+OUTPUT_MD5 = "fdb50b8a569dbef038424e82ceeed882"  # iter22b — Phase A1 follow-up (T9 + notificationPlayStatusChangedNative hook)
 
 # ---------------------------------------------------------------- T1
 
@@ -253,9 +262,29 @@ def _native_track_changed_stub(t5_vaddr: int) -> bytes:
     return a.resolve()
 
 
+def _native_play_status_changed_stub(t9_vaddr: int) -> bytes:
+    """iter22b: replace the first 4 bytes of notificationPlayStatusChangedNative
+    with `b.w T9`. The remaining bytes of the original function body are
+    unreachable but left in place (valid dead code; harmless)."""
+    a = Asm(NATIVE_PLAY_STATUS_CHANGED_VADDR)
+    a.labels["target"] = t9_vaddr
+    a.b_w("target")
+    return a.resolve()
+
+
 # Stock first 4 bytes of notificationTrackChangedNative — the prologue's
 # `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` instruction.
 NATIVE_TRACK_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF0, 0x47])
+
+# Stock first 4 bytes of notificationPlayStatusChangedNative.
+# Disassembled: stmdb sp!, {r0, r1, r4, r5, r6, r7, r8, lr} (reg list 0x41F3) --
+# distinct from notificationTrackChangedNative's prologue (0x47F0) because the
+# play_status native takes 3 jbyte args (Java arg3 = play_status arrives in r4
+# per the AAPCS register/stack split for variadic-byte Java natives), and the
+# stock body needs r0/r1 (env, this) preserved for re-use after the call into
+# the AVRCP service.  We don't care about the original body — overwriting the
+# first 4 bytes with `b.w T9` short-circuits everything past it.
+NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF3, 0x41])
 
 
 def build_patches() -> tuple[list[dict], int]:
@@ -263,6 +292,7 @@ def build_patches() -> tuple[list[dict], int]:
     blob, addrs = build_trampolines()
     extended_t2_vaddr = addrs["extended_T2"]
     t5_vaddr = addrs["T5"]
+    t9_vaddr = addrs["T9"]
     new_load1_size = T4_VADDR + len(blob)
 
     patches = [
@@ -286,6 +316,16 @@ def build_patches() -> tuple[list[dict], int]:
             "offset": NATIVE_TRACK_CHANGED_VADDR,
             "before": NATIVE_TRACK_CHANGED_STOCK_PROLOGUE,
             "after":  _native_track_changed_stub(t5_vaddr),
+        },
+        {
+            "name": (
+                f"iter22b: notificationPlayStatusChangedNative @"
+                f" 0x{NATIVE_PLAY_STATUS_CHANGED_VADDR:x} → b.w T9 (0x{t9_vaddr:x})"
+                f" — proactive PLAYBACK_STATUS_CHANGED on play/pause edge"
+            ),
+            "offset": NATIVE_PLAY_STATUS_CHANGED_VADDR,
+            "before": NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE,
+            "after":  _native_play_status_changed_stub(t9_vaddr),
         },
         {
             "name": (

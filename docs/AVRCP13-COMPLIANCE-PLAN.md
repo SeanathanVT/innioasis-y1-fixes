@@ -137,9 +137,9 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 
 **Compliance delta:** mandatory PDUs handled goes 3→5; PDUs spec-correct goes 2→5 (both inform PDUs added + TRACK_CHANGED's existing implementation made spec-correct).
 
-### Phase A1 — Notification expansion (T8) — SHIPPED iter20b
+### Phase A1 — Notification expansion (T8 + T9) — SHIPPED iter20b / iter22b
 
-**Status:** Implemented in iter20b. Reproducible build at `28d0129cedeb06e7ba233190f92eefde`. Awaiting hardware verification.
+**Status:** Implemented in iter20b (T8 INTERIM dispatcher) + iter22b (T9 proactive CHANGED for event 0x01). Reproducible build at `fdb50b8a569dbef038424e82ceeed882`. Awaiting hardware verification on Kia EV6 + Samsung TV.
 
 **Final implementation:** T8 trampoline branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm (replaces the previous fall-through to "unknow indication"). T8 allocates an 800 B stack frame, reads `y1-track-info` (for events 0x01/0x05 which carry payloads from the iter20a schema), then dispatches on `event_id` and emits an INTERIM via the matching `reg_notievent_*_rsp` PLT:
 
@@ -152,17 +152,18 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 | 0x06 BATT_STATUS_CHANGED | 0x3354 | u8 canned `0x00 NORMAL` | — |
 | 0x07 SYSTEM_STATUS_CHANGED | 0x3348 | u8 canned `0x00 POWERED_ON` | — |
 
-INTERIM-only — no proactive CHANGED for the new events. Position is not live-extrapolated (same approach as T6; CTs poll). For event 0x01 a proactive CHANGED would be valuable but requires another smali NOP in `MtkBt.odex` to bypass the `cardinality:0` gate for the PLAYBACK_STATUS_CHANGED case (similar to iter17a's NOP for TRACK_CHANGED). Deferred.
+INTERIM coverage as above. **iter22b adds proactive CHANGED for event 0x01 PLAYBACK_STATUS_CHANGED via T9** — structurally a clone of T5 (the iter17a TRACK_CHANGED proactive trampoline). T9 is invoked by the patched `notificationPlayStatusChangedNative` (file offset 0x3c88, stock prologue `2D E9 F3 41` overwritten with `b.w T9`), which fires on every Y1MediaBridge `playstatechanged` broadcast once the matching MtkBt cardinality NOP at 0x3c4fe (sswitch_18a, event 0x01 case) is in place. T9 reads `y1-track-info[792]` (current play_status), compares against `y1-trampoline-state[9]` (`last_play_status` — previously pad), emits `reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, play_status)` via PLT 0x339c on edge, and writes the new value back. transId is auto-extracted from conn[17] by the response builder (same convention T5 uses for track_changed_rsp). Closes the §6.7.1 spec gap for event 0x01. Position (event 0x05) and the other events stay INTERIM-only — proactive CHANGED for 0x05 would need a periodic timer (no broadcast equivalent), and 0x03/0x04/0x06/0x07 don't have natural Y1-side edge sources.
 
 **T1 `EventsSupported` expansion:** events array advertised in `GetCapabilities(0x03)` responses goes from `[0x02]` count=1 to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` count=7. Two byte-edits in `T1_TRAMPOLINE`. Per the spec-compliance feedback rule, advertise only what's implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised until Phase C.
 
 **Schema dependency:** Y1MediaBridge schema fields needed by T8 (`play_status` at offset 792, `position_at_state_change_ms` at offsets 780..783) were already added in iter20a — no further Y1MediaBridge changes for iter20b.
 
-**Files touched:**
-- `src/patches/_trampolines.py` — added `_emit_t8` (~210 B trampoline body), modified `extended_T2`'s unknown-event arm to bridge to T8, added `T8_*` frame constants and 6 new `PLT_reg_notievent_*_rsp` constants, added `BATT_STATUS_NORMAL` / `SYSTEM_STATUS_POWERED` canned-value constants. ~190 lines.
-- `src/patches/patch_libextavrcp_jni.py` — `T1_TRAMPOLINE` bytes updated for events count `1→7` and events array; bumped `OUTPUT_MD5` to `28d0129cedeb06e7ba233190f92eefde`. ~10 lines.
+**Files touched (cumulative iter20b + iter22b):**
+- `src/patches/_trampolines.py` — `_emit_t8` (iter20b, ~210 B INTERIM dispatcher), `_emit_t9` (iter22b, ~190 B T5-shaped proactive CHANGED for event 0x01); modified `extended_T2`'s unknown-event arm to bridge to T8; new `T8_*` and `T9_*` frame constants; 6 new `PLT_reg_notievent_*_rsp` constants; `BATT_STATUS_NORMAL` / `SYSTEM_STATUS_POWERED` canned-value constants.
+- `src/patches/patch_libextavrcp_jni.py` — `T1_TRAMPOLINE` events count `1→7` + events array (iter20b); new `NATIVE_PLAY_STATUS_CHANGED_VADDR=0x3c88` hook + `_native_play_status_changed_stub` (iter22b); `OUTPUT_MD5` bumped from `28d0129cedeb06e7ba233190f92eefde` (iter20b) to `fdb50b8a569dbef038424e82ceeed882` (iter22b).
+- `src/patches/patch_mtkbt_odex.py` — new `[iter22b]` patch entry NOPing `if-eqz v5, :cond_184` at 0x3c4fe (sswitch_18a / event 0x01); `OUTPUT_MD5` bumped from `ca23da7a4d55365e5bcf9245a48eb675` (iter17a) to `fa2e34b178bee4dfae4a142bc5c1b701` (iter22b).
 
-**Compliance scorecard delta:** PDU 0x31 event coverage 1/8 → 7/8. T1 `EventsSupported` matches actual coverage.
+**Compliance scorecard delta:** PDU 0x31 event coverage 1/8 → 7/8 (iter20b). T1 `EventsSupported` matches actual coverage. Event 0x01 now ships INTERIM + proactive CHANGED-on-edge (iter22b), matching event 0x02 TRACK_CHANGED's iter15+ behavior. Spec compliance for event 0x01 §6.7.1 closed.
 
 ### Phase B — GetPlayStatus (T6) — SHIPPED iter20a
 
