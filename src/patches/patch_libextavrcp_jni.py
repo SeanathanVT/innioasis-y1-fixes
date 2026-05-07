@@ -2,7 +2,7 @@
 """
 patch_libextavrcp_jni.py — AVRCP TG/Target trampoline chain patched into
 libextavrcp_jni.so so this firmware (where Java-side AVRCP is a no-op stub)
-can answer Sonos's metadata queries directly from native code.
+can answer permissive CTs' metadata queries directly from native code.
 
 Pairs with patch_mtkbt.py's P1 patch which routes inbound VENDOR_DEPENDENT
 AV/C commands through msg 519 with size=9.
@@ -68,9 +68,9 @@ T_charset — iter19a, in LOAD #1 padding past the T4/extended_T2/T5 blob.
      Handles InformDisplayableCharacterSet (PDU 0x17). Calls
      inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success). Bare 8-byte
      ack frame; the spec doesn't require us to honor the CT's charset
-     declaration, just to acknowledge it. Bolt EV head unit sends this once
+     declaration, just to acknowledge it. A strict CT sends this once
      at connect; iter19a stops the previous msg=520 NOT_IMPLEMENTED reject
-     that was likely degrading Bolt's metadata-fetch behavior.
+     that was likely degrading the strict CT's metadata-fetch behavior.
 
 T_battery — iter19a, structurally identical to T_charset but for
      InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via PLT 0x357c.
@@ -92,22 +92,22 @@ VENDOR_DEPENDENT through size==8 PASSTHROUGH dispatch and didn't reach
 the right Java callback. See docs/INVESTIGATION.md Trace #12.
 
 iter5..iter13: T1 + T2 + T4 progressively built. iter13 hardware-verified
-Title + Artist + Album displayed on Sonos — but only for the first track:
-Sonos caches metadata by TRACK_CHANGED INTERIM track_id, and our T2 always
+Title + Artist + Album displayed on permissive CTs — but only for the first track:
+permissive CTs cache metadata by TRACK_CHANGED INTERIM track_id, and our T2 always
 sent 0xFF×8.
 
 iter14/14b/14c: Y1MediaBridge wrote real metadata into a file; T4 reads
 it. iter14b found the right path (/data/data/com.y1.mediabridge/files/);
 iter14c added diagnostic logging that confirmed T4 was firing on track
-change but Sonos still showed the cached first-track metadata.
+change but permissive CTs still showed the cached first-track metadata.
 
 iter15: state-tracked CHANGED notifications. extended_T2 saves the
 RegisterNotification transId; T4 detects track_id changes against a
 state file and emits a CHANGED with the saved transId before replying
 to GetElementAttributes. INTERIM/CHANGED both carried the file's real
-track_id. Hardware-tested 2026-05-06 — DEADLOCKED Sonos: returning a
-real track_id flips Sonos into "stable identity, only refresh on
-CHANGED" mode; T4 fires only when Sonos polls; Sonos won't poll until
+track_id. Hardware-tested 2026-05-06 — DEADLOCKED permissive CTs: returning a
+real track_id flips permissive CTs into "stable identity, only refresh on
+CHANGED" mode; T4 fires only when permissive CTs poll; permissive CTs won't poll until
 it sees a CHANGED. 14 minutes of zero AVRCP traffic confirmed.
 
 iter16: same architecture as iter15 but INTERIM/CHANGED's track_id
@@ -115,7 +115,7 @@ field is hardcoded to the 0xFF×8 sentinel ("not bound to a particular
 media element" per AVRCP 1.4 §6.7.2). State file's bytes 0..7 still
 hold the file's last-synced track_id — that's what T4 compares against
 to know when to emit CHANGED. Restores iter14c-style polling
-behaviour and adds CHANGED edges on real track changes so Sonos
+behaviour and adds CHANGED edges on real track changes so permissive CTs
 invalidates its 0xFF×8-keyed cache and re-renders.
 
 iter17a/b: proactive CHANGED via T5 + Java-side cardinality bypass +
@@ -123,8 +123,8 @@ single-frame multi-attribute response fix (T4 calling convention).
 
 iter19a (Phase A0 of docs/AVRCP13-COMPLIANCE-PLAN.md): adds T_charset
 and T_battery for PDUs 0x17 and 0x18 (CT→TG informational pair, both
-spec-mandated, both rejected pre-iter19a → caused Bolt EV failure per
-/work/logs/dual-bolt-iter18d/), and fixes the existing T2/T5 wire shape
+spec-mandated, both rejected pre-iter19a → caused strict CTs failure per
+the strict-CT iter18d capture), and fixes the existing T2/T5 wire shape
 for TRACK_CHANGED notifications (was passing r1=transId which hits the
 response builder's reject-shape path; now r1=0 for spec-correct
 emission of reasonCode + event_id + track_id). Compliance scorecard
@@ -182,8 +182,8 @@ OUTPUT_MD5 = "e2790518d258e87326c8a65ad7b8f5c8"  # iter22d — T6 live position 
 # only what we actually implement. 0x08 PLAYER_APPLICATION_SETTING_CHANGED is
 # Phase C territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
 # unadvertised until we ship that. Pre-iter20b the array was just `02` count=1
-# for historical reasons (Sonos-era exploration; iter10 reduced from 5 events
-# to 1 because Sonos abandoned the registration sequence on the first
+# for historical reasons (permissive CTs-era exploration; iter10 reduced from 5 events
+# to 1 because permissive CTs abandoned the registration sequence on the first
 # NOT_IMPLEMENTED). Now that we actually handle the events we advertise,
 # strict CTs that gate on coverage will subscribe to all 7.
 T1_TRAMPOLINE = bytes([

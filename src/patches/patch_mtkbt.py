@@ -7,7 +7,7 @@ Output md5: a37d56c91beb00b021c55f7324f2cc09
 
 Four byte-level patches against the SERVED AVRCP TG record (Group D, the
 record that actually lands on the wire after mtkbt's last-wins merge) plus
-the AV/C op_code dispatcher. The goal is (1) make Sonos and other AVRCP
+the AV/C op_code dispatcher. The goal is (1) make permissive CTs and other AVRCP
 1.3+ controllers engage with the record and start sending VENDOR_DEPENDENT
 commands and (2) route those commands into the JNI's msg 519 emit path so
 the libextavrcp_jni.so trampoline chain (patch_libextavrcp_jni.py) can
@@ -24,7 +24,7 @@ S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
      0x0100 ServiceName entry pointing at the existing "Advanced Audio"
      SDP string at file offset 0x0eb9ce. This sacrifices the SupportedFeatures
      attribute on the wire (peers see no 0x0311); empirically Pixel-1.3 advertises
-     features=0x0001 but Sonos engages without strictly requiring the attribute.
+     features=0x0001 but permissive CTs engage without strictly requiring the attribute.
      The string content "Advanced Audio" is reused from mtkbt's existing A2DP
      ServiceName — peers don't validate ServiceName content; they just need
      the attribute present so the record passes structural sanity checks.

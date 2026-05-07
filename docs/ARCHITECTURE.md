@@ -1,6 +1,6 @@
 # AVRCP Metadata Architecture
 
-How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer controllers like Sonos, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt.py` V1/V2 — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31. AVRCP 1.4's browsing channel, Now Playing list, and advanced player-application settings are not implemented.)
+How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album) to peer Controllers, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. (We advertise 1.3 over AVCTP 1.2 — see `patch_mtkbt.py` V1/V2 — and implement only the 1.3 metadata feature set: `GetCapabilities` 0x10, `GetElementAttributes` 0x20, `RegisterNotification(TRACK_CHANGED)` 0x31. AVRCP 1.4's browsing channel, Now Playing list, and advanced player-application settings are not implemented.)
 
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.4 responses on the wire.
 
@@ -12,7 +12,7 @@ For **iteration plans and pending work**: see [`PROXY-BUILD.md`](PROXY-BUILD.md)
 
 ## TL;DR
 
-Sonos sends a stock AVRCP 1.3+ GetElementAttributes request (PDU 0x20 — same wire format in 1.3 and 1.4) → mtkbt routes it through msg-519 (P1 patch) → `libextavrcp_jni.so::saveRegEventSeqId` is intercepted at file 0x6538 (R1 patch) → a chain of three trampolines (T1, T2, T4) inspects the inbound PDU byte and calls the matching `btmtk_avrcp_send_*_rsp` PLT entry directly → mtkbt builds a real AVRCP 1.3 metadata response frame and emits it on the wire → Sonos displays the metadata.
+A peer CT sends a stock AVRCP 1.3+ GetElementAttributes request (PDU 0x20 — same wire format in 1.3 and 1.4) → mtkbt routes it through msg-519 (P1 patch) → `libextavrcp_jni.so::saveRegEventSeqId` is intercepted at file 0x6538 (R1 patch) → a chain of three trampolines (T1, T2, T4) inspects the inbound PDU byte and calls the matching `btmtk_avrcp_send_*_rsp` PLT entry directly → mtkbt builds a real AVRCP 1.3 metadata response frame and emits it on the wire → the CT displays the metadata.
 
 The trampolines live in unused/repurposed JNI debug methods (`testparmnum`, `classInitNative`) and in the page-alignment padding past the original LOAD #1 segment end (extended via `FileSiz`/`MemSiz` program-header surgery).
 
@@ -39,7 +39,7 @@ The trampolines call these directly. No new IPC, no Java surgery for the core ha
 ## The data path, end-to-end
 
 ```
-                           Sonos (AVRCP 1.4 controller)
+                           Peer CT (AVRCP 1.3+ controller)
                                        │
                                        ▼
                             ┌──────────────────────┐
@@ -214,7 +214,7 @@ That's why T4's fall-through pre-amble is:
 0xac64: b.w 0x65bc                ; → original unknow indication
 ```
 
-iter7 only restored r0 → msg=520 still didn't flow because pass_through_rsp got `lr=0x653c` (the stale bl return address) as the SIZE arg and silently dropped. iter8/9 added the lr restore → msg=520 flows correctly. The side-effect of this fix was that the AVRCP service stopped restart-looping every 2 seconds (because it was no longer waiting on responses that never came), which made play/pause work for the first time on Sonos.
+iter7 only restored r0 → msg=520 still didn't flow because pass_through_rsp got `lr=0x653c` (the stale bl return address) as the SIZE arg and silently dropped. iter8/9 added the lr restore → msg=520 flows correctly. The side-effect of this fix was that the AVRCP service stopped restart-looping every 2 seconds (because it was no longer waiting on responses that never came), which made play/pause work for the first time end-to-end.
 
 ---
 
@@ -293,7 +293,7 @@ So the function emits an IPC msg=540 frame when:
 
 It only **accumulates without emitting** when `arg1 == 0 AND arg3 != 0 AND (arg2+1) < arg3`.
 
-**transId** is NOT one of the args. The function reads it from `conn[17]` (line 0x21f2: `ldrb r2, [r0, #17]`) and copies into the response's wire frame. So passing `arg2 = transId` (as iter11/12 did) was just abusing arg2 as an attribute-INDEX with the value of transId — Title got written to slot[transId] of the buffer with all other slots zero, and Sonos found the one valid attribute and used it.
+**transId** is NOT one of the args. The function reads it from `conn[17]` (line 0x21f2: `ldrb r2, [r0, #17]`) and copies into the response's wire frame. So passing `arg2 = transId` (as iter11/12 did) was just abusing arg2 as an attribute-INDEX with the value of transId — Title got written to slot[transId] of the buffer with all other slots zero, and the CT found the one valid attribute and used it.
 
 ### Calling pattern for a 3-attribute response (iter13)
 
@@ -306,7 +306,7 @@ send_rsp(conn, arg1=0, idx=2, total=3, attr=3, len=8, "Y1 Album");   // (idx+1==
 
 **One** msg=540 IPC frame outbound containing all three attributes.
 
-> **iter15/16/17a regression (2026-05-06):** the dynamically-assembled T4 was passing `arg2 = transId, arg3 = 0` — taking the `arg3 == 0` legacy path on every call and emitting 3 separate msg=540 frames per query. Sonos rendered each one in turn (visible flicker: Title appearing intermittently while Artist/Album swapped in/out). Diagnosed from the logcat ratio of 1299 msg=540 outbound to ~433 GetElementAttributes inbound during the iter17a hardware test. Fixed in iter17b by restoring the iter13 calling pattern above.
+> **iter15/16/17a regression (2026-05-06):** the dynamically-assembled T4 was passing `arg2 = transId, arg3 = 0` — taking the `arg3 == 0` legacy path on every call and emitting 3 separate msg=540 frames per query. CTs rendered each one in turn (visible flicker: Title appearing intermittently while Artist/Album swapped in/out). Diagnosed from the logcat ratio of 1299 msg=540 outbound to ~433 GetElementAttributes inbound during the iter17a hardware test. Fixed in iter17b by restoring the iter13 calling pattern above.
 
 ### Calling pattern for `…send_reg_notievent_track_changed_rsp` (PLT 0x3384, used by T2)
 
@@ -332,7 +332,7 @@ void btmtk_avrcp_send_get_capabilities_rsp(
 );
 ```
 
-iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `02` (TRACK_CHANGED only, count=1) because Sonos aborts the entire registration loop on the first NOT_IMPLEMENTED reply — a side-effect we discovered empirically once iter9's "unknow indication" path actually started flowing rejects.
+iter10 reduced the advertised events from `01 02 09 0a 0b` (5 events) to just `02` (TRACK_CHANGED only, count=1) because some CTs abort the entire registration loop on the first NOT_IMPLEMENTED reply — a side-effect discovered empirically once iter9's "unknow indication" path actually started flowing rejects. iter20b later restored a 7-event advertisement [0x01..0x07] paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects no longer fire for advertised events.
 
 ### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, planned T6 — Phase B)
 
@@ -387,7 +387,7 @@ Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at 
 
 All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the same shape (40-byte buffer, msg=544, conn[17]→transId at sp+9). Each function bakes in its event-specific constant at sp+13 (1=playback, 2=track_changed, 5=pos_changed, ...). The `cbnz` test on r1 is shared: r1==0 = "write event payload", r1!=0 = "write reject flag (sp+10=1) + reject code (sp+11=arg1) and skip event payload".
 
-The current iter17b T2 trampoline passes `r1 = transId` (which is usually non-zero), so it's been hitting the second path. Empirically Sonos still receives a TRACK_CHANGED notification of some kind and falls back to GetElementAttributes polling for metadata, which is why iter15+ has been working despite this. To be spec-correct (and to actually deliver the embedded track_id), iter19 should pass `r1=0` in T2/T5/T6/T8 across the board. **Treat as a known issue to fix when making the Phase A/B trampoline pass; verify on hardware that it doesn't regress current Sonos rendering.**
+The current iter17b T2 trampoline passes `r1 = transId` (which is usually non-zero), so it's been hitting the second path. Empirically permissive CTs still receive a TRACK_CHANGED notification of some kind and fall back to GetElementAttributes polling for metadata, which is why iter15+ has been working for that CT class despite this. To be spec-correct (and to actually deliver the embedded track_id), iter19 should pass `r1=0` in T2/T5/T6/T8 across the board. **Treat as a known issue to fix when making the Phase A/B trampoline pass; verify on hardware that it doesn't regress permissive-CT rendering.**
 
 ---
 
@@ -415,11 +415,11 @@ The JNI trampoline blob is built dynamically by `src/patches/_trampolines.py` us
 
 **Wire-level `track_id` history (iter15 → iter16 → iter19b → iter19d):**
 
-- **iter15** sent the file's real `track_id` in INTERIM. Sonos read it and switched to "stable identity, refresh on CHANGED" mode. T4 was reactive only — fires on inbound `GetElementAttributes` — so it would never produce a CHANGED on its own; Sonos waited for a CHANGED that wouldn't come unless Sonos polled, but Sonos wouldn't poll because it was in "refresh-on-CHANGED" mode. Hardware test 2026-05-06 confirmed the deadlock: 14 minutes of zero AVRCP traffic post-INTERIM.
+- **iter15** sent the file's real `track_id` in INTERIM. Permissive CTs read it and switched to "stable identity, refresh on CHANGED" mode (per AVRCP §6.7.2). T4 was reactive only — fires on inbound `GetElementAttributes` — so it would never produce a CHANGED on its own; the CT waited for a CHANGED that wouldn't come unless it polled, but in "refresh-on-CHANGED" mode it wouldn't poll. Hardware test 2026-05-06 confirmed the deadlock: 14 minutes of zero AVRCP traffic post-INTERIM.
 - **iter16** pinned the wire-level field to the sentinel `0xFF×8` (AVRCP §6.7.2 — "not bound to a particular media element"). CTs treat this as "no stable identity, refresh on each event" and keep polling. The state file's bytes 0..7 still hold the real last-synced `track_id` for T4's change detection logic; only the on-the-wire payload changed.
 - **iter17a** added T5 — a proactive CHANGED-emit trampoline reached via the patched `notificationTrackChangedNative`. Every Y1MediaBridge track-change broadcast now produces a CHANGED on the wire regardless of whether the CT is polling. This eliminated iter15's deadlock pre-condition.
-- **iter19b** experimentally dropped the sentinel; restored iter15's "real `track_id` on the wire" behavior. Theoretically safe now because T5 supplies the proactive CHANGED edges that iter15 lacked. Targeted strict CTs (Chevrolet Bolt EV) that gate metadata refresh on the `track_id` actually changing — and ignored every iter16/17/19a CHANGED because they all carried the same `0xFF×8`.
-- **iter19d** REVERTED iter19b. Hardware test against Samsung The Frame Pro (`/work/logs/dual-tv-iter19c-playpause/`) showed the TV reacted to real track_ids in INTERIM by entering a tight `RegisterNotification` subscribe storm at ~90 Hz from connection setup forward (3401 inbound `size:13` over 38 seconds, ~7 ms inter-frame). The flood saturated AVCTP and dropped PASSTHROUGH release frames: any TV-remote button press became a "key held down" event — Next/Prev fast-forwarded the track at ~32× speed, Play/Pause produced haptic-stuck-on "vibrate-loop". Bolt's UI-side block (the original motivation for iter19b) wasn't actually fixed by switching to real track_ids anyway — Bolt re-fetched on the first CHANGED only and ignored every subsequent one. Sentinel restored. The strict-CT-refresh-on-CHANGED problem moves to iter20+ (Phase A1 + Phase B per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) — `PLAYBACK_STATUS_CHANGED` notification subscription + `GetPlayStatus` PDU, which are the spec-mandated paths most cars actually use, regardless of `track_id`).
+- **iter19b** experimentally dropped the sentinel; restored iter15's "real `track_id` on the wire" behavior. Theoretically safe now because T5 supplies the proactive CHANGED edges that iter15 lacked. Targeted strict CT classes that gate metadata refresh on the `track_id` actually changing — they had been ignoring every iter16/17/19a CHANGED because they all carried the same `0xFF×8`.
+- **iter19d** REVERTED iter19b. Hardware test against a high-subscribe-rate CT class (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for the capture path) showed the CT reacted to real track_ids in INTERIM by entering a tight `RegisterNotification` subscribe storm at ~90 Hz from connection setup forward (3401 inbound `size:13` over 38 seconds, ~7 ms inter-frame). The flood saturated AVCTP and dropped PASSTHROUGH release frames: any held-key event became a "key held down" cascade — held NEXT/PREV fast-forwarded the track at ~32× speed, held PLAY/PAUSE produced haptic-stuck-on symptoms. The strict-CT UI-side block (the original motivation for iter19b) wasn't actually fixed by switching to real track_ids anyway — strict CTs re-fetched on the first CHANGED only and ignored every subsequent one. Sentinel restored per AVRCP §6.7.2 (spec-permissible "no media bound" mode). The strict-CT-refresh-on-CHANGED problem moves to iter20+ (Phase A1 + Phase B per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) — `PLAYBACK_STATUS_CHANGED` notification subscription + `GetPlayStatus` PDU, which are the spec-mandated paths most CTs actually use regardless of `track_id`).
 
 The state file at `y1-trampoline-state[0..7]` still holds the real synthetic audioId from `Y1MediaBridge.mCurrentAudioId` (= `path.hashCode() | 0x100000000L`, iter18d) — that's used internally by T4 and T5 for change detection. Only the on-the-wire `track_id` field is the sentinel.
 
@@ -434,7 +434,7 @@ Two files, both in `/data/data/com.y1.mediabridge/files/`:
   - bytes 520..775 = Album (same)
   - mode 0644 (world-readable so the BT process can open it)
 - **y1-trampoline-state** (16 B, pre-created by Y1MediaBridge at startup, updated by the trampolines):
-  - bytes 0..7  = last track_id we told Sonos about (updated by T4 after emitting CHANGED, and by extended_T2 every RegisterNotification)
+  - bytes 0..7  = last track_id we told the CT about (updated by T4 after emitting CHANGED, and by extended_T2 every RegisterNotification)
   - byte 8     = last RegisterNotification transId (updated by extended_T2)
   - bytes 9..15 = padding
   - mode 0666 (world-rw so the BT process can rewrite it)

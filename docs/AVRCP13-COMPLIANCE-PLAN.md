@@ -1,6 +1,6 @@
 # AVRCP 1.3 Spec-Compliance Plan
 
-A staged path from the current "Sonos-correct minimum subset" (iter18d) to a fully spec-compliant AVRCP 1.3 TG. Written 2026-05-06 in response to the Bolt failure (works on Sonos + Samsung TV; fails on Chevrolet Bolt EV head unit).
+A staged path from the current iter18d minimum subset (GetCapabilities + GetElementAttributes + RegisterNotification(TRACK_CHANGED) only) to a fully spec-compliant AVRCP 1.3 TG. Written 2026-05-06 in response to a strict-CT failure mode (the TG worked on permissive CTs that poll for metadata regardless, but failed on strict CTs that gate metadata refresh on charset acknowledgement and CHANGED-edge wire correctness). Per-CT empirical observations live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT".
 
 This document is the build plan only. For why we have a proxy at all, the current trampoline chain shape, and the calling conventions of the response builders we already use, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For per-patch byte detail of what's shipped, see [`PATCHES.md`](PATCHES.md).
 
@@ -30,7 +30,7 @@ Spec citations are AVRCP 1.4 (which is a strict superset of 1.3 for the metadata
 | 0x17 | InformDisplayableCharacterSet | Yes | falls through | Phase C |
 | 0x18 | InformBatteryStatusOfCT | Yes | falls through | Phase C (canned response) |
 | 0x20 | GetElementAttributes | Yes | T4 — replies with attrs 1/2/3 (Title/Artist/Album), UTF-8 single 644-byte frame | Add attrs 4 (TrackNumber), 5 (TotalNumberOfTracks), 6 (Genre), 7 (PlayingTime) — Phase B |
-| 0x30 | GetPlayStatus | Yes | falls through to mtkbt → behavior unknown | Phase B (top suspect for Bolt) |
+| 0x30 | GetPlayStatus | Yes | falls through to mtkbt → behavior unknown | Phase B |
 | 0x31 | RegisterNotification | Yes | T2 — handles event 0x02 only; INTERIM with sentinel `0xFF×8` | Phase A: events 0x01/0x05/0x08; spec also mandates 0x03/0x04/0x06/0x07 |
 | 0x40 | RequestContinuingResponse | Yes | falls through | Phase D |
 | 0x41 | AbortContinuingResponse | Yes | falls through | Phase D |
@@ -114,7 +114,7 @@ If we ever do exhaust LOAD #1 padding, we have a known fallback: extend the tric
 
 ## 4. Implementation phases
 
-Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain. Phases were re-factored 2026-05-06 after the Bolt EV capture established that PDU 0x17 InformDisplayableCharacterSet was the dominant blocker — splitting Phase A0 (Inform PDUs + the wire-shape correctness fix for our existing TRACK_CHANGED implementation) out of the original Phase A/C buckets gives a coherent compliance unit small enough to ship in hours rather than days.
+Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain. Phases were re-factored 2026-05-06 after a strict-CT capture established that PDU 0x17 InformDisplayableCharacterSet was the dominant blocker — splitting Phase A0 (Inform PDUs + the wire-shape correctness fix for our existing TRACK_CHANGED implementation) out of the original Phase A/C buckets gives a coherent compliance unit small enough to ship in hours rather than days.
 
 ### Phase A0 — Inform PDUs + TRACK_CHANGED wire-shape fix (iter19)
 
@@ -125,7 +125,7 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 - **T_battery trampoline** for PDU 0x18 InformBatteryStatusOfCT → calls `battery_status_rsp` via PLT 0x357c with `r1=0` (success).
 - **T2/T5 r1 fix**: replace `ldrb.w r1, [sp, #368]` (transId) with `movs r1, #0` (success path). Saves 2 bytes per site.
 
-**Bolt EV capture confirms 0x17 is the blocker:** `/work/logs/dual-bolt-iter18d/` shows the Bolt sending PDU 0x17 once at connection setup; we currently NACK with msg=520; afterwards the Bolt registers TRACK_CHANGED 30 times but only ever issues a single GetElementAttributes — consistent with both "the TG won't acknowledge my charset declaration so I distrust subsequent metadata" and "your CHANGED notifications are reject-shaped so I'm not re-fetching." iter19 fixes both.
+**Strict-CT capture confirms 0x17 is the blocker:** the strict-CT capture (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for the relevant CT and the log path) shows the CT sending PDU 0x17 once at connection setup; we currently NACK with msg=520; afterwards the CT registers TRACK_CHANGED 30 times but only ever issues a single GetElementAttributes — consistent with both "the TG won't acknowledge my charset declaration so I distrust subsequent metadata" and "your CHANGED notifications are reject-shaped so I'm not re-fetching." iter19 fixes both.
 
 **No Y1MediaBridge changes. No music-app patches.** The Inform PDUs are pure CT→TG informational acks with no data flow back to the Y1.
 
@@ -139,7 +139,7 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 
 ### Phase A1 — Notification expansion (T8 + T9) — SHIPPED iter20b / iter22b
 
-**Status:** Implemented in iter20b (T8 INTERIM dispatcher) + iter22b (T9 proactive CHANGED for event 0x01). Reproducible build at `fdb50b8a569dbef038424e82ceeed882`. Awaiting hardware verification on Kia EV6 + Samsung TV.
+**Status:** Implemented in iter20b (T8 INTERIM dispatcher) + iter22b (T9 proactive CHANGED for event 0x01). Reproducible build at `fdb50b8a569dbef038424e82ceeed882`. Hardware verification status per CT lives in [`INVESTIGATION.md`](INVESTIGATION.md).
 
 **Final implementation:** T8 trampoline branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm (replaces the previous fall-through to "unknow indication"). T8 allocates an 800 B stack frame, reads `y1-track-info` (for events 0x01/0x05 which carry payloads from the iter20a schema), then dispatches on `event_id` and emits an INTERIM via the matching `reg_notievent_*_rsp` PLT:
 
@@ -305,12 +305,13 @@ Each entry should produce a documented C signature in `ARCHITECTURE.md` §"Rever
 
 ## 7. Test/verification strategy
 
-Per phase: a hardware capture against at least three CTs covering different policy postures.
+Per phase: a hardware capture against at least three CTs covering different policy postures. Test-matrix CT roster + per-CT empirical observations live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT". Recommended posture spread:
 
-- **Sonos Roam** — most permissive, has been our reference all along.
-- **Samsung The Frame TV** — proven working at iter18d.
-- **Chevrolet Bolt EV head unit** — strict, currently failing.
-- (stretch) iPhone car-mode dashboard — different polling pattern again.
+- **Permissive CT** — polls metadata regardless of CHANGED edges; most forgiving baseline.
+- **High-subscribe-rate CT** — subscribes to TRACK_CHANGED at high frequency (regression check for AVCTP-saturation symptoms).
+- **Strict CT** — gates metadata refresh on charset acknowledgement and real CHANGED edges.
+- **Polling CT** — uses GetPlayStatus polling rather than RegisterNotification subscriptions (regression check for T6 / live position).
+- (stretch) An iOS / WearOS CT — different polling pattern again.
 
 For each CT, capture btlog+logcat with:
 ```
@@ -335,10 +336,10 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 | Music-app smali patch (Phase C) breaks UI in some unanticipated way | Medium | Each patch is additive (no replacing existing logic); pre-flight test in DEX-validate pass. Each individual smali change has a `getPlayerService() == null` early-out so we never crash if init order shifts. |
 | LOAD #1 extension exhausts page-padding | Very low | 3,260 B free post-iter17b; budget supports >40 trampolines. Fallback: extend LOAD #2 padding. |
 | Trampoline blob shifts every PLT call beyond range | Low (Thumb b.w covers ±16 MB; trampolines and PLT are <0x10000 apart) | Verify `bl.w`/`b.w` reach in `_thumb2asm.py` self-test for each new emit site. |
-| AVRCP version negotiation: we advertise 1.4 in SDP but our PDU set is 1.3-shape | Low post-Phase E | Phase E adds optional SetAbsoluteVolume + volume_changed_rsp. If a strict 1.4 CT discovers we don't honor abs-vol, falls back to 1.3 polling — Sonos's empirical behavior. |
+| AVRCP version negotiation: we advertise 1.4 in SDP but our PDU set is 1.3-shape | Low post-Phase E | Phase E adds optional SetAbsoluteVolume + volume_changed_rsp. Per AVRCP §6.6 a CT that doesn't see expected 1.4 features can fall back to 1.3 polling, which is the empirical behavior we've observed across permissive CTs. |
 | Cross-app broadcasts (Phase C music-app→Y1MediaBridge) get killed by some Android battery saver | Very low (4.2.2 has no doze; both apps are /system/app) | n/a |
 | Continuation PDU 0x40/0x41 (Phase D) requires intra-session state | Medium if we need it | Probably not needed — gate Phase D entirely on whether any peer ever sends 0x40 in our captures. |
-| AVCTP saturation under a CT subscribe storm drops PASSTHROUGH key-release frames; the music app then interprets the held key as a long-press, calls `startFastForward()`/`startRewind()`, and the lambda thread runs forever | Medium (observed against Samsung TV under iter19b real-track_id and iter19c/iter20b sentinel; reduced but not eliminated by Phase A1's 7-event fan-out) | **iter21 / Patch D**: bound `PlayerService$startFastForward$1.invoke()` and `PlayerService$startRewind$1.invoke()` to 50 iterations × 100 ms ≈ 5 s wall clock, then clear `fastForwardLock` and exit. Music-app-side defensive recovery, not a wire-layer change; the AVRCP layer remains spec-compliant. |
+| AVCTP saturation under a CT subscribe storm drops PASSTHROUGH key-release frames; the music app then interprets the held key as a long-press, calls `startFastForward()`/`startRewind()`, and the lambda thread runs forever | Medium (observed under iter19b real-track_id and iter19c/iter20b sentinel; reduced but not eliminated by Phase A1's 7-event fan-out — see [`INVESTIGATION.md`](INVESTIGATION.md) for the per-CT empirical context) | **iter21 / Patch D**: bound `PlayerService$startFastForward$1.invoke()` and `PlayerService$startRewind$1.invoke()` to 50 iterations × 100 ms ≈ 5 s wall clock, then clear `fastForwardLock` and exit. Music-app-side defensive recovery, not a wire-layer change; the AVRCP layer remains spec-compliant. |
 
 ---
 
@@ -363,12 +364,12 @@ Compared with the cumulative effort from iter1 through iter18d (already shipped:
 
 These let us short-circuit phases when a CT actually works:
 
-- **After Phase A0 (iter19):** retest Bolt. PDU 0x17 NACK is closed and TRACK_CHANGED is now spec-correct on the wire — most likely fixes the Bolt directly. If yes → defer A1+B as the next compliance increment rather than urgent fixes.
+- **After Phase A0 (iter19):** retest the strict-CT class. PDU 0x17 NACK is closed and TRACK_CHANGED is now spec-correct on the wire — most likely fixes strict-CT failures directly. If yes → defer A1+B as the next compliance increment rather than urgent fixes.
 - **After Phase A1+B (iter20):** retest against any new strict CT that surfaced. By this point we cover all 8 RegisterNotification events the spec mandates plus GetPlayStatus, which together account for the bulk of CT compatibility issues we know about.
 - **After Phase C (iter22, was iter21):** PApp Settings is mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
 - **After Phase D+E (iter23, was iter22):** full 1.3 spec compliance achieved.
 
-> Phase numbering after iter21 slid by one because iter21 was repurposed mid-stream from "Phase C music-app patch" into a defensive bound on the FF/RW hold-loop after the Samsung TV PASSTHROUGH-release-drop / vibrate-loop captures forced it ahead of compliance work. Phase C is now scheduled as iter22.
+> Phase numbering after iter21 slid by one because iter21 was repurposed mid-stream from "Phase C music-app patch" into a defensive bound on the FF/RW hold-loop after dropped-PASSTHROUGH-release symptoms (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT") forced it ahead of compliance work. Phase C is now scheduled as iter22+.
 
 We don't have to commit to the full 1.3 build up front. Each iter ships an incremental compliance milestone that's coherent on its own.
 

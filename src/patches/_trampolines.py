@@ -378,12 +378,12 @@ def _emit_t4(a: Asm) -> None:
     # reject_code arg, not transId — see extended_T2's matching comment.
     # iter19d: revert iter19b — back to the iter16 0xFF×8 sentinel. iter19b
     # had switched to the real track_id from y1-track-info[0..7] to fix the
-    # Bolt's "ignored every CHANGED after the first" behavior, but it
-    # destabilized the Samsung TV: ~90 Hz RegisterNotification subscribe
+    # the strict CT's "ignored every CHANGED after the first" behavior, but it
+    # destabilized the a high-subscribe-rate CT: ~90 Hz RegisterNotification subscribe
     # storm from the moment of pairing, AVCTP saturation, and PASSTHROUGH
     # release frames being dropped (held-key fast-forward on every Next/Prev
-    # press, vibrate-loop on Play/Pause). Bolt's UI-side block was never
-    # actually fixed by iter19b anyway. Sentinel restored; Bolt becomes an
+    # press, vibrate-loop on Play/Pause). The strict CT's UI-side block was never
+    # actually fixed by iter19b anyway. Sentinel restored; this CT class becomes an
     # iter20+ Phase A1+B problem.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
@@ -427,7 +427,7 @@ def _emit_t4(a: Asm) -> None:
     # transId is read by the function itself from conn[17]; we don't pass it.
     # iter15/16/17 regression: arg2=transId, arg3=0 took the legacy "arg3==0
     # → EMIT every call" path, producing 3 separate msg=540 frames per query.
-    # Sonos rendered each one in turn → flashing/iterative metadata updates.
+    # permissive CTs rendered each one in turn → flashing/iterative metadata updates.
     for idx, (label_suffix, attr_id, str_offset) in enumerate((
         ("title",  0x01, T4_OFF_FILE_TITLE),
         ("artist", 0x02, T4_OFF_FILE_ARTIST),
@@ -557,14 +557,14 @@ def _emit_extended_t2(a: Asm) -> None:
     # writes a reject-shape frame that omits the event payload. transId is
     # auto-extracted from conn[17] regardless.
     # iter19d: revert iter19b — back to the iter16 0xFF×8 sentinel. The
-    # Samsung TV reacted to real track_ids in INTERIM by entering a tight
+    # a high-subscribe-rate CTs reacted to real track_ids in INTERIM by entering a tight
     # ~90 Hz RegisterNotification subscribe loop from connection setup
     # forward. The flood saturated AVCTP and dropped PASSTHROUGH release
     # frames, so any user button press from the TV remote became a held-key
     # event — Next/Prev fast-forwarded the track at ~32× speed, Play/Pause
-    # produced a vibrate-loop. Bolt's UI-side metadata block (the original
+    # produced a vibrate-loop. The strict CT's UI-side metadata block (the original
     # motivation for iter19b) wasn't actually fixed by switching to real
-    # track_ids, so reverting loses nothing for Bolt; Bolt becomes an
+    # track_ids, so reverting loses nothing for strict CT; this CT class becomes an
     # iter20+ Phase A1+B problem (PLAYBACK_STATUS_CHANGED + GetPlayStatus).
     # See top-of-file "Wire-level track_id history" for the full path.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
@@ -586,7 +586,7 @@ def _emit_t5(a: Asm) -> None:
     handleKeyMessage path (with the cardinality if-eqz NOPed in MtkBt.odex)
     invokes the native method on every track-change broadcast from
     Y1MediaBridge — this lands here, asynchronously to any inbound AVRCP
-    command from Sonos.
+    command from permissive CTs.
 
     On entry:
       - r0 = JNIEnv*  (Java native arg 0)
@@ -608,7 +608,7 @@ def _emit_t5(a: Asm) -> None:
          track_id, state[8] = last RegisterNotification transId).
       4. If state[0..7] != file[0..7], emit a track_changed_rsp with
          reason=CHANGED, transId=state[8], track_id=&sentinel_ffx8 (the
-         iter16 sentinel — same wire-level identity as INTERIM so Sonos
+         iter16 sentinel — same wire-level identity as INTERIM so permissive CTs
          stays in poll-on-each-event mode), then write file[0..7] back to
          state[0..7] in y1-trampoline-state so we don't re-emit until the
          track moves again.
@@ -700,7 +700,7 @@ def _emit_t5(a: Asm) -> None:
     # r0 = conn buffer (= struct + 8); r1 = 0 (success — see top-of-file
     # iter19a note about the response builder's r1 dispatch); r2 = REASON_CHANGED;
     # r3 = &sentinel_ffx8 (iter19d revert; iter19b had pointed at the on-stack
-    # file_tid_buf at sp+16, but the Samsung TV reacted to real track_ids
+    # file_tid_buf at sp+16, but the a high-subscribe-rate CTs reacted to real track_ids
     # with a ~90 Hz RegisterNotification subscribe storm that saturated AVCTP
     # and dropped PASSTHROUGH release frames — see extended_T2 INTERIM's
     # matching comment for the full diagnosis).
@@ -887,7 +887,7 @@ def _emit_t6(a: Asm) -> None:
     # — clock_gettime can't really fail with valid args) gives us a sane
     # fallback (delta_sec computed against now_sec=0 will yield a negative
     # number which when multiplied by 1000 produces a position behind
-    # state_change_sec — still bounded, just useless. Kia would just see
+    # state_change_sec — still bounded, just useless. Polling CTs would just see
     # the same value on each poll and stop animating).
     a.movs_imm8(0, 0)
     a.str_sp_imm(0, T6_OFF_TIMESPEC_SEC)
@@ -1108,7 +1108,7 @@ def _emit_t9(a: Asm) -> None:
 
     Closes the AVRCP §6.7.1 spec gap left by iter20b: T8 handles event 0x01
     INTERIM-only, never fires the spec-mandated CHANGED frame when the
-    play_status actually flips. Symptom: Kia EV6 head unit subscribes to
+    play_status actually flips. Symptom: a polling CT subscribes to
     event 0x01, gets the immediate INTERIM, then never sees CHANGED, so the
     car-side play/pause icon stays stuck on its initial value even though
     Y1's audio toggles correctly via the PASSTHROUGH path.
