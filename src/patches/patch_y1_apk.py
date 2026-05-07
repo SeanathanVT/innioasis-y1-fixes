@@ -840,7 +840,7 @@ with open(repo_path, 'w') as f:
 print("  Patch C: Y1Repository -- songDao field changed from private to public")
 
 # ============================================================
-# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE coverage  (iter22d)
+# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE coverage  (iter22d, refined iter25)
 # ============================================================
 #
 # Background
@@ -851,39 +851,55 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 # that only ever issue 0x46 (and rely on the TG to interpret it as a
 # toggle when already paused) are also common in practice. A spec-compliant
 # TG must therefore handle all three of:
-#   - 0x44 PLAY  : transition to PLAYING (no-op if already PLAYING)
-#   - 0x46 PAUSE : transition to PAUSED  (no-op if already PAUSED)
+#   - 0x44 PLAY  : transition to PLAYING from any state (no-op if already PLAYING)
+#   - 0x46 PAUSE : transition to PAUSED  from any state (no-op if already PAUSED)
 #   - 0x46 sent as a toggle by the CT: TG state-flip
 #
 # Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
-# /dev/uinput) maps these to the Linux input event keycodes:
-#   - 0x46 PAUSE → Linux KEY_PLAYPAUSE (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
-#   - 0x44 PLAY  → Linux KEY_PLAY (207)      → Android KEYCODE_MEDIA_PLAY (126)
+# /dev/uinput) maps these to the Linux input event keycodes (verified against
+# /system/usr/keylayout/AVRCP.kl + getevent capture on iter23 hardware):
+#   - 0x44 PLAY  → Linux KEY_PLAYCD (200)  → Android KEYCODE_MEDIA_PLAY (126)
+#   - 0x46 PAUSE → Linux KEY_PAUSECD (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
 # (PASSTHROUGH 0x45 STOP is also defined but doesn't matter for this patch.)
 #
 # Y1's PlayControllerReceiver (the registered ACTION_MEDIA_BUTTON receiver)
-# only matches against `KeyMap.KEY_PLAY` which is hardwired to 85
-# (KEYCODE_MEDIA_PLAY_PAUSE). When a CT issues a discrete PLAY (PASSTHROUGH
-# 0x44 → uinput keycode 126), the receiver's `if-ne v2, KEY_PLAY` check
-# fails, no `playOrPause()` call is made, and the music app silently drops
-# the command. From the CT's perspective the TG accepted the command (no
-# AVRCP-layer reject) but ignored it.
+# stock-only matches against `KeyMap.KEY_PLAY` (= 85, KEYCODE_MEDIA_PLAY_PAUSE).
+# When a CT issues a discrete PLAY (PASSTHROUGH 0x44 → uinput KEY_PLAYCD →
+# KEYCODE_MEDIA_PLAY 126), the receiver's `if-ne v2, KEY_PLAY` check fails,
+# no action runs, and the music app silently drops the command.
 #
 # The fix
 # -------
-# Extend PlayControllerReceiver's `:cond_c` block (the KEY_PLAY → playOrPause
-# branch) to also accept keyCode 126 (KEYCODE_MEDIA_PLAY) and 127
-# (KEYCODE_MEDIA_PAUSE) as triggers for `playOrPause()`. Both route to the
-# same toggle handler — toggle from PAUSED to PLAYING when discrete PLAY
-# arrives, toggle from PLAYING to PAUSED when discrete PAUSE arrives. This
-# is functionally equivalent to honoring the discrete commands per AVRCP
-# §11.1.2 because the toggle is a no-op when the requested target state
-# matches the current state.
+# Distinguish three cases in the receiver and route each to the *correct*
+# PlayerService method:
 #
-# 127 is included for forward-compat in case any other path injects
-# KEYCODE_MEDIA_PAUSE (the existing PASSTHROUGH 0x46 → 85 mapping covers
-# the AVRCP path; 127 covers any non-AVRCP source that might also reach
-# the receiver).
+#   - KEY_PLAY (85, KEYCODE_MEDIA_PLAY_PAUSE):
+#       call `playOrPause()V` (toggle).
+#       The legacy ACTION_MEDIA_BUTTON broadcast Intent always uses 85, and
+#       toggle is the right semantics for a single physical play/pause key.
+#
+#   - KEYCODE_MEDIA_PLAY (0x7e, 126) — discrete PLAY:
+#       call `play(Z)V` with bool=false. AVRCP §11.1.2 PLAY transitions to
+#       PLAYING from any state; if already PLAYING, play() is effectively a
+#       no-op (the underlying IjkMediaPlayer is already running).
+#
+#   - KEYCODE_MEDIA_PAUSE (0x7f, 127) — discrete PAUSE:
+#       call `pause(IZ)V` with reason=0x12, flag=true. The reason byte is a
+#       diagnostic identifier that PlayerService Timber-logs as "executed
+#       pause from %d"; existing reasons in the stock binary span 0xc-0x11
+#       (e.g. 0xc/0xf/0xd/0xe = various internal sources, 0x10/0x11 from
+#       playOrPause's pause-arm). 0x12 is a fresh tag for "PlayController
+#       discrete PASSTHROUGH PAUSE". The boolean flag virtually always
+#       resolves to true in the stock binary (Kotlin pause$default helper's
+#       mask defaults p2=true on every observed callsite); we pass true
+#       explicitly to match.
+#
+# iter22d's first attempt routed all three keycodes to playOrPause()
+# (toggle). That was empirically wrong for a strict CT: dual-bolt-iter23
+# capture showed Bolt issuing 5 discrete PLAY (0x44) presses while Y1 was
+# already PLAYING — playOrPause() toggled to PAUSED on each press, the
+# opposite of what Bolt asked for, and Bolt's UI reported the button as
+# unresponsive. iter25 splits the join label into three discrete arms.
 #
 # Stock smali at PlayControllerReceiver.smali:cond_c:
 #   :cond_c
@@ -891,24 +907,49 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
 #   move-result p1
 #   if-ne v2, p1, :cond_e
-#   ... (playOrPause action)
+#   ... (playOrPause action — single arm)
 #
-# Patched: replace the single `if-ne v2, p1, :cond_e` with a chain of three
-# equality checks that ALL fall through to the same action label:
+# Patched (iter25):
 #   :cond_c
 #   sget-object p1, KeyMap;->INSTANCE
 #   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
 #   move-result p1
-#   if-eq v2, p1, :cond_play_match     # KEY_PLAY (= 85) match
-#   const/16 p1, 0x7e                      # KEYCODE_MEDIA_PLAY (126)
-#   if-eq v2, p1, :cond_play_match
-#   const/16 p1, 0x7f                      # KEYCODE_MEDIA_PAUSE (127)
-#   if-ne v2, p1, :cond_e
-#   :cond_play_match
-#   ... (playOrPause action — unchanged)
+#   if-eq v2, p1, :cond_play_pause_toggle    # KEY_PLAY (85) → toggle
+#   const/16 p1, 0x7e
+#   if-eq v2, p1, :cond_play_strict          # MEDIA_PLAY (126) → play()
+#   const/16 p1, 0x7f
+#   if-eq v2, p1, :cond_pause_strict         # MEDIA_PAUSE (127) → pause()
+#   goto :cond_e                             # nothing matched, keep walking
 #
-# apktool reassembles to DEX and adjusts all branch offsets. No new methods,
-# no new fields, no manifest changes.
+#   :cond_play_pause_toggle
+#   ... (playOrPause action — unchanged from stock)
+#   goto :goto_5
+#
+#   :cond_play_strict
+#   sget-object p1, Y1Application$Companion
+#   invoke-virtual {p1}, ->getPlayerService()...
+#   move-result-object p1
+#   if-eqz p1, :cond_e
+#   const/4 v0, 0x0
+#   invoke-virtual {p1, v0}, PlayerService;->play(Z)V
+#   goto :goto_5
+#
+#   :cond_pause_strict
+#   sget-object p1, Y1Application$Companion
+#   invoke-virtual {p1}, ->getPlayerService()...
+#   move-result-object p1
+#   if-eqz p1, :cond_e
+#   const/16 v0, 0x12
+#   const/4 v3, 0x1
+#   invoke-virtual {p1, v0, v3}, PlayerService;->pause(IZ)V
+#   goto :goto_5
+#
+# v0 and v3 are dead at this point (the .locals 6 onReceive method has
+# v0..v5; the keyCode lives in v2 throughout the dispatch chain; v0/v3
+# are scratch). Each arm is a tail call ending in `goto :goto_5`, so we
+# never fall through into the next label. apktool will renumber the
+# user-defined :cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict
+# labels to alphanumeric :cond_X on reassembly — that's expected and fine.
 
 PLAY_CONTROLLER_RECEIVER_SMALI = (
     "smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali"
@@ -921,13 +962,13 @@ if not os.path.exists(play_receiver_path):
 with open(play_receiver_path, 'r') as f:
     play_receiver_src = f.read()
 
-# Match the unique KEY_PLAY → playOrPause branch (the second one in the file
-# at the short-press handler; the long-press version at :cond_d we leave
-# alone — a held PLAY button would be unusual on a car HMI and the existing
-# `longClickPlayBtnToStop` semantics don't generalize to a discrete PLAY/PAUSE
-# pair). Anchor the match on the `getKEY_PLAY()` invocation immediately
-# before the `playOrPause()` call so we hit the right :cond_c and not the
-# :cond_d below.
+# Match the unique KEY_PLAY → playOrPause branch — the short-press handler
+# at :cond_c. The receiver also has a long-press handler further down that
+# calls `longClickPlayBtnToStop()` for a held KEY_PLAY; we leave that alone
+# (held PLAY is unusual on a car HMI / TV remote, and the long-press → STOP
+# semantics don't generalize to discrete PLAY vs PAUSE). Anchor the match
+# on the `getKEY_PLAY()` invocation immediately before the `playOrPause()`
+# call so we hit the right :cond_c and not the long-press handler below.
 OLD_PLAY_BRANCH = """\
     sget-object p1, Lcom/innioasis/fm/configs/KeyMap;->INSTANCE:Lcom/innioasis/fm/configs/KeyMap;
 
@@ -957,17 +998,19 @@ NEW_PLAY_BRANCH = """\
 
     move-result p1
 
-    if-eq v2, p1, :cond_play_match
+    if-eq v2, p1, :cond_play_pause_toggle
 
     const/16 p1, 0x7e
 
-    if-eq v2, p1, :cond_play_match
+    if-eq v2, p1, :cond_play_strict
 
     const/16 p1, 0x7f
 
-    if-ne v2, p1, :cond_e
+    if-eq v2, p1, :cond_pause_strict
 
-    :cond_play_match
+    goto :cond_e
+
+    :cond_play_pause_toggle
     .line 92
     sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
 
@@ -978,6 +1021,38 @@ NEW_PLAY_BRANCH = """\
     if-eqz p1, :cond_e
 
     invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->playOrPause()V
+
+    goto :goto_5
+
+    :cond_play_strict
+    sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/Y1Application$Companion;->getPlayerService()Lcom/innioasis/y1/service/PlayerService;
+
+    move-result-object p1
+
+    if-eqz p1, :cond_e
+
+    const/4 v0, 0x0
+
+    invoke-virtual {p1, v0}, Lcom/innioasis/y1/service/PlayerService;->play(Z)V
+
+    goto :goto_5
+
+    :cond_pause_strict
+    sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/Y1Application$Companion;->getPlayerService()Lcom/innioasis/y1/service/PlayerService;
+
+    move-result-object p1
+
+    if-eqz p1, :cond_e
+
+    const/16 v0, 0x12
+
+    const/4 v3, 0x1
+
+    invoke-virtual {p1, v0, v3}, Lcom/innioasis/y1/service/PlayerService;->pause(IZ)V
 
     goto :goto_5"""
 
@@ -992,8 +1067,9 @@ play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 
 with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
-    "  Patch E: PlayControllerReceiver -- KEY_PLAY trigger expanded to also accept "
-    "keyCode 126 (KEYCODE_MEDIA_PLAY) and 127 (KEYCODE_MEDIA_PAUSE)"
+    "  Patch E (iter25): PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
+    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AVRCP §11.1.2]; "
+    "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per AVRCP §11.1.2]"
 )
 
 # -- Per-smali md5 report -----------------------------------------------------
