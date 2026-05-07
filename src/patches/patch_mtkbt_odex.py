@@ -169,6 +169,13 @@ def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
 
 
 def print_results(label: str, results: list[dict], mode: str) -> None:
+    ok_count = sum(1 for r in results if r["ok"])
+    total = len(results)
+    # Quiet when everything verifies — print a one-line summary. The full
+    # per-site listing is only needed for diagnosis when something fails.
+    if ok_count == total:
+        print(f"\n{label}: {ok_count}/{total} sites OK")
+        return
     print(f"\n{label}")
     print("-" * 72)
     for r in results:
@@ -236,9 +243,10 @@ def main() -> None:
     stored_adler   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
     computed_adler = compute_adler32(data)
     adler_ok = stored_adler == computed_adler
-    print(f"\n  [{'OK' if adler_ok else 'WARN'}] 0x{ADLER_FILE_OFF:06x}  "
-          f"adler32 stored=0x{stored_adler:08x} computed=0x{computed_adler:08x}")
+    # Quiet on match — only surface adler when something's off.
     if not adler_ok:
+        print(f"\n  [WARN] 0x{ADLER_FILE_OFF:06x}  "
+              f"adler32 stored=0x{stored_adler:08x} computed=0x{computed_adler:08x}")
         print("  WARNING: adler32 mismatch on input — continuing anyway")
 
     if args.verify_only:
@@ -257,8 +265,10 @@ def main() -> None:
     stored_after   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
     computed_after = compute_adler32(data)
     adler_after_ok = stored_after == computed_after
-    print(f"  [{'OK' if adler_after_ok else 'FAIL'}] 0x{ADLER_FILE_OFF:06x}  "
-          f"adler32 = 0x{stored_after:08x}")
+    # Quiet on success — only surface the adler when it doesn't match.
+    if not adler_after_ok:
+        print(f"  [FAIL] 0x{ADLER_FILE_OFF:06x}  "
+              f"adler32 stored=0x{stored_after:08x} computed=0x{computed_after:08x}")
 
     if not (post_ok and adler_after_ok):
         print("\nERROR: post-patch verification failed — output not written.")

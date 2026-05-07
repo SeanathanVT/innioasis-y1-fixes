@@ -378,6 +378,13 @@ def verify(data: bytes, mode: str, patches: list[dict]) -> tuple[bool, list[dict
 
 
 def print_results(label: str, results: list[dict], mode: str) -> None:
+    ok_count = sum(1 for r in results if r["ok"])
+    total = len(results)
+    # Quiet when everything verifies — print a one-line summary. The full
+    # per-site listing is only needed for diagnosis when something fails.
+    if ok_count == total:
+        print(f"\n{label}: {ok_count}/{total} sites OK")
+        return
     print(f"\n{label}")
     print("-" * 72)
     for r in results:
