@@ -168,20 +168,31 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 
 **Estimated effort:** 2-3 days. Mostly trampoline assembly + schema design.
 
-### Phase B — GetPlayStatus (T6)
+### Phase B — GetPlayStatus (T6) — SHIPPED iter20a
 
-**Why second:** Only one new PDU, but high probability of being the actual Bolt blocker. Many car head units treat `GetPlayStatus` as the canonical source of truth for the playback timeline and refuse to render metadata without it.
+**Status:** Implemented in iter20a. Reproducible build at `52b1bb70c4edc975ec56c63067c454fb`. Awaiting hardware verification.
 
-**What it adds:** T6 branched from T4's unknown-PDU arm. T6 reads `duration_ms`, computes live `position_ms`, reads `playing_flag`, and calls `get_playstatus_rsp` PLT 0x3564.
+**Final implementation:** T6 branched from T4's pre-check on PDU 0x30 (alongside the existing 0x20/0x17/0x18 dispatch). Reads y1-track-info[776..795] for `duration_ms` / `position_at_state_change_ms` / `state_change_time_sec` (reserved) / `playing_flag` — all stored big-endian to match the existing track_id encoding, byte-swapped to host order via the new Thumb-2 `REV` instruction (`rev_lo_lo` added to `_thumb2asm.py`). Calls `get_playstatus_rsp` via PLT 0x3564 with `arg1=0` + duration + position + play_status.
 
-**Discovery required first:** disassemble `libextavrcp.so:0x2354` to determine `get_playstatus_rsp`'s real arg shape. Hypothesis from name + spec layout: `(conn, song_length_u32, song_position_u32, play_status_u8)`. Verify before implementing.
+**Calling convention** (confirmed via disassembly + cross-reference with stock JNI caller `getPlayerstatusRspNative`, documented in `ARCHITECTURE.md`):
+```c
+btmtk_avrcp_send_get_playstatus_rsp(
+    void* conn,             // r0 = r5+8
+    uint8_t reject_code,    // r1 = 0 for success
+    uint32_t song_length,   // r2 = duration_ms
+    uint32_t song_position, // r3 = position_ms
+    uint8_t play_status     // sp[0] = 0/1/2 = STOPPED/PLAYING/PAUSED
+);
+// Outbound msg_id=542, 20 B IPC frame.
+```
 
-**No music-app patch needed.** All required state is in `MediaBridgeService` already.
+**Position handling: not live-extrapolated.** T6 returns `position_at_state_change_ms` directly. CTs poll GetPlayStatus periodically (typically every few seconds) so the value updates per poll cycle. Skipping live extrapolation avoids a `clock_gettime` syscall + multiplication in the trampoline hot path. Future iters can add live extrapolation if a CT requires continuously-ticking position display (none observed so far; the `state_change_time_sec` field is reserved in the schema for that purpose).
 
 **Files touched:**
-- `src/patches/_trampolines.py` — T6 (~80 lines)
-- `src/patches/patch_libextavrcp_jni.py` — filesz bump
-- `src/Y1MediaBridge/.../MediaBridgeService.java` — extend schema with duration_ms field if Phase A didn't already
+- `src/patches/_trampolines.py` — added `_emit_t6` (~52 B trampoline body), modified T4 pre-check to dispatch PDU 0x30, added `T6_*` frame constants, added `PLT_get_playstatus_rsp = 0x3564`. ~80 lines.
+- `src/patches/_thumb2asm.py` — added `rev_lo_lo` (REV T1) for BE→LE byte-swap. 4 lines.
+- `src/patches/patch_libextavrcp_jni.py` — bumped `OUTPUT_MD5` to `52b1bb70c4edc975ec56c63067c454fb`.
+- `src/Y1MediaBridge/.../MediaBridgeService.java` — extended `writeTrackInfoFile()` schema 776→800 B with the four new fields; added `putBE32` helper. versionCode 14→15, versionName 1.7→1.8.
 
 **Estimated effort:** 1-2 days. Includes the disassembly pass.
 

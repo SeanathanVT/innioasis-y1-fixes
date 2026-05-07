@@ -122,6 +122,8 @@ PLT_track_changed_rsp          = 0x3384
 # iter19a — Phase A0
 PLT_inform_charsetset_rsp      = 0x3588
 PLT_battery_status_rsp         = 0x357c
+# iter20a — Phase B
+PLT_get_playstatus_rsp         = 0x3564
 
 # Function-internal landmarks in saveRegEventSeqId.
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
@@ -160,6 +162,22 @@ T2_OFF_TRANSID = 8
 T2_TRANSID_CALLER_OFF = 368 + T2_FRAME    # 384
 T2_EVENT_ID_OFF_ENTRY = 386               # before SUB SP
 
+# T6 (GetPlayStatus, iter20a) frame: 16 B outgoing args + 800 B file_buf.
+# The y1-track-info schema extension (Y1MediaBridge versionCode 15+) writes
+# four BE u32 fields starting at file offset 776:
+#   776..779: duration_ms          BE u32
+#   780..783: pos_at_state_change  BE u32
+#   784..787: state_change_time    BE u32 (sec since boot; reserved for future
+#                                          live-extrapolation, currently unused)
+#   792:      playing_flag         u8 (0=STOPPED, 1=PLAYING, 2=PAUSED — direct
+#                                      mapping to AVRCP §5.4.3.4 play_status)
+T6_FRAME           = 816
+T6_OFF_ARGS        = 0
+T6_OFF_FILE        = 16
+T6_OFF_FILE_DURATION = T6_OFF_FILE + 776   # 792 - duration_ms
+T6_OFF_FILE_POS      = T6_OFF_FILE + 780   # 796 - position_at_state_change
+T6_OFF_FILE_PLAYFLAG = T6_OFF_FILE + 792   # 808 - playing_flag
+
 # AVRCP TRACK_CHANGED reason codes
 REASON_INTERIM = 0x0F
 REASON_CHANGED = 0x0D
@@ -190,12 +208,14 @@ def _emit_t4(a: Asm) -> None:
     # PDU 0x20 → GetElementAttributes (T4 main body)
     # PDU 0x17 → InformDisplayableCharacterSet (T_charset, iter19a)
     # PDU 0x18 → InformBatteryStatusOfCT (T_battery, iter19a)
+    # PDU 0x30 → GetPlayStatus (T6, iter20a — Phase B)
     # else     → restore lr canary + r0 and fall through to "unknow indication"
     a.ldrb_w(0, 13, T4_PDU_OFF_ENTRY)         # r0 = PDU
     a.cmp_imm8(0, 0x20)
     a.beq("t4_main")
-    # PDU 0x17 / 0x18 dispatch via bne+b.w because T_charset / T_battery live
-    # past the end of the T4 body (~600 B forward), beyond beq's ±256 B range.
+    # PDU 0x17 / 0x18 / 0x30 dispatch via bne+b.w because T_charset / T_battery
+    # / T6 live past the end of the T4 body (~600+ B forward), beyond beq's
+    # ±256 B range.
     a.cmp_imm8(0, 0x17)
     a.bne("t4_after_charset")
     a.b_w("T_charset")
@@ -204,6 +224,10 @@ def _emit_t4(a: Asm) -> None:
     a.bne("t4_after_battery")
     a.b_w("T_battery")
     a.label("t4_after_battery")
+    a.cmp_imm8(0, 0x30)
+    a.bne("t4_after_playstatus")
+    a.b_w("T6")
+    a.label("t4_after_playstatus")
     # Anything else: restore lr canary and fall through to original
     # "unknow indication" path (which expects r0 = conn).
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
@@ -691,6 +715,104 @@ def _emit_t_battery(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_t6(a: Asm) -> None:
+    """T6 (iter20a — Phase B): PDU 0x30 GetPlayStatus.
+
+    Branched from T4's pre-check when the inbound PDU byte is 0x30. Returns
+    the current track's duration / playback position / play_status in a
+    spec-conformant `GetPlayStatus` response per AVRCP 1.4 §5.4.3.4.
+
+    Response builder layout (libextavrcp.so:0x2354 — disassembly 2026-05-06):
+      btmtk_avrcp_send_get_playstatus_rsp(
+          void* conn,             // r0 = r5+8
+          uint8_t reject_code,    // r1 = 0 for success
+          uint32_t song_length,   // r2 = duration ms
+          uint32_t song_position, // r3 = position ms
+          uint8_t  play_status    // sp[0]: 0=STOPPED, 1=PLAYING, 2=PAUSED,
+                                  //        3=FWD_SEEK, 4=REV_SEEK, 0xFF=ERROR
+      );
+      // Outbound msg_id=542, 20 B IPC frame.
+
+    Stack frame: T6_FRAME B (16 outgoing args + 800 file_buf). Read the
+    full y1-track-info into file_buf so the existing 776-byte schema fields
+    (track_id + title/artist/album) stay intact for any concurrent reader,
+    even though T6 itself only consumes the iter20a fields at offsets 776+.
+
+    iter20a returns the position-at-last-state-change directly without live
+    extrapolation. CTs poll GetPlayStatus periodically anyway; the position
+    "jumps" by the inter-poll interval rather than ticking continuously.
+    Skipping live extrapolation avoids a clock_gettime syscall + multiply
+    in the hot path, and avoids needing CLOCK_BOOTTIME parity between the
+    Java side (SystemClock.elapsedRealtime) and the trampoline. Future
+    iters can add live extrapolation if a CT needs continuously-ticking
+    position (none have so far).
+
+    The y1-track-info schema fields T6 reads (iter20a Y1MediaBridge writes
+    these as big-endian; T6 byte-swaps to host-LE via REV before passing to
+    the response builder, which expects register-native order):
+      file[776..779]: duration_ms u32 BE
+      file[780..783]: position_at_state_change_ms u32 BE
+      file[792]:      playing_flag u8 (0=stopped / 1=playing / 2=paused;
+                                       maps directly to AVRCP play_status)
+    """
+    a.label("T6")
+
+    # ---- allocate stack frame ----
+    a.subw(13, 13, T6_FRAME)                  # sub.w sp, sp, #816
+
+    # ---- memset(file_buf, 0, 800) ----
+    # Default everything to 0 so a partial read (file shorter than 800 B,
+    # e.g. an old Y1MediaBridge that hasn't been rebuilt yet for the iter20a
+    # schema) gives play_status=0 (STOPPED) and duration/position=0 rather
+    # than uninitialized stack garbage.
+    a.add_sp_imm(0, T6_OFF_FILE)              # r0 = sp+16
+    a.movs_imm8(1, 0)
+    a.movw(2, 800)
+    a.blx_imm(PLT_memset)
+
+    # ---- open + read y1-track-info ----
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t6_skip_track_read")
+    a.mov_lo_lo(4, 0)                         # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, T6_OFF_FILE)              # r1 = file_buf
+    a.movw(2, 800)                            # count = 800
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+    a.label("t6_skip_track_read")
+
+    # ---- assemble args for get_playstatus_rsp(conn, 0, dur, pos, play_status) ----
+    # sp[0] (caller stack arg slot 0) = play_status byte.
+    a.ldrb_w(0, 13, T6_OFF_FILE_PLAYFLAG)     # r0 = playing_flag (0/1/2)
+    a.strb_w(0, 13, T6_OFF_ARGS)              # sp[0] = play_status
+
+    # r2 = duration_ms (BE in file → REV → host order)
+    a.ldr_sp_imm(2, T6_OFF_FILE_DURATION)
+    a.rev_lo_lo(2, 2)
+
+    # r3 = position_at_state_change_ms (BE → REV → host order)
+    a.ldr_sp_imm(3, T6_OFF_FILE_POS)
+    a.rev_lo_lo(3, 3)
+
+    # r0 = conn buffer (r5+8); r1 = 0 (success)
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)
+    a.blx_imm(PLT_get_playstatus_rsp)
+
+    # ---- restore stack and tail-call epilogue ----
+    a.addw(13, 13, T6_FRAME)
+    a.b_w("t4_to_epilogue")
+
+
 def build() -> tuple[bytes, dict[str, int]]:
     """Build the LOAD-#1-padding trampoline code blob.
 
@@ -712,6 +834,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t5(a)
     _emit_t_charset(a)                        # iter19a — Phase A0
     _emit_t_battery(a)                        # iter19a — Phase A0
+    _emit_t6(a)                               # iter20a — Phase B
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)

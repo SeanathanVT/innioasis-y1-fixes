@@ -102,6 +102,11 @@ class Asm:
         _check(0 <= imm8 <= 0xFF, "svc")
         self._hw(0xDF00 | imm8)
 
+    def rev_lo_lo(self, rd: int, rm: int) -> None:
+        # REV T1 (byte-reverse word): 1011 1010 00 Rm[2..0] Rd[2..0]
+        _check(0 <= rd <= 7 and 0 <= rm <= 7, "rev_lo_lo bad regs")
+        self._hw(0xBA00 | (rm << 3) | rd)
+
     def bcond(self, cond: int, label: str) -> None:
         # T1: 1101 cond imm8 (range ±256 bytes from PC)
         _check(0 <= cond <= 14, "bcond cond")  # cond=14 unconditional reserved -> 15 = SVC

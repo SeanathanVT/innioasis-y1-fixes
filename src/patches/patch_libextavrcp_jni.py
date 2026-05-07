@@ -156,7 +156,7 @@ from _thumb2asm import Asm
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "b96978584bcd05762610b8b1131a6125"  # iter19d (= iter19a) — sentinel restored after iter19b's Samsung TV flood
+OUTPUT_MD5 = "52b1bb70c4edc975ec56c63067c454fb"  # iter20a — Phase B (T6 GetPlayStatus + PDU 0x30 dispatch)
 
 # ---------------------------------------------------------------- T1
 

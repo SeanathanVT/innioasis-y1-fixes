@@ -626,7 +626,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=14 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=15 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1023,8 +1023,18 @@ public class MediaBridgeService extends Service {
     private static final int TITLE_OFFSET  = TRACK_ID_LEN;            // 8
     private static final int ARTIST_OFFSET = TITLE_OFFSET + FIELD_LEN; // 264
     private static final int ALBUM_OFFSET  = ARTIST_OFFSET + FIELD_LEN; // 520
-    private static final int TOTAL_LEN     = ALBUM_OFFSET + FIELD_LEN; // 776
-    private static final int STATE_LEN     = 16;
+    // iter20a — Phase B: append GetPlayStatus fields to the y1-track-info
+    // schema. T6 (libextavrcp_jni.so trampoline at vaddr ~0xaf06) reads
+    // these on every inbound PDU 0x30 to build the GetPlayStatus response
+    // per AVRCP §5.4.3.4. All multi-byte fields are big-endian on disk;
+    // the trampoline byte-swaps to host order via REV before passing to
+    // btmtk_avrcp_send_get_playstatus_rsp.
+    private static final int DURATION_OFFSET    = ALBUM_OFFSET + FIELD_LEN;       // 776 - duration_ms u32 BE
+    private static final int POSITION_OFFSET    = DURATION_OFFSET + 4;            // 780 - pos_at_state_change u32 BE
+    private static final int STATE_TIME_OFFSET  = POSITION_OFFSET + 4;            // 784 - state_change_time_sec u32 BE (reserved)
+    private static final int PLAY_STATUS_OFFSET = STATE_TIME_OFFSET + 8;          // 792 - playing_flag u8
+    private static final int TOTAL_LEN          = PLAY_STATUS_OFFSET + 8;         // 800
+    private static final int STATE_LEN          = 16;
 
     private void writeTrackInfoFile() {
         try {
@@ -1037,6 +1047,24 @@ public class MediaBridgeService extends Service {
             putUtf8Padded(buf, TITLE_OFFSET,  FIELD_LEN, mCurrentTitle);
             putUtf8Padded(buf, ARTIST_OFFSET, FIELD_LEN, mCurrentArtist);
             putUtf8Padded(buf, ALBUM_OFFSET,  FIELD_LEN, mCurrentAlbum);
+
+            // iter20a — duration_ms / position / play_status for T6 GetPlayStatus.
+            // Big-endian u32 to match the existing track_id encoding; T6 byte-swaps
+            // before passing to the response builder. AVRCP §5.4.3.4 specifies
+            // 0xFFFFFFFF as "no track length / position currently selected"; we
+            // use 0 for both when unknown rather than the sentinel because Y1
+            // CTs we've tested (Samsung TV, Bolt EV) handle 0 better than the
+            // sentinel for display purposes. Both are spec-permissible.
+            long duration = mCurrentDuration > 0 ? mCurrentDuration : 0L;
+            putBE32(buf, DURATION_OFFSET, (int) Math.min(duration, 0xFFFFFFFFL));
+            putBE32(buf, POSITION_OFFSET, (int) Math.min(mPositionAtStateChange, 0xFFFFFFFFL));
+            putBE32(buf, STATE_TIME_OFFSET, (int) (mStateChangeTime / 1000L));
+            // playing_flag: 0=STOPPED, 1=PLAYING, 2=PAUSED — direct mapping to
+            // AVRCP §5.4.3.4 play_status enum. We don't track a "stopped" state
+            // independently, so isPlaying maps to 1 (PLAYING) and !isPlaying
+            // maps to 2 (PAUSED). Deeper state (FWD_SEEK / REV_SEEK / ERROR)
+            // would require additional Y1MediaBridge plumbing.
+            buf[PLAY_STATUS_OFFSET] = (byte) (mIsPlaying ? 0x01 : 0x02);
 
             File dir = getFilesDir();
             if (dir == null) {
@@ -1074,6 +1102,17 @@ public class MediaBridgeService extends Service {
         // Truncate to slot-1 to guarantee at least one trailing null byte for strlen.
         int n = src.length < slot ? src.length : slot - 1;
         System.arraycopy(src, 0, dst, off, n);
+    }
+
+    /** Big-endian u32 store. Used by writeTrackInfoFile for the iter20a GetPlayStatus
+     *  fields (duration_ms / position_at_state_change_ms / state_change_time_sec).
+     *  Matches the existing track_id BE encoding so the T6 trampoline can REV-swap
+     *  uniformly. */
+    private static void putBE32(byte[] dst, int off, int v) {
+        dst[off]     = (byte) ((v >> 24) & 0xFF);
+        dst[off + 1] = (byte) ((v >> 16) & 0xFF);
+        dst[off + 2] = (byte) ((v >>  8) & 0xFF);
+        dst[off + 3] = (byte)  (v        & 0xFF);
     }
 
     // =======================================================================

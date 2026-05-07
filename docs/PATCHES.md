@@ -168,6 +168,16 @@ Compliance scorecard unchanged from iter19a (5 mandatory PDUs handled, 5 spec-co
 
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `b96978584bcd05762610b8b1131a6125` (iter19d, byte-identical to iter19a).
 
+**Iter20a (current): Phase B — `GetPlayStatus` (PDU 0x30) trampoline + `y1-track-info` schema extension.** First half of iter20 per [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md). Adds **T6** trampoline (vaddr ~0xaf06) reached via T4's pre-check when the inbound PDU byte is 0x30. T6 allocates an 816 B stack frame (16 B outgoing args + 800 B file_buf), reads the full y1-track-info via the existing SVC-syscall pattern, byte-swaps the BE u32 fields to host order via the new Thumb-2 `REV` instruction (`rev_lo_lo` added to `_thumb2asm.py`), and calls `btmtk_avrcp_send_get_playstatus_rsp` via PLT 0x3564 with `arg1=0` + `r2=duration_ms` + `r3=position_at_state_change_ms` + `sp[0]=play_status`. Outbound `msg_id=542` (new in our msg-id taxonomy), 20 B IPC frame. T4's pre-check expands its dispatch table from 0x20/0x17/0x18 to also cover 0x30. Y1MediaBridge `y1-track-info` schema grows 776 → 800 B with four BE u32 fields at offsets 776..795 (duration_ms / pos_at_state_change_ms / state_change_time_sec / playing_flag). Position is not live-extrapolated; T6 returns position-at-last-state-change directly (CTs poll GetPlayStatus periodically anyway, so the value updates per poll cycle). Trampoline blob 800 → 892 B; LOAD #1 ends at 0xafd0 (was 0xaf74).
+
+**Program-header surgery (iter20a):** the patcher updates LOAD #1's program header at file 0x54:
+- offset+16 (`p_filesz`): 0xac54 → 0xafd0 (iter20a; was 0xaf74 in iter19d)
+- offset+20 (`p_memsz`):  0xac54 → 0xafd0 (iter20a)
+
+**Compliance scorecard:** mandatory PDUs handled goes 5 → 6 (added 0x30 GetPlayStatus); PDUs spec-correct 5 → 6. iter20b will follow with T8 (notification events 0x01/0x03/0x04/0x05/0x06/0x07) + T1's `EventsSupported` array expansion to advertise the events we now handle.
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `52b1bb70c4edc975ec56c63067c454fb` (iter20a). Y1MediaBridge versionCode 14 → 15, versionName 1.7 → 1.8.
+
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
