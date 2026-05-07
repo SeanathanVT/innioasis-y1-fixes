@@ -124,6 +124,13 @@ PLT_inform_charsetset_rsp      = 0x3588
 PLT_battery_status_rsp         = 0x357c
 # iter20a — Phase B
 PLT_get_playstatus_rsp         = 0x3564
+# iter20b — Phase A1 (notification expansion)
+PLT_reg_notievent_playback_rsp        = 0x339c
+PLT_reg_notievent_reached_end_rsp     = 0x3378
+PLT_reg_notievent_reached_start_rsp   = 0x336c
+PLT_reg_notievent_pos_changed_rsp     = 0x3360
+PLT_reg_notievent_battery_status_rsp  = 0x3354
+PLT_reg_notievent_system_status_rsp   = 0x3348
 
 # Function-internal landmarks in saveRegEventSeqId.
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
@@ -177,6 +184,29 @@ T6_OFF_FILE        = 16
 T6_OFF_FILE_DURATION = T6_OFF_FILE + 776   # 792 - duration_ms
 T6_OFF_FILE_POS      = T6_OFF_FILE + 780   # 796 - position_at_state_change
 T6_OFF_FILE_PLAYFLAG = T6_OFF_FILE + 792   # 808 - playing_flag
+
+# T8 (RegisterNotification dispatch for events ≠ 0x02, iter20b — Phase A1)
+# frame: 800 B file_buf at sp+0. None of the reg_notievent_*_rsp calls T8
+# makes need stack args (all 4 ARM args fit in r0/r1/r2/r3), so no outgoing
+# args region is reserved. Caller's event_id slot is at sp+T8_EVENT_ID_OFF
+# after our SUB SP.
+T8_FRAME           = 800
+T8_OFF_FILE        = 0
+T8_OFF_FILE_POS      = T8_OFF_FILE + 780   # 780 - pos_at_state_change_ms
+T8_OFF_FILE_PLAYFLAG = T8_OFF_FILE + 792   # 792 - playing_flag (= AVRCP play_status)
+T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
+
+# AVRCP §6.7.2 canned values for events we don't have a Y1 data source for.
+# - BATT_STATUS_CHANGED: 0x00 NORMAL is the safe default when we don't have
+#   visibility into the device's battery state. (Spec values: 0=NORMAL,
+#   1=WARNING, 2=CRITICAL, 3=EXTERNAL.) The Y1 reads its own battery via
+#   sysfs but Y1MediaBridge doesn't currently bridge that to the trampoline;
+#   could be wired up in a future iter if a CT cares.
+# - SYSTEM_STATUS_CHANGED: 0x00 POWERED_ON — we run only when the device is
+#   on, so this is always correct. (Spec: 0=POWERED_ON, 1=POWERED_OFF,
+#   2=UNPLUGGED.)
+BATT_STATUS_NORMAL    = 0x00
+SYSTEM_STATUS_POWERED = 0x00
 
 # AVRCP TRACK_CHANGED reason codes
 REASON_INTERIM = 0x0F
@@ -403,8 +433,9 @@ def _emit_extended_t2(a: Asm) -> None:
     a.cmp_imm8(0, 0x02)                       # TRACK_CHANGED?
     a.beq("ext2_track_changed")
 
-    # PDU 0x31 but unknown event → fall through to original NOT_IMPLEMENTED.
-    a.b_w("t4_to_unknown")
+    # PDU 0x31 but event ≠ 0x02 → T8 (iter20b) handles events 0x01/0x03/0x04/
+    # 0x05/0x06/0x07. T8 returns NOT_IMPLEMENTED for any other event_id.
+    a.b_w("T8")
 
     a.label("ext2_check_get_attrs")
     # PDU != 0x31. If it's 0x20 (GetElementAttributes), let T4 handle it; the
@@ -813,6 +844,166 @@ def _emit_t6(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_t8(a: Asm) -> None:
+    """T8 (iter20b — Phase A1): RegisterNotification dispatch for events
+    other than TRACK_CHANGED (0x02, handled by extended_T2).
+
+    Branched from extended_T2's "PDU 0x31 + non-0x02 event" arm. Reads
+    y1-track-info into a stack buffer (for events 0x01 and 0x05 which
+    need play_status / position from the schema), then dispatches on
+    event_id and emits an INTERIM via the appropriate
+    `reg_notievent_*_rsp` PLT entry. All these response builders share
+    the same calling convention as their TRACK_CHANGED sibling: r0=conn,
+    r1=0 (success), r2=reasonCode, r3=event-specific payload (or unused).
+    transId is auto-extracted from conn[17] inside each builder.
+
+    Events handled (per AVRCP 1.4 §6.7.2):
+      0x01 PLAYBACK_STATUS_CHANGED  — INTERIM with 1-byte play_status
+                                      (from y1-track-info[792], iter20a)
+      0x03 TRACK_REACHED_END        — INTERIM, no payload
+      0x04 TRACK_REACHED_START      — INTERIM, no payload
+      0x05 PLAYBACK_POS_CHANGED     — INTERIM with 4-byte position_ms
+                                      (BE in file → REV → host order)
+      0x06 BATT_STATUS_CHANGED      — INTERIM with 1-byte canned NORMAL
+      0x07 SYSTEM_STATUS_CHANGED    — INTERIM with 1-byte canned POWERED_ON
+
+    Unknown event_id falls through to "unknow indication" (0x65bc) for the
+    spec-correct NOT_IMPLEMENTED reject.
+
+    iter20b ships INTERIM-only; no proactive CHANGED for the new events.
+    CTs that subscribe will receive the immediate INTERIM (= current
+    state) and can re-subscribe periodically to refresh. Proactive CHANGED
+    for event 0x01 (PLAYBACK_STATUS) is a candidate for a future iter,
+    paired with another smali NOP in MtkBt.odex similar to iter17a's
+    cardinality bypass for TRACK_CHANGED.
+
+    Frame: 800 B file_buf at sp+0. None of the response builders need
+    stack args (all 4 args fit in r0/r1/r2/r3). Caller's event_id is
+    accessed via T8_EVENT_ID_OFF (= 386 + frame).
+    """
+    a.label("T8")
+
+    # ---- allocate stack frame ----
+    a.subw(13, 13, T8_FRAME)                  # sub.w sp, sp, #800
+
+    # ---- memset(file_buf, 0, 800) ----
+    # Default everything to 0 so a partial read (file shorter than 800 B
+    # — e.g. an old Y1MediaBridge from before the iter20a schema bump)
+    # gives play_status=0 (STOPPED) and position=0 rather than uninit
+    # stack garbage.
+    a.add_sp_imm(0, T8_OFF_FILE)              # r0 = sp+0
+    a.movs_imm8(1, 0)
+    a.movw(2, 800)
+    a.blx_imm(PLT_memset)
+
+    # ---- open + read y1-track-info ----
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t8_skip_track_read")
+    a.mov_lo_lo(4, 0)                         # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, T8_OFF_FILE)              # r1 = file_buf
+    a.movw(2, 800)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+    a.label("t8_skip_track_read")
+
+    # ---- dispatch on event_id (caller's sp+386, post-SUB-SP at T8_EVENT_ID_OFF) ----
+    a.ldrb_w(0, 13, T8_EVENT_ID_OFF)          # r0 = event_id
+    a.cmp_imm8(0, 0x01)
+    a.bne("t8_check_3")
+
+    # 0x01 PLAYBACK_STATUS_CHANGED
+    # reg_notievent_playback_rsp(conn, 0, REASON_INTERIM, play_status)
+    a.ldrb_w(3, 13, T8_OFF_FILE_PLAYFLAG)     # r3 = play_status (1=PLAYING / 2=PAUSED / 0=STOPPED)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)                         # success
+    a.add_imm_t3(0, 5, 8)                     # r0 = conn
+    a.blx_imm(PLT_reg_notievent_playback_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_3")
+    a.cmp_imm8(0, 0x03)
+    a.bne("t8_check_4")
+    # 0x03 TRACK_REACHED_END
+    # reg_notievent_reached_end_rsp(conn, 0, REASON_INTERIM)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_reached_end_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_4")
+    a.cmp_imm8(0, 0x04)
+    a.bne("t8_check_5")
+    # 0x04 TRACK_REACHED_START
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_reached_start_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_5")
+    a.cmp_imm8(0, 0x05)
+    a.bne("t8_check_6")
+    # 0x05 PLAYBACK_POS_CHANGED
+    # reg_notievent_pos_changed_rsp(conn, 0, REASON_INTERIM, position_ms_u32)
+    a.ldr_sp_imm(3, T8_OFF_FILE_POS)          # r3 = pos_at_state_change_ms (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_6")
+    a.cmp_imm8(0, 0x06)
+    a.bne("t8_check_7")
+    # 0x06 BATT_STATUS_CHANGED
+    # reg_notievent_battery_status_changed_rsp(conn, 0, REASON_INTERIM, batt_status_u8)
+    a.movs_imm8(3, BATT_STATUS_NORMAL)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_battery_status_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_7")
+    a.cmp_imm8(0, 0x07)
+    a.bne("t8_unknown_event")
+    # 0x07 SYSTEM_STATUS_CHANGED
+    # reg_notievent_system_status_changed_rsp(conn, 0, REASON_INTERIM, system_status_u8)
+    a.movs_imm8(3, SYSTEM_STATUS_POWERED)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_system_status_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_unknown_event")
+    # event_id we don't handle (0x08 PLAYER_APPLICATION_SETTING_CHANGED, etc.)
+    # → spec-correct NOT_IMPLEMENTED reject via the original "unknow
+    # indication" path. Restore stack first so the reject-path's stack-
+    # canary check sees the correct sp.
+    a.addw(13, 13, T8_FRAME)
+    a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # restore lr canary = SIZE
+    a.add_imm_t3(0, 5, 8)                     # restore r0 = conn
+    a.b_w("t4_to_unknown")
+
+    a.label("t8_done")
+    # ---- restore stack and tail-call epilogue ----
+    a.addw(13, 13, T8_FRAME)
+    a.b_w("t4_to_epilogue")
+
+
 def build() -> tuple[bytes, dict[str, int]]:
     """Build the LOAD-#1-padding trampoline code blob.
 
@@ -835,6 +1026,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t_charset(a)                        # iter19a — Phase A0
     _emit_t_battery(a)                        # iter19a — Phase A0
     _emit_t6(a)                               # iter20a — Phase B
+    _emit_t8(a)                               # iter20b — Phase A1
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)

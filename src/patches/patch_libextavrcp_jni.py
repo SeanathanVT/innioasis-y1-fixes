@@ -156,15 +156,27 @@ from _thumb2asm import Asm
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "52b1bb70c4edc975ec56c63067c454fb"  # iter20a — Phase B (T6 GetPlayStatus + PDU 0x30 dispatch)
+OUTPUT_MD5 = "28d0129cedeb06e7ba233190f92eefde"  # iter20b — Phase A1 (T8 events 0x01/0x03-0x07 + T1 EventsSupported [0x01..0x07])
 
 # ---------------------------------------------------------------- T1
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
-# bytes). Advertise only EVENT_TRACK_CHANGED (0x02) — Sonos requests events
-# one at a time and aborts the registration sequence on the first
-# NOT_IMPLEMENTED response, so anything we can't actually answer must be
-# omitted from the supported-events list.
+# bytes). Advertises every event we actually handle in the trampoline chain:
+#   0x01 PLAYBACK_STATUS_CHANGED       (T8, iter20b)
+#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4/T5 CHANGED)
+#   0x03 TRACK_REACHED_END             (T8, iter20b — INTERIM only)
+#   0x04 TRACK_REACHED_START           (T8, iter20b — INTERIM only)
+#   0x05 PLAYBACK_POS_CHANGED          (T8, iter20b — INTERIM only)
+#   0x06 BATT_STATUS_CHANGED           (T8, iter20b — INTERIM only, canned)
+#   0x07 SYSTEM_STATUS_CHANGED         (T8, iter20b — INTERIM only, canned)
+# Per the spec-compliance rule (feedback_avrcp_spec_compliance.md), advertise
+# only what we actually implement. 0x08 PLAYER_APPLICATION_SETTING_CHANGED is
+# Phase C territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
+# unadvertised until we ship that. Pre-iter20b the array was just `02` count=1
+# for historical reasons (Sonos-era exploration; iter10 reduced from 5 events
+# to 1 because Sonos abandoned the registration sequence on the first
+# NOT_IMPLEMENTED). Now that we actually handle the events we advertise,
+# strict CTs that gate on coverage will subscribe to all 7.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -172,12 +184,11 @@ T1_TRAMPOLINE = bytes([
     0x04, 0xA3,                               # adr r3, 0x7324
     0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
     0x00, 0x21,                               # movs r1, #0
-    0x01, 0x22,                               # movs r2, #1   (events count = 1)
+    0x07, 0x22,                               # movs r2, #7   (events count = 7, iter20b)
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x02, 0x00, 0x00, 0x00, 0x00,            # events: TRACK_CHANGED only
-    0x00, 0x00, 0x00,                         # padding
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00,  # iter20b — events 0x01..0x07
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40

@@ -178,6 +178,31 @@ Compliance scorecard unchanged from iter19a (5 mandatory PDUs handled, 5 spec-co
 
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `52b1bb70c4edc975ec56c63067c454fb` (iter20a). Y1MediaBridge versionCode 14 → 15, versionName 1.7 → 1.8.
 
+**Iter20b (current): Phase A1 — `RegisterNotification` event coverage expansion (T8) + `EventsSupported` advertised set expanded.** Adds **T8** trampoline branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. T8 reads `y1-track-info` (for events 0x01 / 0x05 which carry payloads from the iter20a schema), then dispatches on `event_id` and emits an INTERIM via the appropriate `reg_notievent_*_rsp` PLT:
+
+| event_id | name | PLT | payload |
+|---|---|---|---|
+| 0x01 | PLAYBACK_STATUS_CHANGED | 0x339c | play_status u8 (from `y1-track-info[792]`) |
+| 0x03 | TRACK_REACHED_END | 0x3378 | (none) |
+| 0x04 | TRACK_REACHED_START | 0x336c | (none) |
+| 0x05 | PLAYBACK_POS_CHANGED | 0x3360 | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
+| 0x06 | BATT_STATUS_CHANGED | 0x3354 | canned `0x00 NORMAL` |
+| 0x07 | SYSTEM_STATUS_CHANGED | 0x3348 | canned `0x00 POWERED_ON` |
+
+All response builders share the iter17a/19a calling convention (r0=conn, r1=0 success, r2=reasonCode, r3=event-specific u8/u32). Unknown event_ids fall through to "unknow indication" (0x65bc) for the spec-correct NOT_IMPLEMENTED reject. T8 is INTERIM-only; no proactive CHANGED for the new events.
+
+**T1 `EventsSupported` expansion:** the events array advertised in the `GetCapabilities(0x03)` response goes from `[0x02]` count=1 to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` count=7. Two byte-edits in `T1_TRAMPOLINE`: events count `0x01, 0x22` → `0x07, 0x22`, and the events array bytes. Per the spec-compliance feedback rule, advertise only what's actually implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised until Phase C lands. Strict CTs that gate subscription on `EventsSupported` will now subscribe to all six new events.
+
+Trampoline blob 892 → 1104 B; LOAD #1 ends at 0xb0a4 (was 0xafd0).
+
+**Program-header surgery (iter20b):** the patcher updates LOAD #1's program header at file 0x54:
+- offset+16 (`p_filesz`): 0xac54 → 0xb0a4
+- offset+20 (`p_memsz`):  0xac54 → 0xb0a4
+
+**Compliance scorecard:** PDU 0x31 event coverage 1/8 → 7/8 mandatory events; T1 `EventsSupported` matches actual coverage. Mandatory PDUs handled stays at 6 (no new PDUs — this is just expanding 0x31 sub-coverage).
+
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `28d0129cedeb06e7ba233190f92eefde` (iter20b).
+
 **For the full architectural reference** (data path diagram, response builder calling conventions, ELF program-header surgery, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---

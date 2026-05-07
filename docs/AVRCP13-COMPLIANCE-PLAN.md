@@ -137,36 +137,32 @@ Each phase is independent and ship-able on its own. Order is by expected user im
 
 **Compliance delta:** mandatory PDUs handled goes 3→5; PDUs spec-correct goes 2→5 (both inform PDUs added + TRACK_CHANGED's existing implementation made spec-correct).
 
-### Phase A1 — Notification expansion (T8)
+### Phase A1 — Notification expansion (T8) — SHIPPED iter20b
 
-**Why second:** Cars and headphones commonly subscribe to PLAYBACK_STATUS_CHANGED (event 0x01) at connect, and treat NACK on the subscription as "this TG doesn't support state notifications, fall back to polling — or give up." Sonos/Samsung tolerate the NACK; many cars don't.
+**Status:** Implemented in iter20b. Reproducible build at `28d0129cedeb06e7ba233190f92eefde`. Awaiting hardware verification.
 
-**What it adds:** A new T8 trampoline branched from the extended_T2 unknown-event arm. T8 reads the inbound event_id and dispatches to the appropriate `reg_notievent_*_rsp` PLT for events 0x01, 0x03, 0x04, 0x05, 0x06, 0x07. Each call emits an INTERIM with current value pulled from `y1-track-info` extended schema.
+**Final implementation:** T8 trampoline branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm (replaces the previous fall-through to "unknow indication"). T8 allocates an 800 B stack frame, reads `y1-track-info` (for events 0x01/0x05 which carry payloads from the iter20a schema), then dispatches on `event_id` and emits an INTERIM via the matching `reg_notievent_*_rsp` PLT:
 
-**Y1MediaBridge schema bump** (Section 5):
-- `playing_flag` byte — already implicitly tracked, just write it
-- `position_at_state_change_ms` u32 — already in `MediaBridgeService.mPositionAtStateChange`
-- `state_change_time_elapsed_ms` u64 — already in `MediaBridgeService.mStateChangeTime`
-- `duration_ms` u32 — already read by `MediaMetadataRetriever.METADATA_KEY_DURATION` but not stored on the file path
+| event_id | PLT | payload | source |
+|---|---|---|---|
+| 0x01 PLAYBACK_STATUS_CHANGED | 0x339c | u8 play_status | y1-track-info[792] |
+| 0x03 TRACK_REACHED_END | 0x3378 | (none) | — |
+| 0x04 TRACK_REACHED_START | 0x336c | (none) | — |
+| 0x05 PLAYBACK_POS_CHANGED | 0x3360 | u32 position_ms | y1-track-info[780..783] (REV-swapped) |
+| 0x06 BATT_STATUS_CHANGED | 0x3354 | u8 canned `0x00 NORMAL` | — |
+| 0x07 SYSTEM_STATUS_CHANGED | 0x3348 | u8 canned `0x00 POWERED_ON` | — |
 
-**Per-event INTERIM payload:**
-- 0x01 PLAYBACK_STATUS: 1 byte `playing_flag` (1=playing, 2=paused, 0=stopped)
-- 0x03 / 0x04 (REACHED_END/START): no body needed; INTERIM is a 4-byte ack
-- 0x05 PLAYBACK_POS: 4 bytes position_ms BE (computed live: `pos_at_state_change + (playing_flag ? now() - state_change_time_elapsed : 0)`)
-- 0x06 BATT_STATUS: 1 byte canned (0x04 = "external power") — we don't have a battery API, returning canned is fine
-- 0x07 SYSTEM_STATUS: 1 byte canned (0x01 = "powered on")
+INTERIM-only — no proactive CHANGED for the new events. Position is not live-extrapolated (same approach as T6; CTs poll). For event 0x01 a proactive CHANGED would be valuable but requires another smali NOP in `MtkBt.odex` to bypass the `cardinality:0` gate for the PLAYBACK_STATUS_CHANGED case (similar to iter17a's NOP for TRACK_CHANGED). Deferred.
 
-**Outbound CHANGED:** for events 0x01 and 0x05 we'd want a proactive emit similar to T5's track-change CHANGED.
-- Event 0x01 fires from Y1MediaBridge's existing `onStateDetected()` path (already there).
-- Event 0x05 should NOT have proactive CHANGED — emitting at 1Hz minimum would burn battery. CTs that subscribe to 0x05 typically poll-via-CHANGED-cycle: TG sends CHANGED only when the position is no longer monotonic (seek/track-edge). Our T5 already covers track-edge. Seek requires hooking `PlayerService.seekTo()` (Phase B sub-piece — see below).
+**T1 `EventsSupported` expansion:** events array advertised in `GetCapabilities(0x03)` responses goes from `[0x02]` count=1 to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` count=7. Two byte-edits in `T1_TRAMPOLINE`. Per the spec-compliance feedback rule, advertise only what's implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised until Phase C.
+
+**Schema dependency:** Y1MediaBridge schema fields needed by T8 (`play_status` at offset 792, `position_at_state_change_ms` at offsets 780..783) were already added in iter20a — no further Y1MediaBridge changes for iter20b.
 
 **Files touched:**
-- `src/patches/_trampolines.py` — add T8 emitter (~150 lines: switch on event_id, per-event arg shape)
-- `src/patches/patch_libextavrcp_jni.py` — bump LOAD #1 filesz/memsz (~5 lines)
-- `src/Y1MediaBridge/.../MediaBridgeService.java` — extend `writeTrackInfoFile()` to write the new fields; add proactive PLAYBACK_STATUS notification emit hook (~80 lines)
-- T1 update (in `_trampolines.py`) — `EventsSupported` array grows from `[0x02]` to `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (8 bytes); count parameter to `get_capabilities_rsp` becomes 7
+- `src/patches/_trampolines.py` — added `_emit_t8` (~210 B trampoline body), modified `extended_T2`'s unknown-event arm to bridge to T8, added `T8_*` frame constants and 6 new `PLT_reg_notievent_*_rsp` constants, added `BATT_STATUS_NORMAL` / `SYSTEM_STATUS_POWERED` canned-value constants. ~190 lines.
+- `src/patches/patch_libextavrcp_jni.py` — `T1_TRAMPOLINE` bytes updated for events count `1→7` and events array; bumped `OUTPUT_MD5` to `28d0129cedeb06e7ba233190f92eefde`. ~10 lines.
 
-**Estimated effort:** 2-3 days. Mostly trampoline assembly + schema design.
+**Compliance scorecard delta:** PDU 0x31 event coverage 1/8 → 7/8. T1 `EventsSupported` matches actual coverage.
 
 ### Phase B — GetPlayStatus (T6) — SHIPPED iter20a
 
