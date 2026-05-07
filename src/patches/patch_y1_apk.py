@@ -69,12 +69,8 @@ DEPLOYMENT
 
 WHAT THIS PATCH DOES
 --------------------
-  Four smali patches (A/B/C for Artist→Album navigation, D for the iter21
-  FF/RW hold-loop cap), no new files, no Manifest changes. After all
-  patches are applied to the smali, the rebuilt DEX is sanity-checked at
-  the byte level — if any patch's signature is missing from the assembled
-  DEX, the patcher refuses to write the APK (catches the apktool/Java-22+
-  silent-drop failure mode before it hits the device).
+  Four smali patches (A/B/C for Artist→Album navigation, E for discrete
+  PASSTHROUGH PLAY/PAUSE coverage), no new files, no Manifest changes.
 
   Patch A -- ArtistsActivity.confirm():
     When the user taps an artist row (isShowArtists()==true,
@@ -175,10 +171,13 @@ APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"  # apktool 2.9.3
 #     with --no-res to skip resource processing). Each new release would
 #     require reworking the patcher's DEX-extraction step.
 #   - apktool 2.9.3's bundled smali assembler (smali 2.5.x, baksmali 2.5.x)
-#     does NOT support Java 22+ JVMs reliably — observed against Java 25,
-#     it silently drops one of the iter21 cap edits during DEX assembly
-#     while preserving the other. The DEX-signature check at the end of
-#     this script will catch this and refuse to write the APK.
+#     does NOT support Java 22+ JVMs reliably — historical observation:
+#     against Java 25, it silently dropped one of iter21's two FF/RW lambda
+#     edits during DEX assembly while preserving the other. iter21 was
+#     reverted in iter24 (kernel-level fix in `patch_libextavrcp_jni.py`'s
+#     U1 patch closed the AVRCP-side root cause it was guarding against),
+#     so this is no longer load-bearing. Java 22+ may still be problematic
+#     for unrelated reasons; pin to 11–21 if you hit assembler weirdness.
 #
 # Practical recommendation: run the patcher under Java 11–21. If your flash
 # box is on Java 22+, install OpenJDK 21 alongside (Debian/Ubuntu:
@@ -201,8 +200,6 @@ STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
 ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
 REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
-# (Patch D's PLAYER_SMALI / FF_LAMBDA_SMALI / RW_LAMBDA_SMALI are defined
-# inline in the Patch D block below.)
 
 # Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
 ARTIST_INTENT_KEY = "artist_key"
@@ -300,56 +297,6 @@ def ensure_apktool() -> None:
     print(f"  apktool {APKTOOL_VERSION}: saved to {APKTOOL_JAR} ({os.path.getsize(APKTOOL_JAR):,} bytes, md5 verified)")
 
 
-def verify_dex_patch_signatures(dex2_bytes: bytes) -> bool:
-    """Sanity-check that DEX-level patch signatures landed in the assembled DEX.
-
-    apktool's smali assembler can silently drop or alter patches when the host
-    JVM is newer than what apktool was QA'd against (apktool 2.9.3 was released
-    before Java 22). The smali source files in `staging/` may show the patches
-    correctly, but the assembled DEX may not contain them. This check searches
-    for byte signatures that uniquely identify each patch's effect on the
-    bytecode and warns loudly if anything is missing.
-
-    Returns True on PASS, False on FAIL.
-    """
-    failures = []
-
-    # Patch D: FF and RW caps. Both invoke()V lambdas should contain
-    #   const/16 v0, 0x32; if-lt v6, v0, +8
-    # Encoded as: 13 00 32 00 34 06 08 00. Expect TWO occurrences (FF, RW).
-    cap_sig = b'\x13\x00\x32\x00\x34\x06\x08\x00'
-    cap_count = dex2_bytes.count(cap_sig)
-    if cap_count != 2:
-        failures.append(
-            f"Patch D (FF/RW hold-loop cap): expected 2 occurrences of "
-            f"`const/16 v0, #50; if-lt v6, v0, +8` byte signature, found {cap_count}"
-        )
-
-    if not failures:
-        print(f"  DEX signature verification: PASS (Patch D cap x{cap_count})")
-        return True
-
-    print(f"\n  DEX signature verification: FAIL")
-    for f in failures:
-        print(f"    - {f}")
-    print(
-        f"\n  This means apktool's smali assembler dropped or rewrote one or\n"
-        f"  more patches during DEX reassembly. The smali source files under\n"
-        f"  {UNPACKED_DIR}\n"
-        f"  may show the patches correctly, but the assembled DEX does not.\n"
-        f"\n"
-        f"  Diagnostic steps:\n"
-        f"    - Confirm `tools/apktool-{APKTOOL_VERSION}.jar` md5 == {APKTOOL_MD5}\n"
-        f"      (delete it to force a re-download).\n"
-        f"    - Inspect the patched smali files under {UNPACKED_DIR}\n"
-        f"      to confirm the patch syntax is intact.\n"
-        f"    - If on Java 22+, try Java 21 to rule out a JVM compat regression.\n"
-        f"    - Compare the per-smali md5s above against another machine's run.\n"
-        f"\n"
-        f"  Refusing to write the patched APK to avoid a silent-broken flash.\n"
-    )
-    return False
-
 def get_apk_info(apk_path: str):
     """Extract package name and version from binary AndroidManifest.xml."""
     try:
@@ -379,7 +326,7 @@ def get_apk_info(apk_path: str):
 
 # -- Step 0: Pre-flight -------------------------------------------------------
 parser = argparse.ArgumentParser(
-    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + iter21 hold-loop cap).",
+    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + discrete PASSTHROUGH PLAY/PAUSE).",
     epilog="See the docstring at the top of this script for the full per-patch detail."
 )
 parser.add_argument(
@@ -428,12 +375,12 @@ java = find_java()
 print(f"  Java:     {java}")
 
 # JVM version detection. apktool 2.9.3's bundled smali assembler is
-# JVM-version-sensitive on Java 22+ -- it can silently drop patches during
-# DEX assembly (observed: Java 25 drops the FF lambda's iter21 cap while
-# preserving RW). The DEX-signature check at the end of this script is the
-# authoritative gate -- if a patch byte signature is missing it refuses to
-# write the APK regardless of JVM version. The warning here just gives the
-# user a heads-up.
+# JVM-version-sensitive on Java 22+ -- historical observation: Java 25
+# silently dropped one of iter21's two FF/RW lambda edits during DEX
+# reassembly while preserving the other. iter21 was reverted in iter24
+# (kernel-level fix in patch_libextavrcp_jni.py's U1 patch), so we no
+# longer have a known smali pattern that triggers this. Warn anyway --
+# Java 22+ may still have other compat issues with apktool 2.9.3's smali.
 try:
     java_ver_proc = subprocess.run([java, "--version"], capture_output=True, text=True)
     java_ver_str = (java_ver_proc.stdout or java_ver_proc.stderr).strip().splitlines()
@@ -443,11 +390,11 @@ try:
         if m and int(m.group(1)) >= 22:
             print(
                 f"  WARNING: Java {m.group(1)} detected. apktool {APKTOOL_VERSION}'s\n"
-                f"           bundled smali assembler is unreliable on Java 22+ — it can\n"
-                f"           silently drop patches during DEX reassembly. The DEX-signature\n"
-                f"           check at the end will catch this; if it fails, install Java 21\n"
-                f"           and re-run with that JVM (Debian/Ubuntu: `apt install openjdk-21-jdk`,\n"
-                f"           then invoke /usr/lib/jvm/java-21-openjdk-*/bin/java directly or\n"
+                f"           bundled smali assembler has been observed to silently drop\n"
+                f"           patches during DEX reassembly on Java 22+. If your patched\n"
+                f"           APK behaves unexpectedly, install Java 21 and re-run with\n"
+                f"           that JVM (Debian/Ubuntu: `apt install openjdk-21-jdk`, then\n"
+                f"           invoke /usr/lib/jvm/java-21-openjdk-*/bin/java directly or\n"
                 f"           `update-alternatives --config java`)."
             )
 except Exception:
@@ -893,376 +840,6 @@ with open(repo_path, 'w') as f:
 print("  Patch C: Y1Repository -- songDao field changed from private to public")
 
 # ============================================================
-# Patch D: Bound the fast-forward / rewind hold-loop  (iter21)
-# ============================================================
-#
-# Background
-# ----------
-# AVRCP 1.4 §11.2 specifies PASSTHROUGH commands as press-then-release
-# pairs: the CT issues a press (op_id with bit 0x80 cleared), the TG must
-# accept it, then a matching release (op_id with bit 0x80 set) ends the
-# command. AVCTP 1.0 §5.2 carries each frame as a separate L2CAP packet.
-# Under heavy AVCTP load (e.g., a CT subscribed to TRACK_CHANGED at high
-# RegisterNotification frequency), the BT controller's frame buffers can
-# saturate and individual frames can be dropped. If a released frame is
-# dropped while its press counterpart was delivered, the host stack never
-# receives the release event.
-#
-# On Y1 specifically: PASSTHROUGH "MEDIA_NEXT pressed" delivers as
-# KeyEvent.KEYCODE_MEDIA_NEXT (87) via libextavrcp_jni.so's
-# avrcp_input_sendkey -> /dev/uinput. KeyMap.KEY_RIGHT is also 87 in
-# non-RockBox builds, so MEDIA_NEXT and the device's right d-pad share
-# the music-app-side code path.
-#
-# BaseActivity.dispatchKeyEvent treats repeatCount == 3 as a long-press
-# trigger and calls PlayerService.startFastForward(). That sets
-# fastForwardLock=true and spawns a thread whose body is the lambda
-# in PlayerService$startFastForward$1.invoke():
-#
-#     while (fastForwardLock) {
-#         Thread.sleep(100);
-#         setCurrentPosition(currentPosition + duration * 0.01f);
-#     }
-#
-# The matching PASSTHROUGH "released" frame is what triggers
-# stopFastForward() (which clears the lock). When the release frame is
-# DROPPED at the AVCTP layer the lock is never cleared, the loop runs
-# forever, and the player advances ~3-4s of song every 100ms (~32x
-# speed). On the device this also drives the haptic motor on each
-# setCurrentPosition() call, producing the stuck-haptic symptom seen in
-# hardware testing. See `docs/INVESTIGATION.md` "Hardware test history
-# per CT" for the empirical observations that motivated iter21.
-#
-# Patch D bounds the runaway. Each FF/RW thread:
-#   - tracks an iteration counter
-#   - exits and clears fastForwardLock once the counter reaches 50
-#     (50 * 100 ms = 5 seconds of wall-clock hold)
-#
-# 5 seconds covers any realistic legitimate hold (typical FF interaction
-# is 1-3 s on this device) while bounding damage from a single dropped
-# release frame to ~5 s of runaway. The next press starts a fresh thread
-# with a fresh counter, so genuine long scrubs remain possible by
-# re-pressing.
-#
-# Direct iput on PlayerService.fastForwardLock from the inner-class
-# lambda would normally be rejected by Dalvik's verifier (private field,
-# different class). Java-source nest-mate access is implemented via
-# synthetic accessors; only access$getFastForwardLock$p exists in this
-# DEX -- there is no setter. Rather than add an accessor (which would
-# require modifying the enclosing class's method table), we change the
-# field to public. The field is internal to a system-private service, so
-# this is no different in practice from the songDao change in Patch C.
-#
-# Three sub-edits:
-#   D1. PlayerService.smali           : `private` -> `public` on field
-#   D2. PlayerService$startFastForward$1.smali : invoke()V -> bounded loop
-#   D3. PlayerService$startRewind$1.smali      : invoke()V -> bounded loop
-#
-# Spec note: this patch is purely defensive on the music-app side. The
-# AVRCP wire layer remains fully spec-compliant -- no proxy changes.
-
-PLAYER_SMALI = "smali/com/innioasis/y1/service/PlayerService.smali"
-FF_LAMBDA_SMALI = (
-    "smali_classes2/com/innioasis/y1/service/PlayerService$startFastForward$1.smali"
-)
-RW_LAMBDA_SMALI = (
-    "smali_classes2/com/innioasis/y1/service/PlayerService$startRewind$1.smali"
-)
-
-# Iteration cap for the FF/RW loop. 50 * 100ms sleep = 5s wall clock.
-# Hex 0x32 fits in const/16 (8-bit signed immediate via const/16 form).
-HOLD_LOOP_CAP = 50
-
-# ------------------------------------------------------------
-# D1: Make fastForwardLock public so the lambda can iput it.
-# ------------------------------------------------------------
-player_path = os.path.join(UNPACKED_DIR, PLAYER_SMALI)
-if not os.path.exists(player_path):
-    sys.exit(f"ERROR: Expected smali not found: {player_path}")
-
-with open(player_path, 'r') as f:
-    player_src = f.read()
-
-OLD_LOCK_FIELD = ".field private fastForwardLock:Z"
-NEW_LOCK_FIELD = ".field public fastForwardLock:Z"
-
-if OLD_LOCK_FIELD not in player_src:
-    sys.exit(
-        "ERROR: PlayerService.fastForwardLock field declaration not found.\n"
-        f"  Expected: {OLD_LOCK_FIELD}\n"
-        "  Inspect PlayerService.smali manually."
-    )
-
-player_src = player_src.replace(OLD_LOCK_FIELD, NEW_LOCK_FIELD, 1)
-with open(player_path, 'w') as f:
-    f.write(player_src)
-
-# ------------------------------------------------------------
-# D2 / D3: Rewrite invoke()V in each lambda with iteration cap.
-# ------------------------------------------------------------
-#
-# Original FF body (rewind is identical except sub-long/2addr in place
-# of add-long/2addr at the position-update step):
-#
-#   .method public final invoke()V
-#       .locals 6
-#       :cond_0
-#       :goto_0
-#       iget-object v0, p0, ...->this$0:...
-#       invoke-static {v0}, ...->access$getFastForwardLock$p(...)Z
-#       move-result v0
-#       if-eqz v0, :cond_1            # !lock -> exit
-#       const-wide/16 v0, 0x64
-#       invoke-static {v0, v1}, Thread;->sleep(J)V
-#       iget-object v0, p0, ...->this$0:...
-#       invoke-virtual {v0}, ...->getDuration()J
-#       move-result-wide v0
-#       long-to-float v0, v0
-#       const v1, 0x3c23d70a          # 0.01f
-#       mul-float v0, v0, v1
-#       float-to-int v0, v0
-#       if-lez v0, :cond_0            # delta <= 0 -> loop without advancing
-#       iget-object v1, p0, ...->this$0:...
-#       invoke-virtual {v1}, ...->getCurrentPosition()J
-#       move-result-wide v2
-#       int-to-long v4, v0
-#       add-long/2addr v2, v4         # (sub-long/2addr in rewind)
-#       invoke-virtual {v1, v2, v3}, ...->setCurrentPosition(J)V
-#       goto :goto_0
-#       :cond_1
-#       return-void
-#   .end method
-#
-# Bounded body (.locals goes from 6 to 7; v6 holds the iteration counter):
-#
-#   .method public final invoke()V
-#       .locals 7
-#       const/4 v6, 0x0                          # counter = 0
-#       :cond_0
-#       :goto_0
-#       iget-object v0, p0, ...->this$0:...
-#       invoke-static {v0}, ...->access$getFastForwardLock$p(...)Z
-#       move-result v0
-#       if-eqz v0, :cond_1
-#       const/16 v0, <CAP>                       # 50
-#       if-lt v6, v0, :cond_2                    # counter<cap -> normal iter
-#       iget-object v0, p0, ...->this$0:...
-#       const/4 v1, 0x0
-#       iput-boolean v1, v0, ...->fastForwardLock:Z   # clear lock
-#       return-void
-#       :cond_2
-#       add-int/lit8 v6, v6, 0x1                 # counter++
-#       const-wide/16 v0, 0x64
-#       invoke-static {v0, v1}, Thread;->sleep(J)V
-#       iget-object v0, p0, ...->this$0:...
-#       invoke-virtual {v0}, ...->getDuration()J
-#       move-result-wide v0
-#       long-to-float v0, v0
-#       const v1, 0x3c23d70a
-#       mul-float v0, v0, v1
-#       float-to-int v0, v0
-#       if-lez v0, :cond_0
-#       iget-object v1, p0, ...->this$0:...
-#       invoke-virtual {v1}, ...->getCurrentPosition()J
-#       move-result-wide v2
-#       int-to-long v4, v0
-#       add-long/2addr v2, v4                    # sub-long/2addr in rewind
-#       invoke-virtual {v1, v2, v3}, ...->setCurrentPosition(J)V
-#       goto :goto_0
-#       :cond_1
-#       return-void
-#   .end method
-
-def _bounded_invoke(inner_class: str, op: str) -> str:
-    """Build the bounded invoke()V body for either FF or RW lambda.
-
-    inner_class -- e.g. "Lcom/innioasis/y1/service/PlayerService$startFastForward$1;"
-    op          -- "add-long/2addr" for FF, "sub-long/2addr" for RW
-    """
-    return (
-        ".method public final invoke()V\n"
-        "    .locals 7\n"
-        "\n"
-        "    const/4 v6, 0x0\n"
-        "\n"
-        "    :cond_0\n"
-        "    :goto_0\n"
-        f"    iget-object v0, p0, {inner_class}->this$0:Lcom/innioasis/y1/service/PlayerService;\n"
-        "\n"
-        "    invoke-static {v0}, Lcom/innioasis/y1/service/PlayerService;->access$getFastForwardLock$p(Lcom/innioasis/y1/service/PlayerService;)Z\n"
-        "\n"
-        "    move-result v0\n"
-        "\n"
-        "    if-eqz v0, :cond_1\n"
-        "\n"
-        f"    const/16 v0, 0x{HOLD_LOOP_CAP:x}\n"
-        "\n"
-        "    if-lt v6, v0, :cond_2\n"
-        "\n"
-        f"    iget-object v0, p0, {inner_class}->this$0:Lcom/innioasis/y1/service/PlayerService;\n"
-        "\n"
-        "    const/4 v1, 0x0\n"
-        "\n"
-        "    iput-boolean v1, v0, Lcom/innioasis/y1/service/PlayerService;->fastForwardLock:Z\n"
-        "\n"
-        "    return-void\n"
-        "\n"
-        "    :cond_2\n"
-        "    add-int/lit8 v6, v6, 0x1\n"
-        "\n"
-        "    const-wide/16 v0, 0x64\n"
-        "\n"
-        "    invoke-static {v0, v1}, Ljava/lang/Thread;->sleep(J)V\n"
-        "\n"
-        f"    iget-object v0, p0, {inner_class}->this$0:Lcom/innioasis/y1/service/PlayerService;\n"
-        "\n"
-        "    invoke-virtual {v0}, Lcom/innioasis/y1/service/PlayerService;->getDuration()J\n"
-        "\n"
-        "    move-result-wide v0\n"
-        "\n"
-        "    long-to-float v0, v0\n"
-        "\n"
-        "    const v1, 0x3c23d70a    # 0.01f\n"
-        "\n"
-        "    mul-float v0, v0, v1\n"
-        "\n"
-        "    float-to-int v0, v0\n"
-        "\n"
-        "    if-lez v0, :cond_0\n"
-        "\n"
-        f"    iget-object v1, p0, {inner_class}->this$0:Lcom/innioasis/y1/service/PlayerService;\n"
-        "\n"
-        "    invoke-virtual {v1}, Lcom/innioasis/y1/service/PlayerService;->getCurrentPosition()J\n"
-        "\n"
-        "    move-result-wide v2\n"
-        "\n"
-        "    int-to-long v4, v0\n"
-        "\n"
-        f"    {op} v2, v4\n"
-        "\n"
-        "    invoke-virtual {v1, v2, v3}, Lcom/innioasis/y1/service/PlayerService;->setCurrentPosition(J)V\n"
-        "\n"
-        "    goto :goto_0\n"
-        "\n"
-        "    :cond_1\n"
-        "    return-void\n"
-        ".end method"
-    )
-
-
-# Match the existing invoke()V (.locals 6) verbatim so we know the source
-# matches the analyzed 3.0.2 layout. The match is structural rather than
-# byte-identical to allow for whitespace minor variations between apktool
-# decode runs, but is anchored on the unique opcode signature of this
-# loop (Thread.sleep(0x64), the 0x3c23d70a literal, and the
-# (add|sub)-long/2addr step).
-# Placeholders __CLS__ / __OP__ avoid str.format brace conflicts with the
-# literal smali register lists (\{v0\}, \{v0, v1\}, ...).
-INVOKE_PATTERN_TMPL = (
-    r'\.method public final invoke\(\)V\n'
-    r'    \.locals 6\n'
-    r'\n'
-    r'    \.line \d+\n'
-    r'    :cond_0\n'
-    r'    :goto_0\n'
-    r'    iget-object v0, p0, L__CLS__;->this\$0:Lcom/innioasis/y1/service/PlayerService;\n'
-    r'\n'
-    r'    invoke-static \{v0\}, Lcom/innioasis/y1/service/PlayerService;->access\$getFastForwardLock\$p\(Lcom/innioasis/y1/service/PlayerService;\)Z\n'
-    r'\n'
-    r'    move-result v0\n'
-    r'\n'
-    r'    if-eqz v0, :cond_1\n'
-    r'\n'
-    r'    const-wide/16 v0, 0x64\n'
-    r'\n'
-    r'    \.line \d+\n'
-    r'    invoke-static \{v0, v1\}, Ljava/lang/Thread;->sleep\(J\)V\n'
-    r'\n'
-    r'    \.line \d+\n'
-    r'    iget-object v0, p0, L__CLS__;->this\$0:Lcom/innioasis/y1/service/PlayerService;\n'
-    r'\n'
-    r'    invoke-virtual \{v0\}, Lcom/innioasis/y1/service/PlayerService;->getDuration\(\)J\n'
-    r'\n'
-    r'    move-result-wide v0\n'
-    r'\n'
-    r'    long-to-float v0, v0\n'
-    r'\n'
-    r'    const v1, 0x3c23d70a    # 0\.01f\n'
-    r'\n'
-    r'    mul-float v0, v0, v1\n'
-    r'\n'
-    r'    float-to-int v0, v0\n'
-    r'\n'
-    r'    if-lez v0, :cond_0\n'
-    r'\n'
-    r'    \.line \d+\n'
-    r'    iget-object v1, p0, L__CLS__;->this\$0:Lcom/innioasis/y1/service/PlayerService;\n'
-    r'\n'
-    r'    invoke-virtual \{v1\}, Lcom/innioasis/y1/service/PlayerService;->getCurrentPosition\(\)J\n'
-    r'\n'
-    r'    move-result-wide v2\n'
-    r'\n'
-    r'    int-to-long v4, v0\n'
-    r'\n'
-    r'    __OP__ v2, v4\n'
-    r'\n'
-    r'    invoke-virtual \{v1, v2, v3\}, Lcom/innioasis/y1/service/PlayerService;->setCurrentPosition\(J\)V\n'
-    r'\n'
-    r'    goto :goto_0\n'
-    r'\n'
-    r'    :cond_1\n'
-    r'    return-void\n'
-    r'\.end method'
-)
-
-
-def _patch_lambda(rel_path: str, inner_class: str, op_lit: str, op_re: str, label: str) -> None:
-    full_path = os.path.join(UNPACKED_DIR, rel_path)
-    if not os.path.exists(full_path):
-        sys.exit(f"ERROR: Expected smali not found: {full_path}")
-
-    with open(full_path, 'r') as f:
-        src = f.read()
-
-    pattern_str = (
-        INVOKE_PATTERN_TMPL
-        .replace("__CLS__", re.escape(inner_class))
-        .replace("__OP__", op_re)
-    )
-    pattern = re.compile(pattern_str, re.MULTILINE)
-    if not pattern.search(src):
-        sys.exit(
-            f"ERROR: {label} lambda invoke()V pattern not found.\n"
-            f"  File: {full_path}\n"
-            "  The lambda may have been recompiled with a different shape."
-        )
-
-    src = pattern.sub(lambda _m: _bounded_invoke(f"L{inner_class};", op_lit), src, count=1)
-    with open(full_path, 'w') as f:
-        f.write(src)
-
-
-_patch_lambda(
-    FF_LAMBDA_SMALI,
-    "com/innioasis/y1/service/PlayerService$startFastForward$1",
-    "add-long/2addr",
-    r'add-long/2addr',
-    "startFastForward",
-)
-_patch_lambda(
-    RW_LAMBDA_SMALI,
-    "com/innioasis/y1/service/PlayerService$startRewind$1",
-    "sub-long/2addr",
-    r'sub-long/2addr',
-    "startRewind",
-)
-
-print(
-    f"  Patch D: PlayerService FF/RW hold-loop bounded to {HOLD_LOOP_CAP} iters "
-    f"(~{HOLD_LOOP_CAP * 100} ms wall clock)"
-)
-
-# ============================================================
 # Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE coverage  (iter22d)
 # ============================================================
 #
@@ -1422,12 +999,10 @@ print(
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
-# whether the smali edits succeeded — independent of whether the DEX
-# assembly preserved them (the DEX-signature check below covers that side).
+# whether the smali edits succeeded.
 print(f"\nPatched smali file md5s (deterministic — same across machines):")
 PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
-    PLAYER_SMALI, FF_LAMBDA_SMALI, RW_LAMBDA_SMALI,
     PLAY_CONTROLLER_RECEIVER_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
@@ -1454,19 +1029,8 @@ if not os.path.exists(dex1) or not os.path.exists(dex2):
 print(f"  classes.dex  {os.path.getsize(dex1):,} bytes")
 print(f"  classes2.dex {os.path.getsize(dex2):,} bytes")
 
-# -- DEX signature verification ----------------------------------------------
-# Catches the apktool/JVM-compat failure mode where smali source has the
-# patches but the assembled DEX silently lacks them. Refuses to write the
-# patched APK if any expected signature is missing.
-print(f"\nVerifying DEX patch signatures...")
 with open(dex1, 'rb') as f: dex1_bytes = f.read()
 with open(dex2, 'rb') as f: dex2_bytes = f.read()
-if not verify_dex_patch_signatures(dex2_bytes):
-    sys.exit(
-        f"\nERROR: DEX signature check failed. The APK was NOT written.\n"
-        f"  Inspect {UNPACKED_DIR} to confirm the smali edits landed,\n"
-        f"  then re-run under a compatible Java version (see warning above)."
-    )
 
 # -- Build patched APK (replace DEX, keep original META-INF) -----------------
 with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
