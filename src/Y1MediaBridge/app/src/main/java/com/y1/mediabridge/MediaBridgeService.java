@@ -909,10 +909,10 @@ public class MediaBridgeService extends Service {
         // iter22c: refresh the playing_flag byte at y1-track-info[792] BEFORE
         // any broadcast fires. Same race fix iter19c applied to onTrackDetected
         // / broadcastTrackAndState (track-change path), now extended to the
-        // play/pause path. Per AVRCP §5.4.3.4 GetPlayStatus must report the
-        // current play_status, and per §6.7.1 PLAYBACK_STATUS_CHANGED
-        // notifications must reflect the post-edge value when the CHANGED
-        // frame fires. Both T6 (GetPlayStatus, iter20a) and T9
+        // play/pause path. Per AVRCP 1.3 §5.4.1 GetPlayStatus must report
+        // the current play_status, and per §5.4.2 (Table 5.29
+        // EVENT_PLAYBACK_STATUS_CHANGED) the CHANGED frame must reflect
+        // the post-edge value. Both T6 (GetPlayStatus, iter20a) and T9
         // (PLAYBACK_STATUS_CHANGED proactive, iter22b) read y1-track-info[792]
         // for that source-of-truth value; without this writeTrackInfoFile()
         // call the file stays stale across play/pause toggles within a track,
@@ -1056,7 +1056,8 @@ public class MediaBridgeService extends Service {
     // iter20a — Phase B: append GetPlayStatus fields to the y1-track-info
     // schema. T6 (libextavrcp_jni.so trampoline at vaddr ~0xaf06) reads
     // these on every inbound PDU 0x30 to build the GetPlayStatus response
-    // per AVRCP §5.4.3.4. All multi-byte fields are big-endian on disk;
+    // per AVRCP 1.3 §5.4.1 (Tables 5.25/5.26). All multi-byte fields are
+    // big-endian on disk;
     // the trampoline byte-swaps to host order via REV before passing to
     // btmtk_avrcp_send_get_playstatus_rsp.
     private static final int DURATION_OFFSET    = ALBUM_OFFSET + FIELD_LEN;       // 776 - duration_ms u32 BE
@@ -1080,19 +1081,21 @@ public class MediaBridgeService extends Service {
 
             // iter20a — duration_ms / position / play_status for T6 GetPlayStatus.
             // Big-endian u32 to match the existing track_id encoding; T6 byte-swaps
-            // before passing to the response builder. AVRCP §5.4.3.4 specifies
-            // 0xFFFFFFFF as "no track length / position currently selected"; we
-            // use 0 for both when unknown rather than the sentinel because the
-            // CTs in our test matrix render 0 cleanly while some interpret the
-            // 0xFFFFFFFF sentinel as a literal duration. Both are spec-
-            // permissible per §5.4.3.4. See `docs/INVESTIGATION.md` "Hardware
-            // test history per CT" for the empirical observations.
+            // before passing to the response builder. AVRCP 1.3 §5.4.1
+            // Table 5.26 notes "If TG does not support SongLength And
+            // SongPosition on TG, then TG shall return 0xFFFFFFFF"; we use 0
+            // for both when unknown rather than the sentinel because the CTs
+            // in our test matrix render 0 cleanly while some interpret the
+            // 0xFFFFFFFF sentinel as a literal duration (also a Table-5.26
+            // allowed value 0..(2^32-1)). Both are spec-permissible. See
+            // `docs/INVESTIGATION.md` "Hardware test history per CT" for the
+            // empirical observations.
             long duration = mCurrentDuration > 0 ? mCurrentDuration : 0L;
             putBE32(buf, DURATION_OFFSET, (int) Math.min(duration, 0xFFFFFFFFL));
             putBE32(buf, POSITION_OFFSET, (int) Math.min(mPositionAtStateChange, 0xFFFFFFFFL));
             putBE32(buf, STATE_TIME_OFFSET, (int) (mStateChangeTime / 1000L));
             // playing_flag: 0=STOPPED, 1=PLAYING, 2=PAUSED — direct mapping to
-            // AVRCP §5.4.3.4 play_status enum. We don't track a "stopped" state
+            // AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus enum. We don't track a "stopped" state
             // independently, so isPlaying maps to 1 (PLAYING) and !isPlaying
             // maps to 2 (PAUSED). Deeper state (FWD_SEEK / REV_SEEK / ERROR)
             // would require additional Y1MediaBridge plumbing.
@@ -1334,7 +1337,8 @@ public class MediaBridgeService extends Service {
      * the very first track after a connection hand-shake.
      *
      * Wire-level track_id is independently pinned to the {@code 0xFF×8}
-     * sentinel in the trampoline (per AVRCP §6.7.2), so this internal-only
+     * sentinel in the trampoline (AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2
+     * 8-byte clarification), so this internal-only
      * id never reaches the peer device. Synthetic ids OR'd with bit 32 to
      * keep them distinct from MediaStore _IDs (typically small integers).
      */

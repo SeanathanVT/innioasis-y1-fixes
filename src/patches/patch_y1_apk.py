@@ -845,10 +845,14 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # Background
 # ----------
-# AVRCP 1.4 §11.1.2 defines distinct PASSTHROUGH op codes for PLAY (0x44)
-# and PAUSE (0x46), separate from any toggle abstraction. CTs that issue
-# both discrete codes from separate UI elements are spec-conformant; CTs
-# that only ever issue 0x46 (and rely on the TG to interpret it as a
+# AVRCP 1.3 §4.6.1 (PASS THROUGH command — actual op-code table and
+# press/release semantics defined in AV/C Panel Subunit Specification, ref
+# [2] of AVRCP 1.3) gives distinct codes for PLAY (0x44) and PAUSE (0x46),
+# separate from any toggle abstraction. AVRCP 1.3 §19.3 (Appendix D,
+# informative) shows a concrete PASSTHROUGH PLAY frame with operation_ID
+# 0x44 and confirms `state_flag = 0` (press) / `1` (release). CTs that
+# issue both discrete codes from separate UI elements are spec-conformant;
+# CTs that only ever issue 0x46 (and rely on the TG to interpret it as a
 # toggle when already paused) are also common in practice. A spec-compliant
 # TG must therefore handle all three of:
 #   - 0x44 PLAY  : transition to PLAYING from any state (no-op if already PLAYING)
@@ -879,7 +883,8 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       toggle is the right semantics for a single physical play/pause key.
 #
 #   - KEYCODE_MEDIA_PLAY (0x7e, 126) — discrete PLAY:
-#       call `play(Z)V` with bool=false. AVRCP §11.1.2 PLAY transitions to
+#       call `play(Z)V` with bool=false. AVRCP 1.3 §4.6.1 / AV/C Panel
+#       Subunit Spec — PLAY (op_id 0x44) transitions to
 #       PLAYING from any state; if already PLAYING, play() is effectively a
 #       no-op (the underlying IjkMediaPlayer is already running).
 #
@@ -1068,8 +1073,8 @@ with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
     "  Patch E (iter25): PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
-    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AVRCP §11.1.2]; "
-    "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per AVRCP §11.1.2]"
+    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AVRCP 1.3 §4.6.1 / AV/C Panel Subunit op 0x44]; "
+    "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per AVRCP 1.3 §4.6.1 / op 0x46]"
 )
 
 # -- Per-smali md5 report -----------------------------------------------------

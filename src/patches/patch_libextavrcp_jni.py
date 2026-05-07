@@ -48,11 +48,13 @@ U1 (iter23) — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf
      UI_SET_EVBIT calls (EV_KEY at 0x74d4, the EV_REL vendor typo at
      0x74e0, EV_SYN at 0x74f2) are left intact; the device still emits
      key/syn events normally, just without kernel-side auto-repeat. This
-     is also more spec-correct: AVRCP 1.4 §6.4.1.4 requires the CT to
-     periodically re-send PASSTHROUGH PRESS frames during a held button,
-     so we should be forwarding one event per frame, not synthesizing
-     extras at the input layer. Pairs with iter21's PlayerService cap as
-     a defense-in-depth.
+     is also more spec-correct: AVRCP 1.3 §4.6.1 (PASS THROUGH command,
+     defined in AV/C Panel Subunit Specification [ref 2 of AVRCP 1.3]) puts
+     the periodic-resend responsibility for held buttons on the CT — the
+     TG forwards one event per frame, not synthesizing extras at the input
+     layer. Pairs with iter21's PlayerService cap as a defense-in-depth
+     (iter21 since reverted in iter24 because U1 closed the actual root
+     cause and the in-app cap was bounding local hardware-button hold-FF).
 
 T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
      bytes): GetCapabilities (PDU 0x10) — answers with EVENT_TRACK_CHANGED
@@ -135,7 +137,8 @@ it sees a CHANGED. 14 minutes of zero AVRCP traffic confirmed.
 
 iter16: same architecture as iter15 but INTERIM/CHANGED's track_id
 field is hardcoded to the 0xFF×8 sentinel ("not bound to a particular
-media element" per AVRCP 1.4 §6.7.2). State file's bytes 0..7 still
+media element" per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 clarification
+of the 8-byte form against AVRCP 1.5 §6.7.2). State file's bytes 0..7 still
 hold the file's last-synced track_id — that's what T4 compares against
 to know when to emit CHANGED. Restores iter14c-style polling
 behaviour and adds CHANGED edges on real track changes so permissive CTs
@@ -184,7 +187,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 # nested sparse-switch). Replace entry instruction with `b.w T9` so every
 # Y1MediaBridge `playstatechanged` broadcast lands in T9, which fires
 # PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
-# Closes the AVRCP §6.7.1 spec gap left by iter20b's INTERIM-only T8.
+# Closes the AVRCP 1.3 §5.4.2 spec gap left by iter20b's INTERIM-only T8.
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"

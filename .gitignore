@@ -19,3 +19,8 @@ tools/.cmdline-tools-*.zip
 tools/gdbserver
 tools/_attach-mtkbt-gdb-commands.gdb
 tools/apktool-*.jar
+
+# AVRCP spec PDFs are referenced by docs/AVRCP13-COMPLIANCE-PLAN.md §0
+# but not redistributable (Bluetooth SIG copyright). Place locally in
+# docs/spec/ for citation verification; do not commit.
+docs/spec/
