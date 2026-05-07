@@ -690,6 +690,12 @@ public class MediaBridgeService extends Service {
             if (ACTION_SHUTDOWN.equals(action)) {
                 mIsPlaying = false;
                 mStateChangeTime = SystemClock.elapsedRealtime();
+                // iter22c: writeTrackInfoFile before any cross-process broadcast
+                // so T6 GetPlayStatus polls and T9 PLAYBACK_STATUS_CHANGED CHANGED
+                // emits both see the new playing_flag. Same fix as the
+                // onStateDetected play/pause path -- this shutdown path was
+                // covered by the same iter19c-symmetry audit.
+                writeTrackInfoFile();
                 publishState();
                 sendMusicBroadcast("com.android.music.playstatechanged");
                 notifyPlaybackStatus((byte) 3);
