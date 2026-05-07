@@ -387,11 +387,11 @@ Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at 
 
 All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the same shape (40-byte buffer, msg=544, conn[17]→transId at sp+9). Each function bakes in its event-specific constant at sp+13 (1=playback, 2=track_changed, 5=pos_changed, ...). The `cbnz` test on r1 is shared: r1==0 = "write event payload", r1!=0 = "write reject flag (sp+10=1) + reject code (sp+11=arg1) and skip event payload".
 
-The current iter17b T2 trampoline passes `r1 = transId` (which is usually non-zero), so it's been hitting the second path. Empirically permissive CTs still receive a TRACK_CHANGED notification of some kind and fall back to GetElementAttributes polling for metadata, which is why iter15+ has been working for that CT class despite this. To be spec-correct (and to actually deliver the embedded track_id), iter19 should pass `r1=0` in T2/T5/T6/T8 across the board. **Treat as a known issue to fix when making the Phase A/B trampoline pass; verify on hardware that it doesn't regress permissive-CT rendering.**
+All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path. Earlier iters had passed `r1 = transId` and silently hit the reject-shape path; that was fixed in Phase A0 (see `INVESTIGATION.md` for the empirical history).
 
 ---
 
-## Patch summary (iter17b)
+## Patch summary
 
 | Patch | File / addr | Description |
 |-------|-------------|-------------|

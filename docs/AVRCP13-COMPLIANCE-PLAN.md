@@ -1,12 +1,12 @@
 # AVRCP 1.3 Spec-Compliance Plan
 
-A staged path from the current iter18d minimum subset (GetCapabilities + GetElementAttributes + RegisterNotification(TRACK_CHANGED) only) to a fully spec-compliant AVRCP 1.3 TG. Written 2026-05-06 in response to a strict-CT failure mode (the TG worked on permissive CTs that poll for metadata regardless, but failed on strict CTs that gate metadata refresh on charset acknowledgement and CHANGED-edge wire correctness). Per-CT empirical observations live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT".
+Current AVRCP 1.3 spec coverage and the staged path to closing remaining gaps. Anchored against the AVRCP ICS (Implementation Conformance Statement) Table 7 in `docs/spec/AVRCP.ICS.p17.pdf`. Per-CT empirical observations behind each design choice live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT".
 
-This document is the build plan only. For why we have a proxy at all, the current trampoline chain shape, and the calling conventions of the response builders we already use, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For per-patch byte detail of what's shipped, see [`PATCHES.md`](PATCHES.md).
+This document is the build plan only. For why we have a proxy at all, the current trampoline chain shape, and the calling conventions of the response builders we use, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For per-patch byte-level reference, see [`PATCHES.md`](PATCHES.md).
 
 ---
 
-## 0. Spec target + citation discipline (iter26)
+## 0. Spec target + citation discipline
 
 **Wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
 
@@ -51,7 +51,7 @@ Out of scope for this plan: AVRCP 1.4 features (Browsing Channel — separate L2
 
 ## 2. Coverage matrix — current vs spec
 
-**The original "Mandatory in 1.3?" column below was a reading of the spec text without ICS conditionals.** As of iter27 we re-anchor against the **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.pdf` §1.5, which is the canonical M/O determination. M/O status is conditional on what other features the TG claims; the ICS encodes the conditionals explicitly. PDU = "PDU ID" byte at AV/C body offset +4. AVRCP 1.3 V13 spec sections in `docs/spec/AVRCP_SPEC_V13.pdf`.
+Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.pdf` §1.5, which is the canonical M/O determination. M/O status is conditional on what other features the TG claims; the ICS encodes the conditionals explicitly. PDU = "PDU ID" byte at AV/C body offset +4. AVRCP 1.3 V13 spec sections in `docs/spec/AVRCP_SPEC_V13.pdf`.
 
 **Our claims that drive the conditionals:** PASS THROUGH Cat 1 (V1 SDP record, ICS Table 7 item 7), GetElementAttributes Response (T4, item 20). Combining these:
 
@@ -165,7 +165,7 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 
 ### 3a. Per-function argument-convention discovery (still required)
 
-We already learned (the hard way, in iter11→iter13) that argument names are not what their positions suggest — the `get_element_attributes_rsp` "arg2" turned out to be attribute *index*, not transId. Each new response builder needs the same disassembly pass before its trampoline can be written. Pattern, per function:
+Argument names from the OEM are not what their positions suggest — `get_element_attributes_rsp`'s "arg2" turned out to be attribute *index*, not transId; we found that the hard way (see [`INVESTIGATION.md`](INVESTIGATION.md)). Each new response builder needs the same disassembly pass before its trampoline can be written. Pattern, per function:
 
 1. `objdump -d --start-address=<libextavrcp.so addr> --stop-address=<+0x100>` to dump the function body.
 2. Look for `ldrb rN, [r0, #17]` — that's transId being auto-extracted from `conn[17]`. If present, `transId` is *not* an arg.
@@ -177,7 +177,7 @@ Estimated effort per function: 30 min for simple ones, 2 hours for the multi-arg
 
 ### 3b. Code-cave budget
 
-LOAD #1 padding currently used by iter17b's blob: `0xac54..0xaf4c` (760 B). Free space past `0xaf4c` to LOAD #2 at `0xbc08`: **3,260 bytes**. New trampolines average ~80 bytes each; budget supports ~40 more trampolines. We're not space-constrained.
+LOAD #1 padding currently used: `0xac54..0xb18c` (1336 B). Free space past `0xb18c` to LOAD #2 at `0xbc08`: **~2940 bytes**. New trampolines average ~80–200 bytes each; budget supports a few dozen more. Not space-constrained.
 
 If we ever do exhaust LOAD #1 padding, we have a known fallback: extend the trick to the LOAD #2 padding region by bumping LOAD #2's `p_filesz`/`p_memsz`. Not needed for this plan.
 
@@ -416,35 +416,33 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 
 ---
 
-## 9. Effort summary
+## 9. Remaining effort (Phases C, D, E)
 
-| Phase | iter | Trampoline LOC | Schema bump | Music-app patch | New docs | Estimated effort |
-|---|---|---|---|---|---|---|
-| A0 — Inform PDUs + wire-shape | iter19 | ~50 | no | no | ARCH update | 2 hours |
-| A1 — Notifications | iter20 | ~150 | yes | no | ARCH update | 2–3 days |
-| B — GetPlayStatus | iter20 (paired) | ~80 | (rolled into A1) | no | ARCH update | 1–2 days |
-| C — PlayerAppSettings (0x11–0x16) | iter22 (was iter21) | ~350 | yes | yes | patch_y1_apk.py docstring + ARCH | 5–7 days |
-| D — Continuation | iter23 (was iter22) | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
-| E — Audit | iter23 (paired) | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
-| ~~Defensive: bound music-app FF/RW hold-loop~~ | ~~iter21~~ (reverted iter24; superseded by iter23/U1) | ~~0 (smali only)~~ | no | ~~yes (Patch D)~~ | CHANGELOG + PATCHES.md | 1 day |
-| **Total** | iter19–iter22 | **~860** | two schema bumps | two new smali patches | three doc updates | **11–17 days** |
+Phases A0/A1/B already shipped (see compliance scorecard in §2). Estimated effort to close remaining gaps:
 
-Compared with the cumulative effort from iter1 through iter18d (already shipped: ~6 weeks of focused work for the metadata core), full 1.3 compliance is a 2–3 week extension on top, not a re-architecture. The trampoline chain pattern scales linearly with PDU count.
+| Phase | Status | Trampoline LOC | Schema bump | Music-app patch | Estimated effort |
+|---|---|---|---|---|---|
+| A0 — Inform PDUs + wire-shape | **shipped** | ~50 | no | no | — |
+| A1 — Notification expansion | **shipped** | ~150 | yes | no | — |
+| B — GetPlayStatus | **shipped** | ~80 | (with A1) | no | — |
+| C — PlayerAppSettings (0x11–0x16) | not shipped | ~350 | yes | yes | 5–7 days |
+| D — Continuation (0x40–0x41) | not shipped | ~200 | no | no | 2–3 days (skip if not needed) |
+| E — Audit + optional 1.4 abs-vol | partial (Patch E + U1 shipped) | ~80 (T10 abs-vol) | no | no | 1–2 days |
+
+Total remaining for full 1.3 compliance + optional E: ~8–12 days. The trampoline chain pattern scales linearly with PDU count; we're not space-constrained.
 
 ---
 
 ## 10. Decision gates
 
-These let us short-circuit phases when a CT actually works:
+Shipped phases let us short-circuit further work if compatibility is achieved:
 
-- **After Phase A0 (iter19):** retest the strict-CT class. PDU 0x17 NACK is closed and TRACK_CHANGED is now spec-correct on the wire — most likely fixes strict-CT failures directly. If yes → defer A1+B as the next compliance increment rather than urgent fixes.
-- **After Phase A1+B (iter20):** retest against any new strict CT that surfaced. By this point we cover all 8 RegisterNotification events the spec mandates plus GetPlayStatus, which together account for the bulk of CT compatibility issues we know about.
-- **After Phase C (iter22, was iter21):** PApp Settings is mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
-- **After Phase D+E (iter23, was iter22):** full 1.3 spec compliance achieved.
+- **A0 + A1 + B (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 8 RegisterNotification events covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position. Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
+- **Phase C (PApp Settings):** mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
+- **Phase D (Continuation):** mandatory per ICS condition C.2 but unobserved in any of our CT captures. Deferable.
+- **Phase E (audit + optional 1.4 abs-vol):** Patch E + U1 from Phase E already shipped; SetAbsoluteVolume is a stretch goal and would require claiming PASS THROUGH Cat 2 (not currently advertised).
 
-> Phase numbering after iter21 slid by one because iter21 was repurposed mid-stream from "Phase C music-app patch" into a defensive bound on the FF/RW hold-loop after dropped-PASSTHROUGH-release symptoms (see [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT") forced it ahead of compliance work. Phase C is now scheduled as iter22+.
-
-We don't have to commit to the full 1.3 build up front. Each iter ships an incremental compliance milestone that's coherent on its own.
+Each phase ships an incremental compliance milestone that's coherent on its own.
 
 ---
 

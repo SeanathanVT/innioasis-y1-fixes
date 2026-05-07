@@ -12,7 +12,8 @@ A patching toolkit for the Innioasis Y1 media player that improves the music-pla
 - **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
 - **Root** — install a minimal `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
-- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe) for the in-progress metadata-over-Bluetooth work. AVRCP-metadata delivery itself is not yet working — see [Status](#status).
+- **AVRCP 1.3 metadata over Bluetooth** — Title/Artist/Album, current play status (with live position), play-state edges and track-change edges delivered to peer Bluetooth Controllers (car head units, TVs, smart speakers). Implemented as a chain of binary trampolines in `libextavrcp_jni.so` that intercept inbound AVRCP commands and call the existing C response-builder primitives directly, bypassing the OEM's no-op Java AVRCP TG. Behind the `--avrcp` flag (excluded from `--all` because it requires a Y1MediaBridge gradle build first). See [Status](#status).
+- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture with `getevent` + `dumpsys input`, post-root probe, gdbserver attach to mtkbt) used to drive the metadata pipeline above. None are invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 ## Layout
 
@@ -59,7 +60,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | Flag | Effect |
 |---|---|
 | `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
-| `--avrcp` | AVRCP 1.3 metadata pipeline: SDP shape patches in `mtkbt`, JNI trampoline chain (T1/T2/T4/T5) in `libextavrcp_jni.so`, F1/F2/iter17a Java patches in `MtkBt.odex`, plus `Y1MediaBridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
+| `--avrcp` | AVRCP 1.3 metadata pipeline: SDP shape patches in `mtkbt` (V1/V2/S1/P1), full trampoline chain in `libextavrcp_jni.so` (R1/T1/T2/extended_T2/T4/T5/T_charset/T_battery/T6/T8/T9 + U1 kernel-auto-repeat NOP), Java-side patches in `MtkBt.odex` (F1/F2 + cardinality NOPs), discrete PASSTHROUGH PLAY/PAUSE/STOP routing in the music app (Patch E), plus `Y1MediaBridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
 | `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
 | `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
@@ -82,9 +83,21 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 `--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
 
-**AVRCP metadata over BT is working under `--avrcp`** (Title + Artist + Album simultaneously delivered to peer CTs, hardware-verified iter13 onward). `--avrcp` advertises AVRCP **1.3** over AVCTP **1.2** in the SDP record (V1/V2 patches in `patch_mtkbt.py`, with ESR07 §2.1 / Erratum 4969 SDP-record clarifications applied); 1.3 is the highest version where the SDP advertisement, AVCTP, and our trampoline coverage all line up — `mtkbt`'s shipped command-handling layer is internally AVRCP 1.0 and rejects anything past `PASSTHROUGH` natively, so the trampoline chain in `libextavrcp_jni.so` synthesises the 1.3 responses directly. Per [`docs/AVRCP_SPEC_V13.pdf`](docs/spec/AVRCP_SPEC_V13.pdf) the implemented set is: §5.1.1 GetCapabilities (PDU 0x10), §5.3.1 GetElementAttributes (PDU 0x20 — Title/Artist/Album), §5.4.1 GetPlayStatus (PDU 0x30, with live position extrapolation per Table 5.26's "milliseconds elapsed"), §5.4.2 RegisterNotification (PDU 0x31 — INTERIM dispatch for events 0x01–0x07, proactive CHANGED-on-edge for events 0x01 PLAYBACK_STATUS_CHANGED and 0x02 TRACK_CHANGED), §5.2.7 InformDisplayableCharacterSet (PDU 0x17), §5.2.8 InformBatteryStatusOfCT (PDU 0x18), and §4.6.1 PASS THROUGH (discrete PLAY/PAUSE per AV/C Panel Subunit Spec [ref 2 of AVRCP 1.3] op codes 0x44/0x46, handled at the music-app layer). Iter-by-iter motivation and per-CT hardware-test observations live in [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md) "Hardware test history per CT". Spec citation discipline + canonical PDFs in [`docs/AVRCP13-COMPLIANCE-PLAN.md`](docs/AVRCP13-COMPLIANCE-PLAN.md) §0.
+**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see Title/Artist/Album, current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**; `mtkbt`'s shipped command-handling layer is internally AVRCP 1.0 and rejects anything past `PASSTHROUGH` natively, so the trampoline chain in `libextavrcp_jni.so` synthesises the 1.3 responses directly. Implemented PDU set per [`docs/spec/AVRCP_SPEC_V13.pdf`](docs/spec/) (V13 + ESR07 errata):
 
-The breakthrough is a chain of binary trampolines patched into `libextavrcp_jni.so` that intercept inbound AVRCP commands and call the existing C response-builder functions in `libextavrcp.so` directly — bypassing the OEM's incomplete Java AVRCP TG. Full architecture, calling conventions, and the ELF-segment-extension technique used to host code past the original LOAD #1 segment end are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+| Spec § | PDU | Coverage |
+|---|---|---|
+| §5.1.1 | 0x10 GetCapabilities | full |
+| §5.2.7 | 0x17 InformDisplayableCharacterSet | full |
+| §5.2.8 | 0x18 InformBatteryStatusOfCT | full |
+| §5.3.1 | 0x20 GetElementAttributes | Title/Artist/Album in single-frame response |
+| §5.4.1 | 0x30 GetPlayStatus | full, with live position via `clock_gettime(CLOCK_BOOTTIME)` |
+| §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 / 0x02 |
+| §4.6.1 | PASS THROUGH (PLAY/PAUSE/STOP/FORWARD/BACKWARD/etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
+
+Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE-PLAN.md`](docs/AVRCP13-COMPLIANCE-PLAN.md) §2 — every mandatory row hits.
+
+The breakthrough is a chain of binary trampolines patched into `libextavrcp_jni.so` that intercept inbound AVRCP commands and call the existing C response-builder functions in `libextavrcp.so` directly, bypassing the OEM's no-op Java AVRCP TG. Full architecture, calling conventions, and the ELF-segment-extension technique used to host code past the original LOAD #1 segment end are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 `--bluetooth` covers only pairing-essential config edits — it does not modify SDP/AVRCP behavior; that's all under `--avrcp`.
 
@@ -114,7 +127,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4/T5), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/extended_T2/T4/T5/T_charset/T_battery/T6/T8/T9 + R1 + U1), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
 - [docs/AVRCP13-COMPLIANCE-PLAN.md](docs/AVRCP13-COMPLIANCE-PLAN.md) — staged plan from the current implementation to full AVRCP 1.3 spec compliance (Phases A–E)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
