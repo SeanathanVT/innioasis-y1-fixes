@@ -889,6 +889,17 @@ public class MediaBridgeService extends Service {
         mPositionAtStateChange = computePosition();
         mStateChangeTime = SystemClock.elapsedRealtime();
         mIsPlaying = playing;
+        // iter22c: refresh the playing_flag byte at y1-track-info[792] BEFORE
+        // any broadcast fires. Same race fix iter19c applied to onTrackDetected
+        // / broadcastTrackAndState, but for the play/pause path -- which was
+        // missed and left state-of-truth stale until the next track change.
+        // Symptom on Kia EV6: play/pause toggle from car remote drove the Y1
+        // audio correctly but T6 GetPlayStatus polls returned the previous
+        // value, so the car-side icon never flipped between play/pause until
+        // a track changed (which calls broadcastTrackAndState and refreshes
+        // the file). T9 (iter22b) wasn't fired here either since Kia doesn't
+        // subscribe to event 0x01 PLAYBACK_STATUS_CHANGED -- it polls.
+        writeTrackInfoFile();
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");
         notifyPlaybackStatus(playing ? (byte) 2 : (byte) 3);
