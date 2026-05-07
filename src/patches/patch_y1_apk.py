@@ -840,31 +840,39 @@ with open(repo_path, 'w') as f:
 print("  Patch C: Y1Repository -- songDao field changed from private to public")
 
 # ============================================================
-# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE coverage  (iter22d, refined iter25)
+# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE/STOP coverage  (iter22d, refined iter25, +STOP iter27)
 # ============================================================
 #
 # Background
 # ----------
 # AVRCP 1.3 §4.6.1 (PASS THROUGH command — actual op-code table and
 # press/release semantics defined in AV/C Panel Subunit Specification, ref
-# [2] of AVRCP 1.3) gives distinct codes for PLAY (0x44) and PAUSE (0x46),
-# separate from any toggle abstraction. AVRCP 1.3 §19.3 (Appendix D,
-# informative) shows a concrete PASSTHROUGH PLAY frame with operation_ID
-# 0x44 and confirms `state_flag = 0` (press) / `1` (release). CTs that
-# issue both discrete codes from separate UI elements are spec-conformant;
+# [2] of AVRCP 1.3) gives distinct codes for PLAY (0x44), STOP (0x45), and
+# PAUSE (0x46), separate from any toggle abstraction. AVRCP 1.3 §19.3
+# (Appendix D, informative) shows a concrete PASSTHROUGH PLAY frame with
+# operation_ID 0x44 and confirms `state_flag = 0` (press) / `1` (release).
+# CTs that issue discrete codes from separate UI elements are spec-conformant;
 # CTs that only ever issue 0x46 (and rely on the TG to interpret it as a
-# toggle when already paused) are also common in practice. A spec-compliant
-# TG must therefore handle all three of:
-#   - 0x44 PLAY  : transition to PLAYING from any state (no-op if already PLAYING)
-#   - 0x46 PAUSE : transition to PAUSED  from any state (no-op if already PAUSED)
-#   - 0x46 sent as a toggle by the CT: TG state-flip
+# toggle when already paused) are also common in practice.
+#
+# Per the AVRCP ICS Table 8 (operation_id of category 1 for TG, see
+# `docs/spec/AVRCP.ICS.p17.pdf` §1.5), op_ids 0x44 PLAY (item 19) and 0x45
+# STOP (item 20) are **Mandatory** for any TG advertising PASS THROUGH
+# Cat 1 (which we do via the V1 SDP record patch). 0x46 PAUSE (item 21)
+# and 0x4B/0x4C FORWARD/BACKWARD (items 26/27) are Optional.
+#
+# A spec-compliant TG must therefore handle:
+#   - 0x44 PLAY  : transition to PLAYING from any state (no-op if already PLAYING)  [M]
+#   - 0x45 STOP  : transition to STOPPED state (release media position)             [M]
+#   - 0x46 PAUSE : transition to PAUSED from any state (no-op if already PAUSED)    [O]
+#   - 0x46 sent as a toggle by the CT: TG state-flip                                [O, observed]
 #
 # Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
 # /dev/uinput) maps these to the Linux input event keycodes (verified against
 # /system/usr/keylayout/AVRCP.kl + getevent capture on iter23 hardware):
 #   - 0x44 PLAY  → Linux KEY_PLAYCD (200)  → Android KEYCODE_MEDIA_PLAY (126)
+#   - 0x45 STOP  → Linux KEY_STOPCD (166)  → Android KEYCODE_MEDIA_STOP (86)
 #   - 0x46 PAUSE → Linux KEY_PAUSECD (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
-# (PASSTHROUGH 0x45 STOP is also defined but doesn't matter for this patch.)
 #
 # Y1's PlayControllerReceiver (the registered ACTION_MEDIA_BUTTON receiver)
 # stock-only matches against `KeyMap.KEY_PLAY` (= 85, KEYCODE_MEDIA_PLAY_PAUSE).
@@ -874,7 +882,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # The fix
 # -------
-# Distinguish three cases in the receiver and route each to the *correct*
+# Distinguish four cases in the receiver and route each to the *correct*
 # PlayerService method:
 #
 #   - KEY_PLAY (85, KEYCODE_MEDIA_PLAY_PAUSE):
@@ -899,6 +907,16 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       mask defaults p2=true on every observed callsite); we pass true
 #       explicitly to match.
 #
+#   - KEYCODE_MEDIA_STOP (0x56, 86) — discrete STOP (iter27):
+#       call `stop()V` (no args). AV/C Panel Subunit Spec STOP (op_id 0x45)
+#       transitions the player to STOPPED state. PlayerService.stop() is
+#       `public final stop()V .locals 4` and calls IjkMediaPlayer.stop() +
+#       reset() + MediaPlayer.stop() — releasing the media position.
+#       Spec-mandated for any TG advertising PASS THROUGH Cat 1, per the
+#       AVRCP ICS Table 8 item 20 (`docs/spec/AVRCP.ICS.p17.pdf` §1.5).
+#       Pre-iter27, KEYCODE_MEDIA_STOP fell through to the receiver's
+#       no-match path → silently dropped.
+#
 # iter22d's first attempt routed all three keycodes to playOrPause()
 # (toggle). That was empirically wrong for a strict CT: dual-bolt-iter23
 # capture showed Bolt issuing 5 discrete PLAY (0x44) presses while Y1 was
@@ -914,7 +932,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   if-ne v2, p1, :cond_e
 #   ... (playOrPause action — single arm)
 #
-# Patched (iter25):
+# Patched (iter27):
 #   :cond_c
 #   sget-object p1, KeyMap;->INSTANCE
 #   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
@@ -924,6 +942,8 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   if-eq v2, p1, :cond_play_strict          # MEDIA_PLAY (126) → play()
 #   const/16 p1, 0x7f
 #   if-eq v2, p1, :cond_pause_strict         # MEDIA_PAUSE (127) → pause()
+#   const/16 p1, 0x56
+#   if-eq v2, p1, :cond_stop_strict          # MEDIA_STOP (86) → stop()  [iter27]
 #   goto :cond_e                             # nothing matched, keep walking
 #
 #   :cond_play_pause_toggle
@@ -949,12 +969,21 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   invoke-virtual {p1, v0, v3}, PlayerService;->pause(IZ)V
 #   goto :goto_5
 #
+#   :cond_stop_strict                        # iter27
+#   sget-object p1, Y1Application$Companion
+#   invoke-virtual {p1}, ->getPlayerService()...
+#   move-result-object p1
+#   if-eqz p1, :cond_e
+#   invoke-virtual {p1}, PlayerService;->stop()V
+#   goto :goto_5
+#
 # v0 and v3 are dead at this point (the .locals 6 onReceive method has
 # v0..v5; the keyCode lives in v2 throughout the dispatch chain; v0/v3
 # are scratch). Each arm is a tail call ending in `goto :goto_5`, so we
 # never fall through into the next label. apktool will renumber the
-# user-defined :cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict
-# labels to alphanumeric :cond_X on reassembly — that's expected and fine.
+# user-defined :cond_play_pause_toggle / :cond_play_strict /
+# :cond_pause_strict / :cond_stop_strict labels to alphanumeric :cond_X
+# on reassembly — that's expected and fine.
 
 PLAY_CONTROLLER_RECEIVER_SMALI = (
     "smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali"
@@ -1013,6 +1042,10 @@ NEW_PLAY_BRANCH = """\
 
     if-eq v2, p1, :cond_pause_strict
 
+    const/16 p1, 0x56
+
+    if-eq v2, p1, :cond_stop_strict
+
     goto :cond_e
 
     :cond_play_pause_toggle
@@ -1059,6 +1092,19 @@ NEW_PLAY_BRANCH = """\
 
     invoke-virtual {p1, v0, v3}, Lcom/innioasis/y1/service/PlayerService;->pause(IZ)V
 
+    goto :goto_5
+
+    :cond_stop_strict
+    sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/Y1Application$Companion;->getPlayerService()Lcom/innioasis/y1/service/PlayerService;
+
+    move-result-object p1
+
+    if-eqz p1, :cond_e
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->stop()V
+
     goto :goto_5"""
 
 if OLD_PLAY_BRANCH not in play_receiver_src:
@@ -1072,9 +1118,10 @@ play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 
 with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
-    "  Patch E (iter25): PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
-    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AVRCP 1.3 §4.6.1 / AV/C Panel Subunit op 0x44]; "
-    "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per AVRCP 1.3 §4.6.1 / op 0x46]"
+    "  Patch E (iter27): PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
+    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AV/C Panel Subunit op 0x44]; "
+    "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per op 0x46]; "
+    "KEYCODE_MEDIA_STOP (86) → stop() [discrete STOP per op 0x45 — ICS Table 8 item 20 mandatory]"
 )
 
 # -- Per-smali md5 report -----------------------------------------------------

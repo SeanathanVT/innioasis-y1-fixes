@@ -20,7 +20,12 @@ tools/gdbserver
 tools/_attach-mtkbt-gdb-commands.gdb
 tools/apktool-*.jar
 
-# AVRCP spec PDFs are referenced by docs/AVRCP13-COMPLIANCE-PLAN.md §0
-# but not redistributable (Bluetooth SIG copyright). Place locally in
-# docs/spec/ for citation verification; do not commit.
+# AVRCP spec PDFs are referenced by docs/AVRCP13-COMPLIANCE-PLAN.md §0 but
+# not redistributable (Bluetooth SIG copyright). Place locally for citation
+# verification; do not commit. Expected files (download from
+# https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/):
+#   AVRCP_SPEC_V13.pdf      — base spec (V13, 16 April 2007, 93 p.)
+#   ESR07_ESR_V10.pdf       — Errata Service Release 07 (2013-12-03, 41 p.)
+#   AVRCP.ICS.p17.pdf       — Implementation Conformance Statement (2024-07-01, 25 p.)
+#   AVRCP.IXIT.1.6.0.pdf    — IXIT proforma (2014-09-18, 12 p.)
 docs/spec/

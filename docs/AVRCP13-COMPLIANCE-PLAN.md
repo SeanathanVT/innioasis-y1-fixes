@@ -12,6 +12,19 @@ This document is the build plan only. For why we have a proxy at all, the curren
 
 - `docs/spec/AVRCP_SPEC_V13.pdf` — base spec, 93 pages
 - `docs/spec/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains the only AVRCP 1.3 erratum (Erratum 4969 — SDP record AVCTP version clarification); §2.2 covers AVRCP 1.5 errata that occasionally inform our reading of inherited 1.3 text (e.g., the 8-byte `Identifier` sentinel form in TRACK_CHANGED).
+- `docs/spec/AVRCP.ICS.p17.pdf` — Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
+- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — Implementation eXtra Information for Testing Proforma, version 1.6.0 (2014-09-18, 12 pages). Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
+
+**AVRCP 1.3 lifecycle status (per ICS §1.2 Table 2b, 2024-07-01):**
+
+| Version | Status |
+|---|---|
+| AVRCP v1.0 | Withdrawn 2023-02-01 |
+| **AVRCP v1.3 (this project's target)** | **Deprecated 2023-02-01. Withdrawn 2027-02-01.** |
+| AVRCP v1.4 | Deprecated 2013-08-01. Withdrawn 2023-02-01. |
+| AVRCP v1.5 | Still valid for new qualification |
+
+We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping. It does mean that **citations to "AVRCP 1.4 §X.Y" are doubly nonsensical** — 1.4 hasn't been a valid qualification target since August 2013. Future iterations should not introduce 1.4-version labels except in F1's BlueAngel-internal-flag context.
 
 **F1 patch in `MtkBt.odex`** sets BlueAngel-internal version code 10→14 ("1.4"). This is internal flag bookkeeping inside MtkBt's Java-side dispatcher to unblock 1.3+ command handling — **it does NOT mean we implement AVRCP 1.4.** We ship zero 1.4-only PDUs (no `0x60` SetAddressedPlayer, no `0x50` SetAbsoluteVolume, no Browsing Channel `0x70..0x77`). When this doc cites "AVRCP 1.4 §X.Y", it's almost certainly historical drift from earlier rev-iterations and should be downgraded to AVRCP 1.3 §... or deleted.
 
@@ -38,38 +51,74 @@ Out of scope for this plan: AVRCP 1.4 features (Browsing Channel — separate L2
 
 ## 2. Coverage matrix — current vs spec
 
-PDU = "PDU ID" byte at AV/C body offset +4. Each row is a single inbound message-type the TG must accept. Spec sections cited are AVRCP 1.3 V13 (`docs/spec/AVRCP_SPEC_V13.pdf`).
+**The original "Mandatory in 1.3?" column below was a reading of the spec text without ICS conditionals.** As of iter27 we re-anchor against the **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.pdf` §1.5, which is the canonical M/O determination. M/O status is conditional on what other features the TG claims; the ICS encodes the conditionals explicitly. PDU = "PDU ID" byte at AV/C body offset +4. AVRCP 1.3 V13 spec sections in `docs/spec/AVRCP_SPEC_V13.pdf`.
 
-| PDU | Name | Mandatory in 1.3? | Currently | Gap |
-|---|---|---|---|---|
-| 0x10 | GetCapabilities | Yes | T1 — replies with `EventsSupported = [0x02]` only | Advertise everything we end up implementing (post-Phase A, ≥4 events) |
-| 0x11 | ListPlayerApplicationSettingAttributes | Yes | falls through to mtkbt → likely NACK | Phase C |
-| 0x12 | ListPlayerApplicationSettingValues | Yes | falls through | Phase C |
-| 0x13 | GetCurrentPlayerApplicationSettingValue | Yes | falls through | Phase C |
-| 0x14 | SetPlayerApplicationSettingValue | Yes | falls through | Phase C |
-| 0x15 | GetPlayerApplicationSettingAttributeText | Yes | falls through | Phase C |
-| 0x16 | GetPlayerApplicationSettingValueText | Yes | falls through | Phase C |
-| 0x17 | InformDisplayableCharacterSet | Yes | falls through | Phase C |
-| 0x18 | InformBatteryStatusOfCT | Yes | falls through | Phase C (canned response) |
-| 0x20 | GetElementAttributes | Yes | T4 — replies with attrs 1/2/3 (Title/Artist/Album), UTF-8 single 644-byte frame | Add attrs 4 (TrackNumber), 5 (TotalNumberOfTracks), 6 (Genre), 7 (PlayingTime) — Phase B |
-| 0x30 | GetPlayStatus | Yes | falls through to mtkbt → behavior unknown | Phase B |
-| 0x31 | RegisterNotification | Yes | T2 — handles event 0x02 only; INTERIM with sentinel `0xFF×8` | Phase A: events 0x01/0x05/0x08; spec also mandates 0x03/0x04/0x06/0x07 |
-| 0x40 | RequestContinuingResponse | Yes | falls through | Phase D |
-| 0x41 | AbortContinuingResponse | Yes | falls through | Phase D |
-| 0x50 | SetAbsoluteVolume (1.4) | If v=1 advertised | falls through | Phase E (advertised; should be honored) |
+**Our claims that drive the conditionals:** PASS THROUGH Cat 1 (V1 SDP record, ICS Table 7 item 7), GetElementAttributes Response (T4, item 20). Combining these:
 
-**Notification events** (PDU 0x31 sub-dispatch) for completeness — spec mandates the TG accept any event ID it advertised in `EventsSupported`:
+| ICS Table 7 row | PDU / Capability | Spec § | ICS Status (this proj) | Currently shipped | Gap |
+|---|---|---|---|---|---|
+| **2** | Accepting connection establishment (control) | §4.1.1 | **M** | ✓ (mtkbt) | — |
+| **3-4** | Connection release | §4.1.2 | **M** | ✓ (mtkbt) | — |
+| **5** | Receiving UNIT INFO | §4.1.3 | **M** | ✓ (mtkbt) | — |
+| **6** | Receiving SUBUNIT INFO | §4.1.3 | **M** | ✓ (mtkbt) | — |
+| **7** | Receiving PASS THROUGH cat 1 | §4.1.3 | **M (C.1: at least one cat)** | ✓ (mtkbt + Patch E) | — |
+| 8 | Receiving PASS THROUGH cat 2 | §4.1.3 | C.1: not required (cat 1 satisfies) | not claimed | optional; would unlock Absolute Volume |
+| 9 | Receiving PASS THROUGH cat 3 | §4.1.3 | C.1: not required | not claimed | — |
+| 10 | Receiving PASS THROUGH cat 4 | §4.1.3 | C.1: not required | not claimed | — |
+| **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
+| 12-15 | List/Get/Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; Phase C ships all |
+| 16-17 | PApp Setting Attribute/Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | optional; Phase C |
+| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (iter19a) | — |
+| 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery (iter19a) | — |
+| **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (Title/Artist/Album, single 644-byte frame) | optional: attrs 4–7 (TrackNumber/Total/Genre/PlayingTime) |
+| **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 (iter20a + iter22d live position) | — |
+| **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2/extended_T2/T8 | — |
+| **23** | Notify EVENT_PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | **M (C.4: M IF GetElementAttributes + RegisterNotification)** | ✓ T8 INTERIM (iter20b) + T9 CHANGED on edge (iter22b) | — |
+| **24** | Notify EVENT_TRACK_CHANGED | §5.4.2 Tbl 5.30 | **M (C.4)** | ✓ extended_T2 INTERIM + T5 CHANGED on edge (iter17a) | — |
+| 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM-only (iter20b) | optional: proactive CHANGED |
+| 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM-only (iter20b) | optional |
+| 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only (iter20b) | optional: proactive CHANGED via timer |
+| 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM with canned 0x00 NORMAL | optional: real battery from Y1 sysfs |
+| 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with canned 0x00 POWER_ON | — |
+| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
+| 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | not shipped | Phase D — mandatory but no observed CT exercises this |
+| 36-58 | MediaPlayerSelection / Browsing (1.4+ PDUs 0x60+) | — | Various C requiring browsing | not shipped (1.4-only) | out of scope per Goal section |
+| 60-62 | Absolute Volume (1.4+ PDUs 0x50, EVENT_VOLUME_CHANGED) | — | C.5: M IF cat 2 | not claimed | optional stretch (would require claiming cat 2) |
+| **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
+| 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + iter23 U1 disables kernel auto-repeat) | — |
 
-| event_id | Name | Currently | Needed |
+**Mandatory rows: all hit.** Optional rows we ship: 18, 19, 25, 26, 27, 28, 29, 66. The Continuation gap (rows 31-32) is a real spec gap but unobserved in our CT test matrix; tracked as Phase D.
+
+**ICS Table 8 (Cat 1 PASSTHROUGH op_ids — mandatory subset):**
+
+| op_id | Operation | ICS status | Currently shipped |
 |---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | not handled | Phase A |
-| 0x02 | TRACK_CHANGED | extended_T2 + T5 | done (iter17b) |
-| 0x03 | TRACK_REACHED_END | not handled | Phase A (reuse `…reached_end_rsp`) |
-| 0x04 | TRACK_REACHED_START | not handled | Phase A |
-| 0x05 | PLAYBACK_POS_CHANGED | not handled | Phase A |
-| 0x06 | BATT_STATUS_CHANGED | not handled | Phase A (canned) |
-| 0x07 | SYSTEM_STATUS_CHANGED | not handled | Phase A (canned) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | not handled | Phase C (paired with PApp Settings) |
+| 0x44 | Play (item 19) | **M** | ✓ Patch E iter25 → `play(false)` |
+| 0x45 | Stop (item 20) | **M** | ✓ Patch E iter27 → `stop()V` |
+| 0x46 | Pause (item 21) | O | ✓ Patch E iter25 → `pause(0x12, true)` |
+| 0x48 | Rewind (item 23) | O | partial (mtkbt fftimer + Y1 long-press) |
+| 0x49 | Fast forward (item 24) | O | partial |
+| 0x4B | Forward / next track (item 26) | O | ✓ |
+| 0x4C | Backward / prev track (item 27) | O | ✓ |
+
+**Mandatory cat 1 op_ids: both hit (PLAY + STOP).**
+
+---
+
+### Notification events (PDU 0x31 sub-dispatch, AVRCP 1.3 §5.4.2 Tables 5.29–5.37)
+
+The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise events `0x01..0x07`.
+
+| event_id | Name | Spec § | INTERIM | CHANGED on edge |
+|---|---|---|---|---|
+| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 (iter20b) | ✓ T9 (iter22b — Y1 play/pause broadcast) |
+| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 (iter15) | ✓ T5 (iter17a — Y1 track-change broadcast) |
+| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | needs end-of-track Y1 broadcast |
+| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | needs start-of-track Y1 broadcast |
+| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | needs periodic Playback-interval timer |
+| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (canned 0x00 NORMAL) | optional |
+| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | optional |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | Phase C |
 
 ---
 
