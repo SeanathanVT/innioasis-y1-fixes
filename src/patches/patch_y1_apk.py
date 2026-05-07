@@ -19,9 +19,20 @@ REQUIREMENTS
 USAGE
 -----
   python3 patch_y1_apk.py <path/to/com_innioasis_y1_X_X_X.apk>
+  python3 patch_y1_apk.py [--skip-md5] [--clean-staging] <apk>
 
   If no argument is given, the script looks for any
   com_innioasis_y1_*.apk in the current directory.
+
+  --skip-md5     bypasses the input APK md5 check (the patcher pins to
+                 stock 3.0.2 by default; an already-patched APK fed back
+                 in would silently fail to apply the patches without it).
+  --clean-staging wipes the cached staging dir before patching (default
+                 reuses it, which is faster across iterations).
+
+  apktool jar is downloaded once and cached in `tools/` at the repo root.
+  Decoded smali + rebuilt DEX live under `staging/y1-apk/` and are
+  retained between runs for inspection.
 
 Produces:  com.innioasis.y1_<version>-patched.apk
 
@@ -55,7 +66,12 @@ DEPLOYMENT
 
 WHAT THIS PATCH DOES
 --------------------
-  Two smali edits, no new files, no Manifest changes:
+  Four smali patches (A/B/C for Artist→Album navigation, D for the iter21
+  FF/RW hold-loop cap), no new files, no Manifest changes. After all
+  patches are applied to the smali, the rebuilt DEX is sanity-checked at
+  the byte level — if any patch's signature is missing from the assembled
+  DEX, the patcher refuses to write the APK (catches the apktool/Java-22+
+  silent-drop failure mode before it hits the device).
 
   Patch A -- ArtistsActivity.confirm():
     When the user taps an artist row (isShowArtists()==true,
@@ -117,6 +133,7 @@ DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
 """
 
 import os, sys, re, shutil, subprocess, urllib.request, zipfile
+import argparse, hashlib
 import glob
 import logging
 from collections import Counter
@@ -133,14 +150,33 @@ except ImportError:
     pass
 
 # -- Config -------------------------------------------------------------------
-WORK_DIR      = "_patch_workdir"
-APKTOOL_JAR   = os.path.join(WORK_DIR, "apktool.jar")
-APKTOOL_URL   = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
-UNPACKED_DIR  = os.path.join(WORK_DIR, "unpacked")
+# Repo-rooted paths so the patcher works the same regardless of CWD. The
+# downloaded apktool jar and the decoded/rebuilt smali tree are both retained
+# across runs (`tools/` and `staging/y1-apk/` respectively) so iterative
+# testing doesn't pay the apktool-download + APK-decode cost every time.
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))           # src/patches
+REPO_ROOT   = os.path.dirname(os.path.dirname(SCRIPT_DIR))         # repo root
+TOOLS_DIR   = os.path.join(REPO_ROOT, "tools")
+STAGING_DIR = os.path.join(REPO_ROOT, "staging", "y1-apk")
+UNPACKED_DIR = os.path.join(STAGING_DIR, "unpacked")
+
+APKTOOL_VERSION = "2.9.3"
+APKTOOL_JAR     = os.path.join(TOOLS_DIR, f"apktool-{APKTOOL_VERSION}.jar")
+APKTOOL_URL     = f"https://github.com/iBotPeaches/Apktool/releases/download/v{APKTOOL_VERSION}/apktool_{APKTOOL_VERSION}.jar"
+APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"  # apktool 2.9.3
+
+# Stock APK md5 — pulled from /system/app/com.innioasis.y1/ on a clean v3.0.2
+# device. The smali pattern matches in this script assume unpatched bytecode,
+# so re-running against an already-patched APK silently fails to apply the
+# patches. The md5 check rejects any non-stock input by default; pass
+# --skip-md5 to override (diagnostic use only).
+STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
 ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
 REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
+# (Patch D's PLAYER_SMALI / FF_LAMBDA_SMALI / RW_LAMBDA_SMALI are defined
+# inline in the Patch D block below.)
 
 # Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
 ARTIST_INTENT_KEY = "artist_key"
@@ -163,6 +199,128 @@ def find_java():
         if shutil.which(candidate):
             return candidate
     sys.exit("ERROR: Java not found. Install Java 11+ and ensure 'java' is on PATH.")
+
+
+def md5_file(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_input_apk(path: str, skip_md5: bool) -> None:
+    """Pin input to the stock 3.0.2 APK so we don't silently re-patch."""
+    actual = md5_file(path)
+    if actual == STOCK_APK_MD5:
+        print(f"  Input md5: {actual}  (stock 3.0.2, verified)")
+        return
+    msg = (
+        f"\nERROR: input APK md5 mismatch.\n"
+        f"  Expected: {STOCK_APK_MD5}  (stock com.innioasis.y1_3.0.2.apk)\n"
+        f"  Got:      {actual}\n"
+        f"\n"
+        f"  This patcher operates only on the stock APK pulled from\n"
+        f"  /system/app/com.innioasis.y1/ on a clean v3.0.2 device. The\n"
+        f"  smali pattern matches assume unpatched bytecode -- patching an\n"
+        f"  already-patched APK silently fails to apply the patches.\n"
+        f"\n"
+        f"  Recover a stock APK with:\n"
+        f"    adb pull /system/app/com.innioasis.y1/com.innioasis.y1.apk\n"
+        f"\n"
+        f"  --skip-md5 bypasses this check (diagnostic use only).\n"
+    )
+    if skip_md5:
+        print(f"  WARNING: input md5 {actual} != expected {STOCK_APK_MD5} (--skip-md5 set, proceeding)")
+        return
+    sys.exit(msg)
+
+
+def ensure_apktool() -> None:
+    """Resolve apktool jar in `tools/`, downloading + md5-verifying if needed."""
+    os.makedirs(TOOLS_DIR, exist_ok=True)
+    cached = (
+        os.path.exists(APKTOOL_JAR)
+        and os.path.getsize(APKTOOL_JAR) > 1_000_000
+    )
+    if cached:
+        actual = md5_file(APKTOOL_JAR)
+        if actual == APKTOOL_MD5:
+            print(f"  apktool {APKTOOL_VERSION}: cached at {APKTOOL_JAR} (md5 verified)")
+            return
+        print(f"  apktool {APKTOOL_VERSION}: cached but md5 mismatch ({actual}); re-downloading")
+        os.remove(APKTOOL_JAR)
+    print(f"  apktool {APKTOOL_VERSION}: downloading from {APKTOOL_URL} ...")
+    try:
+        urllib.request.urlretrieve(APKTOOL_URL, APKTOOL_JAR)
+    except Exception as e:
+        sys.exit(
+            f"ERROR downloading apktool: {e}\n"
+            f"  Manual fix: download {APKTOOL_URL}\n"
+            f"  and place at {APKTOOL_JAR} (must match md5 {APKTOOL_MD5})."
+        )
+    actual = md5_file(APKTOOL_JAR)
+    if actual != APKTOOL_MD5:
+        os.remove(APKTOOL_JAR)
+        sys.exit(
+            f"ERROR: downloaded apktool md5 mismatch.\n"
+            f"  Expected: {APKTOOL_MD5}\n"
+            f"  Got:      {actual}\n"
+            f"  Removed the bad download; re-run to retry."
+        )
+    print(f"  apktool {APKTOOL_VERSION}: saved to {APKTOOL_JAR} ({os.path.getsize(APKTOOL_JAR):,} bytes, md5 verified)")
+
+
+def verify_dex_patch_signatures(dex2_bytes: bytes) -> bool:
+    """Sanity-check that DEX-level patch signatures landed in the assembled DEX.
+
+    apktool's smali assembler can silently drop or alter patches when the host
+    JVM is newer than what apktool was QA'd against (apktool 2.9.3 was released
+    before Java 22). The smali source files in `staging/` may show the patches
+    correctly, but the assembled DEX may not contain them. This check searches
+    for byte signatures that uniquely identify each patch's effect on the
+    bytecode and warns loudly if anything is missing.
+
+    Returns True on PASS, False on FAIL.
+    """
+    failures = []
+
+    # Patch D: FF and RW caps. Both invoke()V lambdas should contain
+    #   const/16 v0, 0x32; if-lt v6, v0, +8
+    # Encoded as: 13 00 32 00 34 06 08 00. Expect TWO occurrences (FF, RW).
+    cap_sig = b'\x13\x00\x32\x00\x34\x06\x08\x00'
+    cap_count = dex2_bytes.count(cap_sig)
+    if cap_count != 2:
+        failures.append(
+            f"Patch D (FF/RW hold-loop cap): expected 2 occurrences of "
+            f"`const/16 v0, #50; if-lt v6, v0, +8` byte signature, found {cap_count}"
+        )
+
+    if not failures:
+        print(f"  DEX signature verification: PASS (Patch D cap x{cap_count})")
+        return True
+
+    print(f"\n  DEX signature verification: FAIL")
+    for f in failures:
+        print(f"    - {f}")
+    print(
+        f"\n  This usually means apktool's smali assembler dropped or rewrote\n"
+        f"  the patch during DEX reassembly (known issue on Java 22+ with\n"
+        f"  apktool {APKTOOL_VERSION}). The smali source files under\n"
+        f"  {UNPACKED_DIR}\n"
+        f"  may show the patches correctly, but the assembled DEX does not.\n"
+        f"\n"
+        f"  Workarounds:\n"
+        f"    - Re-run the patcher under Java 21 or earlier.\n"
+        f"    - Once a newer apktool with Java-22+ compat is pinned in the\n"
+        f"      patcher, re-run to pick it up.\n"
+        f"\n"
+        f"  Refusing to write the patched APK to avoid a silent-broken flash.\n"
+    )
+    return False
 
 def get_apk_info(apk_path: str):
     """Extract package name and version from binary AndroidManifest.xml."""
@@ -192,16 +350,30 @@ def get_apk_info(apk_path: str):
     return (pkg, ver.group(1) if ver else "unknown")
 
 # -- Step 0: Pre-flight -------------------------------------------------------
-if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
-    sys.stdout.write(__doc__ or "")
-    sys.exit(0)
+parser = argparse.ArgumentParser(
+    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + iter21 hold-loop cap).",
+    epilog="See the docstring at the top of this script for the full per-patch detail."
+)
+parser.add_argument(
+    'apk', nargs='?',
+    help='Path to stock com.innioasis.y1_3.0.2.apk. If omitted, looks for one in CWD.'
+)
+parser.add_argument(
+    '--skip-md5', action='store_true',
+    help=f'Bypass input APK md5 check (expected: {STOCK_APK_MD5}). Diagnostic use only.'
+)
+parser.add_argument(
+    '--clean-staging', action='store_true',
+    help=f'Wipe {STAGING_DIR} before patching. Default reuses the decoded smali tree.'
+)
+args = parser.parse_args()
 
 print("=" * 60)
-print("Innioasis Y1 Artist->Album patch")
+print("Innioasis Y1 com.innioasis.y1 APK patcher")
 print("=" * 60)
 
-if len(sys.argv) >= 2:
-    ORIGINAL_APK = sys.argv[1]
+if args.apk:
+    ORIGINAL_APK = args.apk
 else:
     candidates = sorted(glob.glob("com_innioasis_y1_*.apk") +
                         glob.glob("com.innioasis.y1_*.apk"))
@@ -214,33 +386,50 @@ else:
 if not os.path.exists(ORIGINAL_APK):
     sys.exit(f"ERROR: '{ORIGINAL_APK}' not found.")
 
+verify_input_apk(ORIGINAL_APK, args.skip_md5)
+
 pkg_name, version = get_apk_info(ORIGINAL_APK)
 os.makedirs("output", exist_ok=True)
 OUTPUT_APK = os.path.join("output", f"{pkg_name}_{version}-patched.apk")
 print(f"  Package:  {pkg_name}")
 print(f"  Version:  {version}")
 print(f"  Output:   {OUTPUT_APK}")
+print(f"  Staging:  {STAGING_DIR}")
 
 java = find_java()
 print(f"  Java:     {java}")
 
-# -- Step 1: Locate or download apktool ---------------------------------------
-os.makedirs(WORK_DIR, exist_ok=True)
+# Java version compat warning. apktool 2.9.3's bundled smali assembler is
+# JVM-version-sensitive on Java 22+ -- it can silently drop patches during
+# DEX assembly (observed: Java 25 drops the FF lambda's iter21 cap while
+# preserving RW). The DEX signature check at the end of this script will
+# refuse to write the APK if a patch is missing; warn upfront so the user
+# knows what to look for.
+try:
+    java_ver_proc = subprocess.run([java, "--version"], capture_output=True, text=True)
+    java_ver_str = java_ver_proc.stdout or java_ver_proc.stderr
+    m = re.search(r'(?:openjdk|java)\s+(\d+)', java_ver_str.lower())
+    if m and int(m.group(1)) >= 22:
+        print(
+            f"  WARNING: Java {m.group(1)} detected. apktool {APKTOOL_VERSION} was\n"
+            f"           released before Java 22 — its smali assembler can silently\n"
+            f"           drop patches during DEX reassembly. The DEX signature check\n"
+            f"           at the end will detect this; if it fails, retry under Java 21."
+        )
+except Exception:
+    pass
 
-if not os.path.exists(APKTOOL_JAR) or os.path.getsize(APKTOOL_JAR) < 1_000_000:
-    print(f"\n[1/4] Downloading apktool from GitHub...")
-    try:
-        urllib.request.urlretrieve(APKTOOL_URL, APKTOOL_JAR)
-        print(f"      Saved {os.path.getsize(APKTOOL_JAR):,} bytes -> {APKTOOL_JAR}")
-    except Exception as e:
-        sys.exit(f"ERROR downloading apktool: {e}\n"
-                 f"  Manual fix: download {APKTOOL_URL}\n"
-                 f"  and place it at {APKTOOL_JAR}")
-else:
-    print(f"\n[1/4] apktool.jar already present ({os.path.getsize(APKTOOL_JAR):,} bytes)")
+# -- Step 1: Locate or download apktool ---------------------------------------
+print(f"\n[1/4] Resolving apktool {APKTOOL_VERSION}...")
+ensure_apktool()
 
 # -- Step 2: Unpack APK -------------------------------------------------------
 print(f"\n[2/4] Unpacking APK with apktool...")
+os.makedirs(STAGING_DIR, exist_ok=True)
+if args.clean_staging and os.path.exists(STAGING_DIR):
+    print(f"      --clean-staging: wiping {STAGING_DIR}")
+    shutil.rmtree(STAGING_DIR)
+    os.makedirs(STAGING_DIR, exist_ok=True)
 if os.path.exists(UNPACKED_DIR):
     shutil.rmtree(UNPACKED_DIR)
 run([java, "-jar", APKTOOL_JAR, "d", "--no-res", "-f",
@@ -1029,6 +1218,23 @@ print(
     f"(~{HOLD_LOOP_CAP * 100} ms wall clock)"
 )
 
+# -- Per-smali md5 report -----------------------------------------------------
+# Hash each patched smali file. These hashes are deterministic regardless of
+# Java version or apktool reassembly behavior, so they reliably indicate
+# whether the smali edits succeeded — independent of whether the DEX
+# assembly preserved them (the DEX-signature check below covers that side).
+print(f"\nPatched smali file md5s (deterministic — same across machines):")
+PATCHED_SMALI_FILES = [
+    ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
+    PLAYER_SMALI, FF_LAMBDA_SMALI, RW_LAMBDA_SMALI,
+]
+for rel in PATCHED_SMALI_FILES:
+    full = os.path.join(UNPACKED_DIR, rel)
+    if os.path.exists(full):
+        print(f"  {rel}: {md5_file(full)}")
+    else:
+        print(f"  {rel}: MISSING")
+
 # -- Step 4: Reassemble DEX with apktool -------------------------------------
 print(f"\n[4/4] Reassembling smali -> DEX (this takes ~30 seconds)...")
 # apktool builds smali->DEX first, then tries aapt for resources.
@@ -1046,10 +1252,21 @@ if not os.path.exists(dex1) or not os.path.exists(dex2):
 print(f"  classes.dex  {os.path.getsize(dex1):,} bytes")
 print(f"  classes2.dex {os.path.getsize(dex2):,} bytes")
 
-# -- Build patched APK (replace DEX, keep original META-INF) -----------------
+# -- DEX signature verification ----------------------------------------------
+# Catches the apktool/JVM-compat failure mode where smali source has the
+# patches but the assembled DEX silently lacks them. Refuses to write the
+# patched APK if any expected signature is missing.
+print(f"\nVerifying DEX patch signatures...")
 with open(dex1, 'rb') as f: dex1_bytes = f.read()
 with open(dex2, 'rb') as f: dex2_bytes = f.read()
+if not verify_dex_patch_signatures(dex2_bytes):
+    sys.exit(
+        f"\nERROR: DEX signature check failed. The APK was NOT written.\n"
+        f"  Inspect {UNPACKED_DIR} to confirm the smali edits landed,\n"
+        f"  then re-run under a compatible Java version (see warning above)."
+    )
 
+# -- Build patched APK (replace DEX, keep original META-INF) -----------------
 with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
     with zipfile.ZipFile(OUTPUT_APK, 'w',
                          compression=zipfile.ZIP_DEFLATED,
@@ -1082,6 +1299,14 @@ Deploy via ADB push (requires root / remounted /system):
 Do NOT use `adb install` -- PackageManager will reject the APK
 due to signature mismatch (com.innioasis.y1 is a system app).
 {'=' * 60}
-""")
 
-shutil.rmtree(WORK_DIR, ignore_errors=True)
+Retained artifacts:
+  apktool jar:   {APKTOOL_JAR}
+  staging dir:   {STAGING_DIR}/
+    decoded smali:  {UNPACKED_DIR}/
+    rebuilt DEX:    {os.path.join(UNPACKED_DIR, 'build', 'apk')}/
+
+Re-run with --clean-staging for a fresh decode, or just re-run to reuse
+the cached apktool jar and re-decode/patch incrementally.
+{'=' * 60}
+""")

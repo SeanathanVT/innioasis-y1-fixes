@@ -18,3 +18,4 @@ tools/android-sdk-env.sh
 tools/.cmdline-tools-*.zip
 tools/gdbserver
 tools/_attach-mtkbt-gdb-commands.gdb
+tools/apktool-*.jar
