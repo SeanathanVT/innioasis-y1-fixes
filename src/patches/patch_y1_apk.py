@@ -11,8 +11,11 @@ Verified against: 3.0.2 (DEX-level analysis performed on actual binary)
 REQUIREMENTS
 ------------
   Python 3.8+
-  Java 11+  (for apktool's smali assembler)
-  apktool   (downloaded automatically if not found)
+  Java 11–21  (apktool 2.9.3's smali assembler is unreliable on Java 22+;
+               see WHAT THIS PATCH DOES below for the silent-drop failure
+               mode, and the Java-version warning printed at startup).
+  apktool 2.9.3 (downloaded automatically into `tools/` if not present;
+               md5-verified against e28e4b4a413a252617d92b657a33c947).
   pip packages: androguard
     pip install androguard
 
@@ -165,6 +168,29 @@ APKTOOL_JAR     = os.path.join(TOOLS_DIR, f"apktool-{APKTOOL_VERSION}.jar")
 APKTOOL_URL     = f"https://github.com/iBotPeaches/Apktool/releases/download/v{APKTOOL_VERSION}/apktool_{APKTOOL_VERSION}.jar"
 APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"  # apktool 2.9.3
 
+# Why apktool 2.9.3 and not a newer release:
+#   - apktool 2.10.x / 2.11.x / 2.12.x / 3.0.x have all changed the `b`
+#     workflow to write DEXes only into a final dist/<name>.apk rather than
+#     leaving them in build/apk/ when aapt fails (which is what we exploited
+#     with --no-res to skip resource processing). Each new release would
+#     require reworking the patcher's DEX-extraction step.
+#   - apktool 2.9.3's bundled smali assembler (smali 2.5.x, baksmali 2.5.x)
+#     does NOT support Java 22+ JVMs reliably — observed against Java 25,
+#     it silently drops one of the iter21 cap edits during DEX assembly
+#     while preserving the other. The DEX-signature check at the end of
+#     this script will catch this and refuse to write the APK.
+#
+# Practical recommendation: run the patcher under Java 11–21. If your flash
+# box is on Java 22+, install OpenJDK 21 alongside (Debian/Ubuntu:
+# `apt install openjdk-21-jdk` and either `update-alternatives --config java`
+# or invoke /usr/lib/jvm/java-21-openjdk-*/bin/java directly).
+
+# apktool 2.9.3's smali assembler is memory-frugal and runs fine at the
+# default JVM heap on this APK. Newer apktool releases (2.10+) use a parallel
+# ThreadPoolExecutor that may need `-Xmx2g` for large APKs; keeping this
+# slot here so a future bump can wire it up by changing one constant.
+APKTOOL_JVM_FLAGS: list = []
+
 # Stock APK md5 — pulled from /system/app/com.innioasis.y1/ on a clean v3.0.2
 # device. The smali pattern matches in this script assume unpatched bytecode,
 # so re-running against an already-patched APK silently fails to apply the
@@ -307,16 +333,18 @@ def verify_dex_patch_signatures(dex2_bytes: bytes) -> bool:
     for f in failures:
         print(f"    - {f}")
     print(
-        f"\n  This usually means apktool's smali assembler dropped or rewrote\n"
-        f"  the patch during DEX reassembly (known issue on Java 22+ with\n"
-        f"  apktool {APKTOOL_VERSION}). The smali source files under\n"
+        f"\n  This means apktool's smali assembler dropped or rewrote one or\n"
+        f"  more patches during DEX reassembly. The smali source files under\n"
         f"  {UNPACKED_DIR}\n"
         f"  may show the patches correctly, but the assembled DEX does not.\n"
         f"\n"
-        f"  Workarounds:\n"
-        f"    - Re-run the patcher under Java 21 or earlier.\n"
-        f"    - Once a newer apktool with Java-22+ compat is pinned in the\n"
-        f"      patcher, re-run to pick it up.\n"
+        f"  Diagnostic steps:\n"
+        f"    - Confirm `tools/apktool-{APKTOOL_VERSION}.jar` md5 == {APKTOOL_MD5}\n"
+        f"      (delete it to force a re-download).\n"
+        f"    - Inspect the patched smali files under {UNPACKED_DIR}\n"
+        f"      to confirm the patch syntax is intact.\n"
+        f"    - If on Java 22+, try Java 21 to rule out a JVM compat regression.\n"
+        f"    - Compare the per-smali md5s above against another machine's run.\n"
         f"\n"
         f"  Refusing to write the patched APK to avoid a silent-broken flash.\n"
     )
@@ -399,23 +427,29 @@ print(f"  Staging:  {STAGING_DIR}")
 java = find_java()
 print(f"  Java:     {java}")
 
-# Java version compat warning. apktool 2.9.3's bundled smali assembler is
+# JVM version detection. apktool 2.9.3's bundled smali assembler is
 # JVM-version-sensitive on Java 22+ -- it can silently drop patches during
 # DEX assembly (observed: Java 25 drops the FF lambda's iter21 cap while
-# preserving RW). The DEX signature check at the end of this script will
-# refuse to write the APK if a patch is missing; warn upfront so the user
-# knows what to look for.
+# preserving RW). The DEX-signature check at the end of this script is the
+# authoritative gate -- if a patch byte signature is missing it refuses to
+# write the APK regardless of JVM version. The warning here just gives the
+# user a heads-up.
 try:
     java_ver_proc = subprocess.run([java, "--version"], capture_output=True, text=True)
-    java_ver_str = java_ver_proc.stdout or java_ver_proc.stderr
-    m = re.search(r'(?:openjdk|java)\s+(\d+)', java_ver_str.lower())
-    if m and int(m.group(1)) >= 22:
-        print(
-            f"  WARNING: Java {m.group(1)} detected. apktool {APKTOOL_VERSION} was\n"
-            f"           released before Java 22 — its smali assembler can silently\n"
-            f"           drop patches during DEX reassembly. The DEX signature check\n"
-            f"           at the end will detect this; if it fails, retry under Java 21."
-        )
+    java_ver_str = (java_ver_proc.stdout or java_ver_proc.stderr).strip().splitlines()
+    if java_ver_str:
+        print(f"  JVM:      {java_ver_str[0]}")
+        m = re.search(r'(?:openjdk|java)\s+(\d+)', java_ver_str[0].lower())
+        if m and int(m.group(1)) >= 22:
+            print(
+                f"  WARNING: Java {m.group(1)} detected. apktool {APKTOOL_VERSION}'s\n"
+                f"           bundled smali assembler is unreliable on Java 22+ — it can\n"
+                f"           silently drop patches during DEX reassembly. The DEX-signature\n"
+                f"           check at the end will catch this; if it fails, install Java 21\n"
+                f"           and re-run with that JVM (Debian/Ubuntu: `apt install openjdk-21-jdk`,\n"
+                f"           then invoke /usr/lib/jvm/java-21-openjdk-*/bin/java directly or\n"
+                f"           `update-alternatives --config java`)."
+            )
 except Exception:
     pass
 
@@ -432,7 +466,7 @@ if args.clean_staging and os.path.exists(STAGING_DIR):
     os.makedirs(STAGING_DIR, exist_ok=True)
 if os.path.exists(UNPACKED_DIR):
     shutil.rmtree(UNPACKED_DIR)
-run([java, "-jar", APKTOOL_JAR, "d", "--no-res", "-f",
+run([java, *APKTOOL_JVM_FLAGS, "-jar", APKTOOL_JAR, "d", "--no-res", "-f",
      ORIGINAL_APK, "-o", UNPACKED_DIR])
 print(f"      Unpacked to {UNPACKED_DIR}/")
 
@@ -1241,7 +1275,7 @@ print(f"\n[4/4] Reassembling smali -> DEX (this takes ~30 seconds)...")
 # Since we decoded with --no-res, the aapt step fails -- but the DEX
 # is already built by that point. We ignore the exit code intentionally.
 subprocess.run(
-    [java, "-jar", APKTOOL_JAR, "b", UNPACKED_DIR],
+    [java, *APKTOOL_JVM_FLAGS, "-jar", APKTOOL_JAR, "b", UNPACKED_DIR],
     capture_output=True, text=True
 )
 
