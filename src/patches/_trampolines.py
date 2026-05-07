@@ -181,9 +181,20 @@ T2_EVENT_ID_OFF_ENTRY = 386               # before SUB SP
 T6_FRAME           = 816
 T6_OFF_ARGS        = 0
 T6_OFF_FILE        = 16
-T6_OFF_FILE_DURATION = T6_OFF_FILE + 776   # 792 - duration_ms
-T6_OFF_FILE_POS      = T6_OFF_FILE + 780   # 796 - position_at_state_change
-T6_OFF_FILE_PLAYFLAG = T6_OFF_FILE + 792   # 808 - playing_flag
+T6_OFF_FILE_DURATION   = T6_OFF_FILE + 776   # 792 - duration_ms
+T6_OFF_FILE_POS        = T6_OFF_FILE + 780   # 796 - position_at_state_change
+T6_OFF_FILE_STATE_TIME = T6_OFF_FILE + 784   # 800 - state_change_time_sec u32 BE
+T6_OFF_FILE_PLAYFLAG   = T6_OFF_FILE + 792   # 808 - playing_flag
+
+# iter22d: stash struct timespec in unused outgoing-args slack so we can call
+# clock_gettime(CLOCK_BOOTTIME, &timespec) from inside T6 to live-extrapolate
+# the playback position. The outgoing-args region (sp+0..15) is reserved for
+# the response builder's stack args, but only sp[0] (1-byte play_status) is
+# actually consumed; sp+8..15 is unused and can hold the 8-byte timespec
+# without growing T6_FRAME.
+T6_OFF_TIMESPEC      = 8
+T6_OFF_TIMESPEC_SEC  = T6_OFF_TIMESPEC + 0   # 8 - tv_sec u32
+T6_OFF_TIMESPEC_NSEC = T6_OFF_TIMESPEC + 4   # 12 - tv_nsec u32 (we don't use it)
 
 # T8 (RegisterNotification dispatch for events ≠ 0x02, iter20b — Phase A1)
 # frame: 800 B file_buf at sp+0. None of the reg_notievent_*_rsp calls T8
@@ -240,6 +251,13 @@ MODE_0666 = 0o666
 
 # Linux ARM EABI syscall numbers.
 NR_read = 3
+NR_clock_gettime = 263
+
+# Linux clock IDs. CLOCK_BOOTTIME mirrors Android's SystemClock.elapsedRealtime
+# (monotonic, includes time spent in suspend) — same source we use on the
+# Y1MediaBridge side when stamping mStateChangeTime, so subtracting the two
+# yields the wall-clock seconds elapsed since the last play/pause edge.
+CLOCK_BOOTTIME = 7
 
 # ---------------------------------------------------------------- builder
 
@@ -845,15 +863,63 @@ def _emit_t6(a: Asm) -> None:
     a.ldrb_w(0, 13, T6_OFF_FILE_PLAYFLAG)     # r0 = playing_flag (0/1/2)
     a.strb_w(0, 13, T6_OFF_ARGS)              # sp[0] = play_status
 
+    # iter22d — live position extrapolation.
+    # If playing_flag == 1 (PLAYING):
+    #   live_pos = saved_pos + (now_sec - state_change_sec) * 1000
+    # Else (STOPPED / PAUSED):
+    #   live_pos = saved_pos  (the position field IS the freeze point for
+    #                          paused/stopped, which is what CTs expect)
+    # Kia EV6 wants a continuously-incrementing position for it to render
+    # the progress bar during playback; iter20a's static-position approach
+    # (pos == position_at_last_state_change forever) made Kia hide the
+    # display entirely while playing.
+    a.cmp_imm8(0, 1)                          # r0 still = playing_flag
+    a.bne("t6_position_static")
+
+    # ---- clock_gettime(CLOCK_BOOTTIME, &timespec) ----
+    # Default the timespec to zero so a syscall failure (extremely unlikely
+    # — clock_gettime can't really fail with valid args) gives us a sane
+    # fallback (delta_sec computed against now_sec=0 will yield a negative
+    # number which when multiplied by 1000 produces a position behind
+    # state_change_sec — still bounded, just useless. Kia would just see
+    # the same value on each poll and stop animating).
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, T6_OFF_TIMESPEC_SEC)
+    a.str_sp_imm(0, T6_OFF_TIMESPEC_NSEC)
+
+    a.movs_imm8(0, CLOCK_BOOTTIME)            # r0 = clk_id = 7
+    a.add_sp_imm(1, T6_OFF_TIMESPEC)          # r1 = &timespec
+    a.movw(7, NR_clock_gettime)               # r7 = 263
+    a.svc(0)
+
+    # ---- delta_sec = now_sec - state_change_sec ----
+    a.ldr_sp_imm(0, T6_OFF_FILE_STATE_TIME)   # r0 = state_change_sec (BE)
+    a.rev_lo_lo(0, 0)                         # → host order
+    a.ldr_sp_imm(1, T6_OFF_TIMESPEC_SEC)      # r1 = now_sec
+    a.subs_lo_lo(2, 1, 0)                     # r2 = now_sec - state_change_sec
+
+    # ---- delta_ms = delta_sec * 1000 ----
+    a.movw(0, 1000)                           # r0 = 1000
+    a.muls_lo_lo(2, 0)                        # r2 = r2 * r0 (= delta_ms)
+
+    # ---- live_pos = saved_pos + delta_ms ----
+    a.ldr_sp_imm(3, T6_OFF_FILE_POS)          # r3 = saved_pos (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+    a.adds_lo_lo(3, 3, 2)                     # r3 = saved_pos + delta_ms
+
+    a.b_w("t6_emit_response")
+
+    a.label("t6_position_static")
+    a.ldr_sp_imm(3, T6_OFF_FILE_POS)          # r3 = saved_pos (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+
+    a.label("t6_emit_response")
+
     # r2 = duration_ms (BE in file → REV → host order)
     a.ldr_sp_imm(2, T6_OFF_FILE_DURATION)
     a.rev_lo_lo(2, 2)
 
-    # r3 = position_at_state_change_ms (BE → REV → host order)
-    a.ldr_sp_imm(3, T6_OFF_FILE_POS)
-    a.rev_lo_lo(3, 3)
-
-    # r0 = conn buffer (r5+8); r1 = 0 (success)
+    # r0 = conn buffer (r5+8); r1 = 0 (success); r3 = position (already set)
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
     a.blx_imm(PLT_get_playstatus_rsp)

@@ -368,12 +368,23 @@ public class MediaBridgeService extends Service {
             // Transport commands — forward as media keys to the stock player.
             // Note: IBTAvrcpMusic code 6 = play, NOT pause (differs from
             // IMediaPlaybackService which uses 6=pause, 7=play).
-            case 6:  Log.d(TAG, "IBTAvrcpMusic.play → KEYCODE_MEDIA_PLAY");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
-            case 7:  Log.d(TAG, "IBTAvrcpMusic.stop → KEYCODE_MEDIA_STOP");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_STOP);
-            case 8:  Log.d(TAG, "IBTAvrcpMusic.pause → KEYCODE_MEDIA_PAUSE"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PAUSE);
-            case 9:  Log.d(TAG, "IBTAvrcpMusic.resume → KEYCODE_MEDIA_PLAY"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY);
-            case 10: Log.d(TAG, "IBTAvrcpMusic.prev → KEYCODE_MEDIA_PREVIOUS"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
-            case 11: Log.d(TAG, "IBTAvrcpMusic.next → KEYCODE_MEDIA_NEXT");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
+            //
+            // iter22d: route play/pause/resume through KEYCODE_MEDIA_PLAY_PAUSE
+            // (85) instead of distinct MEDIA_PLAY (126) / MEDIA_PAUSE (127).
+            // The Y1 player's `PlayControllerReceiver` matches against
+            // `KeyMap.KEY_PLAY` which is hardwired to 85 (KEYCODE_MEDIA_PLAY_PAUSE);
+            // it has no native handler for 126 or 127. Hitting it with
+            // PLAY_PAUSE always toggles, which is what we want for both
+            // play→pause and pause→play transitions. (Patch E in
+            // patch_y1_apk.py separately teaches PlayControllerReceiver to
+            // recognize 126/127 too, covering the libextavrcp_jni.so/uinput
+            // injection path that bypasses Y1MediaBridge entirely.)
+            case 6:  Log.d(TAG, "IBTAvrcpMusic.play → KEYCODE_MEDIA_PLAY_PAUSE");   return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+            case 7:  Log.d(TAG, "IBTAvrcpMusic.stop → KEYCODE_MEDIA_STOP");         return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_STOP);
+            case 8:  Log.d(TAG, "IBTAvrcpMusic.pause → KEYCODE_MEDIA_PLAY_PAUSE");  return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+            case 9:  Log.d(TAG, "IBTAvrcpMusic.resume → KEYCODE_MEDIA_PLAY_PAUSE"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+            case 10: Log.d(TAG, "IBTAvrcpMusic.prev → KEYCODE_MEDIA_PREVIOUS");     return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+            case 11: Log.d(TAG, "IBTAvrcpMusic.next → KEYCODE_MEDIA_NEXT");         return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
             case 12: Log.d(TAG, "IBTAvrcpMusic.prevGroup → KEYCODE_MEDIA_PREVIOUS"); return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_PREVIOUS);
             case 13: Log.d(TAG, "IBTAvrcpMusic.nextGroup → KEYCODE_MEDIA_NEXT");     return avrcpAck(data, reply, KeyEvent.KEYCODE_MEDIA_NEXT);
 

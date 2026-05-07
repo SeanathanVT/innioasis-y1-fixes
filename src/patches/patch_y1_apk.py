@@ -1252,6 +1252,155 @@ print(
     f"(~{HOLD_LOOP_CAP * 100} ms wall clock)"
 )
 
+# ============================================================
+# Patch E: PlayControllerReceiver.smali — Kia EV6 discrete PLAY/PAUSE  (iter22d)
+# ============================================================
+#
+# Background
+# ----------
+# Kia EV6 head unit's HMI sends DISCRETE AVRCP PASSTHROUGH op codes from its
+# play/pause buttons:
+#   - PLAY button  → AVRCP 0x44 PLAY
+#   - PAUSE button → AVRCP 0x46 PAUSE
+# (As opposed to a single PLAY/PAUSE toggle button that always sends 0x46.)
+#
+# libextavrcp_jni.so's `avrcp_input_sendkey` maps these to the Linux input
+# event codes via /dev/uinput. Empirically (cross-referenced against
+# /work/logs/dual-tv-iter21/ where send_key trace was visible):
+#   - 0x46 PAUSE → Linux KEY_PLAYPAUSE (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
+#   - 0x44 PLAY  → Linux KEY_PLAY (207)      → Android KEYCODE_MEDIA_PLAY (126)
+#
+# Y1's PlayControllerReceiver (the registered ACTION_MEDIA_BUTTON receiver)
+# only matches against `KeyMap.KEY_PLAY` which is hardwired to 85
+# (KEYCODE_MEDIA_PLAY_PAUSE). When the user presses Kia's discrete PLAY
+# button (keyCode 126 arrives), the receiver's `if-ne v2, KEY_PLAY` check
+# fails, no `playOrPause()` call is made, and the music app does nothing.
+# Symptom (iter22c capture, /work/logs/dual-kia-iter22c/): Kia HMI shows the
+# play icon while paused, user presses PLAY, nothing happens. Eventually
+# (~11 s in the capture, four button presses later) Kia falls back to
+# sending PAUSE (0x46) which DOES match KEY_PLAY → toggles → music resumes,
+# but only after multiple presses and a several-second delay.
+#
+# The fix
+# -------
+# Extend PlayControllerReceiver's `:cond_c` block (the KEY_PLAY → playOrPause
+# branch) to also accept keyCode 126 (KEYCODE_MEDIA_PLAY) and 127
+# (KEYCODE_MEDIA_PAUSE) as triggers for `playOrPause()`. Both are routed to
+# the same toggle handler — when paused, toggle = play; when playing, toggle
+# = pause — so the discrete PLAY/PAUSE buttons both work without needing a
+# separate non-toggle handler.
+#
+# Stock smali at PlayControllerReceiver.smali:cond_c:
+#   :cond_c
+#   sget-object p1, KeyMap;->INSTANCE
+#   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
+#   move-result p1
+#   if-ne v2, p1, :cond_e
+#   ... (playOrPause action)
+#
+# Patched: replace the single `if-ne v2, p1, :cond_e` with a chain of three
+# equality checks that ALL fall through to the same action label:
+#   :cond_c
+#   sget-object p1, KeyMap;->INSTANCE
+#   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
+#   move-result p1
+#   if-eq v2, p1, :cond_play_match     # KEY_PLAY (= 85) match
+#   const/16 p1, 0x7e                      # KEYCODE_MEDIA_PLAY (126)
+#   if-eq v2, p1, :cond_play_match
+#   const/16 p1, 0x7f                      # KEYCODE_MEDIA_PAUSE (127)
+#   if-ne v2, p1, :cond_e
+#   :cond_play_match
+#   ... (playOrPause action — unchanged)
+#
+# apktool reassembles to DEX and adjusts all branch offsets. No new methods,
+# no new fields, no manifest changes.
+
+PLAY_CONTROLLER_RECEIVER_SMALI = (
+    "smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali"
+)
+
+play_receiver_path = os.path.join(UNPACKED_DIR, PLAY_CONTROLLER_RECEIVER_SMALI)
+if not os.path.exists(play_receiver_path):
+    sys.exit(f"ERROR: Expected smali not found: {play_receiver_path}")
+
+with open(play_receiver_path, 'r') as f:
+    play_receiver_src = f.read()
+
+# Match the unique KEY_PLAY → playOrPause branch (the second one in the file
+# at the short-press handler; the long-press version at :cond_d we leave
+# alone — a held PLAY button would be unusual on a car HMI and the existing
+# `longClickPlayBtnToStop` semantics don't generalize to a discrete PLAY/PAUSE
+# pair). Anchor the match on the `getKEY_PLAY()` invocation immediately
+# before the `playOrPause()` call so we hit the right :cond_c and not the
+# :cond_d below.
+OLD_PLAY_BRANCH = """\
+    sget-object p1, Lcom/innioasis/fm/configs/KeyMap;->INSTANCE:Lcom/innioasis/fm/configs/KeyMap;
+
+    invoke-virtual {p1}, Lcom/innioasis/fm/configs/KeyMap;->getKEY_PLAY()I
+
+    move-result p1
+
+    if-ne v2, p1, :cond_e
+
+    .line 92
+    sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/Y1Application$Companion;->getPlayerService()Lcom/innioasis/y1/service/PlayerService;
+
+    move-result-object p1
+
+    if-eqz p1, :cond_e
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->playOrPause()V
+
+    goto :goto_5"""
+
+NEW_PLAY_BRANCH = """\
+    sget-object p1, Lcom/innioasis/fm/configs/KeyMap;->INSTANCE:Lcom/innioasis/fm/configs/KeyMap;
+
+    invoke-virtual {p1}, Lcom/innioasis/fm/configs/KeyMap;->getKEY_PLAY()I
+
+    move-result p1
+
+    if-eq v2, p1, :cond_play_match
+
+    const/16 p1, 0x7e
+
+    if-eq v2, p1, :cond_play_match
+
+    const/16 p1, 0x7f
+
+    if-ne v2, p1, :cond_e
+
+    :cond_play_match
+    .line 92
+    sget-object p1, Lcom/innioasis/y1/Y1Application;->Companion:Lcom/innioasis/y1/Y1Application$Companion;
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/Y1Application$Companion;->getPlayerService()Lcom/innioasis/y1/service/PlayerService;
+
+    move-result-object p1
+
+    if-eqz p1, :cond_e
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->playOrPause()V
+
+    goto :goto_5"""
+
+if OLD_PLAY_BRANCH not in play_receiver_src:
+    sys.exit(
+        "ERROR: PlayControllerReceiver KEY_PLAY → playOrPause branch not found.\n"
+        f"  File: {play_receiver_path}\n"
+        "  The smali shape may differ from 3.0.2."
+    )
+
+play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 1)
+with open(play_receiver_path, 'w') as f:
+    f.write(play_receiver_src)
+print(
+    "  Patch E: PlayControllerReceiver -- KEY_PLAY trigger expanded to also accept "
+    "keyCode 126 (KEYCODE_MEDIA_PLAY) and 127 (KEYCODE_MEDIA_PAUSE)"
+)
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1261,6 +1410,7 @@ print(f"\nPatched smali file md5s (deterministic — same across machines):")
 PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
     PLAYER_SMALI, FF_LAMBDA_SMALI, RW_LAMBDA_SMALI,
+    PLAY_CONTROLLER_RECEIVER_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)

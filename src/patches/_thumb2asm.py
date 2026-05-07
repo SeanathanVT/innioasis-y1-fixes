@@ -107,6 +107,21 @@ class Asm:
         _check(0 <= rd <= 7 and 0 <= rm <= 7, "rev_lo_lo bad regs")
         self._hw(0xBA00 | (rm << 3) | rd)
 
+    def adds_lo_lo(self, rd: int, rn: int, rm: int) -> None:
+        # ADDS T1 3-reg form: 0001 100 Rm[2..0] Rn[2..0] Rd[2..0]  (low regs only)
+        _check(0 <= rd <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7, "adds_lo_lo bad regs")
+        self._hw(0x1800 | (rm << 6) | (rn << 3) | rd)
+
+    def subs_lo_lo(self, rd: int, rn: int, rm: int) -> None:
+        # SUBS T1 3-reg form: 0001 101 Rm[2..0] Rn[2..0] Rd[2..0]  (low regs only)
+        _check(0 <= rd <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7, "subs_lo_lo bad regs")
+        self._hw(0x1A00 | (rm << 6) | (rn << 3) | rd)
+
+    def muls_lo_lo(self, rdm: int, rn: int) -> None:
+        # MULS T1: 0100 0011 01 Rn[2..0] Rdm[2..0]  (Rdm = Rdm * Rn; low regs only)
+        _check(0 <= rdm <= 7 and 0 <= rn <= 7, "muls_lo_lo bad regs")
+        self._hw(0x4340 | (rn << 3) | rdm)
+
     def bcond(self, cond: int, label: str) -> None:
         # T1: 1101 cond imm8 (range ±256 bytes from PC)
         _check(0 <= cond <= 14, "bcond cond")  # cond=14 unconditional reserved -> 15 = SVC

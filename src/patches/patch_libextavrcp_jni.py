@@ -165,7 +165,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "fdb50b8a569dbef038424e82ceeed882"  # iter22b — Phase A1 follow-up (T9 + notificationPlayStatusChangedNative hook)
+OUTPUT_MD5 = "e2790518d258e87326c8a65ad7b8f5c8"  # iter22d — T6 live position extrapolation via clock_gettime(CLOCK_BOOTTIME)
 
 # ---------------------------------------------------------------- T1
 
