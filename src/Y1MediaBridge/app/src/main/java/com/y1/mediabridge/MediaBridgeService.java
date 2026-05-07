@@ -669,9 +669,9 @@ public class MediaBridgeService extends Service {
 
             // Create y1-trampoline-state if missing. 16 zero bytes:
             //   bytes 0..7  = last_seen_track_id (0 forces a CHANGED on first
-            //                 GetElementAttributes, which Sonos drops as bogus
-            //                 if transId is also 0 — but real subscriptions
-            //                 update transId before T4 ever fires)
+            //                 GetElementAttributes, which strict CTs may drop
+            //                 as bogus if transId is also 0 — but real
+            //                 subscriptions update transId before T4 ever fires)
             //   byte  8     = last RegisterNotification transId
             //   bytes 9..15 = padding
             File state = new File(dir, TRAMPOLINE_STATE_FILENAME);
@@ -937,7 +937,7 @@ public class MediaBridgeService extends Service {
             return;
         }
 
-        // MediaStore miss. Try a direct ID3 read (~50ms) so Sonos sees real
+        // MediaStore miss. Try a direct ID3 read (~50ms) so the CT sees real
         // metadata immediately rather than the filename. Whether or not that
         // succeeds, we always kick the scanner so future plays of this file
         // hit MediaStore — and on firmwares where the direct read fails with
@@ -1082,9 +1082,11 @@ public class MediaBridgeService extends Service {
             // Big-endian u32 to match the existing track_id encoding; T6 byte-swaps
             // before passing to the response builder. AVRCP §5.4.3.4 specifies
             // 0xFFFFFFFF as "no track length / position currently selected"; we
-            // use 0 for both when unknown rather than the sentinel because Y1
-            // CTs we've tested (Samsung TV, Bolt EV) handle 0 better than the
-            // sentinel for display purposes. Both are spec-permissible.
+            // use 0 for both when unknown rather than the sentinel because the
+            // CTs in our test matrix render 0 cleanly while some interpret the
+            // 0xFFFFFFFF sentinel as a literal duration. Both are spec-
+            // permissible per §5.4.3.4. See `docs/INVESTIGATION.md` "Hardware
+            // test history per CT" for the empirical observations.
             long duration = mCurrentDuration > 0 ? mCurrentDuration : 0L;
             putBE32(buf, DURATION_OFFSET, (int) Math.min(duration, 0xFFFFFFFFL));
             putBE32(buf, POSITION_OFFSET, (int) Math.min(mPositionAtStateChange, 0xFFFFFFFFL));
@@ -1326,9 +1328,10 @@ public class MediaBridgeService extends Service {
      * {@code y1-trampoline-state}. If we leave audioId at {@code -1} for every
      * track (the iter18c symptom — readTagsDirectly success path bypasses
      * MediaStore), bytes 0..7 stay at {@code 0xFFFFFFFFFFFFFFFF} forever and
-     * T5 never detects a change → no proactive CHANGED → Sonos's UI relies
-     * solely on its polling cadence to refresh, which is enough for skips
-     * but not for the very first track of a session.
+     * T5 never detects a change → no proactive CHANGED → CTs that don't
+     * subscribe to event 0x02 must rely on their polling cadence for any
+     * UI refresh, which is enough for mid-session track skips but not for
+     * the very first track after a connection hand-shake.
      *
      * Wire-level track_id is independently pinned to the {@code 0xFF×8}
      * sentinel in the trampoline (per AVRCP §6.7.2), so this internal-only

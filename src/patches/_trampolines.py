@@ -35,9 +35,9 @@ five trampolines (iter16 + iter17a + iter19a/b):
     - Calls inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success).
     - Tail-jumps to t4_to_epilogue. No state side-effects; the spec-defined
       response is a bare 8-byte ack frame.
-    - Bolt EV /work/logs/dual-bolt-iter18d/ confirmed this PDU is sent at
-      connection setup; we previously NACKed (msg=520 NOT_IMPLEMENTED) and
-      Bolt subsequently degraded its metadata-fetch behavior. iter19a closes.
+    - AVRCP 1.4 §5.3 mandates the TG ack any CT charset declaration. Pre-
+      iter19a our TG NACKed with msg=520 NOT_IMPLEMENTED, which strict CTs
+      treat as the TG distrusting subsequent metadata. iter19a closes.
 
   T_battery (PDU 0x18 InformBatteryStatusOfCT, iter19a — Phase A0):
     - Branched from T4's pre-check when PDU == 0x18.
@@ -51,40 +51,44 @@ libextavrcp.so:0x2458 (and confirmed across all reg_notievent_*_rsp builders
 in the same family) shows the function dispatches on r1: r1==0 takes the
 spec-correct path that writes reasonCode + event_id + track_id; r1!=0 takes
 a reject-shape path that omits the event payload. We had been hitting the
-reject path on every TRACK_CHANGED notification — Sonos polled regardless,
-masking the bug; the Bolt depends on the CHANGED edge and didn't.
+reject path on every TRACK_CHANGED notification — CTs that poll metadata
+regardless masked the bug, but strict CTs that depend on the CHANGED edge
+saw nothing.
 
-iter16 → iter19d history of the wire-level track_id field:
-  - iter15: real track_id in INTERIM — flipped Sonos into "stable identity,
-    only refresh on CHANGED" mode. T4 was reactive only (fires on inbound
-    GetElementAttributes); Sonos waited for CHANGED that never came because
-    Sonos wouldn't poll. 14-min deadlock confirmed on hardware.
-  - iter16: 0xFF×8 sentinel (AVRCP §6.7.2 "not bound to a particular media
-    element") — Sonos stayed in poll-on-each-event mode, T4 fired on each
-    poll, T4's compare against state file detected real track changes and
-    emitted CHANGED. Worked.
+iter16 → iter19d history of the wire-level track_id field. AVRCP 1.4 §6.7.2
+permits two modes for the track_id field in TRACK_CHANGED notifications:
+either a real media-element identifier, or 0xFF×8 ("the information is not
+bound to a particular media element"). Each mode has different CT-side
+implications, and our implementation has bounced between them as we
+discovered which mode interacts well with the broader CT population:
+  - iter15: real track_id in INTERIM. With T4 reactive only (fires on
+    inbound GetElementAttributes), CTs that interpret real track_ids as
+    "stable identity, refresh on CHANGED edge" stalled — they expected the
+    TG to push a CHANGED edge but T4 wouldn't fire without their poll.
+    Hardware-confirmed 14-minute zero-traffic deadlock.
+  - iter16: 0xFF×8 sentinel. CTs stay in poll-on-each-event mode, T4 fires
+    on each poll, T4's compare against state file detects real track
+    changes and emits CHANGED. Worked.
   - iter17a: T5 added — proactive CHANGED on every Y1 track change via the
-    Java→native hook, regardless of CT polling.
+    Java→native hook, regardless of CT polling. Eliminates the iter15
+    deadlock pre-condition for any CT.
   - iter19a: r1=0 fix on track_changed_rsp arg layout (was r1=transId,
     hitting the response builder's reject-shape path; spec-correct emission
     requires r1=0 = success path).
-  - iter19b: real track_id (back to iter15's idea) — T5 preempts iter15's
-    Sonos deadlock, AND Bolt-EV class strict CTs need real track_ids to
-    re-fetch on CHANGED. Targeted Bolt's "ignored every CHANGED after the
-    first" behavior.
-  - iter19d: REVERTED iter19b. Hardware test against Samsung The Frame Pro
-    (/work/logs/dual-tv-iter19c-playpause/) showed real track_ids triggered
-    a tight RegisterNotification subscribe storm at ~90 Hz from connection
-    setup forward — 3401 size:13 inbound in 38 seconds, sustained. The
-    flood saturated AVCTP, causing PASSTHROUGH release frames to drop:
-    user pressed Next on the TV remote, music app saw "key held down",
-    fast-forwarded the track at ~32× speed (six seekTo() calls each
-    +3280ms in track over 600ms wall clock); same shape as the Play/Pause
-    "vibrate-loop" reported earlier. Bolt's UI-side block (the original
-    motivation) wasn't actually fixed by iter19b anyway, so the revert
-    loses nothing for Bolt. Sentinel restored. Bolt becomes an iter20+
-    Phase A1+B problem (PLAYBACK_STATUS_CHANGED + GetPlayStatus per
-    docs/AVRCP13-COMPLIANCE-PLAN.md).
+  - iter19b: real track_id (back to iter15's idea) — with T5 in place, the
+    iter15 deadlock is preempted and strict CTs that gate metadata refresh
+    on real track_id changes can now distinguish edges.
+  - iter19d: REVERTED iter19b. Hardware testing showed at least one CT
+    class reacts to real track_ids in INTERIM by entering a tight
+    RegisterNotification subscribe storm at ~90 Hz from connection setup
+    forward, saturating AVCTP and dropping PASSTHROUGH release frames as
+    a side effect. AVRCP §6.7.2's "not bound to a particular media element"
+    sentinel mode is spec-permissible; falling back to it avoids the storm
+    without violating the spec. Per the spec-compliance directive (deviate
+    from spec only when a CT-compat reason is documented), the sentinel
+    mode is the spec-baseline choice. See `docs/INVESTIGATION.md`
+    "Hardware test history per CT" for the empirical observations that
+    drove this revert.
 
 Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   r5 = JNI instance pointer (conn buffer = r5+8)

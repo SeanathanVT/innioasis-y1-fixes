@@ -898,11 +898,21 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # Background
 # ----------
-# When the AVRCP source (e.g. a Samsung TV acting as Controller-Target
-# combo) issues a PASSTHROUGH "MEDIA_NEXT pressed" frame, Android delivers
-# it to the foreground activity as KeyEvent.KEYCODE_MEDIA_NEXT (87).
-# KeyMap.KEY_RIGHT is also 87 in non-RockBox builds, so MEDIA_NEXT and
-# the device's right d-pad share a code path.
+# AVRCP 1.4 §11.2 specifies PASSTHROUGH commands as press-then-release
+# pairs: the CT issues a press (op_id with bit 0x80 cleared), the TG must
+# accept it, then a matching release (op_id with bit 0x80 set) ends the
+# command. AVCTP 1.0 §5.2 carries each frame as a separate L2CAP packet.
+# Under heavy AVCTP load (e.g., a CT subscribed to TRACK_CHANGED at high
+# RegisterNotification frequency), the BT controller's frame buffers can
+# saturate and individual frames can be dropped. If a released frame is
+# dropped while its press counterpart was delivered, the host stack never
+# receives the release event.
+#
+# On Y1 specifically: PASSTHROUGH "MEDIA_NEXT pressed" delivers as
+# KeyEvent.KEYCODE_MEDIA_NEXT (87) via libextavrcp_jni.so's
+# avrcp_input_sendkey -> /dev/uinput. KeyMap.KEY_RIGHT is also 87 in
+# non-RockBox builds, so MEDIA_NEXT and the device's right d-pad share
+# the music-app-side code path.
 #
 # BaseActivity.dispatchKeyEvent treats repeatCount == 3 as a long-press
 # trigger and calls PlayerService.startFastForward(). That sets
@@ -916,12 +926,12 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # The matching PASSTHROUGH "released" frame is what triggers
 # stopFastForward() (which clears the lock). When the release frame is
-# DROPPED -- which we have observed on Samsung TV under AVCTP-saturation
-# conditions caused by its ~45-90 Hz subscribe-storm against TRACK_CHANGED
-# INTERIM frames -- the lock is never cleared, the loop runs forever, and
-# the player advances ~3-4s of song every 100ms (~32x speed). On the
-# device this also drives the haptic motor on each setCurrentPosition()
-# call, producing the "stuck vibrate" symptom the user reported.
+# DROPPED at the AVCTP layer the lock is never cleared, the loop runs
+# forever, and the player advances ~3-4s of song every 100ms (~32x
+# speed). On the device this also drives the haptic motor on each
+# setCurrentPosition() call, producing the stuck-haptic symptom seen in
+# hardware testing. See `docs/INVESTIGATION.md` "Hardware test history
+# per CT" for the empirical observations that motivated iter21.
 #
 # Patch D bounds the runaway. Each FF/RW thread:
 #   - tracks an iteration counter

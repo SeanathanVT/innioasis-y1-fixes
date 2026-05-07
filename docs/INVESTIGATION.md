@@ -1485,3 +1485,46 @@ For full architectural detail (ELF segment-extension trick, calling conventions,
 ---
 
 End of appendix. The brief at `/root/briefs/Innioasis_Y1_AVRCP_Unified_Brief.md` is now redundant with this document and may be deleted.
+
+---
+
+## Hardware test history per CT
+
+Per the spec-compliance directive (every Koensayr/AVRCP change must move toward strict AVRCP-spec compliance — spec-permissible options can be chosen for CT-compat reasons, but the chase starts from "what does the spec say"), per-device test results live here as research context, not in active code or implementation docs. Implementation files (`patch_*.py`, `_trampolines.py`, `MediaBridgeService.java`, `docs/PATCHES.md`, `docs/AVRCP13-COMPLIANCE-PLAN.md`) cite AVRCP spec sections for rationale and reference this section for empirical validation.
+
+CTs referenced below were used during pre-iter22 development. Future CT additions append here without changing implementation files.
+
+### Sonos Roam (deprioritized 2026-05-06 — unreliable pairing)
+
+A2DP Bluetooth speaker. Used as the most-permissive reference baseline for iter5 → iter18d hardware verifications (`/work/logs/dual-sonos-avrcp-min-iter*/`). Notable observations:
+
+- Stays in poll-on-each-event mode when TRACK_CHANGED carries the `0xFF×8` sentinel (AVRCP §6.7.2 "not bound to a particular media element"). T4's reactive emit fires per-poll, metadata refreshes on every track change.
+- iter15 deadlock: real synthetic track_id in INTERIM flipped Sonos into "stable identity, refresh on CHANGED" mode, but iter15's T4 was reactive only — Sonos waited for a CHANGED edge that never came (Sonos didn't poll). 14-min zero-AVRCP-traffic confirmed via state-file forensics. Resolution: iter17a added T5 for proactive CHANGED.
+- iter17b verified flicker-free: msg=540:size:45 ratio held 1:1, all three attributes pack into single frame.
+- iter18d verified synthetic audioId fix: three track changes captured with synthetic audioIds, real metadata via FD path, msg=544 = 1071 INTERIM + 3 CHANGED (one per track change), ratios 1:1 with no flicker.
+- 2026-05-06 onwards: pairing became unreliable in user testing. Dropped from active test matrix; past captures retained as reference.
+
+### Samsung The Frame Pro (active — TV/indoor)
+
+Smart-TV head unit. Subscribes to event 0x02 TRACK_CHANGED only (3919 RegisterNotifications in `/work/logs/dual-tv-iter22b/`, all event 0x02). Notable observations:
+
+- iter19b real track_id in INTERIM destabilized the TV: ~90 Hz RegisterNotification subscribe storm against TRACK_CHANGED INTERIMs (3401 inbound `size:13` over 38 seconds, sustained ~7 ms inter-frame). AVCTP saturated; PASSTHROUGH release frames dropped, producing held-key fast-forward at ~32× speed and stuck-haptic "vibrate-loop" symptoms. iter19d reverted to the 0xFF×8 sentinel which restores the spec-permissible "no media bound" mode and avoids the storm.
+- iter21 hardware-verified the FF/RW lambda cap (50 iters × 100 ms ≈ 5 s) bounds the runaway when release frames drop; iter21 capture shows lambda exits cleanly when the user does eventually release the held key.
+- Does not subscribe to event 0x01 PLAYBACK_STATUS_CHANGED — uses TRACK_CHANGED edges only for any state inference. T9 (iter22b) is forward-compat for this CT.
+
+### Chevrolet Bolt EV (active — car/highway)
+
+GM Infotainment 3 head unit. Strict AVRCP CT (depends on CHANGED edges, doesn't poll metadata). Notable observations:
+
+- Bolt EV `/work/logs/dual-bolt-iter18d/` showed PDU 0x17 InformDisplayableCharacterSet (UTF-8) issued once at connect; our pre-iter19a TG NACKed with msg=520. Bolt then registered TRACK_CHANGED 30 times but only ever issued a single GetElementAttributes — consistent with "the TG won't acknowledge my charset declaration so I distrust subsequent metadata." iter19a closed by adding T_charset.
+- iter19b confirmed the TRACK_CHANGED wire-shape correctness fix (r1=0 to take the response builder's spec-correct path) on Bolt: first CHANGED edge fetched metadata, but every subsequent CHANGED edge after the first was ignored. UI-side block at a layer not visible in our captures; remains an open investigation.
+
+### Kia EV6 (active — car/highway)
+
+Hyundai Motor Group head unit. Polls GetPlayStatus (PDU 0x30) at ~1 Hz, subscribes to event 0x02 TRACK_CHANGED only. Notable observations:
+
+- iter22b/22c capture (`/work/logs/dual-kia-iter22{b,c}/`): all 5 RegisterNotifications were event 0x02; uses GetPlayStatus polling for play_status display rather than subscribing to event 0x01.
+- Pre-iter22c: T6 GetPlayStatus returned stale `playing_flag` because Y1MediaBridge's `onStateDetected` (play/pause path) wasn't refreshing y1-track-info before broadcast. Symptom: car-side icon stuck on initial value until next track change. Closed by iter22c.
+- Pre-iter22d: Kia HMI's discrete PLAY button (PASSTHROUGH 0x44 → uinput KEY_PLAY → KEYCODE_MEDIA_PLAY 126) found no music-app handler; only KEYCODE_MEDIA_PLAY_PAUSE (85) was wired. Symptom: pressing PLAY while paused did nothing; Kia eventually fell back to PAUSE (which toggles via 85) after ~11 s and 4 button presses. Closed by iter22d Patch E.
+- Pre-iter22d: Kia hid the playback-progress scrubber during playback because T6 returned static `position_at_state_change_ms` (iter20a deferral). Closed by iter22d's `clock_gettime(CLOCK_BOOTTIME)`-based live extrapolation.
+- `mIBTAvrcpMusic` binder doesn't connect — zero `IBTAvrcpMusic.*` log entries in iter22c/d captures. AVRCP transport commands reach the music app via the libextavrcp_jni `avrcp_input_sendkey` → uinput path only. Open investigation.
