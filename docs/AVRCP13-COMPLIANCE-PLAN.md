@@ -224,7 +224,6 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 - `src/patches/patch_y1_apk.py` — two new smali patches (D, E for shuffle/repeat)
 - `src/Y1MediaBridge/.../MediaBridgeService.java` — receivers + schema (~120 lines)
 - `src/Y1MediaBridge/app/src/main/AndroidManifest.xml` — receiver entries (or runtime-register)
-- `docs/DEX.md` — document the new smali patch sites
 - `T1 update` — `EventsSupported` grows to include 0x08
 
 **Estimated effort:** 5-7 days. Volume + spec-shape + cross-app IPC + 8 sub-PDUs each needing arg-discovery.
@@ -350,7 +349,7 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 | A0 — Inform PDUs + wire-shape | iter19 | ~50 | no | no | ARCH update | 2 hours |
 | A1 — Notifications | iter20 | ~150 | yes | no | ARCH update | 2–3 days |
 | B — GetPlayStatus | iter20 (paired) | ~80 | (rolled into A1) | no | ARCH update | 1–2 days |
-| C — PlayerAppSettings (0x11–0x16) | iter22 (was iter21) | ~350 | yes | yes | DEX.md + ARCH | 5–7 days |
+| C — PlayerAppSettings (0x11–0x16) | iter22 (was iter21) | ~350 | yes | yes | patch_y1_apk.py docstring + ARCH | 5–7 days |
 | D — Continuation | iter23 (was iter22) | ~200 | no | no | ARCH update | 2–3 days (skip if not needed) |
 | E — Audit | iter23 (paired) | ~80 (T10 abs-vol) | no | no | PATCHES.md sync | 1–2 days |
 | Defensive: bound music-app FF/RW hold-loop | iter21 | 0 (smali only) | no | yes (Patch D) | CHANGELOG + PATCHES.md | 1 day |

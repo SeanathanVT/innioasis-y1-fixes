@@ -116,7 +116,6 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/T4/T5), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
 - [docs/AVRCP13-COMPLIANCE-PLAN.md](docs/AVRCP13-COMPLIANCE-PLAN.md) — staged plan from the current implementation to full AVRCP 1.3 spec compliance (Phases A–E)
-- [docs/DEX.md](docs/DEX.md) — DEX-level analysis for `patch_y1_apk.py`'s smali patches
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 
