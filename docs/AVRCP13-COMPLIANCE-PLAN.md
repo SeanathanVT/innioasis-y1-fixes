@@ -8,7 +8,7 @@ This document is the build plan only. For why we have a proxy at all, the curren
 
 ## 0. Spec target + citation discipline (iter26)
 
-**Wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from bluetooth.com and drop into `docs/spec/`, which is `.gitignore`d):
+**Wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
 
 - `docs/spec/AVRCP_SPEC_V13.pdf` — base spec, 93 pages
 - `docs/spec/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains the only AVRCP 1.3 erratum (Erratum 4969 — SDP record AVCTP version clarification); §2.2 covers AVRCP 1.5 errata that occasionally inform our reading of inherited 1.3 text (e.g., the 8-byte `Identifier` sentinel form in TRACK_CHANGED).
