@@ -1253,42 +1253,50 @@ print(
 )
 
 # ============================================================
-# Patch E: PlayControllerReceiver.smali — Kia EV6 discrete PLAY/PAUSE  (iter22d)
+# Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE coverage  (iter22d)
 # ============================================================
 #
 # Background
 # ----------
-# Kia EV6 head unit's HMI sends DISCRETE AVRCP PASSTHROUGH op codes from its
-# play/pause buttons:
-#   - PLAY button  → AVRCP 0x44 PLAY
-#   - PAUSE button → AVRCP 0x46 PAUSE
-# (As opposed to a single PLAY/PAUSE toggle button that always sends 0x46.)
+# AVRCP 1.4 §11.1.2 defines distinct PASSTHROUGH op codes for PLAY (0x44)
+# and PAUSE (0x46), separate from any toggle abstraction. CTs that issue
+# both discrete codes from separate UI elements are spec-conformant; CTs
+# that only ever issue 0x46 (and rely on the TG to interpret it as a
+# toggle when already paused) are also common in practice. A spec-compliant
+# TG must therefore handle all three of:
+#   - 0x44 PLAY  : transition to PLAYING (no-op if already PLAYING)
+#   - 0x46 PAUSE : transition to PAUSED  (no-op if already PAUSED)
+#   - 0x46 sent as a toggle by the CT: TG state-flip
 #
-# libextavrcp_jni.so's `avrcp_input_sendkey` maps these to the Linux input
-# event codes via /dev/uinput. Empirically (cross-referenced against
-# /work/logs/dual-tv-iter21/ where send_key trace was visible):
+# Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
+# /dev/uinput) maps these to the Linux input event keycodes:
 #   - 0x46 PAUSE → Linux KEY_PLAYPAUSE (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
 #   - 0x44 PLAY  → Linux KEY_PLAY (207)      → Android KEYCODE_MEDIA_PLAY (126)
+# (PASSTHROUGH 0x45 STOP is also defined but doesn't matter for this patch.)
 #
 # Y1's PlayControllerReceiver (the registered ACTION_MEDIA_BUTTON receiver)
 # only matches against `KeyMap.KEY_PLAY` which is hardwired to 85
-# (KEYCODE_MEDIA_PLAY_PAUSE). When the user presses Kia's discrete PLAY
-# button (keyCode 126 arrives), the receiver's `if-ne v2, KEY_PLAY` check
-# fails, no `playOrPause()` call is made, and the music app does nothing.
-# Symptom (iter22c capture, /work/logs/dual-kia-iter22c/): Kia HMI shows the
-# play icon while paused, user presses PLAY, nothing happens. Eventually
-# (~11 s in the capture, four button presses later) Kia falls back to
-# sending PAUSE (0x46) which DOES match KEY_PLAY → toggles → music resumes,
-# but only after multiple presses and a several-second delay.
+# (KEYCODE_MEDIA_PLAY_PAUSE). When a CT issues a discrete PLAY (PASSTHROUGH
+# 0x44 → uinput keycode 126), the receiver's `if-ne v2, KEY_PLAY` check
+# fails, no `playOrPause()` call is made, and the music app silently drops
+# the command. From the CT's perspective the TG accepted the command (no
+# AVRCP-layer reject) but ignored it.
 #
 # The fix
 # -------
 # Extend PlayControllerReceiver's `:cond_c` block (the KEY_PLAY → playOrPause
 # branch) to also accept keyCode 126 (KEYCODE_MEDIA_PLAY) and 127
-# (KEYCODE_MEDIA_PAUSE) as triggers for `playOrPause()`. Both are routed to
-# the same toggle handler — when paused, toggle = play; when playing, toggle
-# = pause — so the discrete PLAY/PAUSE buttons both work without needing a
-# separate non-toggle handler.
+# (KEYCODE_MEDIA_PAUSE) as triggers for `playOrPause()`. Both route to the
+# same toggle handler — toggle from PAUSED to PLAYING when discrete PLAY
+# arrives, toggle from PLAYING to PAUSED when discrete PAUSE arrives. This
+# is functionally equivalent to honoring the discrete commands per AVRCP
+# §11.1.2 because the toggle is a no-op when the requested target state
+# matches the current state.
+#
+# 127 is included for forward-compat in case any other path injects
+# KEYCODE_MEDIA_PAUSE (the existing PASSTHROUGH 0x46 → 85 mapping covers
+# the AVRCP path; 127 covers any non-AVRCP source that might also reach
+# the receiver).
 #
 # Stock smali at PlayControllerReceiver.smali:cond_c:
 #   :cond_c

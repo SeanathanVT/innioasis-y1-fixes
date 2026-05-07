@@ -908,14 +908,16 @@ public class MediaBridgeService extends Service {
         mIsPlaying = playing;
         // iter22c: refresh the playing_flag byte at y1-track-info[792] BEFORE
         // any broadcast fires. Same race fix iter19c applied to onTrackDetected
-        // / broadcastTrackAndState, but for the play/pause path -- which was
-        // missed and left state-of-truth stale until the next track change.
-        // Symptom on Kia EV6: play/pause toggle from car remote drove the Y1
-        // audio correctly but T6 GetPlayStatus polls returned the previous
-        // value, so the car-side icon never flipped between play/pause until
-        // a track changed (which calls broadcastTrackAndState and refreshes
-        // the file). T9 (iter22b) wasn't fired here either since Kia doesn't
-        // subscribe to event 0x01 PLAYBACK_STATUS_CHANGED -- it polls.
+        // / broadcastTrackAndState (track-change path), now extended to the
+        // play/pause path. Per AVRCP §5.4.3.4 GetPlayStatus must report the
+        // current play_status, and per §6.7.1 PLAYBACK_STATUS_CHANGED
+        // notifications must reflect the post-edge value when the CHANGED
+        // frame fires. Both T6 (GetPlayStatus, iter20a) and T9
+        // (PLAYBACK_STATUS_CHANGED proactive, iter22b) read y1-track-info[792]
+        // for that source-of-truth value; without this writeTrackInfoFile()
+        // call the file stays stale across play/pause toggles within a track,
+        // and a CT polling GetPlayStatus or subscribed to event 0x01 sees the
+        // pre-edge value indefinitely.
         writeTrackInfoFile();
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");

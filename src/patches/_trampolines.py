@@ -869,10 +869,12 @@ def _emit_t6(a: Asm) -> None:
     # Else (STOPPED / PAUSED):
     #   live_pos = saved_pos  (the position field IS the freeze point for
     #                          paused/stopped, which is what CTs expect)
-    # Kia EV6 wants a continuously-incrementing position for it to render
-    # the progress bar during playback; iter20a's static-position approach
-    # (pos == position_at_last_state_change forever) made Kia hide the
-    # display entirely while playing.
+    # AVRCP §5.4.3.4 specifies song_position as "the position of the playing
+    # song in milliseconds elapsed". iter20a's static-position behavior
+    # (pos == position_at_last_state_change forever) violates that semantic
+    # for the PLAYING case — CTs that visualize playback progress expect the
+    # value to advance with playback, and some interpret a stuck-across-polls
+    # position as "no position info" and hide the playback-progress display.
     a.cmp_imm8(0, 1)                          # r0 still = playing_flag
     a.bne("t6_position_static")
 
