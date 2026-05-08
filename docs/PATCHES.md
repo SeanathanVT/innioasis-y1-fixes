@@ -1,6 +1,6 @@
 # Patch Reference
 
-Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before/after bytes, rationale, ICS status). For the iter-by-iter evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0.
+Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before/after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0.
 
 ## Patch ID Legend
 

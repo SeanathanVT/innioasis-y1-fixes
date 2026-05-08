@@ -210,7 +210,7 @@ btmtk_avrcp_send_get_playstatus_rsp(
 // Outbound msg_id=542, 20 B IPC frame.
 ```
 
-**Position handling: not live-extrapolated.** T6 returns `position_at_state_change_ms` directly. CTs poll GetPlayStatus periodically (typically every few seconds) so the value updates per poll cycle. Skipping live extrapolation avoids a `clock_gettime` syscall + multiplication in the trampoline hot path. Future iters can add live extrapolation if a CT requires continuously-ticking position display (none observed so far; the `state_change_time_sec` field is reserved in the schema for that purpose).
+**Position handling: live-extrapolated when playing.** When `playing_flag == 1 PLAYING`, T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7) and computes `live_pos = saved_pos + (now_sec - state_change_sec) * 1000` before passing it as the `song_position` arg. CLOCK_BOOTTIME parity with Y1MediaBridge's `SystemClock.elapsedRealtime` source (which stamps `mStateChangeTime`) makes the subtraction yield wall-clock seconds elapsed since the last play/pause edge. When STOPPED/PAUSED, the position field stays at the saved freeze point — what CTs expect for non-playing states. AVRCP 1.3 §5.4.1 Tbl 5.26 specifies `SongPosition` as "the current position of the playing in milliseconds elapsed"; a static across-poll value would violate that, and some CTs interpret a stuck position as "no position info" and hide their playback-progress display. `struct timespec` is stashed in unused outgoing-args slack at sp+8..15 inside the existing T6 frame (no frame growth).
 
 **Files touched:**
 - `src/patches/_trampolines.py` — added `_emit_t6` (~52 B trampoline body), modified T4 pre-check to dispatch PDU 0x30, added `T6_*` frame constants, added `PLT_get_playstatus_rsp = 0x3564`. ~80 lines.
@@ -344,7 +344,7 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
 | 848..1103 | Genre (UTF-8) | 256 | shipped | `MediaStore.Audio.Genres` / `METADATA_KEY_GENRE` |
 
-Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so trampolines from earlier iters keep working (T6/T8/T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
+Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6/T8/T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
 
 The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16/u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
 
@@ -391,7 +391,7 @@ Per phase: a hardware capture against at least three CTs covering different poli
 
 For each CT, capture btlog+logcat with:
 ```
-./tools/dual-capture.sh /work/logs/dual-<ct>-iter<N>/
+./tools/dual-capture.sh /work/logs/dual-<ct>-<run>/
 ```
 and verify:
 1. **No new NACKs.** msg=520 NOT_IMPLEMENTED count should drop to zero post-phase (or stay at zero).
@@ -467,6 +467,6 @@ Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for thi
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — proxy architecture and existing trampoline chain.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte detail.
-- [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes and the per-iter empirical history.
+- [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes and the empirical history that produced each shipped behavior.
 - `src/patches/_trampolines.py` — current trampoline blob assembler; the file each phase will extend.
 - `src/patches/_thumb2asm.py` — Thumb-2 mini-assembler; may need new instruction encodings for some Phase A/C trampolines.

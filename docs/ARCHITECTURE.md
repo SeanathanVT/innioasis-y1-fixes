@@ -395,7 +395,7 @@ Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at 
 
 All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the same shape (40-byte buffer, msg=544, conn[17]→transId at sp+9). Each function bakes in its event-specific constant at sp+13 (1=playback, 2=track_changed, 5=pos_changed, ...). The `cbnz` test on r1 is shared: r1==0 = "write event payload", r1!=0 = "write reject flag (sp+10=1) + reject code (sp+11=arg1) and skip event payload".
 
-All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path. Earlier iters had passed `r1 = transId` and silently hit the reject-shape path; that was fixed in Phase A0 (see `INVESTIGATION.md` for the empirical history).
+All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path. An earlier trampoline shape passed `r1 = transId` and silently hit the reject-shape path; that was fixed in Phase A0 (see `INVESTIGATION.md` for the empirical history).
 
 ---
 
