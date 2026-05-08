@@ -223,7 +223,7 @@ btmtk_avrcp_send_get_playstatus_rsp(
 **Status:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response). Per AVRCP 1.3 §4.7.7 / §5.5, continuation flow is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. Two findings establish the current state:
 
 1. **Across 2868 PDU 0x20 frames in a single TV capture, 100% carry `packet_type=0x00`** (single non-fragmented AVRCP packet). `get_element_attributes_rsp` never sets the start-of-fragmentation flag; mtkbt fragments below at the AVCTP layer transparently to AVRCP. Even with the 7-attr T4 expansion, worst-case packed responses (~1100 B with maxed Title/Artist/Album/Genre slots) ship as a single AVRCP packet.
-2. **Across all 43 captures, zero 0x40/0x41 PDUs** from any CT in the test matrix (Samsung TV / Kia EV6 / Bolt EV / Sonos), against thousands of GetElementAttributes / RegisterNotification PDUs.
+2. **Across all 43 captures, zero 0x40/0x41 PDUs** from any CT in our test matrix, against thousands of GetElementAttributes / RegisterNotification PDUs.
 
 **Current behavior** is a fall-through to `pass_through_rsp` returning msg=520 NotImplemented for any unknown PDU including 0x40/0x41. Functionally adequate; spec-acceptable.
 

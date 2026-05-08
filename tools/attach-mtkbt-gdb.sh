@@ -33,9 +33,9 @@
 #   ./tools/attach-mtkbt-gdb.sh --gdbserver /path/to/gdbserver
 #
 # Driving the capture (once gdb is running):
-#   1. Drive a Sonos session: BT toggle on Y1 → Sonos reconnect → expect
+#   1. Drive a peer-CT session: BT toggle on Y1 → CT reconnect → expect
 #      one inbound VENDOR_DEPENDENT GetCapabilities frame.
-#   2. Press pause on Sonos → expect one inbound PASSTHROUGH frame.
+#   2. Press pause on the CT → expect one inbound PASSTHROUGH frame.
 #   3. The gdb command file's `commands` blocks log register + memory state
 #      at each BP and continue automatically.
 #   4. Compare the captured `[r5+5]` values, AV/C op_code bytes, and which
@@ -43,8 +43,8 @@
 #
 # Watch-items:
 #   - Each BP halt freezes mtkbt's RX thread for as long as the BP commands
-#     run. Sonos times out after a few seconds. Keep `commands` blocks short
-#     (silent + printf + continue) so peers don't disconnect mid-capture.
+#     run. Most peer CTs time out after a few seconds. Keep `commands` blocks
+#     short (silent + printf + continue) so peers don't disconnect mid-capture.
 #   - After detach, mtkbt may be in a wedged state. `BT off → on` resets it.
 
 set -u
@@ -417,11 +417,11 @@ echo "    # symbols are optional but help with disassembly; the stock mtkbt"
 echo "    # extracted from /work/v3.0.2/system.img.extracted/bin/mtkbt works fine"
 
 echo
-echo "Then drive the Sonos scenario:"
-echo "    1. BT off → on on the Y1, let Sonos reconnect"
+echo "Then drive the peer-CT scenario:"
+echo "    1. BT off → on on the Y1, let the CT reconnect"
 echo "    2. Look for 'BP@0x6db7c' line — should fire once for VENDOR_DEPENDENT"
 echo "       GetCapabilities (14B payload) shortly after AVCTP connect."
-echo "    3. Press pause on Sonos — should fire BP@0x6db7c again (8B PASSTHROUGH)."
+echo "    3. Press pause on the CT — should fire BP@0x6db7c again (8B PASSTHROUGH)."
 echo "    4. Compare [r5+5] values + payload byte 2 (AV/C op_code) between the two."
 echo "    Output is logged to /tmp/mtkbt-gdb.log."
 echo
