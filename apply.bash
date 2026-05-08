@@ -68,6 +68,12 @@ FLAGS:
                  --avrcp is excluded because it requires building
                  Y1MediaBridge first (analogous to --root needing
                  src/su/ built).
+  --debug        Build patches with diagnostic Log.d / __android_log_print
+                 calls injected. Surfaces under "adb logcat -s Y1Patch:*"
+                 on-device. Reflash required to toggle (this is a build-
+                 time switch, not a runtime one). Omit for release builds
+                 (zero runtime overhead). Sets KOENSAYR_DEBUG=1 in the
+                 patcher env; each patch script reads it independently.
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed
@@ -90,6 +96,7 @@ FLAG_ADB=false
 FLAG_ANY_SPECIFIED=false
 FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
+FLAG_DEBUG=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
 FLAG_ROOT=false
@@ -136,6 +143,10 @@ while [[ $# -gt 0 ]]; do
     --bluetooth)
       FLAG_BLUETOOTH=true
       FLAG_ANY_SPECIFIED=true
+      shift
+      ;;
+    --debug)
+      FLAG_DEBUG=true
       shift
       ;;
     --music-apk)
@@ -211,6 +222,17 @@ fi
 if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   show_help
   exit 0
+fi
+
+# Debug-logging toggle. Patch scripts read KOENSAYR_DEBUG from the env to
+# decide whether to inject diagnostic Log.d / __android_log_print calls
+# into the patched binaries. Pass --debug when you want a build that
+# surfaces patch-internal traces under `adb logcat -s Y1Patch:*` etc.;
+# omit for a release build (zero runtime overhead).
+if [[ "$FLAG_DEBUG" == true ]]; then
+  export KOENSAYR_DEBUG=1
+  echo "[debug] KOENSAYR_DEBUG=1 — patches will include diagnostic logging."
+  echo "        Filter on-device:  adb logcat -s Y1Patch:* MMI_AVRCP:* Y1MediaBridge:*"
 fi
 
 # Separate from FLAG_ANY_SPECIFIED so a future boot.img-only flag stays a one-line gate change.

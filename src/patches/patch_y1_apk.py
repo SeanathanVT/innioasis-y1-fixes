@@ -195,6 +195,23 @@ APKTOOL_JVM_FLAGS: list = []
 # --skip-md5 to override (diagnostic use only).
 STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 
+# === DEBUG LOGGING TOGGLE ============================================
+# When True, this patcher injects `Log.d("Y1Patch", "<msg>")` calls at
+# the entry of PlayControllerReceiver.onReceive and the key entry-points
+# of PlayerService (play / pause / playOrPause / stop). Shows up in
+# `adb logcat -s Y1Patch:*`.
+#
+# Toggled at build time via the `KOENSAYR_DEBUG` environment variable —
+# `apply.bash --debug` sets it. Omit for release builds (zero runtime
+# overhead).
+#
+# Companion flags: same-named constant in src/patches/_trampolines.py,
+# src/patches/patch_libextavrcp_jni.py, src/patches/patch_mtkbt_odex.py
+# (currently placeholders; will be wired up as needed when we extend
+# the diagnostic to native trampolines or the AVRCP Java dispatcher).
+# Y1MediaBridge already uses Log.d freely; no toggle needed there.
+DEBUG_LOGGING = os.environ.get("KOENSAYR_DEBUG", "") == "1"
+
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
 ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
 REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
@@ -1121,6 +1138,58 @@ if OLD_PLAY_BRANCH not in play_receiver_src:
     )
 
 play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 1)
+
+
+# -- Diagnostic Log.d injection (gated by KOENSAYR_DEBUG / --debug) ----------
+# Surfaces "Y1Patch" tag entries on `adb logcat -s Y1Patch:*` whenever the
+# instrumented method runs. Each injection sits at the very top of the method
+# body (right after `.locals N`), so v0/v1 are guaranteed-uninitialized
+# scratch — no save/restore needed. The original method body re-initialises
+# v0/v1 before using them, so the diagnostic is invisible to the rest of the
+# code apart from the constant-time Log.d call.
+def _inject_log_d(smali, method_signature_re, msg):
+    """Insert a Log.d("Y1Patch", msg) call at the top of the method body.
+
+    Matches `^.method ... <method_signature_re>$\\n    .locals N$` and
+    inserts the Log.d snippet between the `.locals` line and whatever
+    follows. Returns the modified smali source.
+
+    Raises ValueError if the method signature doesn't appear exactly once,
+    so silent partial-applies surface as patcher errors rather than
+    invisible no-instrumentation builds.
+    """
+    pattern = re.compile(
+        rf'(^\.method[^\n]*\b{method_signature_re}\n    \.locals \d+\n)',
+        re.MULTILINE,
+    )
+    snippet = (
+        '\n'
+        '    # === DIAGNOSTIC LOGGING (KOENSAYR_DEBUG=1; --debug) ===\n'
+        '    const-string v0, "Y1Patch"\n'
+        f'    const-string v1, "{msg}"\n'
+        '    invoke-static {v0, v1}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I\n'
+        '    # === END DIAGNOSTIC ===\n'
+        '\n'
+    )
+    matches = pattern.findall(smali)
+    if len(matches) != 1:
+        raise ValueError(
+            f"_inject_log_d: expected exactly one match for {method_signature_re!r}, "
+            f"found {len(matches)}"
+        )
+    return pattern.sub(rf'\1{snippet}', smali, count=1)
+
+
+if DEBUG_LOGGING:
+    print("\n[Patch E debug] DEBUG_LOGGING=True (KOENSAYR_DEBUG=1) — injecting "
+          "Log.d entry-point traces.")
+    play_receiver_src = _inject_log_d(
+        play_receiver_src,
+        r'onReceive\(Landroid/content/Context;Landroid/content/Intent;\)V',
+        "PlayControllerReceiver.onReceive entry",
+    )
+    print("  + PlayControllerReceiver.onReceive entry")
+
 with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
@@ -1129,6 +1198,31 @@ print(
     "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per op 0x46]; "
     "KEYCODE_MEDIA_STOP (86) → stop() [discrete STOP per op 0x45 — ICS Table 8 item 20 mandatory]"
 )
+
+
+# -- Diagnostic Log.d injection into PlayerService entry-points --------------
+# play(Z)V / pause(IZ)V / playOrPause()V / stop()V each sit in PlayerService
+# (separate smali file from PlayControllerReceiver). Instrumenting them lets
+# us see whether the broadcast routing reached PlayerService and which method
+# fired.
+PLAYER_SERVICE_SMALI = "smali/com/innioasis/y1/service/PlayerService.smali"
+player_service_path = os.path.join(UNPACKED_DIR, PLAYER_SERVICE_SMALI)
+
+if DEBUG_LOGGING:
+    if not os.path.exists(player_service_path):
+        sys.exit(f"ERROR: Expected smali not found: {player_service_path}")
+    with open(player_service_path, 'r') as f:
+        player_service_src = f.read()
+    for sig, msg in (
+        (r'play\(Z\)V',           "PlayerService.play(Z) entry"),
+        (r'pause\(IZ\)V',         "PlayerService.pause(IZ) entry"),
+        (r'playOrPause\(\)V',     "PlayerService.playOrPause() entry"),
+        (r'stop\(\)V',            "PlayerService.stop() entry"),
+    ):
+        player_service_src = _inject_log_d(player_service_src, sig, msg)
+        print(f"  + PlayerService.{sig.replace(chr(92), '')}")
+    with open(player_service_path, 'w') as f:
+        f.write(player_service_src)
 
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of

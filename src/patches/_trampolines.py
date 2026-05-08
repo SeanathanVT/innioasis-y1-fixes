@@ -119,7 +119,17 @@ read(2) is not in the PLT — we issue the syscall directly via SVC #0
 with r7=3 (NR_read on Linux ARM EABI).
 """
 
+import os
+
 from _thumb2asm import Asm
+
+# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
+# Placeholder — when set, future trampoline edits could call
+# `__android_log_print` (via a new PLT entry) at trampoline entry/exit so
+# native-side traces show up under `adb logcat -s Y1Patch:*`. Currently
+# no trampoline emits Log calls; the flag is wired so future edits can
+# hook it without re-plumbing.
+DEBUG_LOGGING = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 
 # ---------------------------------------------------------------- constants
 T4_VADDR = 0xac54
