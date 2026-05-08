@@ -2,10 +2,14 @@ package com.y1.mediabridge;
 
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentUris;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.Cursor;
+import android.os.BatteryManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.AudioManager;
@@ -201,6 +205,19 @@ public class MediaBridgeService extends Service {
      *  is "natural-end-only", and a skip is meant to fire only TRACK_CHANGED
      *  + TRACK_REACHED_START. */
     private volatile boolean mPreviousTrackNaturalEnd = false;
+
+    /** AVRCP §5.4.2 Tbl 5.34/5.35 BATT_STATUS bucket value:
+     *  0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE.
+     *  Updated by mBatteryReceiver on every `Intent.ACTION_BATTERY_CHANGED`
+     *  bucket transition; written to y1-track-info[794] by writeTrackInfoFile.
+     *  Read by the AVRCP T8 trampoline at INTERIM time (event 0x06
+     *  RegisterNotification) and by T9 at every `playstatechanged`
+     *  broadcast for CHANGED-on-edge dispatch (Phase F2). */
+    private volatile byte mCurrentBatteryStatus = 0; // default = NORMAL
+
+    /** BroadcastReceiver registered for Android's sticky `ACTION_BATTERY_CHANGED`.
+     *  Held as a field so we can unregister cleanly in onDestroy. */
+    private BroadcastReceiver mBatteryReceiver;
 
     private Bitmap mCurrentAlbumArt;
 
@@ -658,6 +675,102 @@ public class MediaBridgeService extends Service {
         setupRemoteControlClient();
         startLogcatMonitor();
         prepareTrackInfoDir();
+        registerBatteryReceiver();
+    }
+
+    /**
+     * Register a BroadcastReceiver for `Intent.ACTION_BATTERY_CHANGED` and
+     * also synchronously read the sticky broadcast so we have a value at
+     * cold-boot before the first battery-change tick (which can be many
+     * minutes away). On every level/plug bucket transition we update
+     * mCurrentBatteryStatus, write y1-track-info, and fire a
+     * `playstatechanged` broadcast — that wakes T9 (via the existing
+     * cardinality NOP at MtkBt.odex:0x3c4fe → notificationPlayStatusChangedNative
+     * → T9 in libextavrcp_jni.so), which now also checks the battery byte
+     * and emits `BATT_STATUS_CHANGED` CHANGED on edge.
+     *
+     * Stock MtkBt's BTAvrcpSystemListener.onBatteryStatusChange dispatch
+     * chain is dead (BTAvrcpMusicAdapter$2 overrides it with a log-only
+     * stub), so we cannot drive `notificationBatteryStatusChangedNative`
+     * via Android's system battery broadcast — reusing `playstatechanged`
+     * as the trigger is the cheapest correct alternative.
+     */
+    private void registerBatteryReceiver() {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+        mBatteryReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                handleBatteryIntent(intent, false);
+            }
+        };
+        Intent sticky = registerReceiver(mBatteryReceiver, filter);
+        // Sticky broadcast fires the receiver synchronously the first time
+        // through registerReceiver if there's a cached value; on Android 4.2
+        // it is also returned as the registerReceiver return value. Process
+        // it directly so cold boot has a real bucket value before the next
+        // ACTION_BATTERY_CHANGED tick.
+        if (sticky != null) handleBatteryIntent(sticky, true);
+    }
+
+    /**
+     * Bucket-map Android `ACTION_BATTERY_CHANGED` into the AVRCP §5.4.2
+     * Tbl 5.35 enum and update mCurrentBatteryStatus + drive a CHANGED
+     * emission on bucket transitions (or always, for the cold-boot pass).
+     *
+     * Mapping rationale:
+     *   STATUS_FULL                            → 4 FULL_CHARGE
+     *   PLUGGED (AC | USB | wireless)          → 3 EXTERNAL
+     *   level <= 15                            → 2 CRITICAL
+     *   level <= 30                            → 1 WARNING
+     *   else                                   → 0 NORMAL
+     * The `STATUS_FULL` test runs before plugged because some firmwares
+     * report `plugged != 0` even when topped off; FULL_CHARGE is the more
+     * informative value when both apply. Spec is permissive about the
+     * exact thresholds.
+     */
+    private void handleBatteryIntent(Intent intent, boolean coldBoot) {
+        int level   = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+        int scale   = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+        int plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+        int status  = intent.getIntExtra(BatteryManager.EXTRA_STATUS,
+                                          BatteryManager.BATTERY_STATUS_UNKNOWN);
+        int pct = (level >= 0 && scale > 0) ? (level * 100 / scale) : -1;
+
+        byte bucket;
+        if (status == BatteryManager.BATTERY_STATUS_FULL) {
+            bucket = 4;       // FULL_CHARGE
+        } else if (plugged != 0) {
+            bucket = 3;       // EXTERNAL
+        } else if (pct >= 0 && pct <= 15) {
+            bucket = 2;       // CRITICAL
+        } else if (pct >= 0 && pct <= 30) {
+            bucket = 1;       // WARNING
+        } else {
+            bucket = 0;       // NORMAL
+        }
+
+        if (!coldBoot && bucket == mCurrentBatteryStatus) {
+            // Same bucket as last tick — no-op to avoid spamming
+            // `playstatechanged` broadcasts (and AVRCP wire CHANGED emits)
+            // on every percent-level change.
+            return;
+        }
+        Log.d(TAG, "Battery: pct=" + pct + " plugged=" + plugged
+                + " status=" + status + " → AVRCP bucket=" + bucket
+                + (coldBoot ? " (cold boot)" : ""));
+        mCurrentBatteryStatus = bucket;
+        // Persist new bucket before triggering the trampoline path so T9
+        // sees fresh file[794] when notificationPlayStatusChangedNative
+        // fires.
+        writeTrackInfoFile();
+        if (!coldBoot) {
+            // Fire a `playstatechanged` broadcast to drive T9 → BATT_STATUS_CHANGED
+            // CHANGED emission. T9 reads file[792] vs state[9] (play_status,
+            // unchanged here so no spurious play emit) AND file[794] vs
+            // state[10] (battery, just changed → emit CHANGED).
+            sendMusicBroadcast("com.android.music.playstatechanged");
+            notifyPlaybackStatus(mIsPlaying ? (byte) 2 : (byte) 3);
+        }
     }
 
     /**
@@ -739,6 +852,11 @@ public class MediaBridgeService extends Service {
         }
         if (mMediaButtonReceiver != null) {
             mAudioManager.unregisterMediaButtonEventReceiver(mMediaButtonReceiver);
+        }
+        if (mBatteryReceiver != null) {
+            try { unregisterReceiver(mBatteryReceiver); }
+            catch (IllegalArgumentException ignore) { }
+            mBatteryReceiver = null;
         }
         if (mCurrentAlbumArt != null && !mCurrentAlbumArt.isRecycled()) {
             mCurrentAlbumArt.recycle();
@@ -1084,7 +1202,10 @@ public class MediaBridgeService extends Service {
     //   bytes 792       = playing_flag             u8     (T6, T8/T9 event 0x01)
     //   bytes 793       = previous_track_natural_end u8  (T5 — Phase F1 gate
     //                                                       for TRACK_REACHED_END)
-    //   bytes 794..799  = pad                                                    (reserved Phase F4)
+    //   bytes 794       = battery_status u8 (T8 INTERIM + T9 CHANGED-on-edge —
+    //                                          Phase F2; AVRCP §5.4.2 Tbl 5.35
+    //                                          enum 0..4)
+    //   bytes 795..799  = pad                                                    (reserved Phase F4)
     //   bytes 800..815  = TrackNumber              UTF-8 ASCII decimal (16 B slot)
     //   bytes 816..831  = TotalNumberOfTracks      UTF-8 ASCII decimal (16 B slot)
     //   bytes 832..847  = PlayingTime              UTF-8 ASCII decimal ms (16 B slot)
@@ -1120,9 +1241,13 @@ public class MediaBridgeService extends Service {
     /** Phase F1: previous track's natural-end flag at byte 793.
      *  T5 (libextavrcp_jni.so trampoline) reads this to gate AVRCP 1.3 §5.4.2
      *  Tbl 5.31 TRACK_REACHED_END (event 0x03) CHANGED emission. 1=natural
-     *  end (emit TRACK_REACHED_END), 0=skip / interrupt (omit). Sits in the
-     *  pre-existing 793..799 reserved range; 794..799 still reserved. */
+     *  end (emit TRACK_REACHED_END), 0=skip / interrupt (omit). */
     private static final int NATURAL_END_OFFSET = PLAY_STATUS_OFFSET + 1;         // 793 - previous_track_natural_end u8
+    /** Phase F2: bucket-mapped AVRCP §5.4.2 Tbl 5.35 battery enum at byte 794.
+     *  T8 reads this for event 0x06 INTERIM and T9 reads it for CHANGED-on-edge
+     *  detection (compares against y1-trampoline-state[10]). 0=NORMAL,
+     *  1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE. */
+    private static final int BATTERY_STATUS_OFFSET = PLAY_STATUS_OFFSET + 2;      // 794 - battery_status u8
     // GetElementAttributes attrs 4-7. Pre-formatted UTF-8 strings — keeps the
     // T4 trampoline a uniform strlen+memcpy loop and avoids hand-rolled Thumb-2
     // itoa for the numeric fields.
@@ -1171,6 +1296,10 @@ public class MediaBridgeService extends Service {
             // onTrackDetected by comparing the previous track's extrapolated
             // position against its duration at the moment of the track edge.
             buf[NATURAL_END_OFFSET] = (byte) (mPreviousTrackNaturalEnd ? 0x01 : 0x00);
+            // Phase F2: battery_status bucket for AVRCP T8 INTERIM (event 0x06)
+            // and T9 CHANGED-on-edge detection. Updated by mBatteryReceiver
+            // on `Intent.ACTION_BATTERY_CHANGED` bucket transitions.
+            buf[BATTERY_STATUS_OFFSET] = mCurrentBatteryStatus;
 
             // GetElementAttributes attrs 4-7 (AVRCP 1.3 §5.3.4). Store as
             // pre-formatted UTF-8 strings so T4 ships them with the same

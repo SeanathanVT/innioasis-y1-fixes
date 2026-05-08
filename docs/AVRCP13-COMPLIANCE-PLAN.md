@@ -58,14 +58,14 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (gated on natural-end flag from Y1MediaBridge `onTrackDetected` position-vs-duration check) | — |
 | 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (unconditional on every track edge) | — |
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only — periodic CHANGED planned (Phase F3) | partial |
-| 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM with canned `0x00 NORMAL` — real battery + CHANGED-on-edge planned (Phase F2) | partial |
+| 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
 | 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
 | 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
-**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 29, 31, 32, 66. Optional rows partial (INTERIM-only or canned, real-data CHANGED-on-edge work tracked under Phase F): 27, 28.
+**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 28, 29, 31, 32, 66. Optional rows partial (INTERIM-only, real-data CHANGED-on-edge work tracked under Phase F): 27.
 
 **INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. A row marked "INTERIM-only" handles registration but never emits CHANGED; spec-strict subscribers expect both halves. Mandatory rows 23 and 24 ship both halves; the optional rows above currently ship only INTERIM and are tracked under Phase F to ship the missing CHANGED-on-edge halves.
 
@@ -96,7 +96,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on Y1MediaBridge natural-end flag at file[793]) |
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | needs periodic Playback-interval timer |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (canned 0x00 NORMAL) | optional |
+| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | optional |
 | 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | Phase C |
 
@@ -249,18 +249,23 @@ No additional MtkBt.odex cardinality NOPs needed: T5 fires once per `metachanged
 
 Y1MediaBridge versionCode bumps 17 → 18; versionName 2.0 → 2.1.
 
-#### Phase F2 — Real battery state (event 0x06 BATT_STATUS_CHANGED). ~4 hours.
+#### Phase F2 — Real battery state (event 0x06 BATT_STATUS_CHANGED) — SHIPPED
 
-**Spec:** AVRCP 1.3 §5.4.2 Tables 5.34 / 5.35. ICS row 28 (Optional). Allowed values: `0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE`.
+**Spec:** AVRCP 1.3 §5.4.2 Tables 5.34 / 5.35. ICS Table 7 row 28 (Optional). Allowed values: `0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE`.
 
-**Real data:** Android `Intent.ACTION_BATTERY_CHANGED` (sticky broadcast on API 17+). Provides `EXTRA_LEVEL` (0-100), `EXTRA_PLUGGED` (charger state), `EXTRA_STATUS` (CHARGING/FULL/etc.). No sysfs access required.
+**Real data:** Android `Intent.ACTION_BATTERY_CHANGED` (sticky broadcast on API 17+). Provides `EXTRA_LEVEL` (0-100), `EXTRA_SCALE`, `EXTRA_PLUGGED` (charger state), `EXTRA_STATUS` (CHARGING/FULL/etc.). No sysfs access required.
 
-**Implementation:**
-- Y1MediaBridge: new BroadcastReceiver for `ACTION_BATTERY_CHANGED`. Bucket-map level + plug state to AVRCP value (`charging+full → FULL_CHARGE; charging → EXTERNAL; level≤15 → CRITICAL; level≤30 → WARNING; else → NORMAL`). Emit broadcast `com.y1.mediabridge.batterychanged` only on bucket transitions to avoid flooding on every percent tick.
-- Schema: append `battery_status` u8 byte at `y1-track-info[795]` (currently in the reserved 793..799 range).
-- T8's existing event-0x06 INTERIM arm reads `[795]` instead of returning canned `0x00 NORMAL`.
-- New T_battery_changed proactive trampoline (clone of T9 shape, ~50 B), reads `[795]`, calls `reg_notievent_battery_status_changed_rsp` (PLT 0x3354) on edge.
-- One additional cardinality NOP in MtkBt.odex for the sswitch arm handling event 0x06 (mirror of the existing 0x01/0x02 NOPs).
+**Trigger-path discovery during build (worth recording, since it differs from F1's plan).** Stock MtkBt's battery dispatch chain through `BTAvrcpSystemListener.onBatteryStatusChange` is *dead*: `BTAvrcpMusicAdapter$2` overrides the dispatcher with a `Log.i(...)` stub that never calls super, so even if the listener's `mIsRegBattery` gate is bypassed, no notification reaches the JNI native layer. There is also no AIDL surface on `IBTAvrcpMusic` that exposes `notificationBatteryStatusChanged` for Y1MediaBridge to invoke directly. The cheapest spec-compliant alternative is to **reuse the existing `playstatechanged` broadcast** as the trigger and have the trampoline at the other end check whether the battery byte changed alongside the play-status byte.
+
+**What ships:**
+- Y1MediaBridge: new private `BroadcastReceiver mBatteryReceiver` registered for `Intent.ACTION_BATTERY_CHANGED` in `onCreate`, unregistered in `onDestroy`. `handleBatteryIntent()` bucket-maps `EXTRA_LEVEL`/`EXTRA_PLUGGED`/`EXTRA_STATUS` to the AVRCP enum (`STATUS_FULL → 4 FULL_CHARGE; plugged != 0 → 3 EXTERNAL; pct ≤ 15 → 2 CRITICAL; pct ≤ 30 → 1 WARNING; else → 0 NORMAL` — `STATUS_FULL` first because some firmwares report `plugged != 0` even when topped off). Cold-boot reads the sticky broadcast via the `registerReceiver` return value so the bucket has a real value before the next tick. On bucket transitions only (not on every percent change) `mCurrentBatteryStatus` is updated, `writeTrackInfoFile()` runs to persist byte 794, and a `playstatechanged` broadcast fires to wake T9.
+- Schema: byte 794 = `battery_status` u8 (was `pad`, `794..799` reserved). Bytes 795..799 still reserved for Phase F4.
+- T8 event-0x06 INTERIM arm now reads `y1-track-info[794]` instead of returning canned `0x00 NORMAL`. Stack memset to zero before the read makes a short file (pre-F2 Y1MediaBridge) give `NORMAL` — benign default.
+- T9 extended: in addition to the existing `play_status` compare against `y1-trampoline-state[9]`, T9 now compares `y1-track-info[794]` (battery_status) against `y1-trampoline-state[10]` (`last_battery_status`, was pad) and emits `reg_notievent_battery_status_changed_rsp` (PLT 0x3354) with `REASON_CHANGED` on edge. State byte 10 updates and the 16 B state file gets written back if either play or battery changed (single combined write per fire).
+
+**No MtkBt.odex change.** The cardinality NOP at sswitch_18a (file offset `0x3c4fe`) shipped earlier as part of Phase A1 / T9 already wakes `notificationPlayStatusChangedNative` on every `playstatechanged` broadcast, which is the trigger we're piggybacking on.
+
+Y1MediaBridge versionCode bumps 18 → 19; versionName 2.1 → 2.2.
 
 #### Phase F3 — Periodic PLAYBACK_POS_CHANGED (event 0x05). ~1 day.
 
@@ -296,7 +301,7 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 
 **Already shipped:**
 - **Patch E — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1.** Splits `PlayControllerReceiver`'s short-press join arm into four labeled blocks — KEY_PLAY (85, legacy `ACTION_MEDIA_BUTTON`) keeps `playOrPause()` (toggle); KEYCODE_MEDIA_PLAY (126, from PASSTHROUGH 0x44) routes to `play(Z)V` (bool=true); KEYCODE_MEDIA_PAUSE (127, from PASSTHROUGH 0x46) routes to `pause(IZ)V` (reason=0x12, flag=true); KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45) routes to `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. The `play(Z)V` boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`; that singleton edge is what propagates the resume to the rest of the music app (UI, RemoteControlClient, AudioFocus state). Calling `play(false)` starts the player but skips the singleton update — other components don't see the resume edge. The Kotlin-generated `play$default(this, dummy, mask=1, null)` wrapper (used by the music app's own `playOrPause()` resume path) overrides the boolean to `1` via the default-args mask, so passing `true` here matches that behavior. Smali-level edits only.
-- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `92e6c7ee5d43ab0c65f27a6da60dd320` (cumulative across all libextavrcp_jni.so patches including U1, T_continuation, and T5's Phase F1 expansion).
+- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `d2409751abc6f35e6adc0cc8447afe2a` (cumulative across all libextavrcp_jni.so patches including U1, T_continuation, T5's Phase F1 expansion, and T9's Phase F2 battery edge).
 
 **Pending audit items (no spec gap, no estimated effort attached):**
 - T1's `EventsSupported` array maintained in lock-step with what's actually implemented (each phase bumps it).
@@ -323,7 +328,8 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 | 788..791 | reserved | 4 | — | (pad) |
 | 792 | playing_flag | 1 | shipped | `mIsPlaying` (1=PLAYING, 2=PAUSED, 0=STOPPED — AVRCP §5.4.1 Tbl 5.26) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
-| 794..799 | reserved | 6 | — | (Phase F4 shuffle_flag/repeat_mode reservation) |
+| 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
+| 795..799 | reserved | 5 | — | (Phase F4 shuffle_flag/repeat_mode reservation) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |

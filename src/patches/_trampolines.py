@@ -243,6 +243,11 @@ T8_FRAME           = 800
 T8_OFF_FILE        = 0
 T8_OFF_FILE_POS      = T8_OFF_FILE + 780   # 780 - pos_at_state_change_ms
 T8_OFF_FILE_PLAYFLAG = T8_OFF_FILE + 792   # 792 - playing_flag (= AVRCP play_status)
+T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (Phase F2 —
+                                            #       AVRCP §5.4.2 Tbl 5.34/5.35
+                                            #       enum: 0=NORMAL, 1=WARNING,
+                                            #       2=CRITICAL, 3=EXTERNAL,
+                                            #       4=FULL_CHARGE)
 T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 
 # T9 (proactive PLAYBACK_STATUS_CHANGED) frame: 16 B state buf at sp+0..15
@@ -261,7 +266,10 @@ T9_FRAME              = 816
 T9_OFF_STATE          = 0
 T9_OFF_FILE           = 16
 T9_OFF_FILE_PLAYFLAG  = T9_OFF_FILE + 792    # 808 - playing_flag inside file_buf
+T9_OFF_FILE_BATTERY   = T9_OFF_FILE + 794    # 810 - battery_status inside file_buf
 T9_STATE_LAST_PS_OFF  = T9_OFF_STATE + 9     # 9 - last_play_status inside state_buf
+T9_STATE_LAST_BATT_OFF = T9_OFF_STATE + 10   # 10 - last_battery_status inside state_buf
+                                              #     (Phase F2 — was pad before)
 
 # T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START — Phase F1) frame:
 # 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
@@ -279,12 +287,18 @@ T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end 
                                               #       lands here).
 
 # AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned values
-# for events we don't have a Y1 data source for.
-# - BATT_STATUS_CHANGED: 0x00 NORMAL is the safe default when we don't have
-#   visibility into the device's battery state. (Spec values: 0=NORMAL,
-#   1=WARNING, 2=CRITICAL, 3=EXTERNAL.) The Y1 reads its own battery via
-#   sysfs but Y1MediaBridge doesn't currently bridge that to the trampoline;
-#   could be wired up in a future iter if a CT cares.
+# for events without a Y1 data source.
+# - BATT_STATUS_CHANGED: real data wired Phase F2. T8 INTERIM reads
+#   y1-track-info[794] (battery_status u8); T9 emits CHANGED-on-edge when
+#   file[794] differs from y1-trampoline-state[10] (last_battery_status).
+#   Y1MediaBridge maps Android `Intent.ACTION_BATTERY_CHANGED` (level +
+#   plugged-state) to the AVRCP enum on every bucket transition and fires
+#   `playstatechanged` so T9 picks up the change. Spec values:
+#   0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE.
+#   BATT_STATUS_NORMAL retained as the default value when y1-track-info is
+#   shorter than 800 B (e.g. an old Y1MediaBridge built against a
+#   pre-Phase-F2 schema) — T8/T9 memset to zero before the read, so a
+#   short read leaves byte 794 = 0 = NORMAL, which is a benign default.
 # - SYSTEM_STATUS_CHANGED: 0x00 POWERED_ON — we run only when the device is
 #   on, so this is always correct. (Spec: 0=POWERED_ON, 1=POWERED_OFF,
 #   2=UNPLUGGED.)
@@ -1221,9 +1235,14 @@ def _emit_t8(a: Asm) -> None:
     a.label("t8_check_6")
     a.cmp_imm8(0, 0x06)
     a.bne("t8_check_7")
-    # 0x06 BATT_STATUS_CHANGED
+    # 0x06 BATT_STATUS_CHANGED — Phase F2.
     # reg_notievent_battery_status_changed_rsp(conn, 0, REASON_INTERIM, batt_status_u8)
-    a.movs_imm8(3, BATT_STATUS_NORMAL)
+    # batt_status read from y1-track-info[794], where Y1MediaBridge writes the
+    # AVRCP enum (0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE)
+    # bucket-mapped from Android `Intent.ACTION_BATTERY_CHANGED`. Stack is
+    # memset to 0 before the read, so a short file (pre-F2 Y1MediaBridge)
+    # gives BATT_STATUS_NORMAL — benign default.
+    a.ldrb_w(3, 13, T8_OFF_FILE_BATTERY)
     a.movs_imm8(2, REASON_INTERIM)
     a.movs_imm8(1, 0)
     a.add_imm_t3(0, 5, 8)
@@ -1259,7 +1278,7 @@ def _emit_t8(a: Asm) -> None:
 
 
 def _emit_t9(a: Asm) -> None:
-    """T9: proactive PLAYBACK_STATUS_CHANGED.
+    """T9: proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED (Phase F2).
 
     Entered via `b.w T9` from the patched libextavrcp_jni.so::
     notificationPlayStatusChangedNative stub at file offset 0x3c88. MtkBt's
@@ -1270,11 +1289,24 @@ def _emit_t9(a: Asm) -> None:
     asynchronously to any inbound AVRCP RegisterNotification.
 
     Closes the AVRCP 1.3 §5.4.2 spec gap that T8 alone leaves: T8 handles
-    event 0x01 INTERIM-only, never fires the spec-mandated CHANGED frame
-    when the play_status actually flips. Without T9 a polling CT subscribes
-    to event 0x01, gets the immediate INTERIM, then never sees CHANGED, so
-    the car-side play/pause icon stays stuck on its initial value even
-    though Y1's audio toggles correctly via the PASSTHROUGH path.
+    events 0x01 / 0x06 INTERIM-only, never fires the spec-mandated CHANGED
+    frame when the value actually flips. Without T9 a polling CT subscribes
+    to event 0x01 / 0x06, gets the immediate INTERIM, then never sees
+    CHANGED, so the car-side play/pause icon (or battery indicator) stays
+    stuck on its initial value even though Y1's audio toggles correctly via
+    the PASSTHROUGH path.
+
+    Phase F2 piggybacks battery emission on this same trampoline:
+    Y1MediaBridge fires `playstatechanged` whenever the battery bucket
+    transitions (in addition to actual play/pause edges). T9 reads
+    file[792] (play_status) AND file[794] (battery_status) and emits
+    CHANGED for whichever differs from the corresponding `state` byte.
+    Stock MtkBt's BTAvrcpSystemListener.onBatteryStatusChange dispatch
+    chain is dead (BTAvrcpMusicAdapter$2 overrides it with a log-only
+    stub, never calling super), so we cannot drive the battery native
+    via the system path; reusing `playstatechanged` as the trigger is
+    the cheapest correct alternative and keeps Y1MediaBridge as the
+    single source of truth for the battery bucket value.
 
     On entry (Java native ABI for `notificationPlayStatusChangedNative(byte,
     byte, byte)`):
@@ -1294,15 +1326,17 @@ def _emit_t9(a: Asm) -> None:
       1. Call JNI helper at 0x36c0 to obtain the BluetoothAvrcpService's
          per-conn struct (same helper T5 uses; conn buffer at struct + 8).
       2. Read y1-track-info into file_buf @ sp+16..815. file[792] = current
-         playing_flag (0=STOPPED, 1=PLAYING, 2=PAUSED — direct AVRCP
-         play_status enum per AVRCP 1.3 §5.4.1 Table 5.26).
+         play_status (AVRCP §5.4.1 Tbl 5.26 enum); file[794] = current
+         battery_status (AVRCP §5.4.2 Tbl 5.35 enum, Phase F2).
       3. Read y1-trampoline-state (16 B) into state_buf @ sp+0..15.
-         state[9] = last_play_status (previously pad).
-      4. If file[792] != state[9]: emit CHANGED via
-         reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, file[792]).
-         transId is auto-extracted from conn[17] by the response builder
-         (same pattern T5 uses for track_changed_rsp). Update state[9] =
-         file[792] and write 16 B back.
+         state[9]  = last_play_status (previously pad).
+         state[10] = last_battery_status (Phase F2; previously pad).
+      4. play_status compare → emit reg_notievent_playback_rsp CHANGED on
+         edge; update state[9].
+      5. battery_status compare → emit
+         reg_notievent_battery_status_changed_rsp CHANGED on edge; update
+         state[10].
+      6. If either changed, write 16 B state back.
 
     Race with T5: both read+modify+write the full 16 B state file. Concurrent
     firings can lose one update. In practice T5 fires on `metachanged` and
@@ -1377,11 +1411,17 @@ def _emit_t9(a: Asm) -> None:
 
     a.label("t9_skip_state_read")
 
-    # ---- compare file[792] (current play_status) vs state[9] (last) ----
+    # r5 was the fd in the read blocks above; both closes ran, so r5 is
+    # dead here. Repurpose r5 as `any_change` accumulator: 1 if either
+    # play_status or battery_status edge fired (so the state file gets
+    # written back). r5 is callee-save so PLT calls below preserve it.
+    a.movs_imm8(5, 0)                         # r5 = any_change = 0
+
+    # ---- play_status compare (file[792] vs state[9]) ----
     a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)     # r0 = current play_status
     a.ldrb_w(1, 13, T9_STATE_LAST_PS_OFF)     # r1 = last_play_status
     a.cmp_w(0, 1)
-    a.beq("t9_no_change")
+    a.beq("t9_after_play_check")
 
     # ---- emit CHANGED via reg_notievent_playback_rsp ----
     # r0 = conn (= struct + 8); r1 = 0 success; r2 = REASON_CHANGED;
@@ -1396,15 +1436,46 @@ def _emit_t9(a: Asm) -> None:
     # ---- update state[9] = file[792] in-memory ----
     a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)
     a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
+    a.movs_imm8(5, 1)                         # any_change = 1
 
-    # ---- write 16-byte state buf back to y1-trampoline-state ----
+    a.label("t9_after_play_check")
+
+    # ---- battery_status compare (file[794] vs state[10]) — Phase F2 ----
+    # AVRCP 1.3 §5.4.2 Tbl 5.34 (BATT_STATUS_CHANGED CHANGED) carries a
+    # 1-byte battery_status payload (Tbl 5.35 enum). Y1MediaBridge
+    # bucket-maps Android `Intent.ACTION_BATTERY_CHANGED` (level + plug
+    # state) to the AVRCP enum on every transition and writes file[794]
+    # before firing `playstatechanged`. T9 then picks it up.
+    a.ldrb_w(0, 13, T9_OFF_FILE_BATTERY)      # r0 = current battery_status
+    a.ldrb_w(1, 13, T9_STATE_LAST_BATT_OFF)   # r1 = last_battery_status
+    a.cmp_w(0, 1)
+    a.beq("t9_after_batt_check")
+
+    # ---- emit CHANGED via reg_notievent_battery_status_changed_rsp ----
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.ldrb_w(3, 13, T9_OFF_FILE_BATTERY)      # r3 = battery_status
+    a.blx_imm(PLT_reg_notievent_battery_status_rsp)
+
+    # ---- update state[10] = file[794] in-memory ----
+    a.ldrb_w(0, 13, T9_OFF_FILE_BATTERY)
+    a.strb_w(0, 13, T9_STATE_LAST_BATT_OFF)
+    a.movs_imm8(5, 1)                         # any_change = 1
+
+    a.label("t9_after_batt_check")
+
+    # ---- write state buf back only if any_change ----
+    a.cmp_imm8(5, 0)
+    a.beq("t9_no_change")
+
     a.adr_w(0, "path_state")
     a.movw(1, O_WRONLY | O_TRUNC)
     a.movs_imm8(2, 0)
     a.blx_imm(PLT_open)
     a.cmp_imm8(0, 0)
     a.blt("t9_no_change")                     # open failed → skip write, still return success
-    a.mov_lo_lo(5, 0)
+    a.mov_lo_lo(5, 0)                         # r5 = fd
 
     a.mov_lo_lo(0, 5)
     a.add_sp_imm(1, T9_OFF_STATE)             # r1 = state_buf
