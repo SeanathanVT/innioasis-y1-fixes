@@ -13,7 +13,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | **A, B, C, E** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP routing per AV/C Panel Subunit Spec op_id table. |
 | **su** | `/system/xbin/su` | Setuid-root `su` binary installed by `--root` flag. Replaces the historical adbd byte-patch attempts. |
 
-> **Not shipped (attempted and removed):** G1/G2 (mtkbt xlog redirect, crashed at NULL fmt — closed without root or daemon-side tooling); H1/H2/H3 (adbd setuid byte patches, broke ADB protocol — superseded by `src/su/`); the legacy AVRCP 1.4 byte-patch set (B1-E8 / C2/C3/C4 — regressed PASSTHROUGH without delivering metadata, removed in v2.1.0). Diagnoses preserved in [`INVESTIGATION.md`](INVESTIGATION.md).
+> **Not shipped (attempted and removed):** G1/G2 (mtkbt xlog redirect, crashed at NULL fmt — closed without root or daemon-side tooling); H1/H2/H3 (adbd setuid byte patches, broke ADB protocol — superseded by `src/su/`). Earlier byte-patch experiments preserved in [`INVESTIGATION.md`](INVESTIGATION.md).
 
 ---
 
@@ -78,7 +78,7 @@ Other PDU/event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset
 
 `r1=0` matters: response builders dispatch on r1 — `r1==0` writes the spec-correct event payload (reasonCode + event_id + 8-byte track_id memcpy per AVRCP 1.3 §5.4.2 Table 5.30); `r1!=0` writes a reject-shape frame. We pass `r1=0` everywhere.
 
-**Track_id sentinel** = `0xFFFFFFFFFFFFFFFF` (8 bytes of 0xFF) per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 / AVRCP 1.5 §6.7.2 — "this information is not bound to a particular media element". Keeps CTs in poll-on-each-event mode rather than the alternative "stable identity, refresh on CHANGED only" mode (which deadlocks against a reactive-only TG). The `y1-trampoline-state[0..7]` field still holds the real track_id internally so T4/T5 can detect edges and emit CHANGED proactively.
+**Track_id sentinel** = `0xFFFFFFFFFFFFFFFF` (8 bytes of 0xFF) per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 (printed `0xFFFFFFFF` in 1.3 is a typo; ESR07 clarifies the field is 8 bytes — "this information is not bound to a particular media element"). Keeps CTs in poll-on-each-event mode rather than the alternative "stable identity, refresh on CHANGED only" mode (which deadlocks against a reactive-only TG). The `y1-trampoline-state[0..7]` field still holds the real track_id internally so T4/T5 can detect edges and emit CHANGED proactively.
 
 ### T4 — GetElementAttributes (PDU 0x20)
 
@@ -196,7 +196,7 @@ Current trampoline blob is 1480 bytes (~2540 bytes still free in the padding). N
 
 Patches `MtkBt.odex` with four byte edits and recomputes the DEX adler32 checksum embedded in the ODEX header.
 
-**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns 14 (BlueAngel-internal code for AVRCP 1.4) instead of 10 (1.3). This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling without changing the wire shape. **Does not** mean we implement AVRCP 1.4 (see [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0).
+**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns the BlueAngel-internal flag value 14 instead of 10. This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling on a stack that was originally compiled for an earlier AVRCP version. The wire shape is unchanged; we ship AVRCP 1.3 PDUs only. See [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §1.
 
 **F2** at file `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false`. Fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts.
 

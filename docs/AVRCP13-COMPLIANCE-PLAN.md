@@ -10,42 +10,22 @@ This document is the build plan only. For why we have a proxy at all, the curren
 
 **Wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
 
-- `docs/spec/AVRCP_SPEC_V13.pdf` — base spec, 93 pages
-- `docs/spec/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains the only AVRCP 1.3 erratum (Erratum 4969 — SDP record AVCTP version clarification); §2.2 covers AVRCP 1.5 errata that occasionally inform our reading of inherited 1.3 text (e.g., the 8-byte `Identifier` sentinel form in TRACK_CHANGED).
+- `docs/spec/AVRCP_SPEC_V13.pdf` — base spec, 93 pages.
+- `docs/spec/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains Erratum 4969 (SDP record AVCTP version clarification, the only formal 1.3 erratum); §2.2 carries supplementary clarifications that resolve printed typos in 1.3 wire-format tables (e.g., the 8-byte `Identifier` sentinel form for TRACK_CHANGED).
 - `docs/spec/AVRCP.ICS.p17.pdf` — Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
-- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — Implementation eXtra Information for Testing Proforma, version 1.6.0 (2014-09-18, 12 pages). Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
+- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — Implementation eXtra Information for Testing Proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
 
-**AVRCP 1.3 lifecycle status (per ICS §1.2 Table 2b, 2024-07-01):**
+Per ICS §1.2 Table 2b, AVRCP 1.3 was deprecated 2023-02-01 and is scheduled for withdrawal 2027-02-01. We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping.
 
-| Version | Status |
-|---|---|
-| AVRCP v1.0 | Withdrawn 2023-02-01 |
-| **AVRCP v1.3 (this project's target)** | **Deprecated 2023-02-01. Withdrawn 2027-02-01.** |
-| AVRCP v1.4 | Deprecated 2013-08-01. Withdrawn 2023-02-01. |
-| AVRCP v1.5 | Still valid for new qualification |
-
-We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping. It does mean that **citations to "AVRCP 1.4 §X.Y" are doubly nonsensical** — 1.4 hasn't been a valid qualification target since August 2013. Future iterations should not introduce 1.4-version labels except in F1's BlueAngel-internal-flag context.
-
-**F1 patch in `MtkBt.odex`** sets BlueAngel-internal version code 10→14 ("1.4"). This is internal flag bookkeeping inside MtkBt's Java-side dispatcher to unblock 1.3+ command handling — **it does NOT mean we implement AVRCP 1.4.** We ship zero 1.4-only PDUs (no `0x60` SetAddressedPlayer, no `0x50` SetAbsoluteVolume, no Browsing Channel `0x70..0x77`). When this doc cites "AVRCP 1.4 §X.Y", it's almost certainly historical drift from earlier rev-iterations and should be downgraded to AVRCP 1.3 §... or deleted.
-
-**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against `docs/spec/AVRCP_SPEC_V13.pdf` table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where ESR07 clarifies a 1.3 typo against the AVRCP 1.5 successor (notably the TRACK_CHANGED 8-byte Identifier sentinel), cite both: `AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 / AVRCP 1.5 §6.7.2`. Section numbers that don't appear in the spec PDF (`§5.4.3.4`, `§6.7.1`, `§6.7.2` in 1.3, `§11.1.2`, `§6.4.1.4`) are drift; replace with the verified counterpart per the table at the end of this section.
-
-| Drift citation (do not use) | Verified citation (do use) |
-|---|---|
-| `AVRCP 1.4 §11.1.2` (PASSTHROUGH PLAY/PAUSE op codes) | AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec [ref 2]; concrete frame example in AVRCP 1.3 §19.3 (Appendix D) |
-| `AVRCP 1.4 §6.4.1.4` (CT must periodically re-send PRESS during held button) | Same as above (lives in AV/C Panel Subunit Spec, referenced from AVRCP 1.3 §4.6.1) |
-| `AVRCP 1.4 §5.4.3.4` (GetPlayStatus song_position semantics, play_status enum) | AVRCP 1.3 §5.4.1 Table 5.26 |
-| `AVRCP 1.4 §6.7.1` (RegisterNotification PLAYBACK_STATUS_CHANGED) | AVRCP 1.3 §5.4.2 Table 5.29 |
-| `AVRCP 1.4 §6.7.2` (TRACK_CHANGED Identifier 0xFFFFFFFF…FF sentinel) | AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 / AVRCP 1.5 §6.7.2 8-byte clarification |
-| `AVRCP 1.4 §5.3` (TG must ack CT charset declaration) | AVRCP 1.3 §5.2.7 (PDU 0x17 InformDisplayableCharacterSet) |
+**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against `docs/spec/AVRCP_SPEC_V13.pdf` table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where the spec text contains a printed typo, cite ESR07's clarification: `AVRCP 1.3 §X.Y + ESR07 §2.2`. Section numbers must appear in the AVRCP 1.3 spec PDF's table of contents — anything else is a citation error.
 
 ---
 
 ## 1. Goal
 
-Implement enough of AVRCP 1.3 that any spec-compliant AVRCP 1.3+ controller renders our metadata.
+Implement AVRCP 1.3 spec-completely so any spec-compliant 1.3+ controller renders our metadata. Scope is the latest revision of the AVRCP 1.3 spec (V13 + ESR07). Anything outside that revision is out of scope.
 
-Out of scope for this plan: AVRCP 1.4 features (Browsing Channel — separate L2CAP PSM and AVCTP stream; SetAbsoluteVolume PDU 0x50; SetAddressedPlayer PDU 0x60). Reachable via the same code-cave infrastructure if ever needed, but not on this plan's path. The Browsing Channel in particular requires response builders we don't need for metadata-only delivery.
+The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's BlueAngel-internal `getPreferVersion()` value — this internal flag must be set high enough for MtkBt's Java-side dispatcher to invoke 1.3+ command handling on a stack that was originally compiled against AVRCP 1.0. F1 sets the flag and unblocks 1.3 dispatch; nothing in our wire shape is changed by it.
 
 ---
 
@@ -62,7 +42,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | **5** | Receiving UNIT INFO | §4.1.3 | **M** | ✓ (mtkbt) | — |
 | **6** | Receiving SUBUNIT INFO | §4.1.3 | **M** | ✓ (mtkbt) | — |
 | **7** | Receiving PASS THROUGH cat 1 | §4.1.3 | **M (C.1: at least one cat)** | ✓ (mtkbt + Patch E) | — |
-| 8 | Receiving PASS THROUGH cat 2 | §4.1.3 | C.1: not required (cat 1 satisfies) | not claimed | optional; would unlock Absolute Volume |
+| 8 | Receiving PASS THROUGH cat 2 | §4.1.3 | C.1: not required (cat 1 satisfies) | not claimed | — |
 | 9 | Receiving PASS THROUGH cat 3 | §4.1.3 | C.1: not required | not claimed | — |
 | 10 | Receiving PASS THROUGH cat 4 | §4.1.3 | C.1: not required | not claimed | — |
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
@@ -75,19 +55,19 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2/extended_T2/T8 | — |
 | **23** | Notify EVENT_PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | **M (C.4: M IF GetElementAttributes + RegisterNotification)** | ✓ T8 INTERIM + T9 CHANGED on edge | — |
 | **24** | Notify EVENT_TRACK_CHANGED | §5.4.2 Tbl 5.30 | **M (C.4)** | ✓ extended_T2 INTERIM + T5 CHANGED on edge | — |
-| 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM-only | optional: proactive CHANGED |
-| 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM-only | optional |
-| 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only | optional: proactive CHANGED via timer |
-| 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM with canned 0x00 NORMAL | optional: real battery from Y1 sysfs |
-| 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with canned 0x00 POWER_ON | — |
+| 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM-only — CHANGED-on-edge planned (Phase F1) | partial |
+| 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM-only — CHANGED-on-edge planned (Phase F1) | partial |
+| 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only — periodic CHANGED planned (Phase F3) | partial |
+| 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM with canned `0x00 NORMAL` — real battery + CHANGED-on-edge planned (Phase F2) | partial |
+| 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
 | 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
-| 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | not shipped | Phase D — mandatory but no observed CT exercises this |
-| 36-58 | MediaPlayerSelection / Browsing (1.4+ PDUs 0x60+) | — | Various C requiring browsing | not shipped (1.4-only) | out of scope per Goal section |
-| 60-62 | Absolute Volume (1.4+ PDUs 0x50, EVENT_VOLUME_CHANGED) | — | C.5: M IF cat 2 | not claimed | optional stretch (would require claiming cat 2) |
+| 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | not shipped (current fall-through to msg=520 is functionally adequate; explicit handler planned for ICS-completeness — Phase D) | partial |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
-**Mandatory rows: all hit.** Optional rows we ship: 18, 19, 25, 26, 27, 28, 29, 66. The Continuation gap (rows 31-32) is a real spec gap but unobserved in our CT test matrix; tracked as Phase D.
+**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 29, 66. Optional rows partial (INTERIM-only or canned, real-data CHANGED-on-edge work tracked under Phase F): 25, 26, 27, 28. The Continuation gap (rows 31-32) is unobserved in our CT test matrix; explicit handler tracked as Phase D for ICS-completeness only.
+
+**INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. A row marked "INTERIM-only" handles registration but never emits CHANGED; spec-strict subscribers expect both halves. Mandatory rows 23 and 24 ship both halves; the optional rows above currently ship only INTERIM and are tracked under Phase F to ship the missing CHANGED-on-edge halves.
 
 **ICS Table 8 (Cat 1 PASSTHROUGH op_ids — mandatory subset):**
 
@@ -157,9 +137,6 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 | 0x16 | get_player_value_text_value_rsp | `0x35a0` | `0x203c` |
 | 0x17 | inform_charsetset_rsp | `0x3588` | `0x2138` |
 | 0x18 | battery_status_rsp (CT-side battery) | `0x357c` | `0x2160` |
-| **Phase E — 1.4 absolute volume** ||||
-| 0x50 | set_absolute_volume_rsp | `0x3558` | `0x2950` |
-| (paired notif) 0x31 event 0x0d | reg_notievent_volume_changed_rsp | `0x333c` | `0x28e8` |
 
 **No new PLT discovery needed.** The stubs are already linked. The work that remains:
 
@@ -241,66 +218,90 @@ btmtk_avrcp_send_get_playstatus_rsp(
 
 **Estimated effort:** 1-2 days. Includes the disassembly pass.
 
-### Phase C — PlayerApplicationSettings (T7 family)
+### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41)
 
-**Why third:** Spec-mandated but rarely a metadata gate. Defer until Phases A0+A1+B don't fix the next strict CT. Largest single phase by code volume.
+**Status:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response). Per AVRCP 1.3 §4.7.7 / §5.5, continuation flow is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. Two findings establish the current state:
 
-**What it adds:** A T7 trampoline that branches into 6 sub-trampolines for PDUs 0x11–0x16 (the configurational sub-set; 0x17 and 0x18 are now in Phase A0). Each sub-trampoline reads from y1-track-info extended fields (shuffle / repeat / ...), constructs the appropriate response, and calls the matching PLT.
+1. **Across 2868 PDU 0x20 frames in a single TV capture, 100% carry `packet_type=0x00`** (single non-fragmented AVRCP packet). `get_element_attributes_rsp` never sets the start-of-fragmentation flag; mtkbt fragments below at the AVCTP layer transparently to AVRCP. Even with the 7-attr T4 expansion, worst-case packed responses (~1100 B with maxed Title/Artist/Album/Genre slots) ship as a single AVRCP packet.
+2. **Across all 43 captures, zero 0x40/0x41 PDUs** from any CT in the test matrix (Samsung TV / Kia EV6 / Bolt EV / Sonos), against thousands of GetElementAttributes / RegisterNotification PDUs.
 
-**Music-app patches needed (`patch_y1_apk.py`):**
-- Hook `SharedPreferencesUtils.setShuffle(Z)V` to broadcast `com.y1.mediabridge.SHUFFLE_CHANGED` with `extra:bool`. ~10 smali instructions.
-- Hook `SharedPreferencesUtils.setRepeatMode(I)V` to broadcast `com.y1.mediabridge.REPEAT_CHANGED` with `extra:int`. ~10 smali instructions.
+**Current behavior** is a fall-through to `pass_through_rsp` returning msg=520 NotImplemented for any unknown PDU including 0x40/0x41. Functionally adequate; spec-acceptable.
 
-**Y1MediaBridge additions:**
-- Two new `BroadcastReceiver`s; bump y1-track-info schema with `shuffle_flag` u8 + `repeat_mode` u8.
-- Initial values read at service startup by reading `com.innioasis.y1`'s SharedPreferences XML (since broadcasts only fire on changes and we need the cold-boot value).
+**Phase D ships an explicit handler** for ICS-conformance scorecard reasons only: a tiny T-trampoline that returns AV/C `INVALID PARAMETER` (status 0x05) since we never set `packet_type=01` and therefore never legitimately receive 0x40. Effort: ~30 min. Documented as paper-only closure of ICS rows 31-32.
+
+**Re-evaluation trigger:** if any future hardware capture surfaces non-zero PDU 0x40 traffic (would indicate `get_element_attributes_rsp` started fragmenting after the 7-attr expansion), upgrade to a stateful continuation handler that re-emits the buffered response (~2-3 days).
+
+### Phase F — Optional event coverage (real data, CHANGED-on-edge)
+
+Closes the partial-implementation entries on ICS Table 7 rows 25-28 by completing the CHANGED-on-edge half of each event subscription. Listed here in increasing effort order. All four sub-phases ship real data sourced from Y1 / Android system APIs — no canned values.
+
+#### Phase F1 — Track-edge events (PDUs in event 0x03 TRACK_REACHED_END + 0x04 TRACK_REACHED_START). ~3 hours.
+
+**Spec:** AVRCP 1.3 §5.4.2 Tables 5.31 / 5.32. ICS rows 25 / 26 (both Optional).
+
+**Real data:** Y1MediaBridge's existing `com.android.music.metachanged` broadcast already fires at every track edge — the moment when the previous track reaches end and the new track reaches start.
+
+**Spec-strict semantic for END:** §5.4.2 Table 5.31 is "Notify when reached the end of the track of the playing element" — natural-end-only, not skip-driven. Distinguish via `mPositionAtStateChange ≈ mCurrentDuration` (within ~1 sec) on the previous track at the moment of the metachanged broadcast. Skip-driven track changes fire only event 0x02 + event 0x04, not 0x03.
+
+**Implementation:** extend T5's existing track-change CHANGED emission to fire a 3-tuple in sequence — event 0x03 TRACK_REACHED_END (only on natural end), event 0x02 TRACK_CHANGED (existing), event 0x04 TRACK_REACHED_START (always on track edge). T5 already runs at the right moment via the patched `notificationTrackChangedNative`; just add two PLT calls and a stack-buffer compare for the natural-end check. ~30 B added to the trampoline blob. Y1MediaBridge writes a 1-bit `previous_track_natural_end` flag into the schema before firing the broadcast.
+
+#### Phase F2 — Real battery state (event 0x06 BATT_STATUS_CHANGED). ~4 hours.
+
+**Spec:** AVRCP 1.3 §5.4.2 Tables 5.34 / 5.35. ICS row 28 (Optional). Allowed values: `0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE`.
+
+**Real data:** Android `Intent.ACTION_BATTERY_CHANGED` (sticky broadcast on API 17+). Provides `EXTRA_LEVEL` (0-100), `EXTRA_PLUGGED` (charger state), `EXTRA_STATUS` (CHARGING/FULL/etc.). No sysfs access required.
+
+**Implementation:**
+- Y1MediaBridge: new BroadcastReceiver for `ACTION_BATTERY_CHANGED`. Bucket-map level + plug state to AVRCP value (`charging+full → FULL_CHARGE; charging → EXTERNAL; level≤15 → CRITICAL; level≤30 → WARNING; else → NORMAL`). Emit broadcast `com.y1.mediabridge.batterychanged` only on bucket transitions to avoid flooding on every percent tick.
+- Schema: append `battery_status` u8 byte at `y1-track-info[795]` (currently in the reserved 793..799 range).
+- T8's existing event-0x06 INTERIM arm reads `[795]` instead of returning canned `0x00 NORMAL`.
+- New T_battery_changed proactive trampoline (clone of T9 shape, ~50 B), reads `[795]`, calls `reg_notievent_battery_status_changed_rsp` (PLT 0x3354) on edge.
+- One additional cardinality NOP in MtkBt.odex for the sswitch arm handling event 0x06 (mirror of the existing 0x01/0x02 NOPs).
+
+#### Phase F3 — Periodic PLAYBACK_POS_CHANGED (event 0x05). ~1 day.
+
+**Spec:** AVRCP 1.3 §5.4.2 Table 5.33. ICS row 27 (Optional). RegisterNotification command for event 0x05 carries a `playback_interval` u32 (in seconds); TG fires CHANGED every N seconds while playing.
+
+**Real data:** existing Y1MediaBridge `computePosition()` (live extrapolation from `mPositionAtStateChange + (now - mStateChangeTime)`).
+
+**Implementation (single-conn assumption — Y1 connects to one CT at a time per the test matrix):**
+- Per-conn subscription state stored at `y1-trampoline-state[10..15]` (currently pad): `pos_subscribed_interval_sec` (u32 BE, 4 B) + `pos_last_emitted_ms` (u32 BE, 4 B).
+- T8's existing event-0x05 INTERIM arm extended to write the saved interval into `[10..13]` on subscription.
+- Y1MediaBridge fires `com.y1.mediabridge.posticked` every 1 second while playing (Handler postDelayed loop).
+- New T_pos_tick trampoline reads saved interval from state, computes whether elapsed ≥ interval, emits CHANGED with current position via `reg_notievent_pos_changed_rsp` (PLT 0x3360), updates `pos_last_emitted_ms`.
+- Pause/stop: Y1MediaBridge stops the broadcast cadence; resume restarts it.
+
+#### Phase F4 — PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08). ~5 days.
+
+**Spec:** AVRCP 1.3 §5.2.1–5.2.6 + §5.4.2 Table 5.37. ICS rows 12-17 + 30. Condition C.14: support either none or all of 0x11-0x14 — we currently support none (spec-conformant); going to "all" is the threshold.
+
+**Real data:** Y1's `com.innioasis.y1.apk` `SharedPreferencesUtils.setShuffle(Z)V` and `setRepeatMode(I)V`.
+
+**Implementation:** two new smali patches in `patch_y1_apk.py` (broadcast on shuffle/repeat setters); Y1MediaBridge BroadcastReceivers + cold-boot SharedPreferences read; six new T7-family sub-trampolines for PDUs 0x11-0x16 (~350 B); proactive trampoline T_papp_changed for event 0x08; T1 advertises events grow to include 0x08.
 
 **Sub-PDU detail (informative):**
 - 0x11 ListPlayerAppSettingAttrs — return 2 attrs: 0x02 (Repeat), 0x03 (Shuffle). 1.3 also defines 0x01 EqualizerStatus and 0x04 ScanStatus, both optional; skip.
 - 0x12 ListPlayerAppSettingValues for attr=0x02 → 4 values (off / single / all / group). For attr=0x03 → 3 values (off / all / group).
 - 0x13 GetCurrentPlayerAppSettingValue — read shuffle_flag/repeat_mode from y1-track-info, return.
-- 0x14 SetPlayerAppSettingValue — controller sending us shuffle/repeat. Forward as a broadcast that the music app receives → setSharedPref → broadcast loops back to us. Or: directly write SharedPreferences via root-helper. (Path TBD; simpler is the broadcast roundtrip.)
+- 0x14 SetPlayerAppSettingValue — controller sending us shuffle/repeat. Forward as a broadcast that the music app receives → setSharedPref → broadcast loops back to us.
 - 0x15/0x16 — text labels for attribute and value names. Static strings ("Repeat", "Off", etc.) shippable in LOAD #1 padding.
-- 0x17 InformDisplayableCharacterSet — receive CT's accepted charsets. We currently ignore; respond with bare ack and continue sending UTF-8.
-- 0x18 InformBatteryStatusOfCT — receive CT's battery state. Respond with bare ack.
 
 Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the same broadcast receivers.
 
-**Files touched:**
-- `src/patches/_trampolines.py` — T7 family (~400 lines, the largest single addition)
-- `src/patches/patch_libextavrcp_jni.py` — filesz bump
-- `src/patches/patch_y1_apk.py` — two new smali patches (D, E for shuffle/repeat)
-- `src/Y1MediaBridge/.../MediaBridgeService.java` — receivers + schema (~120 lines)
-- `src/Y1MediaBridge/app/src/main/AndroidManifest.xml` — receiver entries (or runtime-register)
-- `T1 update` — `EventsSupported` grows to include 0x08
-
-**Estimated effort:** 5-7 days. Volume + spec-shape + cross-app IPC + 8 sub-PDUs each needing arg-discovery.
-
-### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41)
-
-**Why fourth:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response) — but only relevant if any single response goes large enough to trip the response builder's continuation flag. The AVRCP-level continuation mechanism is distinct from AVCTP-layer fragmentation: AVCTP fragments transparently below the AVRCP PDU; continuation only kicks in when the TG sets a "more available" flag in its packet, prompting the CT to come back with PDU 0x40.
-
-**Diagnostic finding:** grep across all 43 captures in `/work/logs/dual-*` for the byte signature `00 19 58 40` (Bluetooth SIG OUI + PDU 0x40) and `00 19 58 41` returns **zero** matches across Samsung TV, Kia EV6, Bolt EV, and Sonos test sets — even though the same grep finds 8444 OUI hits, 2868 GetElementAttributes (PDU 0x20), and 5547 RegisterNotification (PDU 0x31) in a single TV capture. **No CT in our test matrix exercises continuation.** Consistent with the spec mechanics: when T4 shipped 3 attrs the response was small enough that `get_element_attributes_rsp` never set the continuation flag, so CTs never got prompted to ask for more.
-
-**Re-evaluation after the 7-attr T4 expansion:** worst-case packed response with maxed Title/Artist/Album/Genre slots (~256 B each) + numeric attrs is ~1100 B. Whether that trips the response builder's continuation flag depends on its internal threshold, which we have not disassembled. If hardware captures continue to show zero PDU 0x40 traffic, demote Phase D to a documented spec-only NACK→ack stub. If a CT does start sending 0x40 once responses grow, we ship the full handler.
-
-**If implemented:** a Phase-D trampoline handles 0x40/0x41 by re-emitting the buffered response (continuation) or zeroing it (abort). Requires carrying state across PDU dispatches — first time we'd persist intra-AVCTP state in the trampolines.
-
-**Estimated effort:** 2-3 days if real-world traffic ever requests it; otherwise ~30 minutes for a documented NACK-or-spec-ack stub.
-
 ### Phase E — Audit + cleanup
 
-- **Patch E — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1 — SHIPPED.** PASSTHROUGH op codes + press/release behavior live in AV/C Panel Subunit Spec (ref [2] of AVRCP 1.3); §4.6.1 in AVRCP 1.3 references that spec. Concrete frame example in AVRCP 1.3 §19.3 (Appendix D, informative) shows op_id 0x44 PLAY with state_flag = 0 / 1 for press / release. Spec semantic: PLAY transitions to PLAYING from any state; PAUSE transitions to PAUSED from any state; STOP transitions to STOPPED from any state. Patch E splits `PlayControllerReceiver`'s short-press join arm into four labeled blocks — KEY_PLAY (85, legacy `ACTION_MEDIA_BUTTON`) keeps `playOrPause()` (toggle); KEYCODE_MEDIA_PLAY (126, from PASSTHROUGH 0x44) routes to `play(Z)V` (bool=false); KEYCODE_MEDIA_PAUSE (127, from PASSTHROUGH 0x46) routes to `pause(IZ)V` (reason=0x12, flag=true); KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45) routes to `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. Routing all three discrete keycodes through `playOrPause()` (toggle) is a known wrong shape: a strict CT issuing discrete PLAY while Y1 is already PLAYING would have its intent inverted, with the CT's UI reporting the button as unresponsive. Smali-level edits only, in `patch_y1_apk.py`'s Patch E block.
-- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering — it synthesizes ~25 Hz `KEY_xxx REPEAT` events whenever a `DOWN` arrives without a matching `UP`, which happens whenever a CT-side PASSTHROUGH RELEASE is dropped on a saturated AVCTP channel. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init` (real body at `0x73c8`). Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `bd3554d38486856cfbb17a37c02fd0a0` (cumulative across all libextavrcp_jni.so patches including U1).
+**Already shipped:**
+- **Patch E — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1.** Splits `PlayControllerReceiver`'s short-press join arm into four labeled blocks — KEY_PLAY (85, legacy `ACTION_MEDIA_BUTTON`) keeps `playOrPause()` (toggle); KEYCODE_MEDIA_PLAY (126, from PASSTHROUGH 0x44) routes to `play(Z)V` (bool=false); KEYCODE_MEDIA_PAUSE (127, from PASSTHROUGH 0x46) routes to `pause(IZ)V` (reason=0x12, flag=true); KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45) routes to `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. Routing all three discrete keycodes through `playOrPause()` (toggle) is a known wrong shape: a strict CT issuing discrete PLAY while Y1 is already PLAYING would have its intent inverted. Smali-level edits only.
+- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `bd3554d38486856cfbb17a37c02fd0a0` (cumulative across all libextavrcp_jni.so patches including U1).
+
+**Pending audit items (no spec gap, no estimated effort attached):**
 - T1's `EventsSupported` array maintained in lock-step with what's actually implemented (each phase bumps it).
-- SDP record audit: re-confirm that what we advertise in the served record matches what we actually implement post-Phase A/B/C.
-- Optional 1.4 absolute volume support (PDU 0x50 + event 0x0d). Trivial trampoline (T10), no Y1MediaBridge schema change (volume is system-level). Useful for cars that use Bluetooth for hands-free where AVRCP volume changes the phone's media volume.
-- Investigate whether `BluetoothAvrcpService.disable()` flag in MtkBt.odex (F2 patch) needs a sister patch for the new event subscriptions.
+- SDP record audit: re-confirm that what we advertise in the served record matches what we actually implement post-Phase F4.
+- Investigate whether `BluetoothAvrcpService.disable()` flag in MtkBt.odex (F2 patch) needs a sister patch for the new event subscriptions added in Phase F.
 - mtkbt has a software-side `fftimer` (strings at `0xc8ada`, `0xc8b05`, `0xc8b2a`) that may re-fire FF/RW keys at the AVRCP layer independently of the kernel auto-repeat that U1 disables. Not exercised in any current capture; on the radar if held-button cascades reappear after U1 ships.
 - **Y1 player state-code coverage in `MediaBridgeService.LogcatMonitor`.** The monitor at `MediaBridgeService.java:869` only recognizes Y1 `BaseActivity` state codes `'1'` (playing) and `'3'` (paused). Hardware captures have shown Y1 emitting `播放状态切换 5` after FF cascades terminated — likely a STOPPED state that we currently silently drop. AVRCP 1.3 §5.4.1 Table 5.26 distinguishes `STOPPED (0x00)` from `PAUSED (0x02)` as separate `PlayStatus` values; under the current code `mIsPlaying` stays `true` if Y1 transitions playing → state-5 (no-op for state 5) without an intervening state-3 (paused) hop. T6 GetPlayStatus and T9 PLAYBACK_STATUS_CHANGED would then misreport. Fix: reverse-engineer Y1's full state-code space from `BaseActivity` smali, extend the LogcatMonitor's state-char dispatch to cover STOPPED and any other AVRCP-mappable codes, and extend the `playing_flag` byte at `y1-track-info[792]` to carry the three-valued AVRCP enum (we already write `0=STOPPED, 1=PLAYING, 2=PAUSED` per the schema, but nothing currently writes 0).
-- Logging cleanup: gate trampoline + Y1MediaBridge logging behind a build-time debug flag (already noted in `project_y1_mods_status.md` post-release work).
-
-**Estimated effort:** 1-2 days.
+- **Event 0x07 SYSTEM_STATUS_CHANGED.** T8 emits canned `0x00 POWER_ON` for the INTERIM and never fires CHANGED. This is intentional and correct: while trampolines execute, the system is by definition POWER_ON; UNPLUGGED is for accessory/dock contexts that don't apply to the Y1; POWER_OFF is unobservable from inside a process that can no longer emit responses. The canned value IS the real value. Documented here to forestall future "this is canned, fix it" audits.
+- Logging cleanup: gate trampoline + Y1MediaBridge logging behind a build-time debug flag.
 
 ---
 
@@ -398,9 +399,9 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 
 ---
 
-## 9. Remaining effort (Phases C, D, E)
+## 9. Remaining effort
 
-Phases A0/A1/B already shipped (see compliance scorecard in §2). Estimated effort to close remaining gaps:
+Phases A0/A1/B + GetElementAttributes 7-attr already shipped (see compliance scorecard in §2). Estimated effort to close remaining gaps:
 
 | Phase | Status | Trampoline LOC | Schema bump | Music-app patch | Estimated effort |
 |---|---|---|---|---|---|
@@ -408,11 +409,13 @@ Phases A0/A1/B already shipped (see compliance scorecard in §2). Estimated effo
 | A1 — Notification expansion | **shipped** | ~150 | yes | no | — |
 | B — GetPlayStatus | **shipped** | ~80 | (with A1) | no | — |
 | GetElementAttributes attrs 4-7 | **shipped** | ~140 (T4 7-attr loop) | yes (1104 B y1-track-info) | no | — |
-| C — PlayerAppSettings (0x11–0x16) | not shipped | ~350 | yes | yes | 5–7 days |
-| D — Continuation (0x40–0x41) | not shipped — diagnostic shows zero CT exercises across 43 captures | ~200 | no | no | 30 min for spec-only stub; 2–3 days for full implementation if hardware ever shows 0x40 traffic |
-| E — Audit + optional 1.4 abs-vol | partial (Patch E + U1 shipped) | ~80 (T10 abs-vol) | no | no | 1–2 days |
+| F1 — Track-edge events (0x03/0x04 CHANGED) | not shipped | ~30 | yes (1 flag byte) | no | 3 hours |
+| F2 — Real battery state (0x06 CHANGED) | not shipped | ~50 | yes (1 byte) | no | 4 hours |
+| F3 — Periodic 0x05 PLAYBACK_POS_CHANGED | not shipped | ~120 | (uses state file pad) | no | 1 day |
+| F4 — PlayerApplicationSettings (0x11–0x16 + event 0x08) | not shipped | ~400 | yes (2 bytes) | yes | 5 days |
+| D — Continuation (0x40–0x41) | not shipped — diagnostic shows zero CT exercises across 43 captures | ~30 | no | no | 30 min for spec-only stub |
 
-Total remaining for full 1.3 compliance + optional E: ~8–12 days (conservative; D may collapse to a stub). The trampoline chain pattern scales linearly with PDU count; we're not space-constrained.
+Total remaining for full 1.3 compliance: ~7–8 days end-to-end.
 
 ---
 
@@ -420,10 +423,10 @@ Total remaining for full 1.3 compliance + optional E: ~8–12 days (conservative
 
 Shipped phases let us short-circuit further work if compatibility is achieved:
 
-- **A0 + A1 + B + GetElementAttributes 7-attr (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 8 RegisterNotification events covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position; **GetElementAttributes packs all 7 §5.3.4 attribute IDs** (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
-- **Phase C (PApp Settings):** mostly spec-completeness; few CTs gate metadata behind it. Diminishing returns from here.
-- **Phase D (Continuation):** mandatory per ICS condition C.2 but **diagnostic across all 43 captures shows zero CT exercises 0x40/0x41**. Deferable to a documented spec-only stub unless hardware testing surfaces continuation traffic from the larger 7-attr response.
-- **Phase E (audit + optional 1.4 abs-vol):** Patch E + U1 from Phase E already shipped; SetAbsoluteVolume is a stretch goal and would require claiming PASS THROUGH Cat 2 (not currently advertised).
+- **A0 + A1 + B + GetElementAttributes 7-attr (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 7 advertised RegisterNotification events 0x01..0x07 covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position; **GetElementAttributes packs all 7 §5.3.4 attribute IDs** (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
+- **Phase F (optional event CHANGED-on-edge coverage):** completes the partial-implementation rows on ICS Table 7 25-28 by shipping real-data CHANGED edges for 0x03/0x04/0x05/0x06 and PApp Settings for 0x11-0x16 + event 0x08. F4 (PApp) is rarely a metadata gate in observed CT behavior — diminishing returns relative to F1/F2/F3.
+- **Phase D (Continuation):** mandatory per ICS condition C.2 but **diagnostic across all 43 captures shows zero CT exercises 0x40/0x41**. Ships as a 30-minute spec-only stub for ICS-completeness; full state machine deferred unless hardware ever surfaces 0x40 traffic.
+- **Phase E (audit + cleanup):** Patch E + U1 already shipped; remaining items (SDP audit, MtkBt.odex disable() check, fftimer investigation, Y1 player state-code expansion, logging gate) are non-spec work tracked separately.
 
 Each phase ships an incremental compliance milestone that's coherent on its own.
 
@@ -431,10 +434,9 @@ Each phase ships an incremental compliance milestone that's coherent on its own.
 
 ## 11. Out of scope (and why)
 
-- **AVRCP 1.4 browsing channel** (out-of-scope for AVRCP 1.3; listed for reference only) — separate L2CAP PSM, separate AVCTP stream, requires `set_browsedplayer_rsp`/`get_folderitems_rsp`/`change_path_rsp`/`get_itemattributes_rsp`/`play_items_rsp`/`add_tonowplaying_rsp`/`search_rsp` (PLT stubs all exist; calling convention work is non-trivial). Useful for cars that show a media library view, but our use case is "what's playing right now," which is the metadata channel only. Defer.
-- **AVRCP 1.5 cover art (BIP)** — separate OBEX channel, separate PSM, image-encoder integration. Y1 has cover art in MediaStore but pushing it over BIP is a different protocol entirely. Out of scope.
 - **AVRCP TG group navigation (0x7d/0x7e in 1.3-Cat-3)** — falls under PASSTHROUGH which we haven't broken. No changes needed.
-- **Browsing-channel SDP advertisement** — currently absent from our served record. Adding it would invite browse-channel probes we can't answer. Leave as-is.
+
+Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for this project. See §1 Goal.
 
 ---
 

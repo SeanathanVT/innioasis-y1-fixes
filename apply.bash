@@ -23,14 +23,14 @@ venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
-  --avrcp        AVRCP 1.3 metadata pipeline (Pixel-1.3 SDP shape + AVCTP 1.2
+  --avrcp        AVRCP 1.3 metadata pipeline (1.3 SDP shape + AVCTP 1.2
                  + JNI trampoline chain in libextavrcp_jni.so + proactive
                  CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex
                  + Y1MediaBridge.apk metadata bridge). Replaces an earlier
-                 "byte-patch the AVRCP 1.4 SDP advertisement" approach that
-                 regressed stock PASSTHROUGH without delivering metadata; the
-                 trampoline chain (T1/T2/T4/T5) bypasses mtkbt's compiled-1.0
-                 command dispatcher and synthesises the 1.3 responses inside
+                 SDP byte-patch approach that regressed stock PASSTHROUGH
+                 without delivering metadata; the trampoline chain bypasses
+                 mtkbt's compiled-1.0 command dispatcher and synthesises
+                 the 1.3 responses inside
                  the JNI library directly.
 
                  Components:
@@ -613,10 +613,10 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
 
   echo "Configuring build.prop for Bluetooth fixes.."
   # persist.bluetooth.avrcpversion is intentionally NOT set — see
-  # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
-  # AVRCP 1.4 advertisement that mtkbt can't actually deliver, regressing
-  # the working AVRCP 1.0 PASSTHROUGH. The remaining properties are
-  # essential for car/peer pairing and stay regardless of AVRCP version.
+  # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to
+  # an AVRCP version mtkbt cannot actually deliver, regressing the working
+  # stock PASSTHROUGH. The remaining properties are essential for car/peer
+  # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
 ro.bluetooth.class=2098204

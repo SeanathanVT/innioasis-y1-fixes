@@ -17,17 +17,22 @@ ODEX structure:
     const/16 v0, #10   ; DEX bytes: 13 00 0A 00
     return v0
 
-  BlueAngel internal version codes: 10 = AVRCP 1.3, 14 = AVRCP 1.4.
+  This return value drives the Java-side dispatcher's command-handling
+  cascade. The stock value 10 routes commands through MtkBt's compiled-in
+  AVRCP 1.0 handlers and rejects anything past PASSTHROUGH. Returning 14
+  unblocks 1.3+ command dispatch through the rest of the JNI/native path.
+  This is internal flag bookkeeping inside MtkBt's BlueAngel layer; the
+  on-the-wire AVRCP version is determined by the SDP record (V1 patch in
+  patch_mtkbt.py), not by this value.
 
-  This return value drives the entire Java -> JNI -> daemon capability cascade:
-    getPreferVersion() -> checkCapability() 1.4 block -> activateConfig_3req(bitmask)
+    getPreferVersion() -> checkCapability() -> activateConfig_3req(bitmask)
     -> g_tg_feature = 0x0e (@ libextavrcp_jni.so 0xD29C)
     -> activate_1req reads global -> btmtk_avrcp_send_activate_req payload[6] = 0x0e
-    -> mtkbt daemon receives AVRCP 1.4 internal code on abstract socket bt.ext.adp.avrcp
+    -> mtkbt daemon receives the unblocked internal code on abstract socket bt.ext.adp.avrcp
 
   Patch: change return value from 10 (0x0a) to 14 (0x0e).
-  Confirmed working in logcat: getPreferVersion:14, Support AVRCP1.4,
-  _activate_1req version:14 sdpfeature:35.
+  Confirmed working in logcat: getPreferVersion:14, _activate_1req
+  version:14 sdpfeature:35.
 
 --- Patch 3: cardinality bypass for proactive TRACK_CHANGED ---
 
@@ -108,7 +113,7 @@ ADLER_FILE_OFF = 0x30
 
 PATCHES = [
     {
-        "name":   "[F1] getPreferVersion return  (BlueAngel 10=AVRCP1.3 -> 14=AVRCP1.4)",
+        "name":   "[F1] getPreferVersion return value (BlueAngel internal 10 -> 14, unblocks 1.3+ dispatch)",
         "offset": 0x3e0ea,
         "before": bytes([0x0a]),
         "after":  bytes([0x0e]),
@@ -190,7 +195,7 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patch stock MtkBt.odex for AVRCP 1.4 + BT toggle fix"
+        description="Patch stock MtkBt.odex for AVRCP 1.3+ Java-dispatcher unblock + BT toggle fix"
     )
     parser.add_argument("input", help="Path to stock MtkBt.odex")
     parser.add_argument("--output", "-o", default=None,

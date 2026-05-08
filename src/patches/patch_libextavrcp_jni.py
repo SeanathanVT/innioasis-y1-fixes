@@ -69,8 +69,7 @@ extended_T2 — in LOAD #1 padding area, at vaddr derived from T4 layout.
           (so T4 can later check whether the track has changed).
        3. Reply track_changed_rsp INTERIM with the 0xFF×8 sentinel
           ("not bound to a particular media element" per AVRCP 1.3 §5.4.2
-          Table 5.30 + ESR07 §2.2 clarification of the 8-byte form
-          against AVRCP 1.5 §6.7.2).
+          Table 5.30 + ESR07 §2.2 clarification of the 8-byte form).
      PDU 0x31 + event ≠ 0x02 → b.w T8 (RegisterNotification dispatcher
      for the rest of the events). Other PDUs fall through to T4 (PDU 0x20).
 

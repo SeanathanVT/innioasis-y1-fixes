@@ -77,11 +77,11 @@ Wire-level track_id design choice. AVRCP 1.3 §5.4.2 Table 5.30 (Response
 EVENT_TRACK_CHANGED) defines the 8-byte `Identifier` ("Index of the
 current track") and notes "If no track currently selected, then return
 0xFFFFFFFF in the INTERIM response" — the printed text in 1.3 is a typo
-(the field is 8 bytes), corrected by ESR07 §2.2 against the AVRCP 1.5
-successor (§6.7.2) to `0xFFFFFFFFFFFFFFFF` (8 bytes). We use the
-"not bound" sentinel form on the wire (spec-permissible per the same
-clause). Hardware testing showed that emitting a real synthetic track_id
-in INTERIM made at least one strict CT class enter a tight
+(the field is 8 bytes), corrected by ESR07 §2.2 to the 8-byte form
+`0xFFFFFFFFFFFFFFFF`. We use the "not bound" sentinel form on the wire
+(spec-permissible per the same clause). Hardware testing showed that
+emitting a real synthetic track_id in INTERIM made at least one strict
+CT class enter a tight
 RegisterNotification subscribe storm at ~90 Hz from connection setup,
 saturating AVCTP and dropping PASSTHROUGH release frames as a side
 effect. The sentinel mode avoids that without violating the spec, and
@@ -1324,7 +1324,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     # CHANGED responses. AVRCP 1.3 §5.4.2 Table 5.30 ("If no track currently
     # selected, then return 0xFFFFFFFF in the INTERIM response"; the field
     # is 8 bytes — printed text in 1.3 is a typo) + ESR07 §2.2 clarifying
-    # against AVRCP 1.5 §6.7.2 to the 8-byte form 0xFFFFFFFFFFFFFFFF.
+    # to the 8-byte form 0xFFFFFFFFFFFFFFFF.
     # Semantic: "this information is not bound to a particular media
     # element", which keeps the CT in poll-on-each-event mode.
     a.label("sentinel_ffx8")
