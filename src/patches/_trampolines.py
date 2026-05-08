@@ -2,25 +2,31 @@
 Trampoline assembly for libextavrcp_jni.so.
 
 Builds the dynamically-assembled trampoline blob that ships at vaddr 0xac54
-in the LOAD #1 page-padding area. Eight trampolines:
+in the LOAD #1 page-padding area. Nine trampolines (T1 + T2 stub are written
+separately by patch_libextavrcp_jni.py at other code-cave addresses):
 
-  T4 (GetElementAttributes, PDU 0x20):
-    - Reads y1-track-info (1104 B: 8 B track_id + 3 × 256 B Title/Artist/Album
-      + 20 B GetPlayStatus fields + pad + 16 B TrackNumber + 16 B
-      TotalNumberOfTracks + 16 B PlayingTime + 256 B Genre).
-    - Reads y1-trampoline-state (16 B: last_synced track_id [0..7] +
-      tc_transId [8] + last_play_status [9]).
-    - If state[0..7] != file[0..7] (track changed since the last CHANGED we
-      emitted) → calls track_changed_rsp with reason=CHANGED, arg1=0
-      (success path), track_id = &SENTINEL_FFx8, then writes file[0..7]
-      back into state[0..7] so we don't re-emit until Y1MediaBridge moves
-      the track_id again.
+  T4 (GetElementAttributes, PDU 0x20) — reactive:
+    - Reads the full 1104 B y1-track-info into a stack buffer (full schema
+      in docs/AVRCP13-COMPLIANCE-PLAN.md §5).
+    - Reads the 16 B y1-trampoline-state (last_synced track_id at [0..7],
+      tc_transId at [8], last_play_status at [9], last_battery_status at
+      [10], pad at [11..15]).
+    - If state[0..7] != file[0..7] (track changed since the last CHANGED
+      we emitted): calls track_changed_rsp with reason=CHANGED, r1=0
+      (success), track_id=&SENTINEL_FFx8; writes file[0..7] back into
+      state[0..7] so we don't re-emit until Y1MediaBridge moves the
+      track_id again.
     - Replies with 7× get_element_attributes_rsp covering all AVRCP 1.3
       §5.3.4 attribute IDs 0x01..0x07. The response builder accumulates
       calls 1..6 and emits a single packed msg=540 frame on call 7
       (where arg2+1 == arg3 == 7).
+    - T4's PDU pre-check also dispatches PDU 0x17 → T_charset, 0x18 →
+      T_battery, 0x30 → T6, 0x40/0x41 → T_continuation; PDU 0x31 events
+      flow into T4 only after extended_T2 has handled the event-0x02
+      arm and other events have been fanned out to T8.
 
-  extended_T2 (RegisterNotification(TRACK_CHANGED), PDU 0x31, event 0x02):
+  extended_T2 (RegisterNotification(TRACK_CHANGED), PDU 0x31, event 0x02)
+  — reactive:
     - Reads y1-track-info first 8 bytes (track_id) into a stack buffer.
     - Writes [file_track_id || transId || pad] to y1-trampoline-state so
       T4's later compare doesn't spuriously detect a change against a
@@ -30,48 +36,81 @@ in the LOAD #1 page-padding area. Eight trampolines:
 
   T2 stub at 0x72d4 is rewritten to a single `b.w extended_T2`.
 
-  T5 (proactive TRACK_CHANGED, entered via b.w from the patched first
+  T5 (proactive on Y1 track change, entered via b.w from the patched first
   instruction of `notificationTrackChangedNative`):
-    - Reads y1-track-info + y1-trampoline-state via the JNI per-conn
-      helper at 0x36c0.
-    - On track-id divergence: emits track_changed_rsp CHANGED with
-      r1=0, r2=REASON_CHANGED, r3=&SENTINEL_FFx8, updates state.
+    - Reads the full 800 B y1-track-info file (incl. natural_end flag at
+      [793]) and the 16 B y1-trampoline-state via the JNI per-conn helper
+      at 0x36c0.
+    - On track-id divergence (state[0..7] != file[0..7]): emits the AVRCP
+      §5.4.2 track-edge 3-tuple in spec order:
+        1. reg_notievent_reached_end_rsp CHANGED — only if file[793]==1
+           (Phase F1; natural-end gate per §5.4.2 Tbl 5.31, set by
+           Y1MediaBridge after computePosition() ≈ duration check).
+        2. track_changed_rsp CHANGED — always (track_id=&SENTINEL_FFx8).
+        3. reg_notievent_reached_start_rsp CHANGED — always (every track
+           edge crosses a start-of-new-track boundary per Tbl 5.32).
+      Then writes file[0..7] into state[0..7] and persists state.
 
   T_charset (PDU 0x17 InformDisplayableCharacterSet):
-    - Branched from T4's pre-check when PDU == 0x17.
-    - Calls inform_charsetset_rsp via PLT 0x3588 with arg1=0 (success).
+    - Branched from T4's pre-check on PDU 0x17.
+    - Calls inform_charsetset_rsp via PLT 0x3588 with r1=0 (success).
     - Tail-jumps to t4_to_epilogue. No state side-effects; the spec-defined
-      response is a bare 8-byte ack frame.
-    - AVRCP 1.3 §5.2.7. Without the ack our TG would NACK with msg=520
-      NOT_IMPLEMENTED, which strict CTs interpret as the TG distrusting
-      subsequent metadata.
+      response is a bare 8-byte ack frame (AVRCP 1.3 §5.2.7).
 
   T_battery (PDU 0x18 InformBatteryStatusOfCT):
-    - Branched from T4's pre-check when PDU == 0x18.
-    - Calls battery_status_rsp via PLT 0x357c with arg1=0 (success).
+    - Branched from T4's pre-check on PDU 0x18.
+    - Calls battery_status_rsp via PLT 0x357c with r1=0 (success).
     - Same shape as T_charset; response builder is structurally identical
-      apart from outbound msg_id (538 vs 536).
+      apart from outbound msg_id (538 vs 536). AVRCP 1.3 §5.2.8.
 
-  T6 (PDU 0x30 GetPlayStatus):
-    - Branched from T4's pre-check when PDU == 0x30.
+  T_continuation (PDU 0x40 RequestContinuingResponse / 0x41 Abort):
+    - Branched from T4's pre-check on PDU 0x40 or 0x41.
+    - Restores lr canary + r0=conn and tail-jumps to UNKNOW_INDICATION
+      (the catch-all reject path that emits AV/C NOT_IMPLEMENTED via
+      msg=520). get_element_attributes_rsp never sets packet_type=01
+      and we don't fragment above the AVCTP layer, so a CT only sends
+      0x40 in error from our perspective. AVRCP 1.3 §6.15.2 specifies
+      AV/C INVALID_PARAMETER (0x05); NOT_IMPLEMENTED is functionally
+      indistinguishable to the CT — both abandon the continuation flow.
+
+  T6 (PDU 0x30 GetPlayStatus) — reactive:
+    - Branched from T4's pre-check on PDU 0x30.
     - Reads y1-track-info[776..795] (duration_ms / pos_at_state_change_ms /
-      state_change_time_sec / playing_flag, all big-endian on disk),
-      byte-swaps the u32s to host order via Thumb-2 REV.
-    - When playing, calls clock_gettime(CLOCK_BOOTTIME, &timespec) to
-      extrapolate live position from the saved freeze-point.
+      state_change_time_sec / playing_flag, BE on disk → REV → host).
+    - When playing_flag == PLAYING, calls clock_gettime(CLOCK_BOOTTIME,
+      &timespec) and extrapolates live_pos = saved_pos + (now_sec -
+      state_change_sec) * 1000 — same arithmetic T9's position-emit
+      block does, so polled GetPlayStatus and event-0x05 CHANGED report
+      consistent positions.
     - Calls get_playstatus_rsp via PLT 0x3564.
 
-  T8 (RegisterNotification dispatcher for events ≠ 0x02):
+  T8 (RegisterNotification INTERIM dispatcher for events ≠ 0x02):
     - Entered from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
-    - Dispatches on event_id, calling the matching reg_notievent_*_rsp PLT
-      entry for events 0x01/0x03/0x04/0x05/0x06/0x07. INTERIM-only;
-      proactive CHANGED for event 0x01 lives in T9.
+    - Dispatches on event_id, calling the matching reg_notievent_*_rsp
+      PLT for events 0x01 (play_status from y1-track-info[792]),
+      0x03/0x04 (no payload), 0x05 (position from [780..783] REV),
+      0x06 (battery_status from [794] — Phase F2 changed this from
+      canned NORMAL), 0x07 (canned 0x00 POWER_ON — intentional, see
+      compliance plan §4 Phase E audit notes).
+    - INTERIM only. CHANGED-on-edge for 0x01/0x05/0x06 lives in T9;
+      for 0x02/0x03/0x04 in T5/extended_T2.
 
-  T9 (proactive PLAYBACK_STATUS_CHANGED, entered via b.w from the patched
-  first instruction of `notificationPlayStatusChangedNative`):
-    - Reads y1-track-info[792] (play_status), compares against
-      y1-trampoline-state[9] (last_play_status).
-    - On edge: emits CHANGED via reg_notievent_playback_rsp, writes state.
+  T9 (proactive on Y1 play / battery / position events, entered via b.w
+  from the patched first instruction of `notificationPlayStatusChangedNative`):
+    - Reads the full 800 B y1-track-info and 16 B y1-trampoline-state.
+    - Three independent edge / cadence checks:
+        1. play_status: if file[792] != state[9], emit
+           reg_notievent_playback_rsp CHANGED, update state[9].
+        2. battery_status (Phase F2): if file[794] != state[10], emit
+           reg_notievent_battery_status_changed_rsp CHANGED, update
+           state[10].
+        3. position (Phase F3): if file[792] == 1 PLAYING,
+           clock_gettime(CLOCK_BOOTTIME) + same arithmetic as T6, emit
+           reg_notievent_pos_changed_rsp CHANGED. Driven at 1 s cadence
+           by Y1MediaBridge's mPosTickRunnable firing `playstatechanged`
+           while playing.
+    - Single combined state-file write per fire if either play or
+      battery edge fired. Position emission never dirties state.
 
 Wire-level track_id design choice. AVRCP 1.3 §5.4.2 Table 5.30 (Response
 EVENT_TRACK_CHANGED) defines the 8-byte `Identifier` ("Index of the
@@ -81,42 +120,34 @@ current track") and notes "If no track currently selected, then return
 `0xFFFFFFFFFFFFFFFF`. We use the "not bound" sentinel form on the wire
 (spec-permissible per the same clause). Hardware testing showed that
 emitting a real synthetic track_id in INTERIM made at least one strict
-CT class enter a tight
-RegisterNotification subscribe storm at ~90 Hz from connection setup,
-saturating AVCTP and dropping PASSTHROUGH release frames as a side
-effect. The sentinel mode avoids that without violating the spec, and
-the per-track CHANGED edge information is delivered via T4/T5 detecting
-divergence between y1-track-info[0..7] and y1-trampoline-state[0..7]
-(comparison runs on real track_ids; the emitted wire packet uses the
-sentinel). Per the spec-compliance directive, deviations from the spec
-only happen when documented CT-compat reasons demand it.
+CT class enter a tight RegisterNotification subscribe storm at ~90 Hz
+from connection setup, saturating AVCTP and dropping PASSTHROUGH release
+frames as a side effect. The sentinel mode avoids that without violating
+the spec, and the per-track CHANGED edge information is delivered via
+T4/T5 detecting divergence between y1-track-info[0..7] and
+y1-trampoline-state[0..7] (comparison runs on real track_ids; the
+emitted wire packet uses the sentinel).
 
-T2/T5/T9 all pass `r1=0` to their response builder. The builder
-dispatches on r1: r1==0 takes the spec-correct path that writes
+All trampolines that call a `reg_notievent_*_rsp` PLT pass `r1=0`. The
+builder dispatches on r1: r1==0 takes the spec-correct path that writes
 reasonCode + event_id + payload; r1!=0 takes a reject-shape path that
-omits the payload. Passing r1=0 is verified against disassembly of
-libextavrcp.so:0x2458 (track_changed_rsp) and confirmed across all
+omits the payload. Verified against disassembly of libextavrcp.so:0x2458
+(track_changed_rsp) and confirmed structurally identical across all
 reg_notievent_*_rsp builders in the same family.
 
 Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   r5 = JNI instance pointer (conn buffer = r5+8)
   caller's sp+368 = transId    (1 byte)
-  caller's sp+374 = lr canary   (2 bytes)
+  caller's sp+374 = lr canary   (2 bytes; SIZE field — see ARCHITECTURE)
   caller's sp+382 = PDU         (1 byte)
-  caller's sp+386 = event_id    (1 byte)
-  caller's sp+394 = num_attrs   (1 byte)
+  caller's sp+386 = event_id    (1 byte; PDU 0x31 only)
+  caller's sp+386 = identifier  (8 bytes BE; PDU 0x20 GetElementAttributes only)
+  caller's sp+394 = num_attrs   (1 byte; PDU 0x20 only)
 
-PLT entries used (objdump -R + cross-ref against existing patcher comments):
-  open                         = 0x363c
-  close                        = 0x33d8
-  strlen                       = 0x34d4
-  memset                       = 0x33fc
-  write                        = 0x3630
-  get_element_attributes_rsp   = 0x3570
-  track_changed_rsp            = 0x3384
-
-read(2) is not in the PLT — we issue the syscall directly via SVC #0
-with r7=3 (NR_read on Linux ARM EABI).
+PLT entries used: see the `PLT_*` constants below; full inventory in
+docs/AVRCP13-COMPLIANCE-PLAN.md §3. read(2) is not in the PLT — we
+issue the syscall directly via SVC #0 with r7=3 (NR_read on Linux ARM
+EABI). clock_gettime(2) is via SVC #0 with r7=263 (NR_clock_gettime).
 """
 
 import os
@@ -166,20 +197,33 @@ JNI_GET_AVRCP_STATE = 0x36c0
 
 # Stack frame layout inside T4 (after sub.w sp, sp, #FRAME_LEN):
 #   sp+0   .. +15    = outgoing stack args for get_element_attributes_rsp (16 B)
-#   sp+16  .. +31    = state buffer (16 B; bytes 0..7 = last_seen track_id,
+#   sp+16  .. +31    = state buffer (16 B; mirrors y1-trampoline-state schema:
+#                                          bytes 0..7 = last_seen track_id,
 #                                          byte 8     = last RegisterNotification transId,
-#                                          bytes 9..15 = padding)
-#   sp+32  .. +1135  = file buffer (1104 B; track_info file image)
-#                      0..7    track_id
-#                      8..263  title  (256 B)
-#                      264..519 artist (256 B)
-#                      520..775 album  (256 B)
-#                      776..795 GetPlayStatus fields (T6 reads these)
-#                      796..799 pad (Phase C reserved)
-#                      800..815 TrackNumber  UTF-8 ASCII decimal (16 B)
-#                      816..831 TotalNumberOfTracks (16 B)
-#                      832..847 PlayingTime  UTF-8 ASCII decimal ms (16 B)
-#                      848..1103 Genre (256 B)
+#                                          byte 9     = last_play_status (T9 edge),
+#                                          byte 10    = last_battery_status (T9 edge),
+#                                          bytes 11..15 = padding)
+#   sp+32  .. +1135  = file buffer (1104 B; full y1-track-info image)
+#                      0..7      track_id
+#                      8..263    Title  (256 B UTF-8, null-padded)
+#                      264..519  Artist
+#                      520..775  Album
+#                      776..779  duration_ms                BE u32 (T6)
+#                      780..783  pos_at_state_change_ms     BE u32 (T6, T8 event 0x05)
+#                      784..787  state_change_time_sec      BE u32 (T6/T9 live-position
+#                                                                    extrapolation)
+#                      788..791  pad
+#                      792       playing_flag               u8 (AVRCP §5.4.1 Tbl 5.26 enum;
+#                                                                T6, T8 event 0x01, T9)
+#                      793       previous_track_natural_end u8 (T5 gate for §5.4.2 Tbl 5.31
+#                                                                TRACK_REACHED_END CHANGED)
+#                      794       battery_status             u8 (AVRCP §5.4.2 Tbl 5.35 enum;
+#                                                                T8 event 0x06, T9)
+#                      795..799  pad (Phase F4 — shuffle_flag / repeat_mode reservation)
+#                      800..815  TrackNumber                UTF-8 ASCII decimal (16 B)
+#                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
+#                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
+#                      848..1103 Genre                      UTF-8 (256 B)
 T4_FRAME           = 1136
 T4_FILE_SIZE       = 1104
 T4_OFF_ARGS        = 0

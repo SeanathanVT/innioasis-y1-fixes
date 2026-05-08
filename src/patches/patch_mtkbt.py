@@ -13,18 +13,19 @@ commands and (2) route those commands into the JNI's msg 519 emit path so
 the libextavrcp_jni.so trampoline chain (patch_libextavrcp_jni.py) can
 synthesise the AVRCP 1.3 responses.
 
-This targets the empirically-working Pixel-1.3 SDP shape (per Trace #11
-reference data + the 2026-05-05 sdptool A/B against Pixel 4) plus the one
-structural attribute that even Pixel-1.3 has and Y1 lacks at every patch
-level: a 0x0100 ServiceName.
+This targets the empirically-working AVRCP 1.3 reference SDP shape (per
+known-working AVRCP 1.3 reference data + sdptool A/B captures recorded in
+docs/INVESTIGATION.md) plus the one structural attribute that even the
+reference record has and Y1 lacks at every patch level: a 0x0100 ServiceName.
 
 V1 — AVRCP 1.0 -> 1.3 (served ProfileDescList LSB)
 V2 — AVCTP 1.0 -> 1.2 (served ProtocolDescList AVCTP version LSB)
 S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
      0x0100 ServiceName entry pointing at the existing "Advanced Audio"
      SDP string at file offset 0x0eb9ce. This sacrifices the SupportedFeatures
-     attribute on the wire (peers see no 0x0311); empirically Pixel-1.3 advertises
-     features=0x0001 but permissive CTs engage without strictly requiring the attribute.
+     attribute on the wire (peers see no 0x0311); the known-working AVRCP 1.3
+     reference advertises features=0x0001 but permissive CTs engage without
+     strictly requiring the attribute.
      The string content "Advanced Audio" is reused from mtkbt's existing A2DP
      ServiceName — peers don't validate ServiceName content; they just need
      the attribute present so the record passes structural sanity checks.
@@ -151,7 +152,7 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Minimum SDP patches for stock mtkbt — Pixel-1.3 SDP shape + ServiceName"
+        description="Minimum SDP patches for stock mtkbt — AVRCP 1.3 reference SDP shape + ServiceName"
     )
     parser.add_argument("input", help="Path to stock mtkbt binary")
     parser.add_argument("--output", "-o", default=None,

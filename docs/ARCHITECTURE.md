@@ -180,9 +180,10 @@ When `_Z17saveRegEventSeqIdhh` runs (entry symbol at file 0x5ee4, body at 0x5f0c
 | `sp+382`    | **PDU byte** — every trampoline reads this first |
 | `sp+383`    | packet_type |
 | `sp+384-385`| param_length BE |
-| `sp+386-393`| identifier (8 bytes BE — track_id from RegisterNotification, or attribute identifier in GetElementAttributes) |
-| `sp+394`    | num_attributes (in GetElementAttributes) |
-| `sp+395+`   | attribute_ids, 4 bytes BE each (last byte is the LSB we dispatch on) |
+| `sp+386`    | For PDU 0x31 RegisterNotification: **event_id** (1 byte) — extended_T2 / T8 read this to dispatch. For PDU 0x20 GetElementAttributes: first byte of the 8-byte **identifier** (track_id; sp+386..393). |
+| `sp+387-390`| For PDU 0x31 event 0x05 only: **playback_interval** (4 bytes BE — CT-supplied notification cadence). Currently unread by the trampolines (Phase F3 emits at a fixed 1 s rate; see compliance plan §4 Phase F3 deviation note). For PDU 0x20: continuation of the identifier. |
+| `sp+394`    | num_attributes (PDU 0x20 GetElementAttributes only) |
+| `sp+395+`   | attribute_ids, 4 bytes BE each (PDU 0x20; last byte is the LSB we dispatch on) |
 
 `r5` in saveRegEventSeqId's frame holds the conn-buffer base. **`r5+8` is the conn buffer pointer** that all `btmtk_avrcp_send_*_rsp` functions take as their first arg.
 
@@ -230,7 +231,7 @@ The original `libextavrcp_jni.so` has two LOAD segments:
 
 ```
 LOAD #1: file 0x0..0xac54, vaddr 0x0..0xac54,  R+E
-LOAD #2: file 0xbc08..0xc2a4, vaddr 0xcc08..0xd540, R+W
+LOAD #2: file 0xbc08..0xc2a4, vaddr 0xcc08..0xd548, R+W
 ```
 
 Between LOAD #1's end at file `0xac54` and LOAD #2's start at file `0xbc08`, the file contains **4020 zero bytes of page-alignment padding** (`0xbc08 - 0xac54`). We can write code into that padding and bump LOAD #1's `FileSiz`/`MemSiz` (program-header at file offset `0x54`, fields at +16 and +20 within the phdr) to extend the executable mapping over our new code. **No other section/segment offsets shift** — `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical. The dynamic linker just maps slightly more file content as R+E.
@@ -318,18 +319,23 @@ Per AVRCP 1.3 §5.3.4 a missing attribute is signalled by `AttributeValueLength=
 
 **One** msg=540 IPC frame outbound containing all seven attributes.
 
-### Calling pattern for `…send_reg_notievent_track_changed_rsp` (PLT 0x3384, used by T2)
+### Calling pattern for `…send_reg_notievent_track_changed_rsp` (PLT 0x3384, used by extended_T2 / T4 / T5)
 
 ```c
 void btmtk_avrcp_send_reg_notievent_track_changed_rsp(
     void* conn,           // r0 = r5+8
-    uint8_t transId,      // r1 = transId from sp+368
+    uint8_t reject,       // r1 = 0 for success (event-payload path); non-zero takes
+                          //      the reject path that omits the 8-byte track_id payload.
+                          //      See "Note on the arg1==0 / arg1!=0 dispatch shared by all
+                          //      reg_notievent_*_rsp functions" below.
     uint8_t reasonCode,   // r2 = 0x0F (INTERIM) or 0x0D (CHANGED)
     void* track_id_ptr    // r3 = pointer to 8-byte BE track_id
 );
 ```
 
-Cross-referenced with `notificationTrackChangedNative` at libextavrcp_jni.so:0x3bc0 which calls the same PLT with the same arg shape. Currently T2 passes `track_id_ptr` → 8 bytes of `0xFF` ("identifier not allocated, metadata not available" per AVRCP spec).
+**transId is NOT an arg.** The function reads it from `conn[17]` (the per-conn struct that mtkbt set up for the inbound RegisterNotification command) and writes it into the response's wire frame at offset 5. Passing `transId` as `r1` would route into the reject-shape path that omits the event payload — see the historical note in the bottom subsection of this Reverse-engineered semantics block.
+
+Cross-referenced with `notificationTrackChangedNative` at libextavrcp_jni.so:0x3bc0 which calls the same PLT with the same arg shape. extended_T2 (the actual handler reached via the T2 stub at 0x72d4) and T5 both pass `track_id_ptr` → 8 bytes of `0xFF` ("identifier not allocated, metadata not available" per AVRCP §5.4.2 Tbl 5.30 + ESR07 §2.2 — see "Wire-level track_id choice" below for the rationale).
 
 ### Calling pattern for `…send_get_capabilities_rsp` (PLT 0x35dc, used by T1)
 

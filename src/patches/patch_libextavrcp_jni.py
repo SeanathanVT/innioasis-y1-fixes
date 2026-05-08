@@ -187,16 +187,17 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
 # bytes). Advertises every event we actually handle in the trampoline chain:
 #   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
-#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4/T5 CHANGED)
-#   0x03 TRACK_REACHED_END             (T8 — INTERIM only)
-#   0x04 TRACK_REACHED_START           (T8 — INTERIM only)
-#   0x05 PLAYBACK_POS_CHANGED          (T8 — INTERIM only)
-#   0x06 BATT_STATUS_CHANGED           (T8 — INTERIM only, canned NORMAL)
-#   0x07 SYSTEM_STATUS_CHANGED         (T8 — INTERIM only, canned POWERED_ON)
+#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4/T5 CHANGED on edge)
+#   0x03 TRACK_REACHED_END             (T8 INTERIM + T5 CHANGED on natural-end edge)
+#   0x04 TRACK_REACHED_START           (T8 INTERIM + T5 CHANGED on every track edge)
+#   0x05 PLAYBACK_POS_CHANGED          (T8 INTERIM + T9 CHANGED at 1 s cadence while playing)
+#   0x06 BATT_STATUS_CHANGED           (T8 INTERIM from y1-track-info[794] + T9 CHANGED on bucket edge)
+#   0x07 SYSTEM_STATUS_CHANGED         (T8 INTERIM only, canned POWERED_ON — intentional;
+#                                         the canned value IS the real value while trampolines run)
 # Per the spec-compliance rule (feedback_avrcp_spec_compliance.md), advertise
 # only what we actually implement. 0x08 PLAYER_APPLICATION_SETTING_CHANGED is
-# Phase C territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
-# unadvertised until we ship that.
+# Phase F4 territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
+# unadvertised — Phase F4 is deferred.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10

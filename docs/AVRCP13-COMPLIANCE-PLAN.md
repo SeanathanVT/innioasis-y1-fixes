@@ -61,7 +61,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (unconditional on every track edge) | — |
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM + T9 CHANGED at 1 s cadence while playing (Y1MediaBridge tick fires `playstatechanged`; T9 live-extrapolates position via `clock_gettime(CLOCK_BOOTTIME)`) | — |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
-| 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
+| 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned IS the real value while trampolines run — see §4 Phase E audit notes) | — |
 | 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase F4 (paired with PApp Settings, deferred) |
 | 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
@@ -163,7 +163,7 @@ The Inform PDUs are pure CT→TG informational acks; no Y1MediaBridge data plumb
 
 ### Phase A1 — Notification expansion (T8 + T9) — SHIPPED
 
-T8 trampoline branches from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. T8 allocates an 800 B stack frame, reads `y1-track-info` (for events 0x01/0x05 which carry payloads from the GetPlayStatus block), then dispatches on `event_id` and emits an INTERIM via the matching `reg_notievent_*_rsp` PLT:
+T8 trampoline branches from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. T8 allocates an 800 B stack frame, reads `y1-track-info` (for events 0x01/0x05/0x06 which carry payloads from the schema), then dispatches on `event_id` and emits an INTERIM via the matching `reg_notievent_*_rsp` PLT:
 
 | event_id | PLT | payload | source |
 |---|---|---|---|
@@ -171,18 +171,18 @@ T8 trampoline branches from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. T8 al
 | 0x03 TRACK_REACHED_END | 0x3378 | (none) | — |
 | 0x04 TRACK_REACHED_START | 0x336c | (none) | — |
 | 0x05 PLAYBACK_POS_CHANGED | 0x3360 | u32 position_ms | y1-track-info[780..783] (REV-swapped) |
-| 0x06 BATT_STATUS_CHANGED | 0x3354 | u8 canned `0x00 NORMAL` | — |
-| 0x07 SYSTEM_STATUS_CHANGED | 0x3348 | u8 canned `0x00 POWERED_ON` | — |
+| 0x06 BATT_STATUS_CHANGED | 0x3354 | u8 battery_status | y1-track-info[794] (real bucket; Phase F2) |
+| 0x07 SYSTEM_STATUS_CHANGED | 0x3348 | u8 canned `0x00 POWER_ON` | — (intentional — see §4 Phase E audit notes) |
 
 **T9** adds proactive CHANGED for event 0x01 PLAYBACK_STATUS_CHANGED (structurally a clone of T5, the TRACK_CHANGED proactive trampoline). T9 is invoked by the patched `notificationPlayStatusChangedNative` (file offset 0x3c88, stock prologue `2D E9 F3 41` overwritten with `b.w T9`), which fires on every Y1MediaBridge `playstatechanged` broadcast once the matching MtkBt cardinality NOP at 0x3c4fe (sswitch_18a, event 0x01 case) is in place. T9 reads `y1-track-info[792]` (current play_status), compares against `y1-trampoline-state[9]` (`last_play_status`), emits `reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, play_status)` via PLT 0x339c on edge, and writes the new value back. transId is auto-extracted from conn[17] by the response builder (same convention T5 uses for track_changed_rsp). Phase F2 / F3 later extend T9 to also emit BATT_STATUS_CHANGED and PLAYBACK_POS_CHANGED on the same trigger — see those phases.
 
 **T1 `EventsSupported`:** advertises events `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (count=7). Per the spec-compliance feedback rule, advertise only what's implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised since Phase F4 PlayerApplicationSettings is deferred.
 
-**Schema dependency:** Y1MediaBridge writes `play_status` at offset 792 and `position_at_state_change_ms` at offsets 780..783; T8 reads from those.
+**Schema dependency:** Y1MediaBridge writes `play_status` at offset 792, `position_at_state_change_ms` at 780..783, and (post-F2) `battery_status` at 794; T8 reads from those. Full schema in §5 below.
 
 ### Phase B — GetPlayStatus (T6) — SHIPPED
 
-T6 branches from T4's pre-check on PDU 0x30 (alongside the 0x20/0x17/0x18 dispatch). Reads y1-track-info[776..795] for `duration_ms` / `position_at_state_change_ms` / `state_change_time_sec` / `playing_flag` — all stored big-endian to match the existing track_id encoding, byte-swapped to host order via the Thumb-2 `REV` instruction (`rev_lo_lo` in `_thumb2asm.py`). Calls `get_playstatus_rsp` via PLT 0x3564 with `arg1=0` + duration + position + play_status. When `playing_flag == PLAYING`, T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` to extrapolate live position from the saved freeze-point; when stopped/paused the position field stays at the saved freeze point.
+T6 branches from T4's pre-check on PDU 0x30 (alongside the 0x17 / 0x18 / 0x20 / 0x40 / 0x41 dispatch arms). Reads y1-track-info[776..795] for `duration_ms` / `position_at_state_change_ms` / `state_change_time_sec` / `playing_flag` — all stored big-endian to match the existing track_id encoding, byte-swapped to host order via the Thumb-2 `REV` instruction (`rev_lo_lo` in `_thumb2asm.py`). Calls `get_playstatus_rsp` via PLT 0x3564 with `arg1=0` + duration + position + play_status. When `playing_flag == PLAYING`, T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` to extrapolate live position from the saved freeze-point; when stopped/paused the position field stays at the saved freeze point.
 
 **Calling convention** (confirmed via disassembly + cross-reference with stock JNI caller `getPlayerstatusRspNative`, documented in `ARCHITECTURE.md`):
 ```c
@@ -211,7 +211,7 @@ btmtk_avrcp_send_get_playstatus_rsp(
 
 ### Phase F — Optional event coverage (real data, CHANGED-on-edge)
 
-Closes the partial-implementation entries on ICS Table 7 rows 25-28 by completing the CHANGED-on-edge half of each event subscription. Listed here in increasing effort order. All four sub-phases ship real data sourced from Y1 / Android system APIs — no canned values.
+Closes the CHANGED-on-edge half of each Optional event subscription (ICS Table 7 rows 25-28) and the PlayerApplicationSettings rows (12-17 + 30). Sub-phases F1 / F2 / F3 are shipped — they ship real data sourced from Y1 / Android system APIs, no canned values. Sub-phase F4 (PlayerApplicationSettings) is deferred — see its sub-section for the why.
 
 #### Phase F1 — Track-edge events (events 0x03 TRACK_REACHED_END + 0x04 TRACK_REACHED_START) — SHIPPED
 
@@ -222,7 +222,7 @@ Closes the partial-implementation entries on ICS Table 7 rows 25-28 by completin
 **Spec-strict semantic for END:** §5.4.2 Table 5.31 is "Notify when reached the end of the track of the playing element" — natural-end-only, not skip-driven. Skip-driven track changes fire only event 0x02 + event 0x04, not 0x03.
 
 **What ships:**
-- Y1MediaBridge `onTrackDetected()` now compares the previous track's extrapolated position (`computePosition()` — anchored to the last play/pause/seek state change) against `mCurrentDuration` at the moment of track detection. Within `[-1000ms..+2000ms]` of duration counts as natural end. The 1s lower bound covers tracks where the player overshoots duration slightly before signalling end-of-track; the 2s upper bound covers normal LogcatMonitor staleness. Result is stored in `mPreviousTrackNaturalEnd` (boolean) and written to `y1-track-info[793]` as a u8 (1=natural, 0=skip / interrupt) inside `writeTrackInfoFile()` before the metachanged broadcast fires. Schema expansion: byte 793 was previously in the reserved 793..799 range — now 794..799 are the Phase F4 reservation.
+- Y1MediaBridge `onTrackDetected()` compares the previous track's extrapolated position (`computePosition()` — anchored to the last play/pause/seek state change) against `mCurrentDuration` at the moment of track detection. Within `[-1000ms..+2000ms]` of duration counts as natural end. The 1s lower bound covers tracks where the player overshoots duration slightly before signalling end-of-track; the 2s upper bound covers normal LogcatMonitor staleness. Result is stored in `mPreviousTrackNaturalEnd` (boolean) and written to `y1-track-info[793]` as a u8 (1=natural, 0=skip / interrupt) inside `writeTrackInfoFile()` before the metachanged broadcast fires.
 - T5 trampoline (in `libextavrcp_jni.so`) frame grew from 24 B (16 state + 8 file_tid scratch) to 816 B (16 state + 800 file_buf, mirroring T9's frame shape) so it can read `file[793]`. After detecting a track edge (existing `state[0..7] != file[0..7]` compare), T5 emits the AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec-defined order: `reg_notievent_reached_end_rsp` CHANGED (gated on `file[793]==1`, PLT 0x3378), `track_changed_rsp` CHANGED (existing, PLT 0x3384), `reg_notievent_reached_start_rsp` CHANGED (unconditional on every edge, PLT 0x336c). Adds ~40 B to the trampoline blob.
 
 No additional MtkBt.odex cardinality NOPs needed: T5 fires once per `metachanged` broadcast and emits all three events synchronously inside that single invocation. The cardinality NOPs in MtkBt.odex are only necessary when a separate `notificationXChangedNative` callback path needs to be unblocked.
@@ -268,7 +268,7 @@ Y1MediaBridge versionCode bumps 19 → 20; versionName 2.2 → 2.3.
 **Why deferred:** F4 is all-or-none under C.14 (partial implementation of 0x11-0x14 is non-conformant), and every row it would close is Optional. The implementation requires (a) Y1 APK smali patches that inject `sendBroadcast` calls into static-ish methods (`SharedPreferencesUtils.setMusicIsShuffle`/`setMusicRepeatMode`) where there is no Context handle, requiring `getApp()`-injection chains; (b) Y1MediaBridge cross-package SharedPreferences plumbing for cold-boot reads; (c) at minimum 4 sub-trampolines for 0x11-0x14 (plus 0x15/0x16 text-label trampolines and event 0x08 proactive emission for full ICS coverage) where the PLT calling conventions for `list_player_attrs_rsp`, `list_player_values_rsp`, `get_curplayer_value_rsp`, `set_player_value_rsp`, `get_player_attr_text_rsp`, `get_player_value_text_value_rsp` are not yet documented and would each require disassembly + cross-reference work; (d) a SetPlayerAppSettingValue (PDU 0x14) write path that actually mutates Y1's SharedPreferences from a different process; (e) a new cardinality NOP in MtkBt.odex for the event-0x08 sswitch arm if proactive CHANGED is in scope. Total effort ≈ 5 days of careful work for Optional-only rows.
 
 **What's in place** (pre-F4 plumbing that will not have to be redone):
-- T8's existing event-0x08 INTERIM arm (currently NOT-IMPLEMENTED) is a small extension when the schema/PLT discovery is done.
+- T8 currently falls through to UNKNOW_INDICATION for any unknown event_id including 0x08; adding an event-0x08 arm to T8's dispatch is a small extension once the schema/PLT discovery is done.
 - T1's `EventsSupported` array advertises `[0x01..0x07]`; F4 adds 0x08.
 - Schema bytes `[795..799]` of `y1-track-info` are reserved for `shuffle_flag` / `repeat_mode` plus padding.
 - The infrastructure pattern (Y1MediaBridge → `playstatechanged` broadcast → T9 piggyback) used by F2 / F3 demonstrates a working dispatch path that F4 could reuse for PDU 0x14 if the SetPlayerAppSettingValue write path goes through a fresh Y1MediaBridge BroadcastReceiver-then-trigger-back-to-Y1-app round trip.
