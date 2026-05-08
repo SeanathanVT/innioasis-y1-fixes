@@ -1627,8 +1627,14 @@ def build() -> tuple[bytes, dict[str, int]]:
 
 
 if __name__ == "__main__":
+    # LOAD #2 starts at file 0xbc08 in stock libextavrcp_jni.so; we can
+    # extend LOAD #1 up to but not into LOAD #2, so the padding budget is
+    # 0xbc08 - T4_VADDR = 4020 bytes.
+    LOAD2_OFFSET = 0xbc08
+    PADDING_BUDGET = LOAD2_OFFSET - T4_VADDR
     blob, addrs = build()
-    print(f"blob length: {len(blob)} bytes  (LOAD #1 padding budget: 3712 bytes)")
+    print(f"blob length: {len(blob)} bytes  (LOAD #1 padding budget: {PADDING_BUDGET} bytes; "
+          f"{PADDING_BUDGET - len(blob)} free)")
     print(f"final vaddr: 0x{T4_VADDR + len(blob):x}")
     print()
     print("labels:")

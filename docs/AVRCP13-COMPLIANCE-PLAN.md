@@ -48,8 +48,8 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 9 | Receiving PASS THROUGH cat 3 | §4.1.3 | C.1: not required | not claimed | — |
 | 10 | Receiving PASS THROUGH cat 4 | §4.1.3 | C.1: not required | not claimed | — |
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
-| 12-15 | List/Get/Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; Phase C ships all |
-| 16-17 | PApp Setting Attribute/Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | optional; Phase C |
+| 12-15 | List/Get/Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; Phase F4 ships all (deferred) |
+| 16-17 | PApp Setting Attribute/Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | Phase F4 (deferred) |
 | 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
 | **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime, single packed frame) | — |
@@ -62,14 +62,14 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM + T9 CHANGED at 1 s cadence while playing (Y1MediaBridge tick fires `playstatechanged`; T9 live-extrapolates position via `clock_gettime(CLOCK_BOOTTIME)`) | — |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
-| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
+| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase F4 (paired with PApp Settings, deferred) |
 | 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
 **Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 27, 28, 29, 31, 32, 66. Optional rows still pending: 12-17, 30 (Phase F4 PlayerApplicationSettings).
 
-**INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. A row marked "INTERIM-only" handles registration but never emits CHANGED; spec-strict subscribers expect both halves. Mandatory rows 23 and 24 ship both halves; the optional rows above currently ship only INTERIM and are tracked under Phase F to ship the missing CHANGED-on-edge halves.
+**INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. Mandatory rows 23 and 24 ship both halves. Optional rows 25 / 26 / 27 / 28 also ship both halves (CHANGED-on-edge added by Phase F1 / F2 / F3). Row 29 SYSTEM_STATUS_CHANGED ships INTERIM only — the canned `0x00 POWER_ON` value is the real value while trampolines run, so there is no edge to fire CHANGED on (see §4 Phase E audit notes).
 
 **ICS Table 8 (Cat 1 PASSTHROUGH op_ids — mandatory subset):**
 
@@ -99,8 +99,8 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; Y1MediaBridge tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | optional |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | Phase C |
+| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | intentionally INTERIM-only (canned IS the real value while trampolines run; see §4 Phase E audit notes) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | Phase F4 (deferred) |
 
 ---
 
@@ -115,56 +115,42 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 
 | PDU / event | Response builder | PLT @ | libextavrcp.so body @ |
 |---|---|---|---|
-| **In use** ||||
+| **Currently used by shipped trampolines** ||||
 | 0x10 GetCapabilities | get_capabilities_rsp | `0x35dc` | `0x1dac` |
+| 0x17 InformDisplayableCharacterSet | inform_charsetset_rsp | `0x3588` | `0x2138` |
+| 0x18 InformBatteryStatusOfCT | battery_status_rsp | `0x357c` | `0x2160` |
 | 0x20 GetElementAttributes | get_element_attributes_rsp | `0x3570` | `0x2188` |
-| 0x31 event 0x02 | reg_notievent_track_changed_rsp | `0x3384` | `0x2458` |
-| (default reject) | pass_through_rsp | `0x3624` | n/a (in libextavrcp.so too — not used) |
-| **Phase A — notifications** ||||
+| 0x30 GetPlayStatus | get_playstatus_rsp | `0x3564` | `0x2354` |
 | 0x31 event 0x01 | reg_notievent_playback_rsp | `0x339c` | `0x23f0` |
+| 0x31 event 0x02 | reg_notievent_track_changed_rsp | `0x3384` | `0x2458` |
 | 0x31 event 0x03 | reg_notievent_reached_end_rsp | `0x3378` | `0x24c8` |
 | 0x31 event 0x04 | reg_notievent_reached_start_rsp | `0x336c` | `0x2528` |
 | 0x31 event 0x05 | reg_notievent_pos_changed_rsp | `0x3360` | `0x2588` |
 | 0x31 event 0x06 | reg_notievent_battery_status_changed_rsp | `0x3354` | `0x25f0` |
 | 0x31 event 0x07 | reg_notievent_system_status_changed_rsp | `0x3348` | `0x2658` |
-| 0x31 event 0x08 | reg_notievent_player_appsettings_changed_rsp | `0x345c` | `0x2720` |
-| **Phase B — playback status** ||||
-| 0x30 GetPlayStatus | get_playstatus_rsp | `0x3564` | `0x2354` |
-| **Phase C — player application settings** ||||
+| (default reject for unknown PDU including 0x40/0x41) | pass_through_rsp | `0x3624` | n/a (in libextavrcp.so too — reached via UNKNOW_INDICATION fall-through) |
+| **Phase F4 (deferred) — player application settings** ||||
 | 0x11 | list_player_attrs_rsp | `0x35d0` | `0x1e24` |
 | 0x12 | list_player_values_rsp | `0x35c4` | `0x1e74` |
 | 0x13 | get_curplayer_value_rsp | `0x35b8` | `0x1ed0` |
 | 0x14 | set_player_value_rsp | `0x3594` | `0x1f2e` |
 | 0x15 | get_player_attr_text_rsp | `0x35ac` | `0x1f58` |
 | 0x16 | get_player_value_text_value_rsp | `0x35a0` | `0x203c` |
-| 0x17 | inform_charsetset_rsp | `0x3588` | `0x2138` |
-| 0x18 | battery_status_rsp (CT-side battery) | `0x357c` | `0x2160` |
+| 0x31 event 0x08 | reg_notievent_player_appsettings_changed_rsp | `0x345c` | `0x2720` |
 
-**No new PLT discovery needed.** The stubs are already linked. The work that remains:
+**No new PLT discovery needed.** The stubs are already linked. Argument-convention discovery is still required for any builder we haven't called yet (Phase F4 — list_player_attrs_rsp / list_player_values_rsp / get_curplayer_value_rsp / set_player_value_rsp / get_player_attr_text_rsp / get_player_value_text_value_rsp / reg_notievent_player_appsettings_changed_rsp). Recipe per function: see "Adding a new PDU handler" in [`ARCHITECTURE.md`](ARCHITECTURE.md). Document the resulting C signature in `ARCHITECTURE.md` §"Reverse-engineered semantics" before writing the trampoline.
 
-### 3a. Per-function argument-convention discovery (still required)
+### Code-cave budget
 
-Argument names from the OEM are not what their positions suggest — `get_element_attributes_rsp`'s "arg2" turned out to be attribute *index*, not transId; we found that the hard way (see [`INVESTIGATION.md`](INVESTIGATION.md)). Each new response builder needs the same disassembly pass before its trampoline can be written. Pattern, per function:
+LOAD #1 padding currently used: `0xac54..0xb2c8` (1652 B). Free space past `0xb2c8` to LOAD #2 at `0xbc08`: **~2368 bytes** (4020 B padding total). Phase F4 estimates ~400 B for the six new sub-trampolines plus T_papp_changed; that fits with significant headroom.
 
-1. `objdump -d --start-address=<libextavrcp.so addr> --stop-address=<+0x100>` to dump the function body.
-2. Look for `ldrb rN, [r0, #17]` — that's transId being auto-extracted from `conn[17]`. If present, `transId` is *not* an arg.
-3. Locate the call to `AVRCP_SendMessage` (at `libextavrcp.so:0x18ec`). Walk backwards to see the buffer-build loop and the conditional that decides whether to emit (vs accumulate).
-4. Cross-reference with any in-tree caller in `libextavrcp_jni.so` (most response builders have at least one stock JNI caller — those reveal the OEM's intended arg shape). Search `objdump -d libextavrcp_jni.so | grep -B5 "blx <…@plt>"`.
-5. Document the resulting C signature in `ARCHITECTURE.md`, same format as `get_element_attributes_rsp`.
-
-Estimated effort per function: 30 min for simple ones, 2 hours for the multi-arg accumulator-style ones. Total Phase A→E discovery: ~1 day of focused work.
-
-### 3b. Code-cave budget
-
-LOAD #1 padding currently used: `0xac54..0xb21c` (1480 B). Free space past `0xb21c` to LOAD #2 at `0xbc08`: **~2540 bytes**. New trampolines average ~80–200 bytes each; budget supports a few dozen more. Not space-constrained.
-
-If we ever do exhaust LOAD #1 padding, we have a known fallback: extend the trick to the LOAD #2 padding region by bumping LOAD #2's `p_filesz`/`p_memsz`. Not needed for this plan.
+If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick to the LOAD #2 padding region by bumping LOAD #2's `p_filesz`/`p_memsz`.
 
 ---
 
 ## 4. Implementation phases
 
-Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain. Phases A0 / A1 / B / GetElementAttributes 7-attr are shipped; Phases C and D remain.
+Each phase is independent and ship-able on its own. Order is by expected user impact + prerequisite chain. **Shipped:** A0, A1, B, GetElementAttributes 7-attr, D, F1, F2, F3. **Deferred:** F4 (PlayerApplicationSettings — Optional-only rows under all-or-none C.14, ~5 days when revisited).
 
 ### Phase A0 — Inform PDUs + TRACK_CHANGED wire-shape — SHIPPED
 
@@ -188,9 +174,9 @@ T8 trampoline branches from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. T8 al
 | 0x06 BATT_STATUS_CHANGED | 0x3354 | u8 canned `0x00 NORMAL` | — |
 | 0x07 SYSTEM_STATUS_CHANGED | 0x3348 | u8 canned `0x00 POWERED_ON` | — |
 
-**T9** adds proactive CHANGED for event 0x01 PLAYBACK_STATUS_CHANGED (structurally a clone of T5, the TRACK_CHANGED proactive trampoline). T9 is invoked by the patched `notificationPlayStatusChangedNative` (file offset 0x3c88, stock prologue `2D E9 F3 41` overwritten with `b.w T9`), which fires on every Y1MediaBridge `playstatechanged` broadcast once the matching MtkBt cardinality NOP at 0x3c4fe (sswitch_18a, event 0x01 case) is in place. T9 reads `y1-track-info[792]` (current play_status), compares against `y1-trampoline-state[9]` (`last_play_status`), emits `reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, play_status)` via PLT 0x339c on edge, and writes the new value back. transId is auto-extracted from conn[17] by the response builder (same convention T5 uses for track_changed_rsp). Position (event 0x05) and the other events are INTERIM-only — proactive CHANGED for 0x05 would need a periodic timer (no broadcast equivalent), and 0x03/0x04/0x06/0x07 don't have natural Y1-side edge sources.
+**T9** adds proactive CHANGED for event 0x01 PLAYBACK_STATUS_CHANGED (structurally a clone of T5, the TRACK_CHANGED proactive trampoline). T9 is invoked by the patched `notificationPlayStatusChangedNative` (file offset 0x3c88, stock prologue `2D E9 F3 41` overwritten with `b.w T9`), which fires on every Y1MediaBridge `playstatechanged` broadcast once the matching MtkBt cardinality NOP at 0x3c4fe (sswitch_18a, event 0x01 case) is in place. T9 reads `y1-track-info[792]` (current play_status), compares against `y1-trampoline-state[9]` (`last_play_status`), emits `reg_notievent_playback_rsp(conn, 0, REASON_CHANGED, play_status)` via PLT 0x339c on edge, and writes the new value back. transId is auto-extracted from conn[17] by the response builder (same convention T5 uses for track_changed_rsp). Phase F2 / F3 later extend T9 to also emit BATT_STATUS_CHANGED and PLAYBACK_POS_CHANGED on the same trigger — see those phases.
 
-**T1 `EventsSupported`:** advertises events `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (count=7). Per the spec-compliance feedback rule, advertise only what's implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised until Phase C.
+**T1 `EventsSupported`:** advertises events `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]` (count=7). Per the spec-compliance feedback rule, advertise only what's implemented — event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) stays unadvertised since Phase F4 PlayerApplicationSettings is deferred.
 
 **Schema dependency:** Y1MediaBridge writes `play_status` at offset 792 and `position_at_state_change_ms` at offsets 780..783; T8 reads from those.
 
@@ -211,14 +197,6 @@ btmtk_avrcp_send_get_playstatus_rsp(
 ```
 
 **Position handling: live-extrapolated when playing.** When `playing_flag == 1 PLAYING`, T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7) and computes `live_pos = saved_pos + (now_sec - state_change_sec) * 1000` before passing it as the `song_position` arg. CLOCK_BOOTTIME parity with Y1MediaBridge's `SystemClock.elapsedRealtime` source (which stamps `mStateChangeTime`) makes the subtraction yield wall-clock seconds elapsed since the last play/pause edge. When STOPPED/PAUSED, the position field stays at the saved freeze point — what CTs expect for non-playing states. AVRCP 1.3 §5.4.1 Tbl 5.26 specifies `SongPosition` as "the current position of the playing in milliseconds elapsed"; a static across-poll value would violate that, and some CTs interpret a stuck position as "no position info" and hide their playback-progress display. `struct timespec` is stashed in unused outgoing-args slack at sp+8..15 inside the existing T6 frame (no frame growth).
-
-**Files touched:**
-- `src/patches/_trampolines.py` — added `_emit_t6` (~52 B trampoline body), modified T4 pre-check to dispatch PDU 0x30, added `T6_*` frame constants, added `PLT_get_playstatus_rsp = 0x3564`. ~80 lines.
-- `src/patches/_thumb2asm.py` — added `rev_lo_lo` (REV T1) for BE→LE byte-swap. 4 lines.
-- `src/patches/patch_libextavrcp_jni.py` — bumped `OUTPUT_MD5` to `52b1bb70c4edc975ec56c63067c454fb`.
-- `src/Y1MediaBridge/.../MediaBridgeService.java` — extended `writeTrackInfoFile()` schema 776→800 B with the four new fields; added `putBE32` helper. versionCode 14→15, versionName 1.7→1.8.
-
-**Estimated effort:** 1-2 days. Includes the disassembly pass.
 
 ### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41) — SHIPPED
 
@@ -335,7 +313,7 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 | 780..783 | position_at_state_change_ms (BE u32) | 4 | shipped | `MediaBridgeService.mPositionAtStateChange` |
 | 784..787 | state_change_time_sec (BE u32) | 4 | shipped | `MediaBridgeService.mStateChangeTime / 1000` (CLOCK_BOOTTIME source — T6 live-position extrapolation) |
 | 788..791 | reserved | 4 | — | (pad) |
-| 792 | playing_flag | 1 | shipped | `mIsPlaying` (1=PLAYING, 2=PAUSED, 0=STOPPED — AVRCP §5.4.1 Tbl 5.26) |
+| 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — fed by `LogcatMonitor` mapping Y1's BaseActivity state codes `'1'`/`'3'`/`'5'`) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
 | 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
 | 795..799 | reserved | 5 | — | (Phase F4 shuffle_flag/repeat_mode reservation) |
@@ -352,30 +330,21 @@ The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII de
 
 ---
 
-## 6. Response builder argument discovery — per function
+## 6. Response builder argument discovery — Phase F4 work remaining
 
-For each response builder we plan to call, the discovery work is mechanical and follows the recipe in `ARCHITECTURE.md` §"Adding a new PDU handler". Targets:
+All shipped phases have their response-builder calling conventions documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) §"Reverse-engineered semantics". The remaining discovery work is for Phase F4 PlayerApplicationSettings (deferred):
 
-| Function | libextavrcp.so @ | Priority |
+| Function | libextavrcp.so @ | Notes |
 |---|---|---|
-| `get_playstatus_rsp` | `0x2354` | Phase B (high) |
-| `reg_notievent_playback_rsp` | `0x23f0` | Phase A (high) |
-| `reg_notievent_pos_changed_rsp` | `0x2588` | Phase A |
-| `reg_notievent_player_appsettings_changed_rsp` | `0x2720` | Phase C |
-| `list_player_attrs_rsp` | `0x1e24` | Phase C |
-| `list_player_values_rsp` | `0x1e74` | Phase C |
-| `get_curplayer_value_rsp` | `0x1ed0` | Phase C |
-| `set_player_value_rsp` | `0x1f2e` | Phase C |
-| `get_player_attr_text_rsp` | `0x1f58` | Phase C |
-| `get_player_value_text_value_rsp` | `0x203c` | Phase C |
-| `inform_charsetset_rsp` | `0x2138` | Phase C |
-| `battery_status_rsp` | `0x2160` | Phase C |
-| `reg_notievent_reached_end_rsp` | `0x24c8` | Phase A (low) |
-| `reg_notievent_reached_start_rsp` | `0x2528` | Phase A (low) |
-| `reg_notievent_battery_status_changed_rsp` | `0x25f0` | Phase A (low) |
-| `reg_notievent_system_status_changed_rsp` | `0x2658` | Phase A (low) |
+| `list_player_attrs_rsp` | `0x1e24` | PDU 0x11 — return list of supported attribute IDs |
+| `list_player_values_rsp` | `0x1e74` | PDU 0x12 — return allowed values for one attribute |
+| `get_curplayer_value_rsp` | `0x1ed0` | PDU 0x13 — return current values for the requested attribute IDs |
+| `set_player_value_rsp` | `0x1f2e` | PDU 0x14 — accept new value (also requires a write path that mutates Y1's `SharedPreferences` from a different process) |
+| `get_player_attr_text_rsp` | `0x1f58` | PDU 0x15 — return UTF-8 attribute label text |
+| `get_player_value_text_value_rsp` | `0x203c` | PDU 0x16 — return UTF-8 value label text |
+| `reg_notievent_player_appsettings_changed_rsp` | `0x2720` | event 0x08 — proactive CHANGED on shuffle / repeat edges |
 
-Each entry should produce a documented C signature in `ARCHITECTURE.md` §"Reverse-engineered semantics" before its trampoline is written. The argument shape of every response builder must be confirmed via disassembly, not inferred from arg name; the arg names in the OEM symbols don't always match the arg semantics (see ARCHITECTURE.md for the worked example on `get_element_attributes_rsp`).
+Recipe per function: see [`ARCHITECTURE.md`](ARCHITECTURE.md) §"Adding a new PDU handler". The argument shape must be confirmed via disassembly, not inferred from arg name — the OEM names don't always match semantics (see the worked example on `get_element_attributes_rsp`).
 
 ---
 
@@ -407,38 +376,34 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| New PDU response builder has an arg convention not derivable from disassembly alone | Medium | Bisect via JNI in-tree caller (most builders are called by stock JNI somewhere even if Java stack never reaches them). Failing that, ship a no-op trampoline that returns NOT_IMPLEMENTED and watch CT behavior to confirm the CT was actually probing for that PDU. |
-| Phase A's PLAYBACK_POS_CHANGED proactive emit creates wakeup pressure | Low (we don't do proactive on 0x05 — only on track edge via T5) | Track-edge-only emit confirmed in plan. If a CT hard-requires periodic, gate behind a build-time flag. |
-| Music-app smali patch (Phase C) breaks UI in some unanticipated way | Medium | Each patch is additive (no replacing existing logic); pre-flight test in DEX-validate pass. Each individual smali change has a `getPlayerService() == null` early-out so we never crash if init order shifts. |
-| LOAD #1 extension exhausts page-padding | Very low | ~2540 B free past the current 1480 B blob; budget supports >20 more trampolines. Fallback: extend LOAD #2 padding. |
+| New PDU response builder (Phase F4) has an arg convention not derivable from disassembly alone | Medium | Bisect via JNI in-tree caller (most builders are called by stock JNI somewhere even if Java stack never reaches them). Failing that, ship a no-op trampoline that returns NOT_IMPLEMENTED and watch CT behavior to confirm the CT was actually probing for that PDU. |
+| PLAYBACK_POS_CHANGED 1 s cadence (Phase F3) creates wakeup pressure | Low | T9's position-emit block runs only when file[792]==PLAYING and is driven by a 1 s `Handler.postDelayed` loop in Y1MediaBridge that's cancelled the moment playback pauses or stops. No timer fires while idle. Strict CTs subscribed for a longer interval are over-served (spec-permissible — `shall be emitted at this interval` defines a max-interval ceiling, not a min cadence floor). |
+| Phase F4 music-app smali patches (broadcast on shuffle/repeat setters) break UI in some unanticipated way | Medium (when F4 is revisited) | Each patch must be additive (no replacing existing logic); pre-flight test in DEX-validate pass. Each individual smali change should have a `getPlayerService() == null` early-out so we never crash if init order shifts. |
+| LOAD #1 extension exhausts page-padding | Very low | ~2368 B free past the current 1652 B blob; budget supports many more trampolines (Phase F4's ~400 B fits with headroom). Fallback: extend LOAD #2 padding. |
 | Trampoline blob shifts every PLT call beyond range | Low (Thumb b.w covers ±16 MB; trampolines and PLT are <0x10000 apart) | Verify `bl.w`/`b.w` reach in `_thumb2asm.py` self-test for each new emit site. |
 | AVRCP version negotiation: F1 patch sets MtkBt-internal version to 1.4 but our wire-shape PDU set is 1.3 | Low | F1 only flips the BlueAngel-internal flag to unblock 1.3+ command dispatch through MtkBt's Java layer. SDP record advertises AVRCP 1.3 (V1 patch) / AVCTP 1.2 (V2 patch). Per AVRCP 1.3 §6 (Service Discovery Interoperability Requirements) + ESR07 §2.1 / Erratum 4969, the served version is what CTs key against, and they negotiate a 1.3 dialogue — which is what we implement. |
-| Cross-app broadcasts (Phase C music-app→Y1MediaBridge) get killed by some Android battery saver | Very low (4.2.2 has no doze; both apps are /system/app) | n/a |
-| Continuation PDU 0x40/0x41 (Phase D) requires intra-session state | Medium if we need it | Probably not needed — gate Phase D entirely on whether any peer ever sends 0x40 in our captures. |
+| Cross-app broadcasts (Phase F4 music-app→Y1MediaBridge) get killed by some Android battery saver | Very low (4.2.2 has no doze; both apps are /system/app) | n/a |
+| Continuation PDU 0x40/0x41 traffic appears on a future capture (would require stateful re-emit) | Low (zero across 43 captures so far) | T_continuation currently emits NOT_IMPLEMENTED — spec-acceptable. If 0x40 traffic ever shows up, upgrade to a stateful continuation handler that re-emits the buffered response. |
 | AVCTP saturation under a CT subscribe storm drops PASSTHROUGH key-release frames; the music app then interprets the held key as a long-press, calls `startFastForward()`/`startRewind()`, and the lambda thread runs forever | Medium (high-subscribe-rate CT classes have been observed driving this — see [`INVESTIGATION.md`](INVESTIGATION.md) for per-CT empirical context) | **U1**: NOP `UI_SET_EVBIT(EV_REP)` at `libextavrcp_jni.so:0x74e8` so the kernel's `evdev` soft-repeat timer never fires on the AVRCP virtual keyboard. Without auto-repeat, a dropped PASSTHROUGH RELEASE can no longer drive the held-key cascade; the music app sees one event per actual PRESS frame the CT sends. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec (CT periodic re-send during held button). |
 
 ---
 
 ## 9. Remaining effort
 
-Phases A0/A1/B + GetElementAttributes 7-attr already shipped (see compliance scorecard in §2). Estimated effort to close remaining gaps:
-
 | Phase | Status | Trampoline LOC | Schema bump | Music-app patch | Estimated effort |
 |---|---|---|---|---|---|
 | A0 — Inform PDUs + wire-shape | **shipped** | ~50 | no | no | — |
-| A1 — Notification expansion | **shipped** | ~150 | yes | no | — |
+| A1 — Notification expansion (T8 + T9 PLAYBACK_STATUS) | **shipped** | ~150 | yes | no | — |
 | B — GetPlayStatus | **shipped** | ~80 | (with A1) | no | — |
-| GetElementAttributes attrs 4-7 | **shipped** | ~140 (T4 7-attr loop) | yes (1104 B y1-track-info) | no | — |
-| F1 — Track-edge events (0x03/0x04 CHANGED) | not shipped | ~30 | yes (1 flag byte) | no | 3 hours |
-| F2 — Real battery state (0x06 CHANGED) | not shipped | ~50 | yes (1 byte) | no | 4 hours |
-| F3 — Periodic 0x05 PLAYBACK_POS_CHANGED | not shipped | ~120 | (uses state file pad) | no | 1 day |
-| F1 — Track-edge events (0x03/0x04 CHANGED) | shipped | ~40 | yes (1 byte) | yes (T5 extension) | done |
-| F2 — Real BATT_STATUS_CHANGED (0x06 CHANGED) | shipped | ~50 | yes (1 byte) | yes (T9 extension) | done |
-| F3 — Periodic PLAYBACK_POS_CHANGED (0x05 CHANGED) | shipped | ~60 | no | yes (T9 extension) | done |
-| F4 — PlayerApplicationSettings (0x11–0x16 + event 0x08) | **deferred** — Optional-only rows, all-or-none under C.14, 5 days of work | ~400 | yes (2 bytes) | yes | 5 days when revisited |
-| D — Continuation (0x40–0x41) | shipped — explicit T_continuation routes 0x40/0x41 to UNKNOW_INDICATION reject | ~6 | no | no | done |
+| GetElementAttributes attrs 4-7 | **shipped** | ~140 | yes (y1-track-info → 1104 B) | no | — |
+| D — Continuation 0x40/0x41 | **shipped** | ~6 (T_continuation) | no | no | — |
+| F1 — TRACK_REACHED_END/START CHANGED | **shipped** | ~40 (T5 expansion) | yes (1 byte: natural_end flag) | no | — |
+| F2 — Real BATT_STATUS_CHANGED | **shipped** | ~50 (T9 expansion) | yes (1 byte: battery_status) | no | — |
+| F3 — Periodic PLAYBACK_POS_CHANGED | **shipped** | ~60 (T9 expansion) | no | no | — |
+| Patches E + H | **shipped** | n/a (smali) | no | yes | — |
+| F4 — PlayerApplicationSettings (0x11–0x16 + event 0x08) | **deferred** | ~400 | yes (2 bytes) | yes | 5 days when revisited |
 
-Total remaining for full 1.3 compliance: 5 days (F4 only).
+Total remaining for ICS Table 7 100% coverage: **F4 only** (~5 days). All Mandatory rows are already closed.
 
 ---
 
@@ -468,5 +433,5 @@ Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for thi
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — proxy architecture and existing trampoline chain.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte detail.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — historical investigation including binary discovery passes and the empirical history that produced each shipped behavior.
-- `src/patches/_trampolines.py` — current trampoline blob assembler; the file each phase will extend.
-- `src/patches/_thumb2asm.py` — Thumb-2 mini-assembler; may need new instruction encodings for some Phase A/C trampolines.
+- `src/patches/_trampolines.py` — current trampoline blob assembler; the file each future phase extends.
+- `src/patches/_thumb2asm.py` — Thumb-2 mini-assembler; may need new instruction encodings for Phase F4 trampolines when those are revisited.

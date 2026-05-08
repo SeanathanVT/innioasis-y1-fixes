@@ -60,7 +60,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | Flag | Effect |
 |---|---|
 | `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
-| `--avrcp` | AVRCP 1.3 metadata pipeline: SDP shape patches in `mtkbt` (V1/V2/S1/P1), full trampoline chain in `libextavrcp_jni.so` (R1/T1/T2/extended_T2/T4/T5/T_charset/T_battery/T6/T8/T9 + U1 kernel-auto-repeat NOP), Java-side patches in `MtkBt.odex` (F1/F2 + cardinality NOPs), discrete PASSTHROUGH PLAY/PAUSE/STOP routing in the music app (Patch E), plus `Y1MediaBridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
+| `--avrcp` | AVRCP 1.3 metadata pipeline: SDP shape patches in `mtkbt` (V1/V2/S1/P1), full trampoline chain in `libextavrcp_jni.so` (R1/T1/T2/extended_T2/T4/T5/T_charset/T_battery/T_continuation/T6/T8/T9 + U1 kernel-auto-repeat NOP), Java-side patches in `MtkBt.odex` (F1/F2 + cardinality NOPs), discrete PASSTHROUGH PLAY/PAUSE/STOP routing + media-key propagation in the music app (Patches E + H), plus `Y1MediaBridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
 | `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
 | `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
@@ -92,7 +92,8 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 | §5.2.8 | 0x18 InformBatteryStatusOfCT | full |
 | §5.3.1 / §5.3.4 | 0x20 GetElementAttributes | all 7 attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) in single-frame response |
 | §5.4.1 | 0x30 GetPlayStatus | full, with live position via `clock_gettime(CLOCK_BOOTTIME)` |
-| §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 / 0x02 |
+| §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 (PLAYBACK_STATUS), 0x02 (TRACK_CHANGED), 0x03 (TRACK_REACHED_END, gated on natural end), 0x04 (TRACK_REACHED_START), 0x05 (PLAYBACK_POS, 1 s cadence while playing), 0x06 (BATT_STATUS, real bucket from `ACTION_BATTERY_CHANGED`) |
+| §5.5 | 0x40 / 0x41 RequestContinuingResponse / Abort | explicit AV/C reject (we never fragment, so a CT shouldn't see these in valid flow) |
 | §4.6.1 | PASS THROUGH (PLAY/PAUSE/STOP/FORWARD/BACKWARD/etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
 
 Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE-PLAN.md`](docs/AVRCP13-COMPLIANCE-PLAN.md) §2 — every mandatory row hits.
@@ -127,8 +128,8 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/extended_T2/T4/T5/T_charset/T_battery/T6/T8/T9 + R1 + U1), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
-- [docs/AVRCP13-COMPLIANCE-PLAN.md](docs/AVRCP13-COMPLIANCE-PLAN.md) — staged plan from the current implementation to full AVRCP 1.3 spec compliance (Phases A–E)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/extended_T2/T4/T5/T_charset/T_battery/T_continuation/T6/T8/T9 + R1 + U1), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
+- [docs/AVRCP13-COMPLIANCE-PLAN.md](docs/AVRCP13-COMPLIANCE-PLAN.md) — current ICS Table 7 coverage scorecard plus the staged path to closing remaining gaps (Phase F4 PlayerApplicationSettings is the only deferred phase)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 

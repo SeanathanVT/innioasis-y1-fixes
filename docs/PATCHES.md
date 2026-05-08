@@ -10,7 +10,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every Y1MediaBridge broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
-| **A, B, C, E** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP routing per AV/C Panel Subunit Spec op_id table. |
+| **A, B, C, E, H** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP routing per AV/C Panel Subunit Spec op_id table; H for foreground-activity propagation of `KEYCODE_MEDIA_PLAY/PAUSE/STOP` so AVRCP-driven media keys reach the receiver. |
 | **su** | `/system/xbin/su` | Setuid-root `su` binary installed by `--root` flag. Replaces the historical adbd byte-patch attempts. |
 
 > **Not shipped (attempted and removed):** G1/G2 (mtkbt xlog redirect, crashed at NULL fmt — closed without root or daemon-side tooling); H1/H2/H3 (adbd setuid byte patches, broke ADB protocol — superseded by `src/su/`). Earlier byte-patch experiments preserved in [`INVESTIGATION.md`](INVESTIGATION.md).
@@ -64,7 +64,7 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 7-element `EventsSupported` array `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover (event `0x08 PLAYER_APPLICATION_SETTING_CHANGED` is unadvertised until Phase C).
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover (event `0x08 PLAYER_APPLICATION_SETTING_CHANGED` is unadvertised — Phase F4 PlayerApplicationSettings is deferred).
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -153,8 +153,8 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | `0x3378` | (none) |
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | `0x336c` | (none) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | canned `0x00 NORMAL` (Tbl 5.35 enum) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` |
+| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
+| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — see compliance plan §4 Phase E audit notes) |
 
 All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x02/0x03/0x04/0x05/0x06 live in T9 / T5 (see entries below). Phase F2 changed event 0x06 INTERIM from canned `0x00 NORMAL` to `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`); Phase F3 wired event 0x05 CHANGED via T9 at a 1 s cadence while playing. The 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`.
 
@@ -206,12 +206,12 @@ Spec-correct per AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel 
 
 ### LOAD #1 program-header surgery
 
-The patcher writes the trampoline blob into LOAD #1's page-alignment padding (4276 zero bytes between LOAD #1's stock end at file `0xac54` and LOAD #2's start at `0xbc08`) and bumps LOAD #1's `p_filesz` and `p_memsz` to map the new code as R+E:
+The patcher writes the trampoline blob into LOAD #1's page-alignment padding (4020 zero bytes between LOAD #1's stock end at file `0xac54` and LOAD #2's start at `0xbc08`) and bumps LOAD #1's `p_filesz` and `p_memsz` to map the new code as R+E:
 
-- offset+16 (`p_filesz`): `0xac54 → 0xb21c`
-- offset+20 (`p_memsz`): `0xac54 → 0xb21c`
+- offset+16 (`p_filesz`): `0xac54 → 0xb2c8`
+- offset+20 (`p_memsz`): `0xac54 → 0xb2c8`
 
-Current trampoline blob is 1652 bytes (~2060 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
+Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte padding region). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
 
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `a2d41f924e07abff4a18afb87989b04c`.
 

@@ -1,6 +1,6 @@
 # Y1MediaBridge
 
-Single-APK AVRCP metadata bridge for the Innioasis Y1. Implements the in-Android-OS half of the metadata-forwarding pipe (`IBTAvrcpMusic` + `IMediaPlaybackService` Binder, plus an `RemoteControlClient` publish path). The bridge implementation itself is verified-correct (see [INVESTIGATION.md](../../docs/INVESTIGATION.md) "Verified true"); end-to-end metadata delivery is currently blocked by the native `mtkbt` daemon not relaying inbound AVRCP COMMANDs at the layer that would call into this bridge — see top-level [Status](../../README.md#status).
+Single-APK AVRCP metadata bridge for the Innioasis Y1. Implements the in-Android-OS half of the metadata-forwarding pipe: monitors the Y1 player's logcat for track / play-state / battery / position events, persists the current state to two on-disk files (`y1-track-info` + `y1-trampoline-state` under `/data/data/com.y1.mediabridge/files/`) for the AVRCP trampoline chain in `libextavrcp_jni.so` to read, fires the `playstatechanged` and `metachanged` broadcasts that wake the proactive trampolines (T5 / T9), publishes equivalent state to Android's `RemoteControlClient`, and serves the `IBTAvrcpMusic` + `IMediaPlaybackService` Binder contracts MtkBt expects to find. End-to-end metadata delivery is working — see top-level [Status](../../README.md#status).
 
 ## Architecture
 
@@ -71,8 +71,9 @@ flash flow.
 Ship alongside the patched binaries (current `--avrcp` stack — advertises **AVRCP 1.3** over AVCTP 1.2, since `mtkbt`'s shipped command-handling layer is internally 1.0 and 1.3 is the highest version where SDP advertisement, AVCTP, and trampoline coverage all line up):
 
 - Patched `/system/bin/mtkbt` — V1 (AVRCP 1.0→1.3 SDP), V2 (AVCTP 1.0→1.2 SDP), S1 (replace `0x0311` SupportedFeatures slot with `0x0100` ServiceName), P1 (force fn 0x144bc op_code dispatch into the msg-519 emit path so VENDOR_DEPENDENT frames reach our trampolines)
-- Patched `/system/lib/libextavrcp_jni.so` — R1 (redirect at 0x6538), T1 GetCapabilities trampoline at 0x7308, T2 stub at 0x72d4, and the T4 + extended_T2 + T5 + T_charset + T_battery + T6 + T8 + T9 trampoline blob in the LOAD #1 page-padding region at 0xac54 (state-tracked TRACK_CHANGED CHANGED + 7-attribute single-frame GetElementAttributes responses with strings read from `/data/data/com.y1.mediabridge/files/y1-track-info`, plus proactive CHANGED on Y1 track changes and play/pause edges)
+- Patched `/system/lib/libextavrcp_jni.so` — R1 (redirect at 0x6538), T1 GetCapabilities trampoline at 0x7308, T2 stub at 0x72d4, and the extended_T2 + T4 + T5 + T_charset + T_battery + T_continuation + T6 + T8 + T9 trampoline blob in the LOAD #1 page-padding region at 0xac54: 7-attribute single-frame GetElementAttributes responses with strings read from `y1-track-info`; proactive CHANGED on Y1 track edges (T5 emits the §5.4.2 3-tuple TRACK_REACHED_END / TRACK_CHANGED / TRACK_REACHED_START); proactive CHANGED on play/pause edges, battery-bucket transitions, and 1 s position cadence while playing (T9); GetPlayStatus with `clock_gettime(CLOCK_BOOTTIME)` live position (T6); InformDisplayableCharacterSet / InformBatteryStatusOfCT acks (T_charset / T_battery); explicit AV/C reject for Continuation 0x40/0x41 (T_continuation). U1 NOP suppresses kernel auto-repeat on the AVRCP uinput device.
 - Patched `/system/app/MtkBt.odex` — F1 (`getPreferVersion()`), F2 (reset `sPlayServiceInterface` on disable), two cardinality NOPs (`if-eqz` gates at `0x3c530` and `0x3c4fe`) so `notificationTrackChangedNative` and `notificationPlayStatusChangedNative` fire on every Y1MediaBridge broadcast. DEX adler32 recomputed.
+- Patched `/system/app/com.innioasis.y1.apk` — Patch E (discrete PASSTHROUGH PLAY/PAUSE/STOP routing in `PlayControllerReceiver`), Patch H (`BaseActivity.dispatchKeyEvent` propagates discrete media keys past the foreground activity).
 
 Per-patch byte-level reference: [`../../docs/PATCHES.md`](../../docs/PATCHES.md).
 
@@ -153,61 +154,9 @@ them fully without the original `boot.oat` / framework vtables. The interface
 `TRANSACTION_*` constants live in the DEX encoded_array_item and come out
 cleanly regardless — which is all we needed.
 
-## Changes
+## Version history
 
-### versionCode 9 (1.2)
-
-- **`AndroidManifest.xml` versionCode synced to `9`** — previously hardcoded to `1`,
-  which would cause the package manager to reject an upgrade from versionCode 8 as a
-  downgrade on Android 4.2 installs.
-- **`onBind` logging demoted** — was `Log.e` with a full stack trace on every bind.
-  Reduced to `Log.d` with just the action. Binding happens on every car reconnect;
-  the stack trace was only needed to confirm MtkBt was resolving to our service.
-- **Duplicate-scan guard** — `mPendingScanPath` field prevents two concurrent
-  `MediaScannerConnection.scanFile` calls for the same path when the Y1 player emits
-  both a lyrics line (`刷新一次歌词`) and an album-art line (`刷新一次专辑图`) before
-  the first scan completes. Second call is now a no-op; `mPendingScanPath` cleared
-  in the scan callback before `broadcastTrackAndState`.
-
-### versionCode 8 — `callbacks=0` fix
-
-`attachInterface` was removed from `AvrcpBinder`. Adding it (versionCode 7) had
-caused `IBTAvrcpMusic.Stub.asInterface()` to take the local path and cast our
-`AvrcpBinder` to `IBTAvrcpMusic` — a cast it doesn't satisfy — silently
-swallowing `registerCallback`. Removing `attachInterface` forces the remote
-Proxy path for all callers; `registerCallback` now arrives as `onTransact
-code=1` and populates `mAvrcpCallbacks`. Confirmed fixed: no `callbacks=0`
-entries after first bind in the versionCode 9 session.
-
-### versionCode 3 — full transaction-code coverage
-
-Previous builds bound successfully and `registerCallback` ran, but cars still
-logged `[BT][AVRCP] onReceive EVENT_TRACK_CHANGED fail`. Root cause: our
-binder's `onTransact` only handled ~14 of the 37 codes `IBTAvrcpMusic$Stub`
-actually declares.
-
-Ground-truth transaction codes were extracted directly from the device's
-`MtkBt.odex` (de-odex → `MtkBt.dex`, parsed with androguard) and every code
-in `IBTAvrcpMusic$Stub` is now handled. In particular:
-
-| Code | Method                                   | Why it matters                                |
-|-----:|------------------------------------------|-----------------------------------------------|
-|    3 | `regNotificationEvent(byte,int)->bool`   | **THE blocker** — car subscribe path          |
-|    5 | `getCapabilities() -> byte[]`            | populates MtkBt `mCapabilities`               |
-|   22 | `informDisplayableCharacterSet(int)->b`  | setup handshake                               |
-|   23 | `informBatteryStatusOfCT() -> bool`      | setup handshake                               |
-|   14,16,18,20 | set{Equalize,Shuffle,Repeat,Scan}Mode | previously fell through                    |
-|   12,13 | prevGroup / nextGroup                 | remapped to prev / next keys                  |
-|   32,33,34,35,37 | enqueue / getNowPlaying / etc.    | stubbed with typed zero replies               |
-
-`handleMediaPlayback` (the AOSP-style `IMediaPlaybackService`) was also
-re-aligned against the DEX ground truth: `position` is code 11 (not 30),
-`duration` is code 10 (not 31), `getArtistName` is code 16 (not 15), and
-`getAlbumId` / `getArtistId` were added at codes 15 / 17.
-
-No behavior change to the logcat monitor, the RCC pipeline, the callback
-notifier, or the lifecycle. All transactions that previously worked still
-work identically.
+Per-version detail is in the top-level [`CHANGELOG.md`](../../CHANGELOG.md) and `git log`. Code-level rationale for non-obvious choices (notably *not* calling `attachInterface` on the dispatch binder, the full `IBTAvrcpMusic$Stub` transaction-code coverage, the duplicate-scan guard, the play-status three-valued enum, the F2/F3 trigger choices) lives in source-code comments inside [`MediaBridgeService.java`](app/src/main/java/com/y1/mediabridge/MediaBridgeService.java) — those comments are the source of truth.
 
 ## See also
 
