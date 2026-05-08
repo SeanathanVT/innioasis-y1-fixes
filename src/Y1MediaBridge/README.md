@@ -15,9 +15,13 @@ One system app. No separate daemon, no shared files, no IPC.
   `com.android.music.IMediaPlaybackService` from the same process.
 
 - **PlaySongReceiver** — static broadcast receiver for `MY_PLAY_SONG`,
-  `BOOT_COMPLETED`, `ABOUT_SHUT_DOWN`, and `MEDIA_BUTTON`. Forwards media
-  button events from the car directly to the stock player's
-  `PlayControllerReceiver`.
+  `BOOT_COMPLETED`, and `ABOUT_SHUT_DOWN` (Y1-internal lifecycle).
+  AVRCP transport keys deliberately do not route here — `MediaBridgeService`
+  no longer claims the `AudioManager` MediaButton-receiver slot, so
+  AudioService's ordered-broadcast fallback delivers `ACTION_MEDIA_BUTTON`
+  directly to the music app's `PlayControllerReceiver` (priority MAX_VALUE).
+  Lock-screen / system-UI media buttons reach the same receiver via the
+  RCC PendingIntent set up in `setupRemoteControlClient()`.
 
 ## Build
 
