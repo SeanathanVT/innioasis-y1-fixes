@@ -107,7 +107,7 @@ import zlib
 from pathlib import Path
 
 STOCK_MD5         = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5        = "fa2e34b178bee4dfae4a142bc5c1b701"  # release: F1 + F2 + sswitch_1a3/sswitch_18a cardinality NOPs
+OUTPUT_MD5        = "fa2e34b178bee4dfae4a142bc5c1b701"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — currently we only patch DEX bytecode in-place via byte

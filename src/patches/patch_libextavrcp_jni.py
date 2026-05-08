@@ -182,7 +182,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"  # T9 emits PLAYBACK_POS_CHANGED CHANGED at 1s cadence while playing, with live-extrapolated position via clock_gettime(CLOCK_BOOTTIME)
+OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include

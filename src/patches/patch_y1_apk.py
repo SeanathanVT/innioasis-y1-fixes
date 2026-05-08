@@ -163,7 +163,7 @@ UNPACKED_DIR = os.path.join(STAGING_DIR, "unpacked")
 APKTOOL_VERSION = "2.9.3"
 APKTOOL_JAR     = os.path.join(TOOLS_DIR, f"apktool-{APKTOOL_VERSION}.jar")
 APKTOOL_URL     = f"https://github.com/iBotPeaches/Apktool/releases/download/v{APKTOOL_VERSION}/apktool_{APKTOOL_VERSION}.jar"
-APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"  # apktool 2.9.3
+APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"
 
 # Why apktool 2.9.3 and not a newer release:
 #   - apktool 2.10.x / 2.11.x / 2.12.x / 3.0.x have all changed the `b`
