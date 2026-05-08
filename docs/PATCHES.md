@@ -251,6 +251,55 @@ goto :cond_e                             # no match → existing fall-through
 
 Uses scratch registers `v0` (bool/reason) and `v3` (flag) which are dead at this point in the `.locals 6` `onReceive` method. apktool optimizes the no-match `goto :cond_e` to `goto :goto_5` since stock's `:cond_e` sits immediately before `:goto_5` (same control flow).
 
+**Patch H** in `smali/com/innioasis/y1/base/BaseActivity.smali` — propagate unhandled discrete media keys.
+
+`BaseActivity.dispatchKeyEvent(KeyEvent)` is the foreground activity's key entry point for the music app's screens (every Activity in the app extends `BaseActivity`, which extends `AppCompatActivity`). Stock implementation:
+
+```
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 7
+    const/4 v0, 0x1
+    if-nez p1, :cond_0
+    return v0                   # null event → "consumed"
+    :cond_0
+    invoke-virtual {p1}, KeyEvent;->getAction()I
+    move-result v1
+    invoke-virtual {p1}, KeyEvent;->getKeyCode()I
+    move-result v2
+    const/4 v3, 0x3
+    ... [if-eq v2, KEY_LEFT/RIGHT/UP/DOWN/MENU/PLAY/ENTER → ... goto :goto_0] ...
+    :goto_2
+    return v0                   # always returns 1 (TRUE)
+.end method
+```
+
+`v0` is set to `0x1` at method entry and never reassigned — every KeyEvent the activity receives is consumed regardless of whether it acted. For the keycodes `KeyMap` covers (the device's hardware scroll-wheel: KEY_LEFT/RIGHT/UP/DOWN/MENU/PLAY/ENTER) the activity dispatches directly to `PlayerService` (`playOrPause`, `nextSong`, `prevSong`, etc.) and consuming-with-action is the right behaviour. For discrete media keycodes the activity does NOT recognise — `KEYCODE_MEDIA_PLAY` (`0x7e`), `KEYCODE_MEDIA_PAUSE` (`0x7f`), `KEYCODE_MEDIA_STOP` (`0x56`) — control falls through every if-eq check, reaches `:goto_2 / return v0`, and the events are silently swallowed. They never reach `PhoneFallbackEventHandler.handleMediaKeyEvent` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, so `PlayControllerReceiver` (which has discrete handlers from Patch E) never fires for them.
+
+This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end on a strict CT: kernel uinput via `/system/usr/keylayout/AVRCP.kl` correctly maps PASSTHROUGH 0x44 → `KEY_PLAYCD` (200) → `KEYCODE_MEDIA_PLAY` (126), the focused window's `BaseActivity.dispatchKeyEvent` receives it, the activity's `KeyMap` knows nothing about code 126, and the event terminates there. Captures showed 9/9 AVRCP 0x44 PLAY events dropped while PASSTHROUGH 0x46 PAUSE / 0x4B FORWARD / 0x4C BACKWARD all reached `PlayerService` directly (those map to `KEYCODE_MEDIA_PLAY_PAUSE` / `KEYCODE_MEDIA_NEXT` / `KEYCODE_MEDIA_PREVIOUS` and the activity has KeyMap branches for them).
+
+Patched: insert an early `return false` immediately after `move-result v2`, gated on `keyCode == 0x7e || keyCode == 0x7f || keyCode == 0x56`.
+
+```
+[stock through `move-result v2`]
+const/16 v3, 0x7e
+if-eq v2, v3, :patch_h_propagate
+const/16 v3, 0x7f
+if-eq v2, v3, :patch_h_propagate
+const/16 v3, 0x56
+if-eq v2, v3, :patch_h_propagate
+goto :patch_h_continue
+:patch_h_propagate
+const/4 v0, 0x0
+return v0                       # let the system continue dispatch
+:patch_h_continue
+const/4 v3, 0x3                 # original next instruction
+[stock continues unchanged]
+```
+
+`v3` is reused as scratch then overwritten by the next instruction; `v0` is set to 0 only on the propagate path which immediately returns. The patched method semantically becomes "consume only what we actually act on; let everything else fall through to the default Activity dispatch chain."
+
+**Upstream-compatibility note.** This patch lives entirely inside the music app's APK. Other foreground apps installable on the device (e.g. Rockbox) extend `AppCompatActivity` directly and do not inherit from `com.innioasis.y1.base.BaseActivity`, so their AVRCP key handling is unaffected. The keylayout `/system/usr/keylayout/AVRCP.kl` stays stock — the kernel→`KeyEvent` mapping continues to deliver `KEYCODE_MEDIA_PLAY` (126) for op_id 0x44, which is the spec-correct keycode for any app that handles standard Android media keys.
+
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 
 **Deployment:** `adb root && adb remount && adb push <apk> /system/app/com.innioasis.y1/com.innioasis.y1.apk && adb reboot`. Do **not** use `adb install` — PackageManager rejects re-signed system app APKs.

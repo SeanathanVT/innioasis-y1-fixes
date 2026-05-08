@@ -1224,6 +1224,182 @@ if DEBUG_LOGGING:
     with open(player_service_path, 'w') as f:
         f.write(player_service_src)
 
+
+# ============================================================
+# Patch H: BaseActivity.smali — propagate unhandled discrete media keys
+# ============================================================
+#
+# Background
+# ----------
+# `BaseActivity.dispatchKeyEvent(KeyEvent)` is the foreground activity's key
+# entry point for the music app's screens (BluetoothActivity, BasePlayerActivity
+# subclasses, etc. all extend BaseActivity). The stock implementation always
+# returns TRUE (v0 is set to 0x1 at method entry and never reassigned), so
+# every KeyEvent reaching the foreground activity is consumed regardless of
+# whether the activity acted on it. For keycodes the activity recognises
+# (KeyMap.KEY_LEFT/RIGHT/UP/DOWN/MENU/PLAY/ENTER), it dispatches directly to
+# PlayerService — `playOrPause()`, `nextSong()`, `prevSong()`, etc. — and
+# those keys keep working. For discrete media keycodes the activity does NOT
+# recognise — KEYCODE_MEDIA_PLAY (0x7e), KEYCODE_MEDIA_PAUSE (0x7f),
+# KEYCODE_MEDIA_STOP (0x56) — control falls through every if-eq check and
+# reaches the trailing `return v0` (TRUE) without doing anything. The events
+# are silently swallowed, never reaching PhoneFallbackEventHandler →
+# AudioService → PlayControllerReceiver.
+#
+# This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end
+# on a strict CT: the kernel uinput → AVRCP.kl → KEYCODE_MEDIA_PLAY (126)
+# chain reaches the focused window (BaseActivity), the activity has nothing
+# to do with code 126 because its KeyMap covers the device's hardware
+# scroll-wheel only, and the event terminates there.
+#
+# The fix
+# -------
+# Insert an early-return-FALSE for the three discrete media keycodes the
+# activity does not handle. They then propagate via the standard fallback
+# path (PhoneFallbackEventHandler → AudioManager.dispatchMediaKeyEvent →
+# AudioService → ACTION_MEDIA_BUTTON broadcast) to PlayControllerReceiver,
+# whose discrete arms (Patch E) call play(true) / pause(0x12, true) / stop()
+# respectively.
+#
+# Scope chosen
+# ------------
+#   - 0x7e MEDIA_PLAY  : never handled by the activity. Propagate.
+#   - 0x7f MEDIA_PAUSE : never handled by the activity. Propagate.
+#   - 0x56 MEDIA_STOP  : never handled by the activity. Propagate.
+#
+# We deliberately do not touch 0x55 (MEDIA_PLAY_PAUSE), 0x57 (MEDIA_NEXT),
+# 0x58 (MEDIA_PREVIOUS), 0x59 (MEDIA_REWIND), 0x5a (MEDIA_FAST_FORWARD):
+# these get matched against KeyMap.getKEY_PLAY / getKEY_RIGHT / getKEY_LEFT
+# / getKEY_DOWN / getKEY_UP further down the method and are dispatched
+# directly to PlayerService — that path still works.
+#
+# Upstream-compatibility note
+# ---------------------------
+# This patch lives entirely inside the music app's APK. Other foreground
+# apps (e.g. Rockbox, when installed on the device) have their own
+# Activity.dispatchKeyEvent and never inherit from this BaseActivity, so
+# their AVRCP key handling is unaffected. AVRCP.kl stays stock — the
+# kernel→KeyEvent mapping continues to deliver KEYCODE_MEDIA_PLAY (126)
+# for op_id 0x44, which is the spec-correct keycode for any app that
+# handles standard Android media keys.
+#
+# Stock smali at BaseActivity.smali:
+#     .method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+#         .locals 7
+#         const/4 v0, 0x1
+#         if-nez p1, :cond_0
+#         return v0                       # null event → "consumed"
+#         :cond_0
+#         invoke-virtual {p1}, KeyEvent;->getAction()I
+#         move-result v1
+#         invoke-virtual {p1}, KeyEvent;->getKeyCode()I
+#         move-result v2
+#         const/4 v3, 0x3                  # ← injection point above this line
+#         ...
+#
+# Patched: between `move-result v2` and `const/4 v3, 0x3`, check v2 against
+# 0x7e/0x7f/0x56 and `return 0` if any matches; otherwise fall through.
+
+BASE_ACTIVITY_SMALI = "smali/com/innioasis/y1/base/BaseActivity.smali"
+base_activity_path = os.path.join(UNPACKED_DIR, BASE_ACTIVITY_SMALI)
+if not os.path.exists(base_activity_path):
+    sys.exit(f"ERROR: Expected smali not found: {base_activity_path}")
+
+with open(base_activity_path, 'r') as f:
+    base_activity_src = f.read()
+
+OLD_DISPATCH_HEAD = """\
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 7
+
+    const/4 v0, 0x1
+
+    if-nez p1, :cond_0
+
+    return v0
+
+    .line 673
+    :cond_0
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getAction()I
+
+    move-result v1
+
+    .line 674
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getKeyCode()I
+
+    move-result v2
+
+    const/4 v3, 0x3"""
+
+NEW_DISPATCH_HEAD = """\
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 7
+
+    const/4 v0, 0x1
+
+    if-nez p1, :cond_0
+
+    return v0
+
+    .line 673
+    :cond_0
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getAction()I
+
+    move-result v1
+
+    .line 674
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getKeyCode()I
+
+    move-result v2
+
+    const/16 v3, 0x7e
+
+    if-eq v2, v3, :patch_h_propagate
+
+    const/16 v3, 0x7f
+
+    if-eq v2, v3, :patch_h_propagate
+
+    const/16 v3, 0x56
+
+    if-eq v2, v3, :patch_h_propagate
+
+    goto :patch_h_continue
+
+    :patch_h_propagate
+    const/4 v0, 0x0
+
+    return v0
+
+    :patch_h_continue
+    const/4 v3, 0x3"""
+
+if OLD_DISPATCH_HEAD not in base_activity_src:
+    sys.exit(
+        "ERROR: BaseActivity dispatchKeyEvent prologue not found.\n"
+        f"  File: {base_activity_path}\n"
+        "  The smali shape may differ from 3.0.2."
+    )
+
+base_activity_src = base_activity_src.replace(OLD_DISPATCH_HEAD, NEW_DISPATCH_HEAD, 1)
+
+if DEBUG_LOGGING:
+    base_activity_src = _inject_log_d(
+        base_activity_src,
+        r'dispatchKeyEvent\(Landroid/view/KeyEvent;\)Z',
+        "BaseActivity.dispatchKeyEvent entry",
+    )
+    print("  + BaseActivity.dispatchKeyEvent entry")
+
+with open(base_activity_path, 'w') as f:
+    f.write(base_activity_src)
+print(
+    "  Patch H: BaseActivity.dispatchKeyEvent -- propagate KEYCODE_MEDIA_PLAY (126), "
+    "KEYCODE_MEDIA_PAUSE (127), KEYCODE_MEDIA_STOP (86) so AVRCP PASSTHROUGH "
+    "0x44/0x46/0x45 reach PlayControllerReceiver via fallback dispatch"
+)
+
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1231,7 +1407,7 @@ if DEBUG_LOGGING:
 print(f"\nPatched smali file md5s (deterministic — same across machines):")
 PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
-    PLAY_CONTROLLER_RECEIVER_SMALI,
+    PLAY_CONTROLLER_RECEIVER_SMALI, BASE_ACTIVITY_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)

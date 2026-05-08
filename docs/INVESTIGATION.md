@@ -9,6 +9,7 @@ The shipped patch set:
 - `libextavrcp_jni.so.patched` (4 patches: **C2a/b, C3a/b**)
 - `libextavrcp.so.patched` (1 patch: **C4**)
 - `MtkBt.odex.patched` (2 patches: **F1, F2**)
+- `com.innioasis.y1*.apk.patched` (smali Patches **A**, **B**, **C**, **E**, **H**) — Patch H (iter31, 2026-05-08) added: `BaseActivity.dispatchKeyEvent` previously returned TRUE for every KeyEvent, swallowing `KEYCODE_MEDIA_PLAY (0x7e)` / `MEDIA_PAUSE (0x7f)` / `MEDIA_STOP (0x56)` because the activity has no `KeyMap` branch for them. iter30 captures (Kia EV6, dual-kia-iter30/) showed 9/9 AVRCP PASSTHROUGH 0x44 PLAY events terminating at the foreground activity instead of reaching `PlayControllerReceiver`; the framework smali (`PhoneWindowManager.interceptKeyBeforeQueueing` / `dispatchMediaKeyWithWakeLock`, `AudioService.dispatchMediaKeyEvent` / `isValidMediaKeyEvent` / `isValidVoiceInputKeyCode`, `PhoneFallbackEventHandler.onKeyDown` / `onKeyUp`, `mediatek-framework.odex`) was deodexed and ruled out as the filter. Fix: insert an early `return false` for those three keycodes immediately after `getKeyCode()` so they propagate to the standard fallback path and reach Patch E's discrete arms. Implication: `/system/usr/keylayout/AVRCP.kl` stays stock, leaving the kernel→KeyEvent mapping spec-correct for any other foreground app installed on the device (e.g. Rockbox).
 
 Patches **E5, E7a, E7b were tested and removed** — they patched live code that was never exercised at runtime for our peer state, so they had no observable effect.
 
