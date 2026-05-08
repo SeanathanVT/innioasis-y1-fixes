@@ -7,7 +7,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | ID(s) | Binary | Site / effect |
 |---|---|---|
 | **V1, V2, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
-| **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
+| **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every Y1MediaBridge broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
 | **A, B, C, E** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP routing per AV/C Panel Subunit Spec op_id table. |
@@ -98,7 +98,7 @@ All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is 
 
 T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-trampoline-state[0..7]`) and emits a reactive CHANGED via `reg_notievent_track_changed_rsp` before the GetElementAttributes response, then writes the new track_id back to state.
 
-Pre-check dispatch table: `0x20 → main`, `0x17 → T_charset`, `0x18 → T_battery`, `0x30 → T6`, `0x31+event≠0x02 → T8`, else fall through to "unknow indication".
+Pre-check dispatch table: `0x20 → main`, `0x17 → T_charset`, `0x18 → T_battery`, `0x30 → T6`, `0x40 → T_continuation`, `0x41 → T_continuation`, `0x31+event≠0x02 → T8`, else fall through to "unknow indication".
 
 ### T5 — proactive TRACK_CHANGED on Y1 track-change broadcast
 
@@ -109,9 +109,15 @@ In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `
 | before | `2D E9 F0 47` | `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` (function prologue) |
 | after  | `[b.w T5 emitted by patcher]` | branch to T5 trampoline |
 
-T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` and `y1-trampoline-state`, on track-id divergence emits `reg_notievent_track_changed_rsp` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=&sentinel_ffx8`, updates state, returns `jboolean(1)`.
+T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` (full 800 B) and `y1-trampoline-state`, and on track-id divergence emits the AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec order:
 
-Fired on every Y1MediaBridge `com.android.music.metachanged` broadcast (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable.
+1. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by Y1MediaBridge) `== 1`. Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
+2. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=&sentinel_ffx8`. Always.
+3. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Always (every track edge crosses a start-of-new-track boundary).
+
+Then writes the new track_id back to state and returns `jboolean(1)`.
+
+Fired on every Y1MediaBridge `com.android.music.metachanged` broadcast (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable. T5's frame is 816 B (16 state + 800 file_buf, mirroring T9's frame shape — needed so T5 can read `file[793]` for the natural-end gate).
 
 ### T_charset — InformDisplayableCharacterSet (PDU 0x17)
 
@@ -120,6 +126,14 @@ Branched from T4's pre-check on PDU 0x17. Calls `inform_charsetset_rsp` via PLT 
 ### T_battery — InformBatteryStatusOfCT (PDU 0x18)
 
 Same shape as T_charset, calls `battery_status_rsp` via PLT `0x357c`. AVRCP 1.3 §5.2.8.
+
+### T_continuation — RequestContinuingResponse (0x40) / AbortContinuingResponse (0x41)
+
+Branched from T4's pre-check on PDU 0x40 or 0x41. Restores `lr` canary + `r0=conn` and tail-jumps to UNKNOW_INDICATION (the catch-all reject path that emits AV/C NOT_IMPLEMENTED via msg=520). Functionally identical to the catch-all fall-through but routed through an explicit dispatch in the pre-check so ICS Table 7 rows 31-32 read "shipped" rather than "fall-through".
+
+AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. `get_element_attributes_rsp` never sets the start-of-fragmentation flag (verified: 2868 PDU 0x20 frames in a single TV capture, 100% `packet_type=0x00`); mtkbt fragments below at the AVCTP layer transparently. Across all 43 captures, zero 0x40/0x41 PDUs from any CT in the test matrix. The trampoline body is 6 bytes (one `ldrh.w`, one `add.w`, one `b.w`).
+
+§6.15.2 specifies AV/C INVALID_PARAMETER (status 0x05) as the spec-strict response when receiving 0x40 without prior fragmentation; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject for an unsupported PDU and is functionally indistinguishable to the CT (both are reject frames; the CT abandons the continuation flow either way). If a future capture surfaces non-zero 0x40 traffic, upgrade to a stateful continuation handler that re-emits the buffered response.
 
 ### T6 — GetPlayStatus (PDU 0x30)
 
@@ -142,7 +156,7 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | canned `0x00 NORMAL` (Tbl 5.35 enum) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 is INTERIM-only — proactive CHANGED for event 0x01 lives in T9; CHANGED edges for 0x03/0x04/0x05 are not currently emitted (would need periodic / track-edge plumbing from Y1MediaBridge).
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x02/0x03/0x04 live in T9 / T5 (see entries below). CHANGED edges for 0x05 / 0x06 / 0x07 are not currently emitted (Phase F2/F3 plumbing).
 
 ### T9 — proactive PLAYBACK_STATUS_CHANGED on Y1 play/pause edge
 
@@ -184,9 +198,9 @@ The patcher writes the trampoline blob into LOAD #1's page-alignment padding (42
 - offset+16 (`p_filesz`): `0xac54 → 0xb21c`
 - offset+20 (`p_memsz`): `0xac54 → 0xb21c`
 
-Current trampoline blob is 1480 bytes (~2540 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
+Current trampoline blob is 1548 bytes (~2164 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `bd3554d38486856cfbb17a37c02fd0a0`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `92e6c7ee5d43ab0c65f27a6da60dd320`.
 
 **For the full architectural reference** (data-path diagram, response-builder calling conventions, ELF program-header surgery details, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

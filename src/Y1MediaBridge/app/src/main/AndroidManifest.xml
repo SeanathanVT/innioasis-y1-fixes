@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="16"
-    android:versionName="1.9">
+    android:versionCode="18"
+    android:versionName="2.1">
 
     <!--
         READ_LOGS is signatureOrSystem on Android 4.2.

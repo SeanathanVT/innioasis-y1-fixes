@@ -191,6 +191,17 @@ public class MediaBridgeService extends Service {
     private volatile long mPositionAtStateChange = 0;
     private volatile long mStateChangeTime       = 0;
 
+    /** Whether the previous track ended naturally (position at duration) vs.
+     *  was interrupted by a skip / stop / explicit pause+resume on a different
+     *  track. Set in onTrackDetected by comparing the previous track's
+     *  extrapolated position against its duration before mCurrent* fields are
+     *  rewritten. Read by the AVRCP T5 trampoline (libextavrcp_jni.so) from
+     *  y1-track-info[793] to gate emission of the AVRCP 1.3 §5.4.2 Tbl 5.31
+     *  TRACK_REACHED_END (event 0x03) CHANGED frame — strict spec semantic
+     *  is "natural-end-only", and a skip is meant to fire only TRACK_CHANGED
+     *  + TRACK_REACHED_START. */
+    private volatile boolean mPreviousTrackNaturalEnd = false;
+
     private Bitmap mCurrentAlbumArt;
 
     private AudioManager        mAudioManager;
@@ -927,8 +938,38 @@ public class MediaBridgeService extends Service {
 
     private void onTrackDetected(String path) {
         if (path.equals(mCurrentPath)) return;
-        Log.d(TAG, "Track change: " + path);
+
+        // Phase F1: detect whether the previous track ended naturally
+        // (position ≈ duration at the moment of the track edge) vs was
+        // interrupted by a skip / stop / pause+resume-on-different-track.
+        // AVRCP 1.3 §5.4.2 Tbl 5.31 (TRACK_REACHED_END) is "Notify when
+        // reached the end of the track of the playing element" —
+        // natural-end-only, not skip-driven. The T5 trampoline reads this
+        // flag from y1-track-info[793] to decide whether to emit the
+        // event 0x03 CHANGED frame alongside the standard 0x02 + 0x04.
+        //
+        // Heuristic: previous track's extrapolated position was within
+        // [-1s..+2s] of its duration at the moment the new track was
+        // detected. The 1s lower bound covers tracks where the player
+        // overshoots duration slightly before signalling end-of-track;
+        // the 2s upper bound covers normal LogcatMonitor staleness
+        // (state-change anchor can be a few hundred ms behind real-time
+        // playback). Tighter bounds risk false negatives on slow logcat
+        // pipes; looser bounds risk false positives on aggressive
+        // skip-near-end. Skip when there's no previous track (cold start)
+        // or no known duration (couldn't read tags) — both leave the
+        // flag at its default `false`.
+        boolean previousNaturalEnd = false;
+        if (mCurrentPath != null && mCurrentDuration > 0) {
+            long prevPos = computePosition();
+            long delta = mCurrentDuration - prevPos;
+            previousNaturalEnd = (delta >= -1000L && delta <= 2000L);
+        }
+        Log.d(TAG, "Track change: " + path
+                + " prevNaturalEnd=" + previousNaturalEnd);
+
         mCurrentPath = path;
+        mPreviousTrackNaturalEnd = previousNaturalEnd;
         mPositionAtStateChange = 0;
         mStateChangeTime = SystemClock.elapsedRealtime();
 
@@ -1041,7 +1082,9 @@ public class MediaBridgeService extends Service {
     //                                                       extrapolation)
     //   bytes 788..791  = pad                                                    (reserved)
     //   bytes 792       = playing_flag             u8     (T6, T8/T9 event 0x01)
-    //   bytes 793..799  = pad                                                    (reserved Phase C)
+    //   bytes 793       = previous_track_natural_end u8  (T5 — Phase F1 gate
+    //                                                       for TRACK_REACHED_END)
+    //   bytes 794..799  = pad                                                    (reserved Phase F4)
     //   bytes 800..815  = TrackNumber              UTF-8 ASCII decimal (16 B slot)
     //   bytes 816..831  = TotalNumberOfTracks      UTF-8 ASCII decimal (16 B slot)
     //   bytes 832..847  = PlayingTime              UTF-8 ASCII decimal ms (16 B slot)
@@ -1074,6 +1117,12 @@ public class MediaBridgeService extends Service {
     private static final int POSITION_OFFSET    = DURATION_OFFSET + 4;            // 780 - pos_at_state_change u32 BE
     private static final int STATE_TIME_OFFSET  = POSITION_OFFSET + 4;            // 784 - state_change_time_sec u32 BE (reserved)
     private static final int PLAY_STATUS_OFFSET = STATE_TIME_OFFSET + 8;          // 792 - playing_flag u8
+    /** Phase F1: previous track's natural-end flag at byte 793.
+     *  T5 (libextavrcp_jni.so trampoline) reads this to gate AVRCP 1.3 §5.4.2
+     *  Tbl 5.31 TRACK_REACHED_END (event 0x03) CHANGED emission. 1=natural
+     *  end (emit TRACK_REACHED_END), 0=skip / interrupt (omit). Sits in the
+     *  pre-existing 793..799 reserved range; 794..799 still reserved. */
+    private static final int NATURAL_END_OFFSET = PLAY_STATUS_OFFSET + 1;         // 793 - previous_track_natural_end u8
     // GetElementAttributes attrs 4-7. Pre-formatted UTF-8 strings — keeps the
     // T4 trampoline a uniform strlen+memcpy loop and avoids hand-rolled Thumb-2
     // itoa for the numeric fields.
@@ -1117,6 +1166,11 @@ public class MediaBridgeService extends Service {
             // maps to 2 (PAUSED). Deeper state (FWD_SEEK / REV_SEEK / ERROR)
             // would require additional Y1MediaBridge plumbing.
             buf[PLAY_STATUS_OFFSET] = (byte) (mIsPlaying ? 0x01 : 0x02);
+            // Phase F1: natural-end flag for the AVRCP T5 trampoline's
+            // TRACK_REACHED_END gate. mPreviousTrackNaturalEnd is set in
+            // onTrackDetected by comparing the previous track's extrapolated
+            // position against its duration at the moment of the track edge.
+            buf[NATURAL_END_OFFSET] = (byte) (mPreviousTrackNaturalEnd ? 0x01 : 0x00);
 
             // GetElementAttributes attrs 4-7 (AVRCP 1.3 §5.3.4). Store as
             // pre-formatted UTF-8 strings so T4 ships them with the same

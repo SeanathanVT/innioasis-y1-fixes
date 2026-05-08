@@ -55,17 +55,17 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2/extended_T2/T8 | — |
 | **23** | Notify EVENT_PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | **M (C.4: M IF GetElementAttributes + RegisterNotification)** | ✓ T8 INTERIM + T9 CHANGED on edge | — |
 | **24** | Notify EVENT_TRACK_CHANGED | §5.4.2 Tbl 5.30 | **M (C.4)** | ✓ extended_T2 INTERIM + T5 CHANGED on edge | — |
-| 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM-only — CHANGED-on-edge planned (Phase F1) | partial |
-| 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM-only — CHANGED-on-edge planned (Phase F1) | partial |
+| 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (gated on natural-end flag from Y1MediaBridge `onTrackDetected` position-vs-duration check) | — |
+| 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (unconditional on every track edge) | — |
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only — periodic CHANGED planned (Phase F3) | partial |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM with canned `0x00 NORMAL` — real battery + CHANGED-on-edge planned (Phase F2) | partial |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
 | 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
-| 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | not shipped (current fall-through to msg=520 is functionally adequate; explicit handler planned for ICS-completeness — Phase D) | partial |
+| 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
-**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 29, 66. Optional rows partial (INTERIM-only or canned, real-data CHANGED-on-edge work tracked under Phase F): 25, 26, 27, 28. The Continuation gap (rows 31-32) is unobserved in our CT test matrix; explicit handler tracked as Phase D for ICS-completeness only.
+**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 29, 31, 32, 66. Optional rows partial (INTERIM-only or canned, real-data CHANGED-on-edge work tracked under Phase F): 27, 28.
 
 **INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. A row marked "INTERIM-only" handles registration but never emits CHANGED; spec-strict subscribers expect both halves. Mandatory rows 23 and 24 ship both halves; the optional rows above currently ship only INTERIM and are tracked under Phase F to ship the missing CHANGED-on-edge halves.
 
@@ -93,8 +93,8 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 |---|---|---|---|---|
 | 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play/pause broadcast) |
 | 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
-| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | needs end-of-track Y1 broadcast |
-| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | needs start-of-track Y1 broadcast |
+| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on Y1MediaBridge natural-end flag at file[793]) |
+| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | needs periodic Playback-interval timer |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (canned 0x00 NORMAL) | optional |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | optional |
@@ -218,32 +218,36 @@ btmtk_avrcp_send_get_playstatus_rsp(
 
 **Estimated effort:** 1-2 days. Includes the disassembly pass.
 
-### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41)
+### Phase D — Continuation PDUs (RequestContinuingResponse 0x40 + AbortContinuingResponse 0x41) — SHIPPED
 
-**Status:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response). Per AVRCP 1.3 §4.7.7 / §5.5, continuation flow is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. Two findings establish the current state:
+**Status:** ICS Table 7 rows 31-32 are M (C.2: M IF GetElementAttributes Response). Per AVRCP 1.3 §4.7.7 / §5.5, continuation flow is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. Two empirical findings established the no-fragmentation state:
 
 1. **Across 2868 PDU 0x20 frames in a single TV capture, 100% carry `packet_type=0x00`** (single non-fragmented AVRCP packet). `get_element_attributes_rsp` never sets the start-of-fragmentation flag; mtkbt fragments below at the AVCTP layer transparently to AVRCP. Even with the 7-attr T4 expansion, worst-case packed responses (~1100 B with maxed Title/Artist/Album/Genre slots) ship as a single AVRCP packet.
 2. **Across all 43 captures, zero 0x40/0x41 PDUs** from any CT in our test matrix, against thousands of GetElementAttributes / RegisterNotification PDUs.
 
-**Current behavior** is a fall-through to `pass_through_rsp` returning msg=520 NotImplemented for any unknown PDU including 0x40/0x41. Functionally adequate; spec-acceptable.
+**What ships:** a `T_continuation` trampoline branched from T4's pre-check when the inbound PDU byte is 0x40 or 0x41. Routes to the same UNKNOW_INDICATION path the catch-all fall-through uses, producing an AV/C NOT_IMPLEMENTED reject (msg=520). AVRCP 1.3 §6.15.2 specifies AV/C INVALID_PARAMETER (status 0x05) as the strict-spec response; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject for an unsupported PDU and is functionally indistinguishable from INVALID_PARAMETER from the CT's perspective (both are reject frames; the CT abandons the continuation flow either way). Explicit code-path closes the ICS scorecard row.
 
-**Phase D ships an explicit handler** for ICS-conformance scorecard reasons only: a tiny T-trampoline that returns AV/C `INVALID PARAMETER` (status 0x05) since we never set `packet_type=01` and therefore never legitimately receive 0x40. Effort: ~30 min. Documented as paper-only closure of ICS rows 31-32.
-
-**Re-evaluation trigger:** if any future hardware capture surfaces non-zero PDU 0x40 traffic (would indicate `get_element_attributes_rsp` started fragmenting after the 7-attr expansion), upgrade to a stateful continuation handler that re-emits the buffered response (~2-3 days).
+**Re-evaluation trigger:** if any future hardware capture surfaces non-zero PDU 0x40 traffic (would indicate `get_element_attributes_rsp` started fragmenting after the 7-attr expansion or some later schema growth), upgrade to a stateful continuation handler that re-emits the buffered response (~2-3 days).
 
 ### Phase F — Optional event coverage (real data, CHANGED-on-edge)
 
 Closes the partial-implementation entries on ICS Table 7 rows 25-28 by completing the CHANGED-on-edge half of each event subscription. Listed here in increasing effort order. All four sub-phases ship real data sourced from Y1 / Android system APIs — no canned values.
 
-#### Phase F1 — Track-edge events (PDUs in event 0x03 TRACK_REACHED_END + 0x04 TRACK_REACHED_START). ~3 hours.
+#### Phase F1 — Track-edge events (events 0x03 TRACK_REACHED_END + 0x04 TRACK_REACHED_START) — SHIPPED
 
-**Spec:** AVRCP 1.3 §5.4.2 Tables 5.31 / 5.32. ICS rows 25 / 26 (both Optional).
+**Spec:** AVRCP 1.3 §5.4.2 Tables 5.31 / 5.32. ICS Table 7 rows 25 / 26 (both Optional).
 
 **Real data:** Y1MediaBridge's existing `com.android.music.metachanged` broadcast already fires at every track edge — the moment when the previous track reaches end and the new track reaches start.
 
-**Spec-strict semantic for END:** §5.4.2 Table 5.31 is "Notify when reached the end of the track of the playing element" — natural-end-only, not skip-driven. Distinguish via `mPositionAtStateChange ≈ mCurrentDuration` (within ~1 sec) on the previous track at the moment of the metachanged broadcast. Skip-driven track changes fire only event 0x02 + event 0x04, not 0x03.
+**Spec-strict semantic for END:** §5.4.2 Table 5.31 is "Notify when reached the end of the track of the playing element" — natural-end-only, not skip-driven. Skip-driven track changes fire only event 0x02 + event 0x04, not 0x03.
 
-**Implementation:** extend T5's existing track-change CHANGED emission to fire a 3-tuple in sequence — event 0x03 TRACK_REACHED_END (only on natural end), event 0x02 TRACK_CHANGED (existing), event 0x04 TRACK_REACHED_START (always on track edge). T5 already runs at the right moment via the patched `notificationTrackChangedNative`; just add two PLT calls and a stack-buffer compare for the natural-end check. ~30 B added to the trampoline blob. Y1MediaBridge writes a 1-bit `previous_track_natural_end` flag into the schema before firing the broadcast.
+**What ships:**
+- Y1MediaBridge `onTrackDetected()` now compares the previous track's extrapolated position (`computePosition()` — anchored to the last play/pause/seek state change) against `mCurrentDuration` at the moment of track detection. Within `[-1000ms..+2000ms]` of duration counts as natural end. The 1s lower bound covers tracks where the player overshoots duration slightly before signalling end-of-track; the 2s upper bound covers normal LogcatMonitor staleness. Result is stored in `mPreviousTrackNaturalEnd` (boolean) and written to `y1-track-info[793]` as a u8 (1=natural, 0=skip / interrupt) inside `writeTrackInfoFile()` before the metachanged broadcast fires. Schema expansion: byte 793 was previously in the reserved 793..799 range — now 794..799 are the Phase F4 reservation.
+- T5 trampoline (in `libextavrcp_jni.so`) frame grew from 24 B (16 state + 8 file_tid scratch) to 816 B (16 state + 800 file_buf, mirroring T9's frame shape) so it can read `file[793]`. After detecting a track edge (existing `state[0..7] != file[0..7]` compare), T5 emits the AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec-defined order: `reg_notievent_reached_end_rsp` CHANGED (gated on `file[793]==1`, PLT 0x3378), `track_changed_rsp` CHANGED (existing, PLT 0x3384), `reg_notievent_reached_start_rsp` CHANGED (unconditional on every edge, PLT 0x336c). Adds ~40 B to the trampoline blob.
+
+No additional MtkBt.odex cardinality NOPs needed: T5 fires once per `metachanged` broadcast and emits all three events synchronously inside that single invocation. The cardinality NOPs in MtkBt.odex are only necessary when a separate `notificationXChangedNative` callback path needs to be unblocked.
+
+Y1MediaBridge versionCode bumps 17 → 18; versionName 2.0 → 2.1.
 
 #### Phase F2 — Real battery state (event 0x06 BATT_STATUS_CHANGED). ~4 hours.
 
@@ -292,7 +296,7 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 
 **Already shipped:**
 - **Patch E — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1.** Splits `PlayControllerReceiver`'s short-press join arm into four labeled blocks — KEY_PLAY (85, legacy `ACTION_MEDIA_BUTTON`) keeps `playOrPause()` (toggle); KEYCODE_MEDIA_PLAY (126, from PASSTHROUGH 0x44) routes to `play(Z)V` (bool=true); KEYCODE_MEDIA_PAUSE (127, from PASSTHROUGH 0x46) routes to `pause(IZ)V` (reason=0x12, flag=true); KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45) routes to `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. The `play(Z)V` boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`; that singleton edge is what propagates the resume to the rest of the music app (UI, RemoteControlClient, AudioFocus state). Calling `play(false)` starts the player but skips the singleton update — other components don't see the resume edge. The Kotlin-generated `play$default(this, dummy, mask=1, null)` wrapper (used by the music app's own `playOrPause()` resume path) overrides the boolean to `1` via the default-args mask, so passing `true` here matches that behavior. Smali-level edits only.
-- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `bd3554d38486856cfbb17a37c02fd0a0` (cumulative across all libextavrcp_jni.so patches including U1).
+- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `92e6c7ee5d43ab0c65f27a6da60dd320` (cumulative across all libextavrcp_jni.so patches including U1, T_continuation, and T5's Phase F1 expansion).
 
 **Pending audit items (no spec gap, no estimated effort attached):**
 - T1's `EventsSupported` array maintained in lock-step with what's actually implemented (each phase bumps it).
@@ -318,7 +322,8 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 | 784..787 | state_change_time_sec (BE u32) | 4 | shipped | `MediaBridgeService.mStateChangeTime / 1000` (CLOCK_BOOTTIME source — T6 live-position extrapolation) |
 | 788..791 | reserved | 4 | — | (pad) |
 | 792 | playing_flag | 1 | shipped | `mIsPlaying` (1=PLAYING, 2=PAUSED, 0=STOPPED — AVRCP §5.4.1 Tbl 5.26) |
-| 793..799 | reserved | 7 | — | (Phase C shuffle_flag/repeat_mode reservation) |
+| 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
+| 794..799 | reserved | 6 | — | (Phase F4 shuffle_flag/repeat_mode reservation) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |

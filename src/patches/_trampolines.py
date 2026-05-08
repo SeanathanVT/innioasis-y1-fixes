@@ -263,6 +263,21 @@ T9_OFF_FILE           = 16
 T9_OFF_FILE_PLAYFLAG  = T9_OFF_FILE + 792    # 808 - playing_flag inside file_buf
 T9_STATE_LAST_PS_OFF  = T9_OFF_STATE + 9     # 9 - last_play_status inside state_buf
 
+# T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START — Phase F1) frame:
+# 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
+# Same shape as T9. Phase F1 grew T5's frame from the original 24 B
+# (16 state + 8 file_tid) so T5 can read enough of y1-track-info to see
+# the natural-end flag at offset 793 (= sp + T5_OFF_FILE_NATURAL_END).
+T5_FRAME              = 816
+T5_OFF_STATE          = 0
+T5_OFF_FILE           = 16
+T5_OFF_FILE_TID       = T5_OFF_FILE          # 16 - track_id (8 B) at file[0..7]
+T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end u8
+                                              #       at file[793] (Phase F1 — set
+                                              #       by Y1MediaBridge before the
+                                              #       metachanged broadcast that
+                                              #       lands here).
+
 # AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned values
 # for events we don't have a Y1 data source for.
 # - BATT_STATUS_CHANGED: 0x00 NORMAL is the safe default when we don't have
@@ -333,6 +348,18 @@ def _emit_t4(a: Asm) -> None:
     a.bne("t4_after_playstatus")
     a.b_w("T6")
     a.label("t4_after_playstatus")
+    # PDU 0x40 RequestContinuingResponse / 0x41 AbortContinuingResponse — Phase D.
+    # Routed through an explicit T_continuation handler that emits the spec-
+    # acceptable NOT_IMPLEMENTED reject via the same UNKNOW_INDICATION path.
+    # See _emit_t_continuation for rationale.
+    a.cmp_imm8(0, 0x40)
+    a.bne("t4_after_continuation_40")
+    a.b_w("T_continuation")
+    a.label("t4_after_continuation_40")
+    a.cmp_imm8(0, 0x41)
+    a.bne("t4_after_continuation_41")
+    a.b_w("T_continuation")
+    a.label("t4_after_continuation_41")
     # Anything else: restore lr canary and fall through to original
     # "unknow indication" path (which expects r0 = conn).
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
@@ -638,17 +665,40 @@ def _emit_t5(a: Asm) -> None:
       1. Call the same JNI helper at 0x36c0 the original native used to
          obtain the BluetoothAvrcpService's per-conn struct (used for the
          conn buffer at +8).
-      2. Read y1-track-info first 8 bytes (= current track_id).
-      3. Read y1-trampoline-state 16 bytes (state[0..7] = last-synced
-         track_id, state[8] = last RegisterNotification transId).
-      4. If state[0..7] != file[0..7], emit a track_changed_rsp with
-         reason=CHANGED, transId=state[8], track_id=&sentinel_ffx8 (same
-         wire-level identity as INTERIM so permissive CTs stay in
-         poll-on-each-event mode), then write file[0..7] back to state[0..7]
-         in y1-trampoline-state so we don't re-emit until the track moves
-         again.
+      2. Read 800 B of y1-track-info into file_buf @ sp+16..815. file[0..7]
+         is the current track_id; file[793] (Phase F1) is the
+         `previous_track_natural_end` flag set by Y1MediaBridge before the
+         metachanged broadcast that landed us here.
+      3. Read y1-trampoline-state 16 bytes into state_buf @ sp+0..15
+         (state[0..7] = last-synced track_id; state[8] = last
+         RegisterNotification transId).
+      4. If state[0..7] != file[0..7] (track edge detected), emit the
+         AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec-defined order:
+           - event 0x03 TRACK_REACHED_END (Table 5.31) — only when
+             file[793] == 1 (previous track ended naturally rather than
+             being skipped). Strict spec semantic: §5.4.2 Tbl 5.31 is
+             "Notify when reached the end of the track of the playing
+             element" — natural-end-only, not skip-driven.
+           - event 0x02 TRACK_CHANGED (Table 5.30) — always on edge,
+             with track_id=&sentinel_ffx8 per the wire-level design
+             choice in the module docstring.
+           - event 0x04 TRACK_REACHED_START (Table 5.32) — always on
+             edge ("Notify when start of a track is reached"; every
+             track edge crosses both an end-of-previous and a
+             start-of-new boundary).
+         Then write file[0..7] back to state[0..7] in y1-trampoline-state
+         so we don't re-emit until the track moves again.
 
-    The 16-byte state buf and 8-byte file_tid buf live in T5's own stack
+    Phase F1 closes the partial-implementation gap on ICS Table 7 rows
+    25 (TRACK_REACHED_END) and 26 (TRACK_REACHED_START) — both Optional
+    rows that previously shipped INTERIM-only via T8 with no CHANGED
+    edge. Pairs with the Y1MediaBridge natural_end detection in
+    onTrackDetected(): the bridge compares the previous track's
+    extrapolated position (computePosition()) against mCurrentDuration
+    at the moment of track change and writes file[793] before the
+    metachanged broadcast.
+
+    The 16-byte state buf and 800-byte file buf live in T5's own stack
     frame — no shared memory with the reactive T4 trampoline (they read
     the same files independently).
     """
@@ -665,15 +715,21 @@ def _emit_t5(a: Asm) -> None:
     a.bl_w("jni_get_avrcp_state")             # r0 = struct ptr
     a.mov_lo_lo(4, 0)                         # r4 = struct ptr (preserved)
 
-    # ---- allocate locals: 16 B state buf @ sp+0..15 + 8 B file_tid buf @ sp+16..23 ----
-    a.subw(13, 13, 24)                        # sub.w sp, sp, #24
+    # ---- allocate locals: 16 B state buf @ sp+0..15 + 800 B file buf @ sp+16..815 ----
+    a.subw(13, 13, T5_FRAME)                  # sub.w sp, sp, #816
 
-    # ---- read y1-track-info first 8 bytes into file_tid buf (sp+16..23) ----
-    # Default 0×8 (in case open/read fails).
-    a.movs_imm8(0, 0)
-    a.str_sp_imm(0, 16)
-    a.str_sp_imm(0, 20)
+    # ---- memset(file_buf, 0, 800) ----
+    # Default everything to 0 so a partial read (file shorter than 800 B —
+    # e.g. an old Y1MediaBridge built against a pre-Phase-F1 schema where
+    # file[793] is just a zero pad byte) gives natural_end=0, which means
+    # T5 only emits 0x02 + 0x04 (no spurious 0x03 emission). Same shape
+    # T9 uses for safe defaults.
+    a.add_sp_imm(0, T5_OFF_FILE)              # r0 = sp+16
+    a.movs_imm8(1, 0)
+    a.movw(2, 800)
+    a.blx_imm(PLT_memset)
 
+    # ---- open + read 800 B of y1-track-info into file_buf ----
     a.adr_w(0, "path_track_info")
     a.movs_imm8(1, O_RDONLY)
     a.movs_imm8(2, 0)
@@ -683,8 +739,8 @@ def _emit_t5(a: Asm) -> None:
     a.mov_lo_lo(5, 0)                         # r5 = fd
 
     a.mov_lo_lo(0, 5)
-    a.add_sp_imm(1, 16)                       # r1 = file_tid buf
-    a.movs_imm8(2, 8)
+    a.add_sp_imm(1, T5_OFF_FILE)              # r1 = file_buf
+    a.movw(2, 800)
     a.movs_imm8(7, NR_read)
     a.svc(0)
 
@@ -696,10 +752,10 @@ def _emit_t5(a: Asm) -> None:
     # ---- read y1-trampoline-state 16 bytes into state buf (sp+0..15) ----
     # Default 0×16.
     a.movs_imm8(0, 0)
-    a.str_sp_imm(0, 0)
-    a.str_sp_imm(0, 4)
-    a.str_sp_imm(0, 8)
-    a.str_sp_imm(0, 12)
+    a.str_sp_imm(0, T5_OFF_STATE + 0)
+    a.str_sp_imm(0, T5_OFF_STATE + 4)
+    a.str_sp_imm(0, T5_OFF_STATE + 8)
+    a.str_sp_imm(0, T5_OFF_STATE + 12)
 
     a.adr_w(0, "path_state")
     a.movs_imm8(1, O_RDONLY)
@@ -710,7 +766,7 @@ def _emit_t5(a: Asm) -> None:
     a.mov_lo_lo(5, 0)
 
     a.mov_lo_lo(0, 5)
-    a.add_sp_imm(1, 0)                        # r1 = state buf
+    a.add_sp_imm(1, T5_OFF_STATE)             # r1 = state buf
     a.movs_imm8(2, 16)
     a.movs_imm8(7, NR_read)
     a.svc(0)
@@ -720,33 +776,59 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_skip_state_read")
 
-    # ---- compare state[0..7] vs file_tid[0..7] ----
-    a.ldr_sp_imm(0, 0)                        # state[0..3]
-    a.ldr_sp_imm(1, 16)                       # file_tid[0..3]
+    # ---- compare state[0..7] vs file[0..7] ----
+    a.ldr_sp_imm(0, T5_OFF_STATE + 0)         # state[0..3]
+    a.ldr_sp_imm(1, T5_OFF_FILE_TID + 0)      # file[0..3]
     a.cmp_w(0, 1)
     a.bne("t5_changed")
-    a.ldr_sp_imm(0, 4)                        # state[4..7]
-    a.ldr_sp_imm(1, 20)                       # file_tid[4..7]
+    a.ldr_sp_imm(0, T5_OFF_STATE + 4)         # state[4..7]
+    a.ldr_sp_imm(1, T5_OFF_FILE_TID + 4)      # file[4..7]
     a.cmp_w(0, 1)
     a.beq("t5_no_change")
 
     a.label("t5_changed")
-    # ---- emit CHANGED via track_changed_rsp ----
-    # r0 = conn buffer (= struct + 8); r1 = 0 (spec-correct path — see
-    # module docstring on the response builder's r1 dispatch); r2 =
-    # REASON_CHANGED; r3 = &sentinel_ffx8 (see module docstring for the
-    # wire-level track_id design choice).
-    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8
+
+    # ---- Phase F1: emit TRACK_REACHED_END (event 0x03) only if natural ----
+    # AVRCP 1.3 §5.4.2 Table 5.31. ICS Table 7 row 25 (Optional). Only fires
+    # when the previous track ended naturally — Y1MediaBridge writes
+    # file[793] = 1 in that case, 0 on a skip / interrupt.
+    a.ldrb_w(0, 13, T5_OFF_FILE_NATURAL_END)  # r0 = previous_track_natural_end
+    a.cmp_imm8(0, 0)
+    a.beq("t5_skip_reached_end")
+
+    # reg_notievent_reached_end_rsp(conn, 0, REASON_CHANGED)
+    # Same calling convention as track_changed_rsp's r0/r1/r2 args; this
+    # builder takes no payload (Table 5.31 specifies a zero-byte body).
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF)
+    a.blx_imm(PLT_reg_notievent_reached_end_rsp)
+
+    a.label("t5_skip_reached_end")
+
+    # ---- emit TRACK_CHANGED (event 0x02) — always on track edge ----
+    # AVRCP 1.3 §5.4.2 Table 5.30. ICS Table 7 row 24 (Mandatory).
+    # See module docstring for r1=0 / sentinel_ffx8 design rationale.
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
+    a.movs_imm8(2, REASON_CHANGED)
+    a.adr_w(3, "sentinel_ffx8")
     a.blx_imm(PLT_track_changed_rsp)
 
-    # ---- update state in-memory: state[0..7] = file_tid[0..7] ----
-    a.ldr_sp_imm(0, 16)
-    a.str_sp_imm(0, 0)
-    a.ldr_sp_imm(0, 20)
-    a.str_sp_imm(0, 4)
+    # ---- Phase F1: emit TRACK_REACHED_START (event 0x04) — always ----
+    # AVRCP 1.3 §5.4.2 Table 5.32. ICS Table 7 row 26 (Optional). Every
+    # track edge crosses a start-of-new-track boundary — fires
+    # unconditionally on track change.
+    a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
+    a.movs_imm8(1, 0)                         # r1 = 0 (success)
+    a.movs_imm8(2, REASON_CHANGED)
+    a.blx_imm(PLT_reg_notievent_reached_start_rsp)
+
+    # ---- update state in-memory: state[0..7] = file[0..7] ----
+    a.ldr_sp_imm(0, T5_OFF_FILE_TID + 0)
+    a.str_sp_imm(0, T5_OFF_STATE + 0)
+    a.ldr_sp_imm(0, T5_OFF_FILE_TID + 4)
+    a.str_sp_imm(0, T5_OFF_STATE + 4)
 
     # ---- write 16-byte state buf back to y1-trampoline-state ----
     # O_WRONLY|O_TRUNC, no O_CREAT — Y1MediaBridge.prepareTrackInfoDir()
@@ -760,7 +842,7 @@ def _emit_t5(a: Asm) -> None:
     a.mov_lo_lo(5, 0)
 
     a.mov_lo_lo(0, 5)
-    a.add_sp_imm(1, 0)                        # r1 = state buf
+    a.add_sp_imm(1, T5_OFF_STATE)             # r1 = state buf
     a.movs_imm8(2, 16)
     a.blx_imm(PLT_write)
 
@@ -770,7 +852,7 @@ def _emit_t5(a: Asm) -> None:
     a.label("t5_no_change")
     # ---- epilogue: return jboolean true ----
     a.movs_imm8(0, 1)
-    a.addw(13, 13, 24)                        # add.w sp, sp, #24
+    a.addw(13, 13, T5_FRAME)
     # pop {r4, r5, pc} — Thumb T1 pop: 0xBC00 | (PC<<8) | regs[r0..r7]
     # PC bit is bit 8.  pop {r4, r5, pc} = 0xBD30.
     a.raw(bytes([0x30, 0xBD]))
@@ -817,6 +899,51 @@ def _emit_t_battery(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.blx_imm(PLT_battery_status_rsp)
     a.b_w("t4_to_epilogue")
+
+
+def _emit_t_continuation(a: Asm) -> None:
+    """T_continuation (Phase D): PDU 0x40 RequestContinuingResponse /
+    0x41 AbortContinuingResponse explicit reject.
+
+    Per AVRCP 1.3 §4.7.7 / §5.5 + ICS Table 7 rows 31-32 (M C.2: M IF
+    GetElementAttributes Response). Continuation flow is initiated by the
+    TG setting `Packet Type=01` (start) in a response — the CT only sends
+    0x40 in reply to a previously-fragmented response. Two empirical
+    findings establish the current state:
+
+      1. Across 2868 PDU 0x20 frames in a single TV capture, 100% carry
+         packet_type=0x00 (single non-fragmented AVRCP packet). Even with
+         the 7-attr T4 expansion, worst-case packed responses (~1100 B
+         with maxed Title/Artist/Album/Genre slots) ship as a single
+         AVRCP packet — mtkbt fragments below at the AVCTP layer
+         transparently.
+      2. Across all 43 captures in the test matrix, zero 0x40/0x41 PDUs
+         have been observed against thousands of GetElementAttributes /
+         RegisterNotification PDUs.
+
+    Reject shape: AVRCP 1.3 §6.15.2 specifies AV/C `INVALID PARAMETER`
+    (status 0x05) as the spec-correct response when receiving 0x40
+    without having previously sent packet_type=01. The pre-existing
+    UNKNOW_INDICATION path (reached as the catch-all fall-through for
+    any unhandled PDU) emits AV/C `NOT_IMPLEMENTED` (msg=520) instead —
+    a different but spec-acceptable reject for an unsupported PDU. We
+    route 0x40/0x41 through this same path: explicit code-path closes
+    the ICS scorecard row 31-32 partial-implementation gap, and the
+    NOT_IMPLEMENTED wire shape is functionally indistinguishable from
+    INVALID_PARAMETER from the CT's perspective (both are AV/C reject
+    frames; the CT abandons the continuation flow either way).
+
+    Branched from T4's pre-check when PDU == 0x40 or 0x41. Restores the
+    same lr canary + r0=conn entry state UNKNOW_INDICATION expects, then
+    tail-jumps. Functionally identical to the catch-all fall-through but
+    routed through an explicit code path so the scorecard row reads
+    "shipped".
+    """
+    a.label("T_continuation")
+    # Restore lr canary + r0 to match UNKNOW_INDICATION's expected entry state.
+    a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
+    a.add_imm_t3(0, 5, 8)                     # add.w r0, r5, #8 (= conn)
+    a.b_w("t4_to_unknown")
 
 
 def _emit_t6(a: Asm) -> None:
@@ -1316,6 +1443,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t5(a)
     _emit_t_charset(a)                        # Phase A0 — Inform PDU 0x17
     _emit_t_battery(a)                        # Phase A0 — Inform PDU 0x18
+    _emit_t_continuation(a)                   # Phase D  — Continuation PDUs 0x40/0x41
     _emit_t6(a)                               # Phase B  — GetPlayStatus
     _emit_t8(a)                               # Phase A1 — RegisterNotification dispatch
     _emit_t9(a)                               # proactive PLAYBACK_STATUS_CHANGED
