@@ -27,6 +27,8 @@ Implement AVRCP 1.3 spec-completely so any spec-compliant 1.3+ controller render
 
 The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's BlueAngel-internal `getPreferVersion()` value — this internal flag must be set high enough for MtkBt's Java-side dispatcher to invoke 1.3+ command handling on a stack that was originally compiled against AVRCP 1.0. F1 sets the flag and unblocks 1.3 dispatch; nothing in our wire shape is changed by it.
 
+**Current state:** every Mandatory row of ICS Table 7 is closed, plus every Optional row except 12-17 + 30 (PlayerApplicationSettings — Phase F4, deferred). With the F4 ICS-C.14 quartet being all-or-none and requiring substantial extra work for Optional-only rows, the deliberate decision is to ship the rest spec-completely and revisit F4 once hardware-test bandwidth opens up.
+
 ---
 
 ## 2. Coverage matrix — current vs spec
@@ -281,13 +283,19 @@ Y1MediaBridge versionCode bumps 18 → 19; versionName 2.1 → 2.2.
 
 Y1MediaBridge versionCode bumps 19 → 20; versionName 2.2 → 2.3.
 
-#### Phase F4 — PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08). ~5 days.
+#### Phase F4 — PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08) — DEFERRED
 
-**Spec:** AVRCP 1.3 §5.2.1–5.2.6 + §5.4.2 Table 5.37. ICS rows 12-17 + 30. Condition C.14: support either none or all of 0x11-0x14 — we currently support none (spec-conformant); going to "all" is the threshold.
+**Spec:** AVRCP 1.3 §5.2.1–5.2.6 + §5.4.2 Table 5.37. ICS Table 7 rows 12-17 + 30. Condition C.14: support either none or all of 0x11-0x14 — we currently support none (spec-conformant); going to "all" is the threshold.
 
-**Real data:** Y1's `com.innioasis.y1.apk` `SharedPreferencesUtils.setShuffle(Z)V` and `setRepeatMode(I)V`.
+**Why deferred:** F4 is all-or-none under C.14 (partial implementation of 0x11-0x14 is non-conformant), and every row it would close is Optional. The implementation requires (a) Y1 APK smali patches that inject `sendBroadcast` calls into static-ish methods (`SharedPreferencesUtils.setMusicIsShuffle`/`setMusicRepeatMode`) where there is no Context handle, requiring `getApp()`-injection chains; (b) Y1MediaBridge cross-package SharedPreferences plumbing for cold-boot reads; (c) at minimum 4 sub-trampolines for 0x11-0x14 (plus 0x15/0x16 text-label trampolines and event 0x08 proactive emission for full ICS coverage) where the PLT calling conventions for `list_player_attrs_rsp`, `list_player_values_rsp`, `get_curplayer_value_rsp`, `set_player_value_rsp`, `get_player_attr_text_rsp`, `get_player_value_text_value_rsp` are not yet documented and would each require disassembly + cross-reference work; (d) a SetPlayerAppSettingValue (PDU 0x14) write path that actually mutates Y1's SharedPreferences from a different process; (e) a new cardinality NOP in MtkBt.odex for the event-0x08 sswitch arm if proactive CHANGED is in scope. Total effort ≈ 5 days of careful work for Optional-only rows.
 
-**Implementation:** two new smali patches in `patch_y1_apk.py` (broadcast on shuffle/repeat setters); Y1MediaBridge BroadcastReceivers + cold-boot SharedPreferences read; six new T7-family sub-trampolines for PDUs 0x11-0x16 (~350 B); proactive trampoline T_papp_changed for event 0x08; T1 advertises events grow to include 0x08.
+**What's in place** (pre-F4 plumbing that will not have to be redone):
+- T8's existing event-0x08 INTERIM arm (currently NOT-IMPLEMENTED) is a small extension when the schema/PLT discovery is done.
+- T1's `EventsSupported` array advertises `[0x01..0x07]`; F4 adds 0x08.
+- Schema bytes `[795..799]` of `y1-track-info` are reserved for `shuffle_flag` / `repeat_mode` plus padding.
+- The infrastructure pattern (Y1MediaBridge → `playstatechanged` broadcast → T9 piggyback) used by F2 / F3 demonstrates a working dispatch path that F4 could reuse for PDU 0x14 if the SetPlayerAppSettingValue write path goes through a fresh Y1MediaBridge BroadcastReceiver-then-trigger-back-to-Y1-app round trip.
+
+**Implementation when revisited:** smali patches in `patch_y1_apk.py` (broadcast on shuffle/repeat setters); Y1MediaBridge BroadcastReceivers + cold-boot SharedPreferences read; sub-trampolines for PDUs 0x11-0x16 (~350 B for the response-builder dispatch table); proactive trampoline `T_papp_changed` for event 0x08; T1 advertises events grow to include 0x08.
 
 **Sub-PDU detail (informative):**
 - 0x11 ListPlayerAppSettingAttrs — return 2 attrs: 0x02 (Repeat), 0x03 (Shuffle). 1.3 also defines 0x01 EqualizerStatus and 0x04 ScanStatus, both optional; skip.
@@ -424,10 +432,13 @@ Phases A0/A1/B + GetElementAttributes 7-attr already shipped (see compliance sco
 | F1 — Track-edge events (0x03/0x04 CHANGED) | not shipped | ~30 | yes (1 flag byte) | no | 3 hours |
 | F2 — Real battery state (0x06 CHANGED) | not shipped | ~50 | yes (1 byte) | no | 4 hours |
 | F3 — Periodic 0x05 PLAYBACK_POS_CHANGED | not shipped | ~120 | (uses state file pad) | no | 1 day |
-| F4 — PlayerApplicationSettings (0x11–0x16 + event 0x08) | not shipped | ~400 | yes (2 bytes) | yes | 5 days |
-| D — Continuation (0x40–0x41) | not shipped — diagnostic shows zero CT exercises across 43 captures | ~30 | no | no | 30 min for spec-only stub |
+| F1 — Track-edge events (0x03/0x04 CHANGED) | shipped | ~40 | yes (1 byte) | yes (T5 extension) | done |
+| F2 — Real BATT_STATUS_CHANGED (0x06 CHANGED) | shipped | ~50 | yes (1 byte) | yes (T9 extension) | done |
+| F3 — Periodic PLAYBACK_POS_CHANGED (0x05 CHANGED) | shipped | ~60 | no | yes (T9 extension) | done |
+| F4 — PlayerApplicationSettings (0x11–0x16 + event 0x08) | **deferred** — Optional-only rows, all-or-none under C.14, 5 days of work | ~400 | yes (2 bytes) | yes | 5 days when revisited |
+| D — Continuation (0x40–0x41) | shipped — explicit T_continuation routes 0x40/0x41 to UNKNOW_INDICATION reject | ~6 | no | no | done |
 
-Total remaining for full 1.3 compliance: ~7–8 days end-to-end.
+Total remaining for full 1.3 compliance: 5 days (F4 only).
 
 ---
 
@@ -435,10 +446,10 @@ Total remaining for full 1.3 compliance: ~7–8 days end-to-end.
 
 Shipped phases let us short-circuit further work if compatibility is achieved:
 
-- **A0 + A1 + B + GetElementAttributes 7-attr (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 7 advertised RegisterNotification events 0x01..0x07 covered (INTERIM-only for 0x03–0x07, INTERIM + CHANGED-on-edge for 0x01 and 0x02); GetPlayStatus with live position; **GetElementAttributes packs all 7 §5.3.4 attribute IDs** (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E) and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every mandatory row is hit.
-- **Phase F (optional event CHANGED-on-edge coverage):** completes the partial-implementation rows on ICS Table 7 25-28 by shipping real-data CHANGED edges for 0x03/0x04/0x05/0x06 and PApp Settings for 0x11-0x16 + event 0x08. F4 (PApp) is rarely a metadata gate in observed CT behavior — diminishing returns relative to F1/F2/F3.
-- **Phase D (Continuation):** mandatory per ICS condition C.2 but **diagnostic across all 43 captures shows zero CT exercises 0x40/0x41**. Ships as a 30-minute spec-only stub for ICS-completeness; full state machine deferred unless hardware ever surfaces 0x40 traffic.
-- **Phase E (audit + cleanup):** Patch E + U1 already shipped; remaining items (SDP audit, MtkBt.odex disable() check, fftimer investigation, Y1 player state-code expansion, logging gate) are non-spec work tracked separately.
+- **A0 + A1 + B + GetElementAttributes 7-attr (shipped):** PDU 0x17 NACK closed; TRACK_CHANGED wire-correct; all 7 advertised RegisterNotification events 0x01..0x07 covered with INTERIM responses; GetPlayStatus with live position; **GetElementAttributes packs all 7 §5.3.4 attribute IDs** (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime). Plus discrete PASSTHROUGH PLAY/PAUSE/STOP at the music-app layer (Patch E), Patch H propagating discrete media keys past the foreground activity, and kernel auto-repeat off on the AVRCP uinput device (U1). Per the ICS scorecard in §2, every Mandatory row is hit.
+- **Phase D + F1 + F2 + F3 (shipped):** completes the partial-implementation rows on ICS Table 7 25-28 (track-edge / battery / position CHANGED-on-edge), the Continuation 0x40/0x41 reject explicit dispatch (rows 31-32), and brings every Optional row except 12-17 + 30 (PApp Settings) to spec-strict CHANGED coverage with real data, no canned values.
+- **Phase E (audit + cleanup):** Patch E + U1 + Patch H + LogcatMonitor STOPPED state-code coverage all shipped; remaining items (SDP audit, MtkBt.odex disable() check, fftimer investigation, logging gate) are non-spec work tracked separately.
+- **Phase F4 (deferred):** all Optional rows. 5 days of careful work for ICS C.14's all-or-none threshold on PDUs 0x11-0x14 plus 0x15/0x16 text labels and event 0x08 proactive emission. Revisitable when hardware-test bandwidth opens up.
 
 Each phase ships an incremental compliance milestone that's coherent on its own.
 
