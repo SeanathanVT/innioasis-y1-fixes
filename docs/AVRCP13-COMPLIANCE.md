@@ -50,13 +50,13 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | 9 | Receiving PASS THROUGH cat 3 | §4.1.3 | C.1: not required | not claimed | — |
 | 10 | Receiving PASS THROUGH cat 4 | §4.1.3 | C.1: not required | not claimed | — |
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
-| 12-15 | List/Get/Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; PlayerApplicationSettings ships all (deferred — see §1) |
-| 16-17 | PApp Setting Attribute/Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | PlayerApplicationSettings (deferred) |
+| 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; PlayerApplicationSettings ships all (deferred — see §1) |
+| 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | PlayerApplicationSettings (deferred) |
 | 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
-| **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime, single packed frame) | — |
+| **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime, single packed frame) | — |
 | **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 with live position via `clock_gettime(CLOCK_BOOTTIME)` | — |
-| **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2/extended_T2/T8 | — |
+| **22** | RegisterNotification (PDU 0x31) | §5.4.2 | **M (C.12: M IF cat 1)** | ✓ T2 / extended_T2 / T8 | — |
 | **23** | Notify EVENT_PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | **M (C.4: M IF GetElementAttributes + RegisterNotification)** | ✓ T8 INTERIM + T9 CHANGED on edge | — |
 | **24** | Notify EVENT_TRACK_CHANGED | §5.4.2 Tbl 5.30 | **M (C.4)** | ✓ extended_T2 INTERIM + T5 CHANGED on edge | — |
 | 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (gated on natural-end flag from Y1MediaBridge `onTrackDetected` position-vs-duration check) | — |
@@ -71,7 +71,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 
 **Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 27, 28, 29, 31, 32, 66. Optional rows still pending: 12-17, 30 (PlayerApplicationSettings).
 
-† **Event 0x07 SYSTEM_STATUS_CHANGED — INTERIM-only is intentional.** While trampolines execute, the system is by definition POWER_ON; UNPLUGGED is for accessory/dock contexts that don't apply to the Y1; POWER_OFF is unobservable from inside a process that can no longer emit responses. The canned `0x00 POWER_ON` value IS the real value, so there is no edge to fire CHANGED on.
+† **Event 0x07 SYSTEM_STATUS_CHANGED — INTERIM-only is intentional.** While trampolines execute, the system is by definition POWER_ON; UNPLUGGED is for accessory / dock contexts that don't apply to the Y1; POWER_OFF is unobservable from inside a process that can no longer emit responses. The canned `0x00 POWER_ON` value IS the real value, so there is no edge to fire CHANGED on.
 
 **INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. Mandatory rows 23 and 24 ship both halves. Optional rows 25 / 26 / 27 / 28 also ship both halves with real-data CHANGED-on-edge. Row 29 SYSTEM_STATUS_CHANGED ships INTERIM only (see footnote above).
 
@@ -97,7 +97,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play/pause broadcast) |
+| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play / pause broadcast) |
 | 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
 | 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on Y1MediaBridge natural-end flag at file[793]) |
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
@@ -167,15 +167,15 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — fed by `LogcatMonitor` mapping Y1's BaseActivity state codes `'1'`/`'3'`/`'5'`) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
 | 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
-| 795..799 | reserved | 5 | — | (PlayerApplicationSettings shuffle_flag/repeat_mode reservation) |
+| 795..799 | reserved | 5 | — | (PlayerApplicationSettings shuffle_flag / repeat_mode reservation) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
 | 848..1103 | Genre (UTF-8) | 256 | shipped | `MediaStore.Audio.Genres` / `METADATA_KEY_GENRE` |
 
-Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6/T8/T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
+Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6 / T8 / T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
 
-The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16/u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
+The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16 / u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
 
 `y1-trampoline-state` (16 B, mode 0666) is unchanged; remains the sole writable surface from the BT process side.
 
@@ -200,15 +200,15 @@ Recipe per function: see [`ARCHITECTURE.md`](ARCHITECTURE.md) §"Adding a new PD
 **Sub-PDU detail (informative):**
 - 0x11 ListPlayerAppSettingAttrs — return 2 attrs: 0x02 (Repeat), 0x03 (Shuffle). 1.3 also defines 0x01 EqualizerStatus and 0x04 ScanStatus, both optional; skip.
 - 0x12 ListPlayerAppSettingValues for attr=0x02 → 4 values (off / single / all / group). For attr=0x03 → 3 values (off / all / group).
-- 0x13 GetCurrentPlayerAppSettingValue — read shuffle_flag/repeat_mode from y1-track-info, return.
-- 0x14 SetPlayerAppSettingValue — controller sending us shuffle/repeat. Forward as a broadcast that the music app receives → setSharedPref → broadcast loops back to us.
+- 0x13 GetCurrentPlayerAppSettingValue — read shuffle_flag / repeat_mode from y1-track-info, return.
+- 0x14 SetPlayerAppSettingValue — controller sending us shuffle / repeat. Forward as a broadcast that the music app receives → setSharedPref → broadcast loops back to us.
 - 0x15/0x16 — text labels for attribute and value names. Static strings ("Repeat", "Off", etc.) shippable in LOAD #1 padding.
 
-Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the same broadcast receivers.
+Plus: proactive CHANGED on shuffle / repeat changes via event 0x08, fed by the same broadcast receivers.
 
 ---
 
-## 6. Test/verification strategy
+## 6. Test / verification strategy
 
 Per change: a hardware capture against at least three CTs covering different policy postures. Test-matrix CT roster + per-CT empirical observations live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT". Recommended posture spread:
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni.py — AVRCP TG/Target trampoline chain patched into
+patch_libextavrcp_jni.py — AVRCP TG / Target trampoline chain patched into
 libextavrcp_jni.so so this firmware (where Java-side AVRCP is a no-op stub)
 can answer permissive CTs' metadata queries directly from native code.
 
@@ -43,7 +43,7 @@ U1 — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf 00 bf)
      until something else cancels the held-key state. The other three
      UI_SET_EVBIT calls (EV_KEY at 0x74d4, the EV_REL vendor typo at
      0x74e0, EV_SYN at 0x74f2) are left intact; the device still emits
-     key/syn events normally, just without kernel-side auto-repeat.
+     key / syn events normally, just without kernel-side auto-repeat.
      Spec-correct per AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined
      in AV/C Panel Subunit Specification [ref 2 of AVRCP 1.3]): the CT
      owns the periodic-resend responsibility for held buttons; the TG
@@ -141,7 +141,7 @@ T9 — proactive on Y1 play / battery / position events. Entered via `b.w T9`
 The trampoline blob (extended_T2 + T4 + T5 + T_charset + T_battery +
 T_continuation + T6 + T8 + T9 + path strings + sentinel data) is built
 dynamically by _trampolines.py using a tiny Thumb-2 assembler
-(_thumb2asm.py). LOAD #1's filesz/memsz is extended to cover the blob,
+(_thumb2asm.py). LOAD #1's filesz / memsz is extended to cover the blob,
 which lets the kernel map it as R+E at runtime — the 4020-byte
 page-alignment gap between LOAD #1's stock end (0xac54) and LOAD #2's
 start (0xbc08) is zero padding, so we can grow LOAD #1 freely up to that
@@ -203,7 +203,7 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
 # bytes). Advertises every event we actually handle in the trampoline chain:
 #   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
-#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4/T5 CHANGED on edge)
+#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4 / T5 CHANGED on edge)
 #   0x03 TRACK_REACHED_END             (T8 INTERIM + T5 CHANGED on natural-end edge)
 #   0x04 TRACK_REACHED_START           (T8 INTERIM + T5 CHANGED on every track edge)
 #   0x05 PLAYBACK_POS_CHANGED          (T8 INTERIM + T9 CHANGED at 1 s cadence while playing)
@@ -307,8 +307,8 @@ NATIVE_TRACK_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF0, 0x47])
 # Disassembled: stmdb sp!, {r0, r1, r4, r5, r6, r7, r8, lr} (reg list 0x41F3) --
 # distinct from notificationTrackChangedNative's prologue (0x47F0) because the
 # play_status native takes 3 jbyte args (Java arg3 = play_status arrives in r4
-# per the AAPCS register/stack split for variadic-byte Java natives), and the
-# stock body needs r0/r1 (env, this) preserved for re-use after the call into
+# per the AAPCS register / stack split for variadic-byte Java natives), and the
+# stock body needs r0 / r1 (env, this) preserved for re-use after the call into
 # the AVRCP service.  We don't care about the original body — overwriting the
 # first 4 bytes with `b.w T9` short-circuits everything past it.
 NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF3, 0x41])
@@ -340,8 +340,8 @@ def build_patches() -> tuple[list[dict], int]:
             # input_enable_softrepeat(), so a dropped PASSTHROUGH RELEASE no
             # longer leads to a 25 Hz KEY_xxx REPEAT cascade and the haptic
             # loop on strict CTs goes away. NOPing the blx ioctl@plt at
-            # 0x74e8 is the most surgical option — register/stack contracts
-            # are untouched; the next ioctl reloads r1/r2 cleanly. See
+            # 0x74e8 is the most surgical option — register / stack contracts
+            # are untouched; the next ioctl reloads r1 / r2 cleanly. See
             # docs/INVESTIGATION.md "kernel auto-repeat" for the getevent(8)
             # trace that drove this.
             "name": "U1: NOP blx ioctl@plt for UI_SET_EVBIT(EV_REP) at 0x74e8 — disable kernel auto-repeat on AVRCP uinput",
@@ -368,7 +368,7 @@ def build_patches() -> tuple[list[dict], int]:
             "name": (
                 f"notificationPlayStatusChangedNative @"
                 f" 0x{NATIVE_PLAY_STATUS_CHANGED_VADDR:x} → b.w T9 (0x{t9_vaddr:x})"
-                f" — proactive PLAYBACK_STATUS_CHANGED on play/pause edge"
+                f" — proactive PLAYBACK_STATUS_CHANGED on play / pause edge"
             ),
             "offset": NATIVE_PLAY_STATUS_CHANGED_VADDR,
             "before": NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE,

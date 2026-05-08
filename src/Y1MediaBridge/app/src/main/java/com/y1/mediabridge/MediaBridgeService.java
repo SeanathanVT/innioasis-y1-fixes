@@ -109,7 +109,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * fails, mRegBit never populates and every subsequent notifyTrackChanged the
  * callback fires is dropped before the AVRCP packet is emitted. That is the
  * "[BT][AVRCP] onReceive EVENT_TRACK_CHANGED fail" symptom. So every declared
- * code returns true and writes writeNoException() plus a typed zero/empty/true
+ * code returns true and writes writeNoException() plus a typed zero / empty / true
  * for the declared return type, even when we have no semantic answer.
  *
  * IBTAvrcpMusicCallback (outgoing calls MtkBt subscribes to via registerCallback).
@@ -128,7 +128,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Installed at /system/app/Y1MediaBridge.apk, android:persistent="true" so
  * this survives low-memory kills. A background thread reads logcat directly
  * (READ_LOGS permission, granted to /system/app on Android 4.2) and parses
- * the Y1 player's debug lines to keep the track/state fields current. When
+ * the Y1 player's debug lines to keep the track / state fields current. When
  * anything changes we (a) write RCC metadata and (b) fire the callbacks MtkBt
  * registered with us, which is what makes the car head unit update.
  *
@@ -230,8 +230,8 @@ public class MediaBridgeService extends Service {
 
     /** 1-second-recurring tick that fires the `playstatechanged`
      *  broadcast while mIsPlaying. Drives T9's PLAYBACK_POS_CHANGED CHANGED
-     *  emission (alongside the existing play/battery edge checks T9 already
-     *  does). The tick stops when playback pauses/stops; the next play edge
+     *  emission (alongside the existing play / battery edge checks T9 already
+     *  does). The tick stops when playback pauses / stops; the next play edge
      *  in onStateDetected restarts it. AVRCP 1.3 §5.4.2 Tbl 5.33. */
     private Runnable mPosTickRunnable;
     private static final long POS_TICK_INTERVAL_MS = 1000L;
@@ -247,7 +247,7 @@ public class MediaBridgeService extends Service {
 
     /** Path currently being scanned — prevents duplicate MediaScanner requests
      *  when the player emits both a lyrics line and an album-art line for the
-     *  same track before the first scan completes. Written/read on main thread. */
+     *  same track before the first scan completes. Written / read on main thread. */
     private String mPendingScanPath = null;
 
     /** Callback IBinders registered by MtkBt via IBTAvrcpMusic.registerCallback. */
@@ -717,7 +717,7 @@ public class MediaBridgeService extends Service {
      * Register a BroadcastReceiver for `Intent.ACTION_BATTERY_CHANGED` and
      * also synchronously read the sticky broadcast so we have a value at
      * cold-boot before the first battery-change tick (which can be many
-     * minutes away). On every level/plug bucket transition we update
+     * minutes away). On every level / plug bucket transition we update
      * mCurrentBatteryStatus, write y1-track-info, and fire a
      * `playstatechanged` broadcast — that wakes T9 (via the existing
      * cardinality NOP at MtkBt.odex:0x3c4fe → notificationPlayStatusChangedNative
@@ -1617,7 +1617,7 @@ public class MediaBridgeService extends Service {
 
     /**
      * Try to read ID3 tags directly from the file head. Returns true if we
-     * obtained a real Title and at least one of Artist/Album; false on any
+     * obtained a real Title and at least one of Artist / Album; false on any
      * failure (EACCES, missing file, parser error) or when the resulting
      * tags are empty enough that the caller should treat it as a miss and
      * fall back on the scanner-completion re-broadcast path.
@@ -1730,7 +1730,7 @@ public class MediaBridgeService extends Service {
      * MediaStore hasn't populated yet so we don't have a real {@code _ID}.
      *
      * The trampoline state machine in libextavrcp_jni.so (T5 / extended_T2)
-     * detects "track changed since last register/notify" by comparing bytes
+     * detects "track changed since last register / notify" by comparing bytes
      * 0..7 of {@code y1-track-info} against bytes 0..7 of
      * {@code y1-trampoline-state}. If we leave audioId at {@code -1} for
      * every track (which would happen if the readTagsDirectly success

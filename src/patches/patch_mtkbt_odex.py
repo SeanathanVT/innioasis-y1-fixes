@@ -20,7 +20,7 @@ ODEX structure:
   This return value drives the Java-side dispatcher's command-handling
   cascade. The stock value 10 routes commands through MtkBt's compiled-in
   AVRCP 1.0 handlers and rejects anything past PASSTHROUGH. Returning 14
-  unblocks 1.3+ command dispatch through the rest of the JNI/native path.
+  unblocks 1.3+ command dispatch through the rest of the JNI / native path.
   This is internal flag bookkeeping inside MtkBt's BlueAngel layer; the
   on-the-wire AVRCP version is determined by the SDP record (V1 patch in
   patch_mtkbt.py), not by this value.

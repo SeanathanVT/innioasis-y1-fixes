@@ -69,8 +69,8 @@ DEPLOYMENT
 
 WHAT THIS PATCH DOES
 --------------------
-  Four smali patches (A/B/C for Artist→Album navigation, E for discrete
-  PASSTHROUGH PLAY/PAUSE/STOP coverage per AVRCP 1.3 §4.6.1 + ICS Table 8),
+  Four smali patches (A / B / C for Artist→Album navigation, E for discrete
+  PASSTHROUGH PLAY / PAUSE / STOP coverage per AVRCP 1.3 §4.6.1 + ICS Table 8),
   no new files, no Manifest changes.
 
   Patch A -- ArtistsActivity.confirm():
@@ -151,7 +151,7 @@ except ImportError:
 
 # -- Config -------------------------------------------------------------------
 # Repo-rooted paths so the patcher works the same regardless of CWD. The
-# downloaded apktool jar and the decoded/rebuilt smali tree are both retained
+# downloaded apktool jar and the decoded / rebuilt smali tree are both retained
 # across runs (`tools/` and `staging/y1-apk/` respectively) so iterative
 # testing doesn't pay the apktool-download + APK-decode cost every time.
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))           # src/patches
@@ -178,7 +178,7 @@ APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"
 #     11–21 if you hit assembler weirdness.
 #
 # Practical recommendation: run the patcher under Java 11–21. If your flash
-# box is on Java 22+, install OpenJDK 21 alongside (Debian/Ubuntu:
+# box is on Java 22+, install OpenJDK 21 alongside (Debian / Ubuntu:
 # `apt install openjdk-21-jdk` and either `update-alternatives --config java`
 # or invoke /usr/lib/jvm/java-21-openjdk-*/bin/java directly).
 
@@ -341,7 +341,7 @@ def get_apk_info(apk_path: str):
 
 # -- Step 0: Pre-flight -------------------------------------------------------
 parser = argparse.ArgumentParser(
-    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + discrete PASSTHROUGH PLAY/PAUSE/STOP).",
+    description="Innioasis Y1 com.innioasis.y1 APK smali patcher (Artist→Album + discrete PASSTHROUGH PLAY / PAUSE / STOP).",
     epilog="See the docstring at the top of this script for the full per-patch detail."
 )
 parser.add_argument(

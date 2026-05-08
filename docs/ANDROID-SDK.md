@@ -1,8 +1,8 @@
 # Android SDK setup
 
-The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1MediaBridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1MediaBridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt`/`d8`/etc.
+The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1MediaBridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1MediaBridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt` / `d8` / etc.
 
-This project (apply.bash flash flow) is **Linux-only**, so all instructions below target Linux. There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
+This project (apply.bash flash flow) is **Linux-only**, so all instructions below target Linux. There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF / APT / EPEL / RPMFusion). Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
 
 ## Easy path: `tools/install-android-sdk.sh`
 

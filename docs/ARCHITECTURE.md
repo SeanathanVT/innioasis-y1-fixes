@@ -14,7 +14,7 @@ For **AVRCP 1.3 spec-coverage state**: see [`AVRCP13-COMPLIANCE.md`](AVRCP13-COM
 
 A peer CT sends a stock AVRCP 1.3+ AV/C COMMAND → mtkbt routes it through msg-519 (P1 patch) → `libextavrcp_jni.so::saveRegEventSeqId` is intercepted at file 0x6538 (R1 patch) → a chain of trampolines (T1 / T2 stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9) inspects the inbound PDU byte (and event_id, for PDU 0x31) and calls the matching `btmtk_avrcp_send_*_rsp` PLT entry directly → mtkbt builds a real AVRCP 1.3 response frame and emits it on the wire → the CT displays the metadata.
 
-The trampolines live in unused/repurposed JNI debug methods (`testparmnum`, `classInitNative`) and in the page-alignment padding past the original LOAD #1 segment end (extended via `FileSiz`/`MemSiz` program-header surgery).
+The trampolines live in unused / repurposed JNI debug methods (`testparmnum`, `classInitNative`) and in the page-alignment padding past the original LOAD #1 segment end (extended via `FileSiz` / `MemSiz` program-header surgery).
 
 ---
 
@@ -121,7 +121,7 @@ The trampolines call these directly. No new IPC, no Java surgery for the core ha
               │ T4 (vaddr 0xac54)                        │  Trampoline #3
               │ in EXTENDED LOAD #1 segment              │  GetElementAttributes
               │ (page-padding bytes between LOAD #1      │
-              │  and LOAD #2; LOAD #1 FileSiz/MemSiz     │
+              │  and LOAD #2; LOAD #1 FileSiz / MemSiz   │
               │  bumped from 0xac54 to 0xb2c8)           │
               │                                          │
               │  PDU == 0x20:                            │
@@ -275,7 +275,7 @@ if r3 != 0:
     *internal_counter = 0
 ```
 
-The buffer is zeroed when **either** `arg1` is nonzero (explicit reset/finalize) **or** `arg2 == 0` (first attribute in a new response).
+The buffer is zeroed when **either** `arg1` is nonzero (explicit reset / finalize) **or** `arg2 == 0` (first attribute in a new response).
 
 **Send trigger** (lines 0x22ee–0x2310):
 
@@ -285,7 +285,7 @@ if (arg2 + 1) == arg3 AND arg3 != 0:
     GOTO send         ; last attribute path
 
 if (arg1 != 0) OR (arg3 == 0):
-    GOTO send         ; finalize/legacy path
+    GOTO send         ; finalize / legacy path
 
 return without sending   ; arg1==0 AND arg3 != 0 AND (arg2+1) < arg3
 
@@ -434,7 +434,7 @@ The JNI trampoline blob is built dynamically by `src/patches/_trampolines.py` us
 
 The wire-level `Identifier` field in TRACK_CHANGED notifications is pinned to the `0xFF×8` "not bound to a particular media element" sentinel per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 (the printed `0xFFFFFFFF` in 1.3 is a typo; ESR07 clarifies the field is 8 bytes, sentinel form `0xFFFFFFFFFFFFFFFF`). This keeps CTs in "no stable identity, refresh on each event" mode rather than the alternative "stable identity, only refresh on CHANGED" mode that some CTs adopt when given a real synthetic id. The latter mode causes high-subscribe-rate CT classes to enter a tight `RegisterNotification` storm at ~90 Hz that saturates AVCTP and drops PASSTHROUGH release frames; the sentinel mode avoids that entirely while still being spec-conformant.
 
-Per-track CHANGED edge information is delivered by T4/T5 detecting divergence between `y1-track-info[0..7]` and `y1-trampoline-state[0..7]` (comparison runs on real track_ids; the emitted wire packet uses the sentinel). The state file at `y1-trampoline-state[0..7]` holds the real synthetic audioId from `Y1MediaBridge.mCurrentAudioId` (= `path.hashCode() | 0x100000000L`) for that internal change-detection logic.
+Per-track CHANGED edge information is delivered by T4 / T5 detecting divergence between `y1-track-info[0..7]` and `y1-trampoline-state[0..7]` (comparison runs on real track_ids; the emitted wire packet uses the sentinel). The state file at `y1-trampoline-state[0..7]` holds the real synthetic audioId from `Y1MediaBridge.mCurrentAudioId` (= `path.hashCode() | 0x100000000L`) for that internal change-detection logic.
 
 See [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for the empirical observations that drove this design choice.
 
@@ -476,21 +476,21 @@ These are mtkbt-internal IPC IDs over the abstract socket `bt.ext.adp.avrcp`. NO
 | 500    | various | `AVRCP_HandleA2DPInfo` |
 | 502, 507 | various | Connection lifecycle |
 | 519    | mtkbt → JNI | `CMD_FRAME_IND` — inbound AVRCP COMMAND from peer |
-| 520    | JNI → mtkbt | `CMD_FRAME_RSP` generic ack/reject (PASSTHROUGH ack OR NOT_IMPLEMENTED) |
+| 520    | JNI → mtkbt | `CMD_FRAME_RSP` generic ack / reject (PASSTHROUGH ack OR NOT_IMPLEMENTED) |
 | 522    | JNI → mtkbt | GetCapabilities response (from `…send_get_capabilities_rsp`) |
 | 540    | JNI → mtkbt | GetElementAttributes response (from `…send_get_element_attributes_rsp`) |
 | 544    | JNI → mtkbt | RegisterNotification response (from `…send_reg_notievent_*_rsp`) |
 
 ---
 
-## ARM/Thumb-2 instruction encoding gotchas (lessons from this work)
+## ARM / Thumb-2 instruction encoding gotchas (lessons from this work)
 
 Patches add up — these tripped us up at least once each:
 
 - **ADR T1** (16-bit) requires offset to be a multiple of 4 AND target to be 4-byte aligned. When emitting strings of non-4-aligned length, pad each string to the next 4-byte boundary so subsequent ADR targets stay aligned. ADR.W (32-bit) is more flexible.
-- **POP {r4, lr}** is NOT 16-bit. Only `POP {regs, pc}` (which RETURNS) and `POP {low_regs}` are 16-bit. Restoring `lr` without returning needs `POP.W` (32-bit, 4 bytes). We solved this in T4 by not pushing/popping at all — `r4-r9` are restored by saveRegEventSeqId's epilogue at 0x7154 (`pop {r4-r9, sl, fp, pc}`).
-- **ADD Rd, SP, #imm** (16-bit T1) requires imm to be a multiple of 4 AND in 0..1020. For arbitrary 12-bit immediates use `ADDW Rd, SP, #imm12` (T4, 32-bit, no rotation/alignment requirement).
-- **bl.w** clobbers `lr`. **b.w** doesn't. **blx** changes ARM/Thumb mode based on the target's bit 0 (PLT stubs are at even addresses → switches to ARM, which is what we want).
+- **POP {r4, lr}** is NOT 16-bit. Only `POP {regs, pc}` (which RETURNS) and `POP {low_regs}` are 16-bit. Restoring `lr` without returning needs `POP.W` (32-bit, 4 bytes). We solved this in T4 by not pushing / popping at all — `r4-r9` are restored by saveRegEventSeqId's epilogue at 0x7154 (`pop {r4-r9, sl, fp, pc}`).
+- **ADD Rd, SP, #imm** (16-bit T1) requires imm to be a multiple of 4 AND in 0..1020. For arbitrary 12-bit immediates use `ADDW Rd, SP, #imm12` (T4, 32-bit, no rotation / alignment requirement).
+- **bl.w** clobbers `lr`. **b.w** doesn't. **blx** changes ARM / Thumb mode based on the target's bit 0 (PLT stubs are at even addresses → switches to ARM, which is what we want).
 - **AAPCS callee-saved regs (r4-r11)**: saveRegEventSeqId pushes them in its prologue and restores them in the epilogue at 0x7154. Our trampolines can trash r4-r9 freely without local push/pop — they'll be restored by the parent function's epilogue when we `b.w 0x712a`.
 
 ---

@@ -81,7 +81,7 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 ## Status
 
-`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play/pause/skip from car/headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play / pause / skip from car / headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
 
 **AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see all seven §5.3.4 element attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime), current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**. Implemented PDU set per [`docs/spec/AVRCP_SPEC_V13.pdf`](docs/spec/) (V13 + ESR07 errata):
 
@@ -90,15 +90,15 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 | §5.1.1 | 0x10 GetCapabilities | full |
 | §5.2.7 | 0x17 InformDisplayableCharacterSet | full |
 | §5.2.8 | 0x18 InformBatteryStatusOfCT | full |
-| §5.3.1 / §5.3.4 | 0x20 GetElementAttributes | all 7 attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) in single-frame response |
+| §5.3.1 / §5.3.4 | 0x20 GetElementAttributes | all 7 attributes (Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime) in single-frame response |
 | §5.4.1 | 0x30 GetPlayStatus | full, with live position via `clock_gettime(CLOCK_BOOTTIME)` |
 | §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 (PLAYBACK_STATUS), 0x02 (TRACK_CHANGED), 0x03 (TRACK_REACHED_END, gated on natural end), 0x04 (TRACK_REACHED_START), 0x05 (PLAYBACK_POS, 1 s cadence while playing), 0x06 (BATT_STATUS, real bucket from `ACTION_BATTERY_CHANGED`) |
 | §5.5 | 0x40 / 0x41 RequestContinuingResponse / Abort | explicit AV/C reject (we never fragment, so a CT shouldn't see these in valid flow) |
-| §4.6.1 | PASS THROUGH (PLAY/PAUSE/STOP/FORWARD/BACKWARD/etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
+| §4.6.1 | PASS THROUGH (PLAY / PAUSE / STOP / FORWARD / BACKWARD / etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
 
 Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE.md`](docs/AVRCP13-COMPLIANCE.md) §2 — every mandatory row hits. Architecture, calling conventions, and the ELF-segment-extension technique that hosts the trampoline blob past the original LOAD #1 segment end: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Full investigation history including refuted hypotheses: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
-`--bluetooth` covers only pairing-essential config edits — it does not modify SDP/AVRCP behavior; that's all under `--avrcp`.
+`--bluetooth` covers only pairing-essential config edits — it does not modify SDP / AVRCP behavior; that's all under `--avrcp`.
 
 ## Stock firmware manifest
 
@@ -116,7 +116,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - `git`, `unzip`, `md5sum`.
 - Python 3.8+ with `venv` module. Patcher byte-level scripts are stdlib-only; `patch_y1_apk.py` needs `androguard`, which `tools/setup.sh` installs into `tools/python-venv/`. Java 11+ also required for `--music-apk` (apktool's smali assembler; apktool itself is downloaded by `patch_y1_apk.py` on first invocation).
 - `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
-- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora/RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian/Ubuntu), `pacman -S android-tools` (Arch).
+- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora / RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian / Ubuntu), `pacman -S android-tools` (Arch).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
 - For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install instructions in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 

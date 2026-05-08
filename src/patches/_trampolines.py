@@ -14,13 +14,13 @@ Trampolines emitted by this module (T1 + T2 stub are written separately by
 patch_libextavrcp_jni.py at other code-cave addresses):
 
   extended_T2  PDU 0x31 event 0x02 RegisterNotification(TRACK_CHANGED)
-  T4           PDU 0x20 GetElementAttributes — also routes PDU 0x17/0x18/
-               0x30/0x40/0x41 to T_charset/T_battery/T6/T_continuation
+  T4           PDU 0x20 GetElementAttributes — also routes PDU 0x17 / 0x18 /
+               0x30 / 0x40 / 0x41 to T_charset / T_battery / T6 / T_continuation
   T5           proactive AVRCP §5.4.2 track-edge 3-tuple (REACHED_END
                gated on natural-end + TRACK_CHANGED + REACHED_START)
   T_charset    PDU 0x17 InformDisplayableCharacterSet ack
   T_battery    PDU 0x18 InformBatteryStatusOfCT ack
-  T_continuation PDU 0x40/0x41 → AV/C NOT_IMPLEMENTED reject
+  T_continuation PDU 0x40 / 0x41 → AV/C NOT_IMPLEMENTED reject
   T6           PDU 0x30 GetPlayStatus, w/ clock_gettime live position
   T8           PDU 0x31 events ≠ 0x02 INTERIM dispatcher
   T9           proactive PLAYBACK_STATUS / BATT_STATUS / PLAYBACK_POS
@@ -37,7 +37,7 @@ from _thumb2asm import Asm
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could call
-# `__android_log_print` (via a new PLT entry) at trampoline entry/exit so
+# `__android_log_print` (via a new PLT entry) at trampoline entry / exit so
 # native-side traces show up under `adb logcat -s Y1Patch:*`. Currently
 # no trampoline emits Log calls; the flag is wired so future edits can
 # hook it without re-plumbing.
@@ -91,7 +91,7 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      520..775  Album
 #                      776..779  duration_ms                BE u32 (T6)
 #                      780..783  pos_at_state_change_ms     BE u32 (T6, T8 event 0x05)
-#                      784..787  state_change_time_sec      BE u32 (T6/T9 live-position
+#                      784..787  state_change_time_sec      BE u32 (T6 / T9 live-position
 #                                                                    extrapolation)
 #                      788..791  pad
 #                      792       playing_flag               u8 (AVRCP §5.4.1 Tbl 5.26 enum;
@@ -161,7 +161,7 @@ T6_OFF_TIMESPEC_NSEC = T6_OFF_TIMESPEC + 4   # 12 - tv_nsec u32 (we don't use it
 
 # T8 (RegisterNotification INTERIM dispatch for events ≠ 0x02) frame:
 # 800 B file_buf at sp+0. None of the reg_notievent_*_rsp calls T8 makes
-# need stack args (all 4 ARM args fit in r0/r1/r2/r3), so no outgoing args
+# need stack args (all 4 ARM args fit in r0 / r1 / r2 / r3), so no outgoing args
 # region is reserved. Caller's event_id slot is at sp+T8_EVENT_ID_OFF
 # after our SUB SP.
 T8_FRAME           = 800
@@ -181,7 +181,7 @@ T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 # Edge detection: read y1-track-info[792] (playing_flag), compare against
 # state[9], emit CHANGED on inequality, update state[9], write 16 B back.
 #
-# T5/T9 race acknowledgment: both read+modify+write the full 16 B state file,
+# T5 / T9 race acknowledgment: both read+modify+write the full 16 B state file,
 # so a concurrent T5+T9 firing can lose one of the updates. In practice T5
 # fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
 # broadcasts -- they overlap rarely, and worst case is a single missed
@@ -204,7 +204,7 @@ T9_OFF_TIMESPEC      = T9_OFF_FILE + 800     # 816 - struct timespec
 T9_OFF_TIMESPEC_SEC  = T9_OFF_TIMESPEC + 0
 T9_OFF_TIMESPEC_NSEC = T9_OFF_TIMESPEC + 4
 
-# T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START 3-tuple) frame:
+# T5 (proactive TRACK_CHANGED + TRACK_REACHED_END / START 3-tuple) frame:
 # 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
 # Same shape as T9. T5 reads enough of y1-track-info to see the natural-end
 # flag at offset 793 (= sp + T5_OFF_FILE_NATURAL_END).
@@ -228,7 +228,7 @@ T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end 
 #   `playstatechanged` so T9 picks up the change. Spec values:
 #   0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE.
 #   BATT_STATUS_NORMAL is retained as the default value when y1-track-info
-#   is shorter than 800 B — T8/T9 memset to zero before the read, so a
+#   is shorter than 800 B — T8 / T9 memset to zero before the read, so a
 #   short read leaves byte 794 = 0 = NORMAL, a benign default.
 # - SYSTEM_STATUS_CHANGED: 0x00 POWERED_ON — we run only when the device is
 #   on, so this is always correct. (Spec: 0=POWERED_ON, 1=POWERED_OFF,
@@ -254,7 +254,7 @@ NR_clock_gettime = 263
 # Linux clock IDs. CLOCK_BOOTTIME mirrors Android's SystemClock.elapsedRealtime
 # (monotonic, includes time spent in suspend) — same source we use on the
 # Y1MediaBridge side when stamping mStateChangeTime, so subtracting the two
-# yields the wall-clock seconds elapsed since the last play/pause edge.
+# yields the wall-clock seconds elapsed since the last play / pause edge.
 CLOCK_BOOTTIME = 7
 
 # ---------------------------------------------------------------- builder
@@ -477,7 +477,7 @@ def _emit_extended_t2(a: Asm) -> None:
     """extended_T2: RegisterNotification(TRACK_CHANGED) handler.
 
     T2 stub at 0x72d4 jumps here unconditionally (b.w extended_T2). We dispatch
-    PDU/event-id internally and fall through to T4 if it's a GetElementAttributes
+    PDU / event-id internally and fall through to T4 if it's a GetElementAttributes
     that somehow reached us, or to UNKNOW_INDICATION otherwise.
     """
     a.label("extended_T2")
@@ -741,7 +741,7 @@ def _emit_t5(a: Asm) -> None:
     a.beq("t5_skip_reached_end")
 
     # reg_notievent_reached_end_rsp(conn, 0, REASON_CHANGED)
-    # Same calling convention as track_changed_rsp's r0/r1/r2 args; this
+    # Same calling convention as track_changed_rsp's r0 / r1 / r2 args; this
     # builder takes no payload (Table 5.31 specifies a zero-byte body).
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
@@ -858,7 +858,7 @@ def _emit_t_continuation(a: Asm) -> None:
       1. Across 2868 PDU 0x20 frames in a single TV capture, 100% carry
          packet_type=0x00 (single non-fragmented AVRCP packet). Even with
          the 7-attr T4 expansion, worst-case packed responses (~1100 B
-         with maxed Title/Artist/Album/Genre slots) ship as a single
+         with maxed Title / Artist / Album / Genre slots) ship as a single
          AVRCP packet — mtkbt fragments below at the AVCTP layer
          transparently.
       2. Across all 43 captures in the test matrix, zero 0x40/0x41 PDUs
@@ -911,14 +911,14 @@ def _emit_t6(a: Asm) -> None:
 
     Stack frame: T6_FRAME B (16 outgoing args + 800 file_buf). Read the
     full y1-track-info into file_buf so the existing 776-byte schema fields
-    (track_id + title/artist/album) stay intact for any concurrent reader,
+    (track_id + title / artist / album) stay intact for any concurrent reader,
     even though T6 itself only consumes the GetPlayStatus block at
     offsets 776+.
 
     Live position extrapolation: when playing_flag == 1 (PLAYING), T6
     calls clock_gettime(CLOCK_BOOTTIME, &timespec) and computes
     `live_pos = saved_pos + (now_sec - state_change_sec) * 1000`. When
-    stopped/paused the position field stays at the saved freeze point.
+    stopped / paused the position field stays at the saved freeze point.
     CLOCK_BOOTTIME parity with Y1MediaBridge's SystemClock.elapsedRealtime
     is what makes this arithmetic correct.
 
@@ -939,7 +939,7 @@ def _emit_t6(a: Asm) -> None:
     # ---- memset(file_buf, 0, 800) ----
     # Default everything to 0 so a partial read (file shorter than 800 B,
     # e.g. an old Y1MediaBridge that hasn't been rebuilt for the current
-    # schema) gives play_status=0 (STOPPED) and duration/position=0 rather
+    # schema) gives play_status=0 (STOPPED) and duration / position = 0 rather
     # than uninitialized stack garbage.
     a.add_sp_imm(0, T6_OFF_FILE)              # r0 = sp+16
     a.movs_imm8(1, 0)
@@ -976,7 +976,7 @@ def _emit_t6(a: Asm) -> None:
     #   live_pos = saved_pos + (now_sec - state_change_sec) * 1000
     # Else (STOPPED / PAUSED):
     #   live_pos = saved_pos  (the position field IS the freeze point for
-    #                          paused/stopped, which is what CTs expect)
+    #                          paused / stopped, which is what CTs expect)
     # AVRCP 1.3 §5.4.1 Table 5.26 specifies SongPosition as "the current
     # position of the playing in milliseconds elapsed". A static position
     # that doesn't advance during playback violates that semantic — CTs
@@ -1076,7 +1076,7 @@ def _emit_t8(a: Asm) -> None:
     refresh.
 
     Frame: 800 B file_buf at sp+0. None of the response builders need
-    stack args (all 4 args fit in r0/r1/r2/r3). Caller's event_id is
+    stack args (all 4 args fit in r0 / r1 / r2 / r3). Caller's event_id is
     accessed via T8_EVENT_ID_OFF (= 386 + frame).
     """
     a.label("T8")
@@ -1222,13 +1222,13 @@ def _emit_t9(a: Asm) -> None:
     events 0x01 / 0x05 / 0x06 INTERIM-only, never fires the spec-mandated
     CHANGED frame when the value actually flips. Without T9 a polling CT
     subscribes to event 0x01 / 0x05 / 0x06, gets the immediate INTERIM,
-    then never sees CHANGED, so the car-side play/pause icon, scrub bar,
+    then never sees CHANGED, so the car-side play / pause icon, scrub bar,
     and battery indicator stay stuck on their initial values even though
     Y1's audio toggles correctly via the PASSTHROUGH path.
 
     Battery and periodic position both piggyback on this same trampoline.
     Y1MediaBridge fires `playstatechanged` whenever ANY of the following
-    occurs: actual play/pause edge, battery bucket transition, or 1 s
+    occurs: actual play / pause edge, battery bucket transition, or 1 s
     tick (while playing). T9 unconditionally:
 
       1. play_status: emit PLAYBACK_STATUS_CHANGED CHANGED on file[792]
@@ -1465,7 +1465,7 @@ def _emit_t9(a: Asm) -> None:
     # state_change_time_sec from `SystemClock.elapsedRealtime() / 1000` —
     # CLOCK_BOOTTIME parity with what we read here, which makes the
     # subtraction yield the wall-clock seconds elapsed since the last
-    # play/pause edge.
+    # play / pause edge.
     a.ldr_sp_imm(0, T9_OFF_FILE_STATE_TIME)   # r0 = state_change_sec (BE)
     a.rev_lo_lo(0, 0)                         # → host order
     a.ldr_sp_imm(1, T9_OFF_TIMESPEC_SEC)      # r1 = now_sec

@@ -1,6 +1,6 @@
 # Patch Reference
 
-Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before/after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §0.
+Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before / after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §0.
 
 ## Patch ID Legend
 
@@ -49,7 +49,7 @@ Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an uncondi
 
 ## `patch_libextavrcp_jni.py`
 
-The trampoline chain that synthesises AVRCP 1.3 responses directly from the JNI library, bypassing the no-op Java AVRCP TG. Patches into `_Z17saveRegEventSeqIdhh` (the JNI msg-519 receive function, body at file `0x5f0c`) and extends LOAD #1's filesz/memsz to map the page-alignment padding region as R+E for trampoline code.
+The trampoline chain that synthesises AVRCP 1.3 responses directly from the JNI library, bypassing the no-op Java AVRCP TG. Patches into `_Z17saveRegEventSeqIdhh` (the JNI msg-519 receive function, body at file `0x5f0c`) and extends LOAD #1's filesz / memsz to map the page-alignment padding region as R+E for trampoline code.
 
 ### R1 — redirect at `0x6538` (4 bytes)
 
@@ -74,11 +74,11 @@ T2 stub at `0x72d0` (8 bytes) overwrites `classInitNative` with `movs r0, #0; bx
 2. Write `[track_id || transId || pad]` to `y1-trampoline-state` so T4 can detect track-id edges later.
 3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&sentinel_ffx8`.
 
-Other PDU/event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x40/0x41 → T_continuation, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
+Other PDU / event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x40 / 0x41 → T_continuation, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
 
 `r1=0` matters: response builders dispatch on r1 — `r1==0` writes the spec-correct event payload (reasonCode + event_id + 8-byte track_id memcpy per AVRCP 1.3 §5.4.2 Table 5.30); `r1!=0` writes a reject-shape frame. We pass `r1=0` everywhere.
 
-**Track_id sentinel** = `0xFFFFFFFFFFFFFFFF` (8 bytes of 0xFF) per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 (printed `0xFFFFFFFF` in 1.3 is a typo; ESR07 clarifies the field is 8 bytes — "this information is not bound to a particular media element"). Keeps CTs in poll-on-each-event mode rather than the alternative "stable identity, refresh on CHANGED only" mode (which deadlocks against a reactive-only TG). The `y1-trampoline-state[0..7]` field still holds the real track_id internally so T4/T5 can detect edges and emit CHANGED proactively.
+**Track_id sentinel** = `0xFFFFFFFFFFFFFFFF` (8 bytes of 0xFF) per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 (printed `0xFFFFFFFF` in 1.3 is a typo; ESR07 clarifies the field is 8 bytes — "this information is not bound to a particular media element"). Keeps CTs in poll-on-each-event mode rather than the alternative "stable identity, refresh on CHANGED only" mode (which deadlocks against a reactive-only TG). The `y1-trampoline-state[0..7]` field still holds the real track_id internally so T4 / T5 can detect edges and emit CHANGED proactively.
 
 ### T4 — GetElementAttributes (PDU 0x20)
 
@@ -94,7 +94,7 @@ In the LOAD #1 padding region, reached from extended_T2's PDU-0x20 dispatch arm.
 | 0x06 | Genre | `[848..1103]` |
 | 0x07 | PlayingTime | `[832..847]` (UTF-8 ASCII decimal milliseconds) |
 
-All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is signalled by `AttributeValueLength=0`, which is what an empty string slot produces (strlen returns 0, the response builder packs the 8-byte attribute header with no value bytes). The numeric attrs (4/5/7) are stored pre-formatted as ASCII strings on the Y1MediaBridge side rather than binary u16/u32 with a Thumb-2 itoa, keeping the trampoline a uniform strlen+memcpy loop.
+All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is signalled by `AttributeValueLength=0`, which is what an empty string slot produces (strlen returns 0, the response builder packs the 8-byte attribute header with no value bytes). The numeric attrs (4 / 5 / 7) are stored pre-formatted as ASCII strings on the Y1MediaBridge side rather than binary u16 / u32 with a Thumb-2 itoa, keeping the trampoline a uniform strlen+memcpy loop.
 
 T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-trampoline-state[0..7]`) and emits a reactive CHANGED via `reg_notievent_track_changed_rsp` before the GetElementAttributes response, then writes the new track_id back to state.
 
@@ -131,7 +131,7 @@ Same shape as T_charset, calls `battery_status_rsp` via PLT `0x357c`. AVRCP 1.3 
 
 Branched from T4's pre-check on PDU 0x40 or 0x41. Restores `lr` canary + `r0=conn` and tail-jumps to UNKNOW_INDICATION (the catch-all reject path that emits AV/C NOT_IMPLEMENTED via msg=520). Functionally identical to the catch-all fall-through but routed through an explicit dispatch in the pre-check so ICS Table 7 rows 31-32 read "shipped" rather than "fall-through".
 
-AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. `get_element_attributes_rsp` never sets the start-of-fragmentation flag (verified: 2868 PDU 0x20 frames in a single TV capture, 100% `packet_type=0x00`); mtkbt fragments below at the AVCTP layer transparently. Across all 43 captures, zero 0x40/0x41 PDUs from any CT in the test matrix. The trampoline body is 6 bytes (one `ldrh.w`, one `add.w`, one `b.w`).
+AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. `get_element_attributes_rsp` never sets the start-of-fragmentation flag (verified: 2868 PDU 0x20 frames in a single TV capture, 100% `packet_type=0x00`); mtkbt fragments below at the AVCTP layer transparently. Across all 43 captures, zero 0x40 / 0x41 PDUs from any CT in the test matrix. The trampoline body is 6 bytes (one `ldrh.w`, one `add.w`, one `b.w`).
 
 §6.15.2 specifies AV/C INVALID_PARAMETER (status 0x05) as the spec-strict response when receiving 0x40 without prior fragmentation; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject for an unsupported PDU and is functionally indistinguishable to the CT (both are reject frames; the CT abandons the continuation flow either way). If a future capture surfaces non-zero 0x40 traffic, upgrade to a stateful continuation handler that re-emits the buffered response.
 
@@ -139,13 +139,13 @@ AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet T
 
 Branched from T4's pre-check on PDU 0x30. Reads `y1-track-info[776..795]` (4 BE u32 fields: duration_ms / position_at_state_change_ms / state_change_time_sec / playing_flag), byte-swaps the u32s to host order via Thumb-2 `REV`, and calls `btmtk_avrcp_send_get_playstatus_rsp` via PLT `0x3564` with `arg1=0` + `r2=duration_ms` + `r3=live_position_ms` + `sp[0]=play_status`. Outbound `msg_id=542`, 20-byte IPC frame.
 
-**Live position extrapolation:** when `playing_flag == PLAYING` (Y1MediaBridge's enum maps directly to AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus), T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 — same monotonic source Y1MediaBridge stamps `mStateChangeTime` from), computes `live_pos = saved_pos + (now_sec - state_change_sec) * 1000`, passes that as r3. When STOPPED/PAUSED the position field stays at the saved freeze point. Implements AVRCP 1.3 §5.4.1 Table 5.26's `SongPosition` definition ("the current position of the playing in milliseconds elapsed"). `struct timespec` is stashed in unused outgoing-args slack at sp+8..15 inside the existing T6 frame (no frame growth).
+**Live position extrapolation:** when `playing_flag == PLAYING` (Y1MediaBridge's enum maps directly to AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus), T6 calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 — same monotonic source Y1MediaBridge stamps `mStateChangeTime` from), computes `live_pos = saved_pos + (now_sec - state_change_sec) * 1000`, passes that as r3. When STOPPED / PAUSED the position field stays at the saved freeze point. Implements AVRCP 1.3 §5.4.1 Table 5.26's `SongPosition` definition ("the current position of the playing in milliseconds elapsed"). `struct timespec` is stashed in unused outgoing-args slack at sp+8..15 inside the existing T6 frame (no frame growth).
 
 ICS Table 7 row 21: GetPlayStatus is **mandatory** for any TG that ships GetElementAttributes Response (per ICS condition C.2). T6 closes that mandatory row.
 
 ### T8 — RegisterNotification dispatcher for events ≠ 0x02
 
-In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. Reads `y1-track-info` for events that need payloads (0x01/0x05), then dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT entry:
+In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. Reads `y1-track-info` for events that need payloads (0x01 / 0x05), then dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT entry:
 
 | event_id | name | spec § | PLT | payload |
 |---|---|---|---|---|
@@ -178,7 +178,7 @@ If play or battery changed, the 16 B state file is written back (single combined
 Y1MediaBridge fires `playstatechanged` whenever any of the following occurs:
 - actual play state edge
 - battery bucket transition via `mBatteryReceiver` on `Intent.ACTION_BATTERY_CHANGED` (level+plug bucket-mapped to the AVRCP §5.4.2 Tbl 5.35 enum)
-- 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (started on the play edge in `onStateDetected`, cancelled on the pause/stop edge and in `onDestroy`).
+- 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (started on the play edge in `onStateDetected`, cancelled on the pause / stop edge and in `onDestroy`).
 
 Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing `playstatechanged` as the trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for a short y1-track-info file (`stack_buf` is memset to zero before the read). The position emit deviates slightly from strict spec (we emit at our 1 s cadence rather than the CT-supplied `playback_interval`); this is a permissible floor since "shall be emitted at this interval" defines a maximum interval, not a minimum cadence — emitting more frequently over-serves rather than under-serves.
 
@@ -211,7 +211,7 @@ The patcher writes the trampoline blob into LOAD #1's page-alignment padding (40
 - offset+16 (`p_filesz`): `0xac54 → 0xb2c8`
 - offset+20 (`p_memsz`): `0xac54 → 0xb2c8`
 
-Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte padding region). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
+Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte padding region). No other section / segment offsets shift; `.dynsym` / `.text` / `.rodata` / `.dynamic` / `.rel.plt` etc. all stay byte-identical.
 
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `a2d41f924e07abff4a18afb87989b04c`.
 
@@ -249,7 +249,7 @@ Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. Four p
 
 | keyCode | Source | Action | ICS Table 8 status |
 |---|---|---|---|
-| `KEY_PLAY` (85, `KEYCODE_MEDIA_PLAY_PAUSE`) | Legacy `ACTION_MEDIA_BUTTON` Intent (single physical play/pause key) | `playOrPause()V` (toggle) | n/a (toggle is a Y1-side abstraction) |
+| `KEY_PLAY` (85, `KEYCODE_MEDIA_PLAY_PAUSE`) | Legacy `ACTION_MEDIA_BUTTON` Intent (single physical play / pause key) | `playOrPause()V` (toggle) | n/a (toggle is a Y1-side abstraction) |
 | `KEYCODE_MEDIA_PLAY` (`0x7e` = 126) | PASSTHROUGH 0x44 → Linux `KEY_PLAYCD` (200) → AVRCP.kl `MEDIA_PLAY` | `play(Z)V` with `bool=true` | item 19 — **M (mandatory)** |
 | `KEYCODE_MEDIA_PAUSE` (`0x7f` = 127) | PASSTHROUGH 0x46 → Linux `KEY_PAUSECD` (201) → AVRCP.kl `MEDIA_PLAY_PAUSE` | `pause(IZ)V` with `reason=0x12, flag=true` | item 21 — O (optional) |
 | `KEYCODE_MEDIA_STOP` (`0x56` = 86) | PASSTHROUGH 0x45 → Linux `KEY_STOPCD` (166) → AVRCP.kl `MEDIA_STOP` | `stop()V` | item 20 — **M (mandatory)** |
@@ -260,7 +260,7 @@ Rationale per `PlayerService` method:
 - **`stop()V`** — AV/C Panel Subunit Spec STOP (op_id 0x45): "transition to STOPPED state". `PlayerService.stop()` is `public final stop()V .locals 4` and calls `IjkMediaPlayer.stop() + reset() + MediaPlayer.stop()` — releasing the media position.
 - **`playOrPause()V`** — Y1's existing toggle; correct semantic for the legacy single-physical-key path.
 
-Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict / :cond_stop_strict` to alphanumeric `:cond_d/e/f/10` on reassembly):
+Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict / :cond_stop_strict` to alphanumeric `:cond_d / e / f / 10` on reassembly):
 
 ```
 :cond_c
@@ -276,7 +276,7 @@ goto :cond_e                             # no match → existing fall-through
 [four labeled arms, each ending in goto :goto_5]
 ```
 
-Uses scratch registers `v0` (bool/reason) and `v3` (flag) which are dead at this point in the `.locals 6` `onReceive` method. apktool optimizes the no-match `goto :cond_e` to `goto :goto_5` since stock's `:cond_e` sits immediately before `:goto_5` (same control flow).
+Uses scratch registers `v0` (bool / reason) and `v3` (flag) which are dead at this point in the `.locals 6` `onReceive` method. apktool optimizes the no-match `goto :cond_e` to `goto :goto_5` since stock's `:cond_e` sits immediately before `:goto_5` (same control flow).
 
 **Patch H** in `smali/com/innioasis/y1/base/BaseActivity.smali` — propagate unhandled discrete media keys.
 
@@ -294,13 +294,13 @@ Uses scratch registers `v0` (bool/reason) and `v3` (flag) which are dead at this
     invoke-virtual {p1}, KeyEvent;->getKeyCode()I
     move-result v2
     const/4 v3, 0x3
-    ... [if-eq v2, KEY_LEFT/RIGHT/UP/DOWN/MENU/PLAY/ENTER → ... goto :goto_0] ...
+    ... [if-eq v2, KEY_LEFT / RIGHT / UP / DOWN / MENU / PLAY / ENTER → ... goto :goto_0] ...
     :goto_2
     return v0                   # always returns 1 (TRUE)
 .end method
 ```
 
-`v0` is set to `0x1` at method entry and never reassigned — every KeyEvent the activity receives is consumed regardless of whether it acted. For the keycodes `KeyMap` covers (the device's hardware scroll-wheel: KEY_LEFT/RIGHT/UP/DOWN/MENU/PLAY/ENTER) the activity dispatches directly to `PlayerService` (`playOrPause`, `nextSong`, `prevSong`, etc.) and consuming-with-action is the right behaviour. For discrete media keycodes the activity does NOT recognise — `KEYCODE_MEDIA_PLAY` (`0x7e`), `KEYCODE_MEDIA_PAUSE` (`0x7f`), `KEYCODE_MEDIA_STOP` (`0x56`) — control falls through every if-eq check, reaches `:goto_2 / return v0`, and the events are silently swallowed. They never reach `PhoneFallbackEventHandler.handleMediaKeyEvent` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, so `PlayControllerReceiver` (which has discrete handlers from Patch E) never fires for them.
+`v0` is set to `0x1` at method entry and never reassigned — every KeyEvent the activity receives is consumed regardless of whether it acted. For the keycodes `KeyMap` covers (the device's hardware scroll-wheel: KEY_LEFT / RIGHT / UP / DOWN / MENU / PLAY / ENTER) the activity dispatches directly to `PlayerService` (`playOrPause`, `nextSong`, `prevSong`, etc.) and consuming-with-action is the right behaviour. For discrete media keycodes the activity does NOT recognise — `KEYCODE_MEDIA_PLAY` (`0x7e`), `KEYCODE_MEDIA_PAUSE` (`0x7f`), `KEYCODE_MEDIA_STOP` (`0x56`) — control falls through every if-eq check, reaches `:goto_2 / return v0`, and the events are silently swallowed. They never reach `PhoneFallbackEventHandler.handleMediaKeyEvent` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, so `PlayControllerReceiver` (which has discrete handlers from Patch E) never fires for them.
 
 This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end on a strict CT: kernel uinput via `/system/usr/keylayout/AVRCP.kl` correctly maps PASSTHROUGH 0x44 → `KEY_PLAYCD` (200) → `KEYCODE_MEDIA_PLAY` (126), the focused window's `BaseActivity.dispatchKeyEvent` receives it, the activity's `KeyMap` knows nothing about code 126, and the event terminates there. Captures showed 9/9 AVRCP 0x44 PLAY events dropped while PASSTHROUGH 0x46 PAUSE / 0x4B FORWARD / 0x4C BACKWARD all reached `PlayerService` directly (those map to `KEYCODE_MEDIA_PLAY_PAUSE` / `KEYCODE_MEDIA_NEXT` / `KEYCODE_MEDIA_PREVIOUS` and the activity has KeyMap branches for them).
 
@@ -335,7 +335,7 @@ const/4 v3, 0x3                 # original next instruction
 
 ## `src/su/` (root, v1.8.0+)
 
-Source for a minimal setuid-root `su` binary installed at `/system/xbin/su` by the bash's `--root` flag. Replaces the historical adbd byte patches that broke ADB protocol on hardware (preserved diagnosis in [`INVESTIGATION.md`](INVESTIGATION.md) §"adbd Root Patches (H1/H2/H3)").
+Source for a minimal setuid-root `su` binary installed at `/system/xbin/su` by the bash's `--root` flag. Replaces the historical adbd byte patches that broke ADB protocol on hardware (preserved diagnosis in [`INVESTIGATION.md`](INVESTIGATION.md) §"adbd Root Patches (H1 / H2 / H3)").
 
 - **`src/su/su.c`** — direct ARM-EABI syscall implementation, no libc dependency. `setgid(0)` → `setuid(0)` → `execve("/system/bin/sh", ...)`. Three invocation forms: bare `su` (interactive root shell), `su -c "<cmd>"` (one-off), `su <prog> [args...]` (exec-passthrough).
 - **`src/su/start.S`** — ~10-line ARM Thumb-2 entry stub; extracts argc/argv/envp from the ELF process-start stack layout, calls `main`, exits via `__NR_exit`.

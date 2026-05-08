@@ -38,16 +38,16 @@ FLAGS:
                      1.0->1.2 SDP, S1: replace 0x0311 entry with 0x0100
                      ServiceName, P1: force fn 0x144bc op_code dispatch
                      to msg 519 emit for VENDOR_DEPENDENT)
-                   - patch_libextavrcp_jni.py (R1 + T1/T2/extended_T2/T4/
-                     T5/T_charset/T_battery/T6/T8/T9 trampoline chain in
-                     LOAD #1 page-padding extension + U1 kernel auto-repeat
-                     NOP)
+                   - patch_libextavrcp_jni.py (R1 + T1 / T2 / extended_T2 /
+                     T4 / T5 / T_charset / T_battery / T6 / T8 / T9
+                     trampoline chain in LOAD #1 page-padding extension
+                     + U1 kernel auto-repeat NOP)
                    - patch_mtkbt_odex.py (F1: getPreferVersion -> 14;
                      F2: disable() resets sPlayServiceInterface; two
                      cardinality NOPs in handleKeyMessage so Java fires
                      notificationTrackChangedNative + notification-
                      PlayStatusChangedNative on every Y1 broadcast)
-                   - Y1MediaBridge.apk install (track_id + Title/Artist/
+                   - Y1MediaBridge.apk install (track_id + Title / Artist /
                      Album written to /data/data/com.y1.mediabridge/files/)
 
                  Excluded from --all because it requires a Y1MediaBridge
@@ -56,7 +56,7 @@ FLAGS:
 
                  See docs/ARCHITECTURE.md for the trampoline chain reference.
   --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
-                 + build.prop entries that are essential for car/peer pairing.
+                 + build.prop entries that are essential for car / peer pairing.
                  Does NOT set persist.bluetooth.avrcpversion — the AVRCP
                  version advertised on the wire is shaped by --avrcp's
                  SDP patches instead.
@@ -522,10 +522,10 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
       cat >&2 <<EOF
 ERROR: extracted system.img is an Android sparse image, but simg2img is not
 in PATH. Install it and re-run:
-  Debian/Ubuntu:        sudo apt install android-sdk-libsparse-utils
+  Debian / Ubuntu:      sudo apt install android-sdk-libsparse-utils
   Arch:                 sudo pacman -S android-tools
   Fedora:               sudo dnf install android-tools
-  RHEL/Rocky/Alma 8+:   sudo dnf install epel-release && sudo dnf install android-tools
+  RHEL / Rocky / Alma 8+: sudo dnf install epel-release && sudo dnf install android-tools
 EOF
       exit 1
     fi
@@ -637,7 +637,7 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   # persist.bluetooth.avrcpversion is intentionally NOT set — see
   # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to
   # an AVRCP version mtkbt cannot actually deliver, regressing the working
-  # stock PASSTHROUGH. The remaining properties are essential for car/peer
+  # stock PASSTHROUGH. The remaining properties are essential for car / peer
   # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
