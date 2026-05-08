@@ -219,6 +219,14 @@ public class MediaBridgeService extends Service {
      *  Held as a field so we can unregister cleanly in onDestroy. */
     private BroadcastReceiver mBatteryReceiver;
 
+    /** Phase F3: 1-second-recurring tick that fires the `playstatechanged`
+     *  broadcast while mIsPlaying. Drives T9's PLAYBACK_POS_CHANGED CHANGED
+     *  emission (alongside the existing play/battery edge checks T9 already
+     *  does). The tick stops when playback pauses/stops; the next play edge
+     *  in onStateDetected restarts it. AVRCP 1.3 §5.4.2 Tbl 5.33. */
+    private Runnable mPosTickRunnable;
+    private static final long POS_TICK_INTERVAL_MS = 1000L;
+
     private Bitmap mCurrentAlbumArt;
 
     private AudioManager        mAudioManager;
@@ -858,6 +866,7 @@ public class MediaBridgeService extends Service {
             catch (IllegalArgumentException ignore) { }
             mBatteryReceiver = null;
         }
+        cancelPosTick();
         if (mCurrentAlbumArt != null && !mCurrentAlbumArt.isRecycled()) {
             mCurrentAlbumArt.recycle();
         }
@@ -1052,6 +1061,58 @@ public class MediaBridgeService extends Service {
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");
         notifyPlaybackStatus(playing ? (byte) 2 : (byte) 3);
+        // Phase F3: drive the 1 s position-tick cadence. Start on play,
+        // stop on pause. The tick fires `playstatechanged` so T9 emits
+        // PLAYBACK_POS_CHANGED CHANGED with a fresh live-extrapolated
+        // position.
+        if (playing) {
+            schedulePosTick();
+        } else {
+            cancelPosTick();
+        }
+    }
+
+    /**
+     * Phase F3: 1 s tick that drives PLAYBACK_POS_CHANGED CHANGED. While
+     * mIsPlaying, fire `playstatechanged` every {@link #POS_TICK_INTERVAL_MS}
+     * to wake T9 on the libextavrcp_jni.so side. T9 reads file[792] (still
+     * PLAYING), live-extrapolates the position via clock_gettime
+     * CLOCK_BOOTTIME, and emits the CHANGED frame.
+     *
+     * The tick is idempotent — re-calling schedulePosTick() while one is
+     * already pending cancels the old before posting the new (mostly
+     * defensive; in practice we only call it on play edges and from the
+     * tick body itself).
+     */
+    private void schedulePosTick() {
+        if (mPosTickRunnable != null) {
+            mMainHandler.removeCallbacks(mPosTickRunnable);
+        }
+        mPosTickRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!mIsPlaying) return;
+                // Don't re-write y1-track-info — the file's
+                // pos_at_state_change_ms / state_change_time_sec already
+                // anchor the live extrapolation T9 does on the trampoline
+                // side. Just fire the broadcast (with the standard music
+                // extras MtkBt's BroadcastReceiver expects). T9 will read
+                // y1-track-info, see file[792] == PLAYING, compute
+                // live_pos via clock_gettime CLOCK_BOOTTIME, and emit
+                // PLAYBACK_POS_CHANGED CHANGED.
+                sendMusicBroadcast("com.android.music.playstatechanged");
+                // Re-schedule.
+                mMainHandler.postDelayed(this, POS_TICK_INTERVAL_MS);
+            }
+        };
+        mMainHandler.postDelayed(mPosTickRunnable, POS_TICK_INTERVAL_MS);
+    }
+
+    private void cancelPosTick() {
+        if (mPosTickRunnable != null) {
+            mMainHandler.removeCallbacks(mPosTickRunnable);
+            mPosTickRunnable = null;
+        }
     }
 
     private void onTrackDetected(String path) {

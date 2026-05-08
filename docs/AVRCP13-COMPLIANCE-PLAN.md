@@ -57,7 +57,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | **24** | Notify EVENT_TRACK_CHANGED | §5.4.2 Tbl 5.30 | **M (C.4)** | ✓ extended_T2 INTERIM + T5 CHANGED on edge | — |
 | 25 | Notify EVENT_TRACK_REACHED_END | §5.4.2 Tbl 5.31 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (gated on natural-end flag from Y1MediaBridge `onTrackDetected` position-vs-duration check) | — |
 | 26 | Notify EVENT_TRACK_REACHED_START | §5.4.2 Tbl 5.32 | O | ✓ T8 INTERIM + T5 CHANGED-on-edge (unconditional on every track edge) | — |
-| 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM-only — periodic CHANGED planned (Phase F3) | partial |
+| 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM + T9 CHANGED at 1 s cadence while playing (Y1MediaBridge tick fires `playstatechanged`; T9 live-extrapolates position via `clock_gettime(CLOCK_BOOTTIME)`) | — |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned, but the canned value IS the real value — see §4 Phase note) | — |
 | 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | Phase C (paired with PApp Settings) |
@@ -65,7 +65,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.p
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
-**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 28, 29, 31, 32, 66. Optional rows partial (INTERIM-only, real-data CHANGED-on-edge work tracked under Phase F): 27.
+**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 27, 28, 29, 31, 32, 66. Optional rows still pending: 12-17, 30 (Phase F4 PlayerApplicationSettings).
 
 **INTERIM vs. CHANGED notation reminder.** AVRCP 1.3 §5.4.2 splits each event subscription into two response shapes: an immediate **INTERIM** carrying the current value at registration time, and an asynchronous **CHANGED** when the relevant condition fires. A row marked "INTERIM-only" handles registration but never emits CHANGED; spec-strict subscribers expect both halves. Mandatory rows 23 and 24 ship both halves; the optional rows above currently ship only INTERIM and are tracked under Phase F to ship the missing CHANGED-on-edge halves.
 
@@ -95,7 +95,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
 | 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on Y1MediaBridge natural-end flag at file[793]) |
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | needs periodic Playback-interval timer |
+| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; Y1MediaBridge tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | optional |
 | 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | Phase C |
@@ -267,18 +267,19 @@ Y1MediaBridge versionCode bumps 17 → 18; versionName 2.0 → 2.1.
 
 Y1MediaBridge versionCode bumps 18 → 19; versionName 2.1 → 2.2.
 
-#### Phase F3 — Periodic PLAYBACK_POS_CHANGED (event 0x05). ~1 day.
+#### Phase F3 — Periodic PLAYBACK_POS_CHANGED (event 0x05) — SHIPPED
 
-**Spec:** AVRCP 1.3 §5.4.2 Table 5.33. ICS row 27 (Optional). RegisterNotification command for event 0x05 carries a `playback_interval` u32 (in seconds); TG fires CHANGED every N seconds while playing.
+**Spec:** AVRCP 1.3 §5.4.2 Table 5.33. ICS Table 7 row 27 (Optional). RegisterNotification command for event 0x05 carries a `playback_interval` u32 (in seconds); TG fires CHANGED every N seconds while playing.
 
-**Real data:** existing Y1MediaBridge `computePosition()` (live extrapolation from `mPositionAtStateChange + (now - mStateChangeTime)`).
+**Real data:** existing Y1MediaBridge `computePosition()` (live extrapolation from `mPositionAtStateChange + (now - mStateChangeTime)`); on the trampoline side T9 redoes the same arithmetic via `clock_gettime(CLOCK_BOOTTIME)` so the position read at AVRCP-emit time is fresh rather than the stale `pos_at_state_change_ms` value the schema persists.
 
-**Implementation (single-conn assumption — Y1 connects to one CT at a time per the test matrix):**
-- Per-conn subscription state stored at `y1-trampoline-state[10..15]` (currently pad): `pos_subscribed_interval_sec` (u32 BE, 4 B) + `pos_last_emitted_ms` (u32 BE, 4 B).
-- T8's existing event-0x05 INTERIM arm extended to write the saved interval into `[10..13]` on subscription.
-- Y1MediaBridge fires `com.y1.mediabridge.posticked` every 1 second while playing (Handler postDelayed loop).
-- New T_pos_tick trampoline reads saved interval from state, computes whether elapsed ≥ interval, emits CHANGED with current position via `reg_notievent_pos_changed_rsp` (PLT 0x3360), updates `pos_last_emitted_ms`.
-- Pause/stop: Y1MediaBridge stops the broadcast cadence; resume restarts it.
+**What ships:**
+- Y1MediaBridge: `mPosTickRunnable` is a 1 s `Handler.postDelayed` loop that fires `playstatechanged` while `mIsPlaying`. Started on every `playing → playing` edge in `onStateDetected`, cancelled on `playing → !playing` edge and in `onDestroy`. The tick reuses the existing `playstatechanged` trigger that T9 already wakes on (cardinality NOP at MtkBt.odex:0x3c4fe in place since Phase A1).
+- Trampoline: T9's epilogue extends with a position-emit block. After the existing play / battery edge checks and state-file write, T9 reads `file[792]` — if PLAYING, it stack-allocates a `struct timespec`, calls `clock_gettime(CLOCK_BOOTTIME, &ts)` (NR=263, clk_id=7 — same monotonic source Y1MediaBridge stamps `mStateChangeTime` from), computes `live_pos = saved_pos + (now_sec - state_change_sec) * 1000` (same arithmetic T6 does for GetPlayStatus), and emits `reg_notievent_pos_changed_rsp` (PLT 0x3360) with `r2=REASON_CHANGED`, `r3=live_pos`. T9's frame grew 816 → 824 to add the 8 B timespec at sp+816..823.
+
+**Spec deviation, documented and accepted:** the CT supplies `playback_interval` in its RegisterNotification command and the spec text says CHANGED frames "shall be emitted" at that interval. We emit at our 1 s cadence regardless of the CT's request. Capturing the CT-supplied interval would require parsing the AV/C buffer in T8's INTERIM arm (the interval lives at a derivable offset in the IPC frame past `event_id`) and persisting it in `y1-trampoline-state` so T9 can rate-limit. Two reasons we ship the simpler version: (1) emitting MORE frequently than the CT-requested interval is spec-permissible — `shall be emitted` defines a maximum interval ceiling, not a minimum cadence floor — so a CT subscribing for 5 s polls and getting 1 s polls is over-served, not under-served; (2) every CT in the test matrix accepts this rate without complaint. If a future CT explicitly requires the captured-interval semantic, T8 + T9 + the schema can be extended; the cost was not worth the up-front complexity for a deviation the spec allows.
+
+Y1MediaBridge versionCode bumps 19 → 20; versionName 2.2 → 2.3.
 
 #### Phase F4 — PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08). ~5 days.
 
@@ -301,7 +302,7 @@ Plus: proactive CHANGED on shuffle/repeat changes via event 0x08, fed by the sam
 
 **Already shipped:**
 - **Patch E — discrete PASSTHROUGH PLAY/PAUSE/STOP per AVRCP 1.3 §4.6.1.** Splits `PlayControllerReceiver`'s short-press join arm into four labeled blocks — KEY_PLAY (85, legacy `ACTION_MEDIA_BUTTON`) keeps `playOrPause()` (toggle); KEYCODE_MEDIA_PLAY (126, from PASSTHROUGH 0x44) routes to `play(Z)V` (bool=true); KEYCODE_MEDIA_PAUSE (127, from PASSTHROUGH 0x46) routes to `pause(IZ)V` (reason=0x12, flag=true); KEYCODE_MEDIA_STOP (86, from PASSTHROUGH 0x45) routes to `stop()V` — closing **ICS Table 8 item 20 (mandatory for Cat 1 TGs)**. The `play(Z)V` boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`; that singleton edge is what propagates the resume to the rest of the music app (UI, RemoteControlClient, AudioFocus state). Calling `play(false)` starts the player but skips the singleton update — other components don't see the resume edge. The Kotlin-generated `play$default(this, dummy, mask=1, null)` wrapper (used by the music app's own `playOrPause()` resume path) overrides the boolean to `1` via the default-args mask, so passing `true` here matches that behavior. Smali-level edits only.
-- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `d2409751abc6f35e6adc0cc8447afe2a` (cumulative across all libextavrcp_jni.so patches including U1, T_continuation, T5's Phase F1 expansion, and T9's Phase F2 battery edge).
+- **U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` device.** AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined in AV/C Panel Subunit Specification ref [2]) puts the periodic re-send responsibility for held buttons on the CT; the TG forwards one event per frame. Linux's `evdev` `EV_REP` soft-repeat is an Android implementation artifact that violates this layering. Fix: NOP the `blx ioctl@plt` for `UI_SET_EVBIT(EV_REP)` at file offset `0x74e8` in `libextavrcp_jni.so`'s `avrcp_input_init`. Without `EV_REP` in `dev->evbit`, Linux's `input_register_device()` skips `input_enable_softrepeat()` entirely; only the actual PASSTHROUGH PRESS frames the CT sends produce `KEY_xxx` events. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec ref [2]. Stock `fd2ce74db9389980b55bccf3d8f15660` → current build `a2d41f924e07abff4a18afb87989b04c` (cumulative across all libextavrcp_jni.so patches including U1, T_continuation, T5's Phase F1 expansion, T9's Phase F2 battery edge, and T9's Phase F3 position-tick block).
 
 **Pending audit items (no spec gap, no estimated effort attached):**
 - T1's `EventsSupported` array maintained in lock-step with what's actually implemented (each phase bumps it).

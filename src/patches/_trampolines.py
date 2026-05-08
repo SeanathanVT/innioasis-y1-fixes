@@ -262,14 +262,25 @@ T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 # fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
 # broadcasts -- they overlap rarely, and worst case is a single missed
 # CHANGED edge which recovers on the next event.
-T9_FRAME              = 816
+T9_FRAME              = 824        # +8 from 816 (Phase F3 timespec scratch)
 T9_OFF_STATE          = 0
 T9_OFF_FILE           = 16
-T9_OFF_FILE_PLAYFLAG  = T9_OFF_FILE + 792    # 808 - playing_flag inside file_buf
-T9_OFF_FILE_BATTERY   = T9_OFF_FILE + 794    # 810 - battery_status inside file_buf
-T9_STATE_LAST_PS_OFF  = T9_OFF_STATE + 9     # 9 - last_play_status inside state_buf
+T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # 792 - duration_ms (BE u32, T6 reads same)
+T9_OFF_FILE_POS        = T9_OFF_FILE + 780   # 796 - pos_at_state_change_ms (BE u32)
+T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # 800 - state_change_time_sec (BE u32)
+T9_OFF_FILE_PLAYFLAG   = T9_OFF_FILE + 792   # 808 - playing_flag inside file_buf
+T9_OFF_FILE_BATTERY    = T9_OFF_FILE + 794   # 810 - battery_status inside file_buf
+T9_STATE_LAST_PS_OFF   = T9_OFF_STATE + 9    # 9 - last_play_status inside state_buf
 T9_STATE_LAST_BATT_OFF = T9_OFF_STATE + 10   # 10 - last_battery_status inside state_buf
                                               #     (Phase F2 — was pad before)
+# Phase F3 needs a struct timespec for clock_gettime(CLOCK_BOOTTIME) to
+# live-extrapolate the playback position (same arithmetic T6 does for
+# GetPlayStatus). The 800 B file buffer at sp+16..815 ends at sp+815;
+# place the 8 B timespec immediately after, at sp+816..823. T9_FRAME
+# grew from 816 → 824 to cover this.
+T9_OFF_TIMESPEC      = T9_OFF_FILE + 800     # 816 - struct timespec
+T9_OFF_TIMESPEC_SEC  = T9_OFF_TIMESPEC + 0
+T9_OFF_TIMESPEC_NSEC = T9_OFF_TIMESPEC + 4
 
 # T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START — Phase F1) frame:
 # 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
@@ -1278,7 +1289,7 @@ def _emit_t8(a: Asm) -> None:
 
 
 def _emit_t9(a: Asm) -> None:
-    """T9: proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED (Phase F2).
+    """T9: proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED.
 
     Entered via `b.w T9` from the patched libextavrcp_jni.so::
     notificationPlayStatusChangedNative stub at file offset 0x3c88. MtkBt's
@@ -1289,24 +1300,33 @@ def _emit_t9(a: Asm) -> None:
     asynchronously to any inbound AVRCP RegisterNotification.
 
     Closes the AVRCP 1.3 §5.4.2 spec gap that T8 alone leaves: T8 handles
-    events 0x01 / 0x06 INTERIM-only, never fires the spec-mandated CHANGED
-    frame when the value actually flips. Without T9 a polling CT subscribes
-    to event 0x01 / 0x06, gets the immediate INTERIM, then never sees
-    CHANGED, so the car-side play/pause icon (or battery indicator) stays
-    stuck on its initial value even though Y1's audio toggles correctly via
-    the PASSTHROUGH path.
+    events 0x01 / 0x05 / 0x06 INTERIM-only, never fires the spec-mandated
+    CHANGED frame when the value actually flips. Without T9 a polling CT
+    subscribes to event 0x01 / 0x05 / 0x06, gets the immediate INTERIM,
+    then never sees CHANGED, so the car-side play/pause icon, scrub bar,
+    and battery indicator stay stuck on their initial values even though
+    Y1's audio toggles correctly via the PASSTHROUGH path.
 
-    Phase F2 piggybacks battery emission on this same trampoline:
-    Y1MediaBridge fires `playstatechanged` whenever the battery bucket
-    transitions (in addition to actual play/pause edges). T9 reads
-    file[792] (play_status) AND file[794] (battery_status) and emits
-    CHANGED for whichever differs from the corresponding `state` byte.
-    Stock MtkBt's BTAvrcpSystemListener.onBatteryStatusChange dispatch
-    chain is dead (BTAvrcpMusicAdapter$2 overrides it with a log-only
-    stub, never calling super), so we cannot drive the battery native
-    via the system path; reusing `playstatechanged` as the trigger is
-    the cheapest correct alternative and keeps Y1MediaBridge as the
-    single source of truth for the battery bucket value.
+    Phase F2 (battery) and Phase F3 (periodic position) piggyback on this
+    same trampoline. Y1MediaBridge fires `playstatechanged` whenever ANY
+    of the following occurs: actual play/pause edge, battery bucket
+    transition, or 1 s tick (while playing). T9 unconditionally:
+
+      1. play_status: emit PLAYBACK_STATUS_CHANGED CHANGED on file[792]
+         vs state[9] edge (Phase A1).
+      2. battery_status: emit BATT_STATUS_CHANGED CHANGED on file[794]
+         vs state[10] edge (Phase F2). Stock MtkBt's
+         BTAvrcpSystemListener.onBatteryStatusChange dispatch chain is
+         dead (BTAvrcpMusicAdapter$2 overrides it with a log-only stub),
+         so reusing `playstatechanged` as the trigger is the cheapest
+         spec-compliant alternative.
+      3. pos_changed: emit PLAYBACK_POS_CHANGED CHANGED if file[792] == 1
+         (PLAYING), with live-extrapolated position from
+         clock_gettime(CLOCK_BOOTTIME) — same arithmetic T6 does for
+         GetPlayStatus (Phase F3). Emits at our 1 s cadence rather than
+         the CT's RegisterNotification `playback_interval`; this is a
+         spec-permissible floor (the spec mandates a maximum interval,
+         not a minimum cadence).
 
     On entry (Java native ABI for `notificationPlayStatusChangedNative(byte,
     byte, byte)`):
@@ -1467,14 +1487,14 @@ def _emit_t9(a: Asm) -> None:
 
     # ---- write state buf back only if any_change ----
     a.cmp_imm8(5, 0)
-    a.beq("t9_no_change")
+    a.beq("t9_after_state_write")
 
     a.adr_w(0, "path_state")
     a.movw(1, O_WRONLY | O_TRUNC)
     a.movs_imm8(2, 0)
     a.blx_imm(PLT_open)
     a.cmp_imm8(0, 0)
-    a.blt("t9_no_change")                     # open failed → skip write, still return success
+    a.blt("t9_after_state_write")             # open failed → skip write, still proceed
     a.mov_lo_lo(5, 0)                         # r5 = fd
 
     a.mov_lo_lo(0, 5)
@@ -1485,7 +1505,67 @@ def _emit_t9(a: Asm) -> None:
     a.mov_lo_lo(0, 5)
     a.blx_imm(PLT_close)
 
-    a.label("t9_no_change")
+    a.label("t9_after_state_write")
+
+    # ---- Phase F3: emit PLAYBACK_POS_CHANGED CHANGED if playing ----
+    # AVRCP 1.3 §5.4.2 Tbl 5.33. ICS Table 7 row 27 (Optional). Emit a
+    # live-extrapolated position whenever T9 fires while file[792] == 1
+    # (PLAYING). Y1MediaBridge runs a 1 s tick that fires the
+    # `playstatechanged` broadcast — same trigger T9 already uses for the
+    # play-status / battery checks above — so this gives the CT roughly 1 Hz
+    # CHANGED frames while playing. Strictly the spec says the CT gets to
+    # set its own `playback_interval` via the original RegisterNotification
+    # command and we should emit at exactly that rate; honoring the
+    # CT-supplied interval would require us to capture and persist it from
+    # T8's INTERIM-time stack frame, which is more involved than the
+    # current build budget. Emitting at our 1 s cadence is spec-permissible
+    # because (1) the spec doesn't forbid emitting MORE frequently than
+    # requested (`shall be emitted` defines a floor, not a ceiling), and
+    # (2) the CT can simply ignore frames that arrive faster than its
+    # display refresh rate.
+    a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)
+    a.cmp_imm8(0, 1)                          # 1 = PLAYING (AVRCP §5.4.1 Tbl 5.26)
+    a.bne("t9_done")
+
+    # ---- clock_gettime(CLOCK_BOOTTIME, &timespec) ----
+    # Default the timespec to zero so a syscall failure yields a useless
+    # but bounded fallback (delta_sec computed against now=0 is negative,
+    # live_pos collapses to saved_pos minus a constant — CTs render a
+    # static or rewinding value rather than uninit garbage).
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, T9_OFF_TIMESPEC_SEC)
+    a.str_sp_imm(0, T9_OFF_TIMESPEC_NSEC)
+
+    a.movs_imm8(0, CLOCK_BOOTTIME)
+    a.add_sp_imm(1, T9_OFF_TIMESPEC)          # r1 = &timespec
+    a.movw(7, NR_clock_gettime)
+    a.svc(0)
+
+    # ---- live_pos = saved_pos + (now_sec - state_change_sec) * 1000 ----
+    # Same arithmetic T6 does for GetPlayStatus. Y1MediaBridge writes
+    # state_change_time_sec from `SystemClock.elapsedRealtime() / 1000` —
+    # CLOCK_BOOTTIME parity with what we read here, which makes the
+    # subtraction yield the wall-clock seconds elapsed since the last
+    # play/pause edge.
+    a.ldr_sp_imm(0, T9_OFF_FILE_STATE_TIME)   # r0 = state_change_sec (BE)
+    a.rev_lo_lo(0, 0)                         # → host order
+    a.ldr_sp_imm(1, T9_OFF_TIMESPEC_SEC)      # r1 = now_sec
+    a.subs_lo_lo(2, 1, 0)                     # r2 = now_sec - state_change_sec
+    a.movw(0, 1000)
+    a.muls_lo_lo(2, 0)                        # r2 = delta_ms
+
+    a.ldr_sp_imm(3, T9_OFF_FILE_POS)          # r3 = saved_pos (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+    a.adds_lo_lo(3, 3, 2)                     # r3 = live_pos
+
+    # ---- emit reg_notievent_pos_changed_rsp(conn, 0, REASON_CHANGED, live_pos) ----
+    a.add_imm_t3(0, 4, 8)                     # r0 = conn (= struct + 8)
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    # r3 already = live_pos
+    a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
+
+    a.label("t9_done")
     # ---- epilogue: return jboolean true ----
     a.movs_imm8(0, 1)
     a.addw(13, 13, T9_FRAME)

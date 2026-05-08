@@ -166,7 +166,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "d2409751abc6f35e6adc0cc8447afe2a"  # release build: + Phase F2 (T9 emits BATT_STATUS_CHANGED CHANGED on file[794] edge; T8 event-0x06 INTERIM reads from file[794] instead of canned NORMAL)
+OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"  # release build: + Phase F3 (T9 emits PLAYBACK_POS_CHANGED CHANGED at 1s cadence while playing, with live-extrapolated position via clock_gettime CLOCK_BOOTTIME)
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include

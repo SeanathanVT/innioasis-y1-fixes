@@ -156,25 +156,31 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | canned `0x00 NORMAL` (Tbl 5.35 enum) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x02/0x03/0x04/0x06 live in T9 / T5 (see entries below). Phase F2 changed event 0x06 INTERIM from canned `0x00 NORMAL` to `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`). CHANGED edges for 0x05 / 0x07 are not currently emitted (Phase F3 plumbing for 0x05; 0x07 is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`).
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x02/0x03/0x04/0x05/0x06 live in T9 / T5 (see entries below). Phase F2 changed event 0x06 INTERIM from canned `0x00 NORMAL` to `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`); Phase F3 wired event 0x05 CHANGED via T9 at a 1 s cadence while playing. The 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`.
 
-### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED on Y1 play/pause/battery edge
+### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED
 
-T5's structural twin for events 0x01 and 0x06. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
+T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
 
 | | bytes | mnemonic |
 |---|---|---|
 | before | `2D E9 F3 41` | function prologue |
 | after  | `[b.w T9 emitted by patcher]` | branch to T9 trampoline |
 
-T9 reads `y1-track-info[792]` (current play_status) and `y1-track-info[794]` (current battery_status, Phase F2) into its file buffer, then compares each against the corresponding `y1-trampoline-state` byte:
+T9 reads `y1-track-info` into its file buffer, then runs three independent edge / cadence checks:
 
 - **play_status:** compare file[792] vs state[9] (`last_play_status`, previously pad). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Update state[9].
-- **battery_status:** compare file[794] vs state[10] (`last_battery_status`, previously pad — Phase F2). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
+- **battery_status (Phase F2):** compare file[794] vs state[10] (`last_battery_status`, previously pad). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
+- **playback_pos (Phase F3):** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. T9's frame grew 816 → 824 to add 8 B for the timespec at sp+816..823.
 
-If either changed, the 16 B state file is written back (single combined write per fire). Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers and Table 5.34's CHANGED requirement on event-0x06 subscribers.
+If play or battery changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, and Table 5.33's CHANGED requirement on event-0x05 subscribers.
 
-Y1MediaBridge fires `playstatechanged` whenever either the actual play state changes OR the battery bucket transitions (its `mBatteryReceiver` hooks `Intent.ACTION_BATTERY_CHANGED` and converts level + plug state to the AVRCP §5.4.2 Tbl 5.35 enum). Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing the play-status trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for short-file (pre-F2 Y1MediaBridge) reads.
+Y1MediaBridge fires `playstatechanged` whenever any of the following occurs:
+- actual play state edge (Phase A1)
+- battery bucket transition via `mBatteryReceiver` on `Intent.ACTION_BATTERY_CHANGED` (Phase F2; level+plug bucket-mapped to the AVRCP §5.4.2 Tbl 5.35 enum)
+- 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (Phase F3; started on the play edge in `onStateDetected`, cancelled on the pause/stop edge and in `onDestroy`).
+
+Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing `playstatechanged` as the trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for short-file (pre-F2 Y1MediaBridge) reads. The Phase F3 emit deviates slightly from strict spec (we emit at our 1 s cadence rather than the CT-supplied `playback_interval`); this is a permissible floor since "shall be emitted at this interval" defines a maximum interval, not a minimum cadence — emitting more frequently over-serves rather than under-serves.
 
 ### U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` keyboard
 
@@ -205,9 +211,9 @@ The patcher writes the trampoline blob into LOAD #1's page-alignment padding (42
 - offset+16 (`p_filesz`): `0xac54 → 0xb21c`
 - offset+20 (`p_memsz`): `0xac54 → 0xb21c`
 
-Current trampoline blob is 1596 bytes (~2116 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
+Current trampoline blob is 1652 bytes (~2060 bytes still free in the padding). No other section/segment offsets shift; `.dynsym`/`.text`/`.rodata`/`.dynamic`/`.rel.plt` etc. all stay byte-identical.
 
-**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `d2409751abc6f35e6adc0cc8447afe2a`.
+**MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `a2d41f924e07abff4a18afb87989b04c`.
 
 **For the full architectural reference** (data-path diagram, response-builder calling conventions, ELF program-header surgery details, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
