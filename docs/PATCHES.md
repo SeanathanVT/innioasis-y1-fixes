@@ -74,7 +74,7 @@ T2 stub at `0x72d0` (8 bytes) overwrites `classInitNative` with `movs r0, #0; bx
 2. Write `[track_id || transId || pad]` to `y1-trampoline-state` so T4 can detect track-id edges later.
 3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&sentinel_ffx8`.
 
-Other PDU/event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
+Other PDU/event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x40/0x41 → T_continuation, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
 
 `r1=0` matters: response builders dispatch on r1 — `r1==0` writes the spec-correct event payload (reasonCode + event_id + 8-byte track_id memcpy per AVRCP 1.3 §5.4.2 Table 5.30); `r1!=0` writes a reject-shape frame. We pass `r1=0` everywhere.
 
@@ -156,7 +156,7 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — see compliance plan §4 Phase E audit notes) |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x02/0x03/0x04/0x05/0x06 live in T9 / T5 (see entries below). Phase F2 changed event 0x06 INTERIM from canned `0x00 NORMAL` to `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`); Phase F3 wired event 0x05 CHANGED via T9 at a 1 s cadence while playing. The 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`.
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`.
 
 ### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED
 

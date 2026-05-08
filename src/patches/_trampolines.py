@@ -89,9 +89,8 @@ separately by patch_libextavrcp_jni.py at other code-cave addresses):
     - Dispatches on event_id, calling the matching reg_notievent_*_rsp
       PLT for events 0x01 (play_status from y1-track-info[792]),
       0x03/0x04 (no payload), 0x05 (position from [780..783] REV),
-      0x06 (battery_status from [794] — Phase F2 changed this from
-      canned NORMAL), 0x07 (canned 0x00 POWER_ON — intentional, see
-      compliance plan §4 Phase E audit notes).
+      0x06 (battery_status from [794]), 0x07 (canned 0x00 POWER_ON —
+      intentional, see compliance plan §4 Phase E audit notes).
     - INTERIM only. CHANGED-on-edge for 0x01/0x05/0x06 lives in T9;
       for 0x02/0x03/0x04 in T5/extended_T2.
 

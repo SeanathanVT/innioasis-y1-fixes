@@ -85,13 +85,19 @@ T4 — in LOAD #1 padding at vaddr 0xac54.
           Album (file+520) / TrackNumber (file+800) / TotalNumberOfTracks
           (file+816) / Genre (file+848) / PlayingTime (file+832).
      T4's pre-check also dispatches PDU 0x17 → T_charset, PDU 0x18 →
-     T_battery, PDU 0x30 → T6 before falling through to "unknow indication".
+     T_battery, PDU 0x30 → T6, PDU 0x40/0x41 → T_continuation before
+     falling through to "unknow indication".
 
-T5 — proactive TRACK_CHANGED. Entered via `b.w T5` from the patched first
-     instruction of `notificationTrackChangedNative` (libextavrcp_jni.so:
-     0x3bc0). Reads y1-track-info + y1-trampoline-state, on track-id
-     divergence emits track_changed_rsp CHANGED with the 0xFF×8 sentinel
-     and updates state.
+T5 — proactive on Y1 track change. Entered via `b.w T5` from the patched
+     first instruction of `notificationTrackChangedNative` (libextavrcp_jni.so:
+     0x3bc0). Reads the full 800 B y1-track-info (incl. natural_end flag at
+     [793]) and the 16 B y1-trampoline-state. On track-id divergence
+     (state[0..7] != file[0..7]) emits the AVRCP §5.4.2 track-edge 3-tuple
+     in spec order: reg_notievent_reached_end_rsp CHANGED (gated on
+     file[793]==1 natural-end flag), track_changed_rsp CHANGED (always,
+     0xFF×8 sentinel), reg_notievent_reached_start_rsp CHANGED (always,
+     every track edge crosses a start-of-new-track boundary). Then writes
+     file[0..7] back into state[0..7] and persists state.
 
 T_charset — InformDisplayableCharacterSet (PDU 0x17) → inform_charsetset_rsp
      via PLT 0x3588 with arg1=0 (success). Bare 8-byte ack frame; the spec
@@ -117,19 +123,29 @@ T8 — RegisterNotification dispatcher for events ≠ 0x02. INTERIM-only (the
      event payloads and dispatches on event_id, calling the matching
      reg_notievent_*_rsp PLT entry for events 0x01/0x03/0x04/0x05/0x06/0x07.
 
-T9 — proactive PLAYBACK_STATUS_CHANGED. Entered via `b.w T9` from the
-     patched first instruction of `notificationPlayStatusChangedNative`
-     (libextavrcp_jni.so:0x3c88). Reads y1-track-info[792] (play_status),
-     compares against y1-trampoline-state[9] (last_play_status), emits
-     CHANGED via reg_notievent_playback_rsp on edge.
+T9 — proactive on Y1 play / battery / position events. Entered via `b.w T9`
+     from the patched first instruction of `notificationPlayStatusChangedNative`
+     (libextavrcp_jni.so:0x3c88). Reads y1-track-info + y1-trampoline-state
+     and runs three independent edge / cadence checks:
+       - play_status (file[792] vs state[9]): emit CHANGED via
+         reg_notievent_playback_rsp on edge.
+       - battery_status (file[794] vs state[10]): emit CHANGED via
+         reg_notievent_battery_status_changed_rsp on edge.
+       - position: if file[792] == PLAYING, clock_gettime(CLOCK_BOOTTIME)
+         + same arithmetic as T6 → live_pos, emit CHANGED via
+         reg_notievent_pos_changed_rsp. Driven at 1 s cadence by
+         Y1MediaBridge's mPosTickRunnable firing `playstatechanged`.
+     Single combined state-file write per fire if either play or battery
+     edge fired. Position emission never dirties state.
 
-The trampoline blob (extended_T2 + T4 + T5 + T_charset + T_battery + T6 +
-T8 + T9 + path strings + sentinel data) is built dynamically by
-_trampolines.py using a tiny Thumb-2 assembler (_thumb2asm.py). LOAD #1's
-filesz/memsz is extended to cover the blob, which lets the kernel map it
-as R+E at runtime — the 4276-byte page-alignment gap between LOAD #1's
-stock end (0xac54) and LOAD #2's start (0xbc08) is zero padding, so we
-can grow LOAD #1 freely up to that limit.
+The trampoline blob (extended_T2 + T4 + T5 + T_charset + T_battery +
+T_continuation + T6 + T8 + T9 + path strings + sentinel data) is built
+dynamically by _trampolines.py using a tiny Thumb-2 assembler
+(_thumb2asm.py). LOAD #1's filesz/memsz is extended to cover the blob,
+which lets the kernel map it as R+E at runtime — the 4020-byte
+page-alignment gap between LOAD #1's stock end (0xac54) and LOAD #2's
+start (0xbc08) is zero padding, so we can grow LOAD #1 freely up to that
+limit.
 
 Usage:
     python3 patch_libextavrcp_jni.py libextavrcp_jni.so
