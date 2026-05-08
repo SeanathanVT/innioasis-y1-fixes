@@ -513,5 +513,5 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
 
 - [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) — staged plan for remaining AVRCP 1.3 spec-compliance work (Phases A–E).
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
-- [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture iterations and dead-end paths.
+- [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture work and dead-end paths.
 - `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1/T1/T2/T4. Header comments and PATCHES list are the source of truth for byte-level details.

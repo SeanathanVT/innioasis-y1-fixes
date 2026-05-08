@@ -60,5 +60,5 @@ Earlier byte-patch attempts at `/sbin/adbd` (the H1/H2/H3 patches in `patch_adbd
 - [`../../README.md`](../../README.md) — project overview
 - [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) — **AVRCP metadata proxy architecture**: data-path diagram, trampoline chain (T1/T2/T4/T5), response builder calling conventions, ELF program-header surgery, code-cave inventory. Read this first if extending the trampoline chain or adding new PDU handlers.
 - [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
-- [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) — chronological investigation history (gdbserver capture iterations, dead-end paths, hypothesis evolution)
+- [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) — chronological investigation history (gdbserver capture work, dead-end paths, hypothesis evolution)
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog
