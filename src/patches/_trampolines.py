@@ -7,7 +7,7 @@ separately by patch_libextavrcp_jni.py at other code-cave addresses):
 
   T4 (GetElementAttributes, PDU 0x20) — reactive:
     - Reads the full 1104 B y1-track-info into a stack buffer (full schema
-      in docs/AVRCP13-COMPLIANCE-PLAN.md §5).
+      in docs/AVRCP13-COMPLIANCE.md §4).
     - Reads the 16 B y1-trampoline-state (last_synced track_id at [0..7],
       tc_transId at [8], last_play_status at [9], last_battery_status at
       [10], pad at [11..15]).
@@ -44,8 +44,8 @@ separately by patch_libextavrcp_jni.py at other code-cave addresses):
     - On track-id divergence (state[0..7] != file[0..7]): emits the AVRCP
       §5.4.2 track-edge 3-tuple in spec order:
         1. reg_notievent_reached_end_rsp CHANGED — only if file[793]==1
-           (Phase F1; natural-end gate per §5.4.2 Tbl 5.31, set by
-           Y1MediaBridge after computePosition() ≈ duration check).
+           (natural-end gate per §5.4.2 Tbl 5.31, set by Y1MediaBridge
+           after computePosition() ≈ duration check).
         2. track_changed_rsp CHANGED — always (track_id=&SENTINEL_FFx8).
         3. reg_notievent_reached_start_rsp CHANGED — always (every track
            edge crosses a start-of-new-track boundary per Tbl 5.32).
@@ -90,7 +90,8 @@ separately by patch_libextavrcp_jni.py at other code-cave addresses):
       PLT for events 0x01 (play_status from y1-track-info[792]),
       0x03/0x04 (no payload), 0x05 (position from [780..783] REV),
       0x06 (battery_status from [794]), 0x07 (canned 0x00 POWER_ON —
-      intentional, see compliance plan §4 Phase E audit notes).
+      intentional, since while trampolines run the system is by
+      definition POWER_ON; the canned value IS the real value).
     - INTERIM only. CHANGED-on-edge for 0x01/0x05/0x06 lives in T9;
       for 0x02/0x03/0x04 in T5/extended_T2.
 
@@ -100,10 +101,10 @@ separately by patch_libextavrcp_jni.py at other code-cave addresses):
     - Three independent edge / cadence checks:
         1. play_status: if file[792] != state[9], emit
            reg_notievent_playback_rsp CHANGED, update state[9].
-        2. battery_status (Phase F2): if file[794] != state[10], emit
+        2. battery_status: if file[794] != state[10], emit
            reg_notievent_battery_status_changed_rsp CHANGED, update
            state[10].
-        3. position (Phase F3): if file[792] == 1 PLAYING,
+        3. position: if file[792] == 1 PLAYING,
            clock_gettime(CLOCK_BOOTTIME) + same arithmetic as T6, emit
            reg_notievent_pos_changed_rsp CHANGED. Driven at 1 s cadence
            by Y1MediaBridge's mPosTickRunnable firing `playstatechanged`
@@ -144,7 +145,7 @@ Inputs at trampoline entry (preserved by saveRegEventSeqId's prologue):
   caller's sp+394 = num_attrs   (1 byte; PDU 0x20 only)
 
 PLT entries used: see the `PLT_*` constants below; full inventory in
-docs/AVRCP13-COMPLIANCE-PLAN.md §3. read(2) is not in the PLT — we
+docs/AVRCP13-COMPLIANCE.md §3. read(2) is not in the PLT — we
 issue the syscall directly via SVC #0 with r7=3 (NR_read on Linux ARM
 EABI). clock_gettime(2) is via SVC #0 with r7=263 (NR_clock_gettime).
 """
@@ -171,12 +172,12 @@ PLT_memset                     = 0x33fc
 PLT_write                      = 0x3630
 PLT_get_element_attributes_rsp = 0x3570
 PLT_track_changed_rsp          = 0x3384
-# Phase A0 — Inform PDUs
+# Inform PDUs (CT→TG informational acks).
 PLT_inform_charsetset_rsp      = 0x3588
 PLT_battery_status_rsp         = 0x357c
-# Phase B — GetPlayStatus
+# GetPlayStatus.
 PLT_get_playstatus_rsp         = 0x3564
-# Phase A1 — RegisterNotification dispatcher (events ≠ 0x02)
+# RegisterNotification dispatcher (events ≠ 0x02).
 PLT_reg_notievent_playback_rsp        = 0x339c
 PLT_reg_notievent_reached_end_rsp     = 0x3378
 PLT_reg_notievent_reached_start_rsp   = 0x336c
@@ -218,7 +219,7 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                                                                TRACK_REACHED_END CHANGED)
 #                      794       battery_status             u8 (AVRCP §5.4.2 Tbl 5.35 enum;
 #                                                                T8 event 0x06, T9)
-#                      795..799  pad (Phase F4 — shuffle_flag / repeat_mode reservation)
+#                      795..799  pad (PlayerApplicationSettings shuffle_flag / repeat_mode reservation)
 #                      800..815  TrackNumber                UTF-8 ASCII decimal (16 B)
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
@@ -277,7 +278,7 @@ T6_OFF_TIMESPEC      = 8
 T6_OFF_TIMESPEC_SEC  = T6_OFF_TIMESPEC + 0   # 8 - tv_sec u32
 T6_OFF_TIMESPEC_NSEC = T6_OFF_TIMESPEC + 4   # 12 - tv_nsec u32 (we don't use it)
 
-# T8 (RegisterNotification dispatch for events ≠ 0x02 — Phase A1) frame:
+# T8 (RegisterNotification INTERIM dispatch for events ≠ 0x02) frame:
 # 800 B file_buf at sp+0. None of the reg_notievent_*_rsp calls T8 makes
 # need stack args (all 4 ARM args fit in r0/r1/r2/r3), so no outgoing args
 # region is reserved. Caller's event_id slot is at sp+T8_EVENT_ID_OFF
@@ -286,10 +287,9 @@ T8_FRAME           = 800
 T8_OFF_FILE        = 0
 T8_OFF_FILE_POS      = T8_OFF_FILE + 780   # 780 - pos_at_state_change_ms
 T8_OFF_FILE_PLAYFLAG = T8_OFF_FILE + 792   # 792 - playing_flag (= AVRCP play_status)
-T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (Phase F2 —
-                                            #       AVRCP §5.4.2 Tbl 5.34/5.35
-                                            #       enum: 0=NORMAL, 1=WARNING,
-                                            #       2=CRITICAL, 3=EXTERNAL,
+T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (AVRCP §5.4.2
+                                            #       Tbl 5.34/5.35 enum: 0=NORMAL,
+                                            #       1=WARNING, 2=CRITICAL, 3=EXTERNAL,
                                             #       4=FULL_CHARGE)
 T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 
@@ -305,7 +305,7 @@ T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 # fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
 # broadcasts -- they overlap rarely, and worst case is a single missed
 # CHANGED edge which recovers on the next event.
-T9_FRAME              = 824        # +8 from 816 (Phase F3 timespec scratch)
+T9_FRAME              = 824        # 16 state + 800 file_buf + 8 timespec
 T9_OFF_STATE          = 0
 T9_OFF_FILE           = 16
 T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # 792 - duration_ms (BE u32, T6 reads same)
@@ -315,44 +315,40 @@ T9_OFF_FILE_PLAYFLAG   = T9_OFF_FILE + 792   # 808 - playing_flag inside file_bu
 T9_OFF_FILE_BATTERY    = T9_OFF_FILE + 794   # 810 - battery_status inside file_buf
 T9_STATE_LAST_PS_OFF   = T9_OFF_STATE + 9    # 9 - last_play_status inside state_buf
 T9_STATE_LAST_BATT_OFF = T9_OFF_STATE + 10   # 10 - last_battery_status inside state_buf
-                                              #     (Phase F2 — was pad before)
-# Phase F3 needs a struct timespec for clock_gettime(CLOCK_BOOTTIME) to
-# live-extrapolate the playback position (same arithmetic T6 does for
+# T9's position-emit block needs a struct timespec for clock_gettime(CLOCK_BOOTTIME)
+# to live-extrapolate the playback position (same arithmetic T6 does for
 # GetPlayStatus). The 800 B file buffer at sp+16..815 ends at sp+815;
-# place the 8 B timespec immediately after, at sp+816..823. T9_FRAME
-# grew from 816 → 824 to cover this.
+# place the 8 B timespec immediately after, at sp+816..823.
 T9_OFF_TIMESPEC      = T9_OFF_FILE + 800     # 816 - struct timespec
 T9_OFF_TIMESPEC_SEC  = T9_OFF_TIMESPEC + 0
 T9_OFF_TIMESPEC_NSEC = T9_OFF_TIMESPEC + 4
 
-# T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START — Phase F1) frame:
+# T5 (proactive TRACK_CHANGED + TRACK_REACHED_END/START 3-tuple) frame:
 # 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
-# Same shape as T9. Phase F1 grew T5's frame from the original 24 B
-# (16 state + 8 file_tid) so T5 can read enough of y1-track-info to see
-# the natural-end flag at offset 793 (= sp + T5_OFF_FILE_NATURAL_END).
+# Same shape as T9. T5 reads enough of y1-track-info to see the natural-end
+# flag at offset 793 (= sp + T5_OFF_FILE_NATURAL_END).
 T5_FRAME              = 816
 T5_OFF_STATE          = 0
 T5_OFF_FILE           = 16
 T5_OFF_FILE_TID       = T5_OFF_FILE          # 16 - track_id (8 B) at file[0..7]
 T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end u8
-                                              #       at file[793] (Phase F1 — set
-                                              #       by Y1MediaBridge before the
+                                              #       at file[793] (set by
+                                              #       Y1MediaBridge before the
                                               #       metachanged broadcast that
                                               #       lands here).
 
-# AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned values
-# for events without a Y1 data source.
-# - BATT_STATUS_CHANGED: real data wired Phase F2. T8 INTERIM reads
-#   y1-track-info[794] (battery_status u8); T9 emits CHANGED-on-edge when
-#   file[794] differs from y1-trampoline-state[10] (last_battery_status).
+# AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned-value
+# defaults.
+# - BATT_STATUS_CHANGED: real data wired through y1-track-info[794]
+#   (battery_status u8). T8 INTERIM reads byte 794; T9 emits CHANGED-on-edge
+#   when file[794] differs from y1-trampoline-state[10] (last_battery_status).
 #   Y1MediaBridge maps Android `Intent.ACTION_BATTERY_CHANGED` (level +
 #   plugged-state) to the AVRCP enum on every bucket transition and fires
 #   `playstatechanged` so T9 picks up the change. Spec values:
 #   0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE.
-#   BATT_STATUS_NORMAL retained as the default value when y1-track-info is
-#   shorter than 800 B (e.g. an old Y1MediaBridge built against a
-#   pre-Phase-F2 schema) — T8/T9 memset to zero before the read, so a
-#   short read leaves byte 794 = 0 = NORMAL, which is a benign default.
+#   BATT_STATUS_NORMAL is retained as the default value when y1-track-info
+#   is shorter than 800 B — T8/T9 memset to zero before the read, so a
+#   short read leaves byte 794 = 0 = NORMAL, a benign default.
 # - SYSTEM_STATUS_CHANGED: 0x00 POWERED_ON — we run only when the device is
 #   on, so this is always correct. (Spec: 0=POWERED_ON, 1=POWERED_OFF,
 #   2=UNPLUGGED.)
@@ -416,7 +412,7 @@ def _emit_t4(a: Asm) -> None:
     a.bne("t4_after_playstatus")
     a.b_w("T6")
     a.label("t4_after_playstatus")
-    # PDU 0x40 RequestContinuingResponse / 0x41 AbortContinuingResponse — Phase D.
+    # PDU 0x40 RequestContinuingResponse / 0x41 AbortContinuingResponse.
     # Routed through an explicit T_continuation handler that emits the spec-
     # acceptable NOT_IMPLEMENTED reject via the same UNKNOW_INDICATION path.
     # See _emit_t_continuation for rationale.
@@ -734,7 +730,7 @@ def _emit_t5(a: Asm) -> None:
          obtain the BluetoothAvrcpService's per-conn struct (used for the
          conn buffer at +8).
       2. Read 800 B of y1-track-info into file_buf @ sp+16..815. file[0..7]
-         is the current track_id; file[793] (Phase F1) is the
+         is the current track_id; file[793] is the
          `previous_track_natural_end` flag set by Y1MediaBridge before the
          metachanged broadcast that landed us here.
       3. Read y1-trampoline-state 16 bytes into state_buf @ sp+0..15
@@ -757,14 +753,13 @@ def _emit_t5(a: Asm) -> None:
          Then write file[0..7] back to state[0..7] in y1-trampoline-state
          so we don't re-emit until the track moves again.
 
-    Phase F1 closes the partial-implementation gap on ICS Table 7 rows
-    25 (TRACK_REACHED_END) and 26 (TRACK_REACHED_START) — both Optional
-    rows that previously shipped INTERIM-only via T8 with no CHANGED
-    edge. Pairs with the Y1MediaBridge natural_end detection in
-    onTrackDetected(): the bridge compares the previous track's
-    extrapolated position (computePosition()) against mCurrentDuration
-    at the moment of track change and writes file[793] before the
-    metachanged broadcast.
+    Closes ICS Table 7 rows 25 (TRACK_REACHED_END) and 26
+    (TRACK_REACHED_START) with real-data CHANGED-on-edge alongside T8's
+    INTERIM coverage — both Optional rows. Pairs with the Y1MediaBridge
+    natural_end detection in onTrackDetected(): the bridge compares the
+    previous track's extrapolated position (computePosition()) against
+    mCurrentDuration at the moment of track change and writes file[793]
+    before the metachanged broadcast.
 
     The 16-byte state buf and 800-byte file buf live in T5's own stack
     frame — no shared memory with the reactive T4 trampoline (they read
@@ -856,7 +851,7 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_changed")
 
-    # ---- Phase F1: emit TRACK_REACHED_END (event 0x03) only if natural ----
+    # ---- emit TRACK_REACHED_END (event 0x03) only if natural ----
     # AVRCP 1.3 §5.4.2 Table 5.31. ICS Table 7 row 25 (Optional). Only fires
     # when the previous track ended naturally — Y1MediaBridge writes
     # file[793] = 1 in that case, 0 on a skip / interrupt.
@@ -883,7 +878,7 @@ def _emit_t5(a: Asm) -> None:
     a.adr_w(3, "sentinel_ffx8")
     a.blx_imm(PLT_track_changed_rsp)
 
-    # ---- Phase F1: emit TRACK_REACHED_START (event 0x04) — always ----
+    # ---- emit TRACK_REACHED_START (event 0x04) — always ----
     # AVRCP 1.3 §5.4.2 Table 5.32. ICS Table 7 row 26 (Optional). Every
     # track edge crosses a start-of-new-track boundary — fires
     # unconditionally on track change.
@@ -927,7 +922,7 @@ def _emit_t5(a: Asm) -> None:
 
 
 def _emit_t_charset(a: Asm) -> None:
-    """T_charset (Phase A0): PDU 0x17 InformDisplayableCharacterSet.
+    """T_charset: PDU 0x17 InformDisplayableCharacterSet.
 
     Branched from T4's pre-check when the inbound PDU byte is 0x17. The CT is
     declaring its accepted charsets to us; we ack with success and continue
@@ -952,7 +947,7 @@ def _emit_t_charset(a: Asm) -> None:
 
 
 def _emit_t_battery(a: Asm) -> None:
-    """T_battery (Phase A0): PDU 0x18 InformBatteryStatusOfCT.
+    """T_battery: PDU 0x18 InformBatteryStatusOfCT.
 
     Branched from T4's pre-check when the inbound PDU byte is 0x18. The CT is
     notifying us of its current battery state; we ack. We don't surface this
@@ -970,7 +965,7 @@ def _emit_t_battery(a: Asm) -> None:
 
 
 def _emit_t_continuation(a: Asm) -> None:
-    """T_continuation (Phase D): PDU 0x40 RequestContinuingResponse /
+    """T_continuation: PDU 0x40 RequestContinuingResponse /
     0x41 AbortContinuingResponse explicit reject.
 
     Per AVRCP 1.3 §4.7.7 / §5.5 + ICS Table 7 rows 31-32 (M C.2: M IF
@@ -1015,7 +1010,7 @@ def _emit_t_continuation(a: Asm) -> None:
 
 
 def _emit_t6(a: Asm) -> None:
-    """T6 (Phase B): PDU 0x30 GetPlayStatus.
+    """T6: PDU 0x30 GetPlayStatus.
 
     Branched from T4's pre-check when the inbound PDU byte is 0x30. Returns
     the current track's duration / playback position / play_status in a
@@ -1164,7 +1159,7 @@ def _emit_t6(a: Asm) -> None:
 
 
 def _emit_t8(a: Asm) -> None:
-    """T8 (Phase A1): RegisterNotification dispatch for events other than
+    """T8: RegisterNotification INTERIM dispatch for events other than
     TRACK_CHANGED (0x02, handled by extended_T2).
 
     Branched from extended_T2's "PDU 0x31 + non-0x02 event" arm. Reads
@@ -1289,13 +1284,13 @@ def _emit_t8(a: Asm) -> None:
     a.label("t8_check_6")
     a.cmp_imm8(0, 0x06)
     a.bne("t8_check_7")
-    # 0x06 BATT_STATUS_CHANGED — Phase F2.
+    # 0x06 BATT_STATUS_CHANGED.
     # reg_notievent_battery_status_changed_rsp(conn, 0, REASON_INTERIM, batt_status_u8)
     # batt_status read from y1-track-info[794], where Y1MediaBridge writes the
     # AVRCP enum (0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE)
     # bucket-mapped from Android `Intent.ACTION_BATTERY_CHANGED`. Stack is
-    # memset to 0 before the read, so a short file (pre-F2 Y1MediaBridge)
-    # gives BATT_STATUS_NORMAL — benign default.
+    # memset to 0 before the read, so a short file gives BATT_STATUS_NORMAL —
+    # benign default.
     a.ldrb_w(3, 13, T8_OFF_FILE_BATTERY)
     a.movs_imm8(2, REASON_INTERIM)
     a.movs_imm8(1, 0)
@@ -1350,15 +1345,15 @@ def _emit_t9(a: Asm) -> None:
     and battery indicator stay stuck on their initial values even though
     Y1's audio toggles correctly via the PASSTHROUGH path.
 
-    Phase F2 (battery) and Phase F3 (periodic position) piggyback on this
-    same trampoline. Y1MediaBridge fires `playstatechanged` whenever ANY
-    of the following occurs: actual play/pause edge, battery bucket
-    transition, or 1 s tick (while playing). T9 unconditionally:
+    Battery and periodic position both piggyback on this same trampoline.
+    Y1MediaBridge fires `playstatechanged` whenever ANY of the following
+    occurs: actual play/pause edge, battery bucket transition, or 1 s
+    tick (while playing). T9 unconditionally:
 
       1. play_status: emit PLAYBACK_STATUS_CHANGED CHANGED on file[792]
-         vs state[9] edge (Phase A1).
+         vs state[9] edge.
       2. battery_status: emit BATT_STATUS_CHANGED CHANGED on file[794]
-         vs state[10] edge (Phase F2). Stock MtkBt's
+         vs state[10] edge. Stock MtkBt's
          BTAvrcpSystemListener.onBatteryStatusChange dispatch chain is
          dead (BTAvrcpMusicAdapter$2 overrides it with a log-only stub),
          so reusing `playstatechanged` as the trigger is the cheapest
@@ -1366,8 +1361,8 @@ def _emit_t9(a: Asm) -> None:
       3. pos_changed: emit PLAYBACK_POS_CHANGED CHANGED if file[792] == 1
          (PLAYING), with live-extrapolated position from
          clock_gettime(CLOCK_BOOTTIME) — same arithmetic T6 does for
-         GetPlayStatus (Phase F3). Emits at our 1 s cadence rather than
-         the CT's RegisterNotification `playback_interval`; this is a
+         GetPlayStatus. Emits at our 1 s cadence rather than the CT's
+         RegisterNotification `playback_interval`; this is a
          spec-permissible floor (the spec mandates a maximum interval,
          not a minimum cadence).
 
@@ -1390,10 +1385,10 @@ def _emit_t9(a: Asm) -> None:
          per-conn struct (same helper T5 uses; conn buffer at struct + 8).
       2. Read y1-track-info into file_buf @ sp+16..815. file[792] = current
          play_status (AVRCP §5.4.1 Tbl 5.26 enum); file[794] = current
-         battery_status (AVRCP §5.4.2 Tbl 5.35 enum, Phase F2).
+         battery_status (AVRCP §5.4.2 Tbl 5.35 enum).
       3. Read y1-trampoline-state (16 B) into state_buf @ sp+0..15.
-         state[9]  = last_play_status (previously pad).
-         state[10] = last_battery_status (Phase F2; previously pad).
+         state[9]  = last_play_status.
+         state[10] = last_battery_status.
       4. play_status compare → emit reg_notievent_playback_rsp CHANGED on
          edge; update state[9].
       5. battery_status compare → emit
@@ -1503,7 +1498,7 @@ def _emit_t9(a: Asm) -> None:
 
     a.label("t9_after_play_check")
 
-    # ---- battery_status compare (file[794] vs state[10]) — Phase F2 ----
+    # ---- battery_status compare (file[794] vs state[10]) ----
     # AVRCP 1.3 §5.4.2 Tbl 5.34 (BATT_STATUS_CHANGED CHANGED) carries a
     # 1-byte battery_status payload (Tbl 5.35 enum). Y1MediaBridge
     # bucket-maps Android `Intent.ACTION_BATTERY_CHANGED` (level + plug
@@ -1550,7 +1545,7 @@ def _emit_t9(a: Asm) -> None:
 
     a.label("t9_after_state_write")
 
-    # ---- Phase F3: emit PLAYBACK_POS_CHANGED CHANGED if playing ----
+    # ---- emit PLAYBACK_POS_CHANGED CHANGED if playing ----
     # AVRCP 1.3 §5.4.2 Tbl 5.33. ICS Table 7 row 27 (Optional). Emit a
     # live-extrapolated position whenever T9 fires while file[792] == 1
     # (PLAYING). Y1MediaBridge runs a 1 s tick that fires the
@@ -1635,12 +1630,12 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t4(a)
     _emit_extended_t2(a)
     _emit_t5(a)
-    _emit_t_charset(a)                        # Phase A0 — Inform PDU 0x17
-    _emit_t_battery(a)                        # Phase A0 — Inform PDU 0x18
-    _emit_t_continuation(a)                   # Phase D  — Continuation PDUs 0x40/0x41
-    _emit_t6(a)                               # Phase B  — GetPlayStatus
-    _emit_t8(a)                               # Phase A1 — RegisterNotification dispatch
-    _emit_t9(a)                               # proactive PLAYBACK_STATUS_CHANGED
+    _emit_t_charset(a)                        # Inform PDU 0x17
+    _emit_t_battery(a)                        # Inform PDU 0x18
+    _emit_t_continuation(a)                   # Continuation PDUs 0x40/0x41
+    _emit_t6(a)                               # PDU 0x30 GetPlayStatus
+    _emit_t8(a)                               # PDU 0x31 RegisterNotification dispatch
+    _emit_t9(a)                               # proactive PLAYBACK_STATUS_CHANGED + battery + position
 
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)

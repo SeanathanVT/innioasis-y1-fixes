@@ -1,6 +1,6 @@
 # Patch Reference
 
-Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before/after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §0.
+Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before/after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §0.
 
 ## Patch ID Legend
 
@@ -64,7 +64,7 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 7-element `EventsSupported` array `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover (event `0x08 PLAYER_APPLICATION_SETTING_CHANGED` is unadvertised — Phase F4 PlayerApplicationSettings is deferred).
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover (event `0x08 PLAYER_APPLICATION_SETTING_CHANGED` is unadvertised because PlayerApplicationSettings is deferred).
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -154,9 +154,9 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | `0x336c` | (none) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — see compliance plan §4 Phase E audit notes) |
+| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only — see Phase E audit notes in `docs/AVRCP13-COMPLIANCE-PLAN.md`.
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/AVRCP13-COMPLIANCE.md` §2).
 
 ### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED
 
@@ -170,17 +170,17 @@ T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from 
 T9 reads `y1-track-info` into its file buffer, then runs three independent edge / cadence checks:
 
 - **play_status:** compare file[792] vs state[9] (`last_play_status`, previously pad). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Update state[9].
-- **battery_status (Phase F2):** compare file[794] vs state[10] (`last_battery_status`, previously pad). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
-- **playback_pos (Phase F3):** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. T9's frame grew 816 → 824 to add 8 B for the timespec at sp+816..823.
+- **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
+- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. T9's frame is 824 B (16 state + 800 file_buf + 8 timespec at sp+816..823).
 
 If play or battery changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, and Table 5.33's CHANGED requirement on event-0x05 subscribers.
 
 Y1MediaBridge fires `playstatechanged` whenever any of the following occurs:
-- actual play state edge (Phase A1)
-- battery bucket transition via `mBatteryReceiver` on `Intent.ACTION_BATTERY_CHANGED` (Phase F2; level+plug bucket-mapped to the AVRCP §5.4.2 Tbl 5.35 enum)
-- 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (Phase F3; started on the play edge in `onStateDetected`, cancelled on the pause/stop edge and in `onDestroy`).
+- actual play state edge
+- battery bucket transition via `mBatteryReceiver` on `Intent.ACTION_BATTERY_CHANGED` (level+plug bucket-mapped to the AVRCP §5.4.2 Tbl 5.35 enum)
+- 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (started on the play edge in `onStateDetected`, cancelled on the pause/stop edge and in `onDestroy`).
 
-Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing `playstatechanged` as the trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for short-file (pre-F2 Y1MediaBridge) reads. The Phase F3 emit deviates slightly from strict spec (we emit at our 1 s cadence rather than the CT-supplied `playback_interval`); this is a permissible floor since "shall be emitted at this interval" defines a maximum interval, not a minimum cadence — emitting more frequently over-serves rather than under-serves.
+Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing `playstatechanged` as the trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for a short y1-track-info file (`stack_buf` is memset to zero before the read). The position emit deviates slightly from strict spec (we emit at our 1 s cadence rather than the CT-supplied `playback_interval`); this is a permissible floor since "shall be emitted at this interval" defines a maximum interval, not a minimum cadence — emitting more frequently over-serves rather than under-serves.
 
 ### U1 — disable kernel auto-repeat on the AVRCP `/dev/uinput` keyboard
 
@@ -223,7 +223,7 @@ Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte p
 
 Patches `MtkBt.odex` with four byte edits and recomputes the DEX adler32 checksum embedded in the ODEX header.
 
-**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns the BlueAngel-internal flag value 14 instead of 10. This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling on a stack that was originally compiled for an earlier AVRCP version. The wire shape is unchanged; we ship AVRCP 1.3 PDUs only. See [`AVRCP13-COMPLIANCE-PLAN.md`](AVRCP13-COMPLIANCE-PLAN.md) §1.
+**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns the BlueAngel-internal flag value 14 instead of 10. This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling on a stack that was originally compiled for an earlier AVRCP version. The wire shape is unchanged; we ship AVRCP 1.3 PDUs only. See [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §1.
 
 **F2** at file `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false`. Fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts.
 

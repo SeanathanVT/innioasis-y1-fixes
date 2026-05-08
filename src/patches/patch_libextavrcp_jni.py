@@ -182,7 +182,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"  # release build: + Phase F3 (T9 emits PLAYBACK_POS_CHANGED CHANGED at 1s cadence while playing, with live-extrapolated position via clock_gettime CLOCK_BOOTTIME)
+OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"  # T9 emits PLAYBACK_POS_CHANGED CHANGED at 1s cadence while playing, with live-extrapolated position via clock_gettime(CLOCK_BOOTTIME)
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include
@@ -210,10 +210,9 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 #   0x06 BATT_STATUS_CHANGED           (T8 INTERIM from y1-track-info[794] + T9 CHANGED on bucket edge)
 #   0x07 SYSTEM_STATUS_CHANGED         (T8 INTERIM only, canned POWERED_ON — intentional;
 #                                         the canned value IS the real value while trampolines run)
-# Per the spec-compliance rule (feedback_avrcp_spec_compliance.md), advertise
-# only what we actually implement. 0x08 PLAYER_APPLICATION_SETTING_CHANGED is
-# Phase F4 territory (PlayerApplicationSettings PDUs 0x11–0x16) and stays
-# unadvertised — Phase F4 is deferred.
+# Per the spec-compliance rule, advertise only what we actually implement.
+# 0x08 PLAYER_APPLICATION_SETTING_CHANGED stays unadvertised because
+# PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08) is deferred.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10

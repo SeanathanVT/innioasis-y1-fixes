@@ -96,7 +96,7 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 | §5.5 | 0x40 / 0x41 RequestContinuingResponse / Abort | explicit AV/C reject (we never fragment, so a CT shouldn't see these in valid flow) |
 | §4.6.1 | PASS THROUGH (PLAY/PAUSE/STOP/FORWARD/BACKWARD/etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
 
-Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE-PLAN.md`](docs/AVRCP13-COMPLIANCE-PLAN.md) §2 — every mandatory row hits.
+Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE.md`](docs/AVRCP13-COMPLIANCE.md) §2 — every mandatory row hits.
 
 The breakthrough is a chain of binary trampolines patched into `libextavrcp_jni.so` that intercept inbound AVRCP commands and call the existing C response-builder functions in `libextavrcp.so` directly, bypassing the OEM's no-op Java AVRCP TG. Full architecture, calling conventions, and the ELF-segment-extension technique used to host code past the original LOAD #1 segment end are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -129,7 +129,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain (T1/T2/extended_T2/T4/T5/T_charset/T_battery/T_continuation/T6/T8/T9 + R1 + U1), response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
-- [docs/AVRCP13-COMPLIANCE-PLAN.md](docs/AVRCP13-COMPLIANCE-PLAN.md) — current ICS Table 7 coverage scorecard plus the staged path to closing remaining gaps (Phase F4 PlayerApplicationSettings is the only deferred phase)
+- [docs/AVRCP13-COMPLIANCE.md](docs/AVRCP13-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 

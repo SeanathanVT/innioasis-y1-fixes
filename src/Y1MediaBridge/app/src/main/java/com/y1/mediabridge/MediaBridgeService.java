@@ -221,14 +221,14 @@ public class MediaBridgeService extends Service {
      *  bucket transition; written to y1-track-info[794] by writeTrackInfoFile.
      *  Read by the AVRCP T8 trampoline at INTERIM time (event 0x06
      *  RegisterNotification) and by T9 at every `playstatechanged`
-     *  broadcast for CHANGED-on-edge dispatch (Phase F2). */
+     *  broadcast for CHANGED-on-edge dispatch. */
     private volatile byte mCurrentBatteryStatus = 0; // default = NORMAL
 
     /** BroadcastReceiver registered for Android's sticky `ACTION_BATTERY_CHANGED`.
      *  Held as a field so we can unregister cleanly in onDestroy. */
     private BroadcastReceiver mBatteryReceiver;
 
-    /** Phase F3: 1-second-recurring tick that fires the `playstatechanged`
+    /** 1-second-recurring tick that fires the `playstatechanged`
      *  broadcast while mIsPlaying. Drives T9's PLAYBACK_POS_CHANGED CHANGED
      *  emission (alongside the existing play/battery edge checks T9 already
      *  does). The tick stops when playback pauses/stops; the next play edge
@@ -1124,9 +1124,9 @@ public class MediaBridgeService extends Service {
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");
         notifyPlaybackStatus(callbackPlayStatusByte());
-        // Phase F3: drive the 1 s position-tick cadence. Start on play,
-        // stop on pause/stop. The tick fires `playstatechanged` so T9
-        // emits PLAYBACK_POS_CHANGED CHANGED with a fresh live-extrapolated
+        // Drive the 1 s position-tick cadence. Start on play, stop on
+        // pause/stop. The tick fires `playstatechanged` so T9 emits
+        // PLAYBACK_POS_CHANGED CHANGED with a fresh live-extrapolated
         // position.
         if (playing) {
             schedulePosTick();
@@ -1136,7 +1136,7 @@ public class MediaBridgeService extends Service {
     }
 
     /**
-     * Phase F3: 1 s tick that drives PLAYBACK_POS_CHANGED CHANGED. While
+     * 1 s tick that drives PLAYBACK_POS_CHANGED CHANGED. While
      * mIsPlaying, fire `playstatechanged` every {@link #POS_TICK_INTERVAL_MS}
      * to wake T9 on the libextavrcp_jni.so side. T9 reads file[792] (still
      * PLAYING), live-extrapolates the position via clock_gettime
@@ -1181,7 +1181,7 @@ public class MediaBridgeService extends Service {
     private void onTrackDetected(String path) {
         if (path.equals(mCurrentPath)) return;
 
-        // Phase F1: detect whether the previous track ended naturally
+        // Detect whether the previous track ended naturally
         // (position ≈ duration at the moment of the track edge) vs was
         // interrupted by a skip / stop / pause+resume-on-different-track.
         // AVRCP 1.3 §5.4.2 Tbl 5.31 (TRACK_REACHED_END) is "Notify when
@@ -1324,12 +1324,12 @@ public class MediaBridgeService extends Service {
     //                                                       extrapolation)
     //   bytes 788..791  = pad                                                    (reserved)
     //   bytes 792       = playing_flag             u8     (T6, T8/T9 event 0x01)
-    //   bytes 793       = previous_track_natural_end u8  (T5 — Phase F1 gate
-    //                                                       for TRACK_REACHED_END)
-    //   bytes 794       = battery_status u8 (T8 INTERIM + T9 CHANGED-on-edge —
-    //                                          Phase F2; AVRCP §5.4.2 Tbl 5.35
-    //                                          enum 0..4)
-    //   bytes 795..799  = pad                                                    (reserved Phase F4)
+    //   bytes 793       = previous_track_natural_end u8  (T5 gate for AVRCP
+    //                                                       §5.4.2 Tbl 5.31
+    //                                                       TRACK_REACHED_END)
+    //   bytes 794       = battery_status u8 (T8 INTERIM + T9 CHANGED-on-edge;
+    //                                          AVRCP §5.4.2 Tbl 5.35 enum 0..4)
+    //   bytes 795..799  = pad   (reserved for PlayerApplicationSettings)
     //   bytes 800..815  = TrackNumber              UTF-8 ASCII decimal (16 B slot)
     //   bytes 816..831  = TotalNumberOfTracks      UTF-8 ASCII decimal (16 B slot)
     //   bytes 832..847  = PlayingTime              UTF-8 ASCII decimal ms (16 B slot)
@@ -1362,12 +1362,12 @@ public class MediaBridgeService extends Service {
     private static final int POSITION_OFFSET    = DURATION_OFFSET + 4;            // 780 - pos_at_state_change u32 BE
     private static final int STATE_TIME_OFFSET  = POSITION_OFFSET + 4;            // 784 - state_change_time_sec u32 BE (reserved)
     private static final int PLAY_STATUS_OFFSET = STATE_TIME_OFFSET + 8;          // 792 - playing_flag u8
-    /** Phase F1: previous track's natural-end flag at byte 793.
+    /** Previous track's natural-end flag at byte 793.
      *  T5 (libextavrcp_jni.so trampoline) reads this to gate AVRCP 1.3 §5.4.2
      *  Tbl 5.31 TRACK_REACHED_END (event 0x03) CHANGED emission. 1=natural
      *  end (emit TRACK_REACHED_END), 0=skip / interrupt (omit). */
     private static final int NATURAL_END_OFFSET = PLAY_STATUS_OFFSET + 1;         // 793 - previous_track_natural_end u8
-    /** Phase F2: bucket-mapped AVRCP §5.4.2 Tbl 5.35 battery enum at byte 794.
+    /** Bucket-mapped AVRCP §5.4.2 Tbl 5.35 battery enum at byte 794.
      *  T8 reads this for event 0x06 INTERIM and T9 reads it for CHANGED-on-edge
      *  detection (compares against y1-trampoline-state[10]). 0=NORMAL,
      *  1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE. */
@@ -1416,14 +1416,14 @@ public class MediaBridgeService extends Service {
             // LogcatMonitor (which now recognizes Y1's state-code '5' =
             // STOPPED in addition to '1' PLAYING and '3' PAUSED).
             buf[PLAY_STATUS_OFFSET] = mPlayStatus;
-            // Phase F1: natural-end flag for the AVRCP T5 trampoline's
-            // TRACK_REACHED_END gate. mPreviousTrackNaturalEnd is set in
-            // onTrackDetected by comparing the previous track's extrapolated
-            // position against its duration at the moment of the track edge.
+            // Natural-end flag for the AVRCP T5 trampoline's TRACK_REACHED_END
+            // gate. mPreviousTrackNaturalEnd is set in onTrackDetected by
+            // comparing the previous track's extrapolated position against its
+            // duration at the moment of the track edge.
             buf[NATURAL_END_OFFSET] = (byte) (mPreviousTrackNaturalEnd ? 0x01 : 0x00);
-            // Phase F2: battery_status bucket for AVRCP T8 INTERIM (event 0x06)
-            // and T9 CHANGED-on-edge detection. Updated by mBatteryReceiver
-            // on `Intent.ACTION_BATTERY_CHANGED` bucket transitions.
+            // Battery_status bucket for AVRCP T8 INTERIM (event 0x06) and
+            // T9 CHANGED-on-edge detection. Updated by mBatteryReceiver on
+            // `Intent.ACTION_BATTERY_CHANGED` bucket transitions.
             buf[BATTERY_STATUS_OFFSET] = mCurrentBatteryStatus;
 
             // GetElementAttributes attrs 4-7 (AVRCP 1.3 §5.3.4). Store as
