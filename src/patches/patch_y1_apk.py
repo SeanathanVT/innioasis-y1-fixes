@@ -887,10 +887,22 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       toggle is the right semantics for a single physical play/pause key.
 #
 #   - KEYCODE_MEDIA_PLAY (0x7e, 126) — discrete PLAY:
-#       call `play(Z)V` with bool=false. AVRCP 1.3 §4.6.1 / AV/C Panel
-#       Subunit Spec — PLAY (op_id 0x44) transitions to
-#       PLAYING from any state; if already PLAYING, play() is effectively a
-#       no-op (the underlying IjkMediaPlayer is already running).
+#       call `play(Z)V` with bool=true. AVRCP 1.3 §4.6.1 / AV/C Panel
+#       Subunit Spec — PLAY (op_id 0x44) transitions to PLAYING from any
+#       state; if already PLAYING, play() is a no-op.
+#
+#       Why bool=true and not false: the boolean controls whether
+#       `Static.setPlayValue(1, 0/5)` runs after the player's start() call.
+#       Static.setPlayValue is the singleton edge that propagates the play
+#       state to the rest of the music app (UI, RemoteControlClient state,
+#       AudioFocus-related state machine). Calling play(false) starts the
+#       underlying IjkMediaPlayer / MediaPlayer but skips the singleton
+#       update — other components don't see the resume edge and either
+#       fight it back to paused or never reflect the change. The music
+#       app's own toggle path uses Kotlin-generated `play$default(this,
+#       dummy_false, mask=1, null)` which forces the boolean to `1` (true)
+#       via the mask (see `play$default` in PlayerService.smali). We
+#       match that behavior.
 #
 #   - KEYCODE_MEDIA_PAUSE (0x7f, 127) — discrete PAUSE:
 #       call `pause(IZ)V` with reason=0x12, flag=true. The reason byte is a
@@ -949,7 +961,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #   invoke-virtual {p1}, ->getPlayerService()...
 #   move-result-object p1
 #   if-eqz p1, :cond_e
-#   const/4 v0, 0x0
+#   const/4 v0, 0x1                          # bool=true (see PLAY arm note above)
 #   invoke-virtual {p1, v0}, PlayerService;->play(Z)V
 #   goto :goto_5
 #
@@ -1065,7 +1077,7 @@ NEW_PLAY_BRANCH = """\
 
     if-eqz p1, :cond_e
 
-    const/4 v0, 0x0
+    const/4 v0, 0x1
 
     invoke-virtual {p1, v0}, Lcom/innioasis/y1/service/PlayerService;->play(Z)V
 
@@ -1113,7 +1125,7 @@ with open(play_receiver_path, 'w') as f:
     f.write(play_receiver_src)
 print(
     "  Patch E: PlayControllerReceiver -- KEY_PLAY (85) → playOrPause (toggle); "
-    "KEYCODE_MEDIA_PLAY (126) → play(false) [discrete PLAY per AV/C Panel Subunit op 0x44]; "
+    "KEYCODE_MEDIA_PLAY (126) → play(true) [discrete PLAY per AV/C Panel Subunit op 0x44]; "
     "KEYCODE_MEDIA_PAUSE (127) → pause(0x12, true) [discrete PAUSE per op 0x46]; "
     "KEYCODE_MEDIA_STOP (86) → stop() [discrete STOP per op 0x45 — ICS Table 8 item 20 mandatory]"
 )

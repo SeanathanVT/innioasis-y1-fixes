@@ -223,12 +223,12 @@ Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. Four p
 | keyCode | Source | Action | ICS Table 8 status |
 |---|---|---|---|
 | `KEY_PLAY` (85, `KEYCODE_MEDIA_PLAY_PAUSE`) | Legacy `ACTION_MEDIA_BUTTON` Intent (single physical play/pause key) | `playOrPause()V` (toggle) | n/a (toggle is a Y1-side abstraction) |
-| `KEYCODE_MEDIA_PLAY` (`0x7e` = 126) | PASSTHROUGH 0x44 → Linux `KEY_PLAYCD` (200) → AVRCP.kl `MEDIA_PLAY` | `play(Z)V` with `bool=false` | item 19 — **M (mandatory)** |
+| `KEYCODE_MEDIA_PLAY` (`0x7e` = 126) | PASSTHROUGH 0x44 → Linux `KEY_PLAYCD` (200) → AVRCP.kl `MEDIA_PLAY` | `play(Z)V` with `bool=true` | item 19 — **M (mandatory)** |
 | `KEYCODE_MEDIA_PAUSE` (`0x7f` = 127) | PASSTHROUGH 0x46 → Linux `KEY_PAUSECD` (201) → AVRCP.kl `MEDIA_PLAY_PAUSE` | `pause(IZ)V` with `reason=0x12, flag=true` | item 21 — O (optional) |
 | `KEYCODE_MEDIA_STOP` (`0x56` = 86) | PASSTHROUGH 0x45 → Linux `KEY_STOPCD` (166) → AVRCP.kl `MEDIA_STOP` | `stop()V` | item 20 — **M (mandatory)** |
 
 Rationale per `PlayerService` method:
-- **`play(Z)V` `bool=false`** — AV/C Panel Subunit Spec PLAY (op_id 0x44): "transition to PLAYING from any state". If already PLAYING, the call is a no-op.
+- **`play(Z)V` `bool=true`** — AV/C Panel Subunit Spec PLAY (op_id 0x44): "transition to PLAYING from any state". The boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`. That singleton edge is what propagates the resume to the rest of the app (UI, RemoteControlClient, AudioFocus); without it the player resumes but other components don't see the edge and either fight back to paused or never reflect the change. Kotlin's `play$default(this, dummy, mask=1, null)` (which the music app's own `playOrPause()` resume path uses) overrides the boolean to `1` via the default-args mask, so passing `true` here matches.
 - **`pause(IZ)V` `reason=0x12, flag=true`** — AV/C Panel Subunit Spec PAUSE (op_id 0x46): "transition to PAUSED from any state". The reason byte is a diagnostic identifier PlayerService Timber-logs as `executed pause from %d`; existing reasons in stock span `0xc..0x11`, so `0x12` is a fresh tag for "PlayController discrete PASSTHROUGH PAUSE". The boolean flag virtually always resolves to `true` in stock (every observed callsite goes through Kotlin's `pause$default` helper with a mask byte that defaults p2 to true); we pass `true` explicitly.
 - **`stop()V`** — AV/C Panel Subunit Spec STOP (op_id 0x45): "transition to STOPPED state". `PlayerService.stop()` is `public final stop()V .locals 4` and calls `IjkMediaPlayer.stop() + reset() + MediaPlayer.stop()` — releasing the media position.
 - **`playOrPause()V`** — Y1's existing toggle; correct semantic for the legacy single-physical-key path.
@@ -240,7 +240,7 @@ Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle 
 [KeyMap.getKEY_PLAY()]
 if-eq v2, p1, :cond_play_pause_toggle    # 85  → toggle
 const/16 p1, 0x7e
-if-eq v2, p1, :cond_play_strict          # 126 → play(false)
+if-eq v2, p1, :cond_play_strict          # 126 → play(true)
 const/16 p1, 0x7f
 if-eq v2, p1, :cond_pause_strict         # 127 → pause(0x12, true)
 const/16 p1, 0x56
