@@ -189,6 +189,15 @@ public class MediaBridgeService extends Service {
     private volatile int     mCurrentTrackNumber = 0;
     private volatile int     mCurrentTotalTracks = 0;
     private volatile boolean mIsPlaying       = false;
+    /** AVRCP §5.4.1 Tbl 5.26 PlayStatus enum, kept in lockstep with
+     *  mIsPlaying (which stays a boolean for the IBTAvrcpMusicCallback
+     *  contract that uses a different byte enum and for the
+     *  IMediaPlaybackService.isPlaying return type). PLAYING=1 maps to
+     *  mIsPlaying=true; STOPPED=0 and PAUSED=2 both map to mIsPlaying=false.
+     *  Written to y1-track-info[792] by writeTrackInfoFile so T6 / T8 / T9
+     *  carry the spec-correct three-valued state instead of collapsing
+     *  STOPPED into PAUSED. */
+    private volatile byte mPlayStatus = 0;        // 0=STOPPED at startup
 
     /** Position at last state change; with mStateChangeTime gives us a live
      *  running position estimate since the stock player never reports one. */
@@ -337,11 +346,13 @@ public class MediaBridgeService extends Service {
                         + " uid=" + android.os.Binder.getCallingUid());
                 if (cb != null && !mAvrcpCallbacks.contains(cb)) {
                     mAvrcpCallbacks.add(cb);
+                    byte cbStatus = callbackPlayStatusByte();
                     Log.d(TAG, "IBTAvrcpMusic.registerCallback registered total="
                             + mAvrcpCallbacks.size()
-                            + " — pushing status=" + (mIsPlaying ? 2 : 3)
+                            + " — pushing cbStatus=" + cbStatus
+                            + " avrcpStatus=" + mPlayStatus
                             + " audioId=" + mCurrentAudioId);
-                    notifyAvrcpCallbacks(1, mIsPlaying ? (byte) 2 : (byte) 3);
+                    notifyAvrcpCallbacks(1, cbStatus);
                     notifyAvrcpCallbacks(2, mCurrentAudioId);
                 } else {
                     Log.w(TAG, "IBTAvrcpMusic.registerCallback: cb="
@@ -452,7 +463,7 @@ public class MediaBridgeService extends Service {
 
             case 24: // getPlayStatus() -> byte (1=stopped, 2=playing, 3=paused)
                 if (reply != null) {
-                    byte status = mIsPlaying ? (byte) 2 : (byte) 3;
+                    byte status = callbackPlayStatusByte();
                     Log.v(TAG, "IBTAvrcpMusic.getPlayStatus → " + status);
                     reply.writeNoException();
                     reply.writeByte(status);
@@ -646,6 +657,22 @@ public class MediaBridgeService extends Service {
         }
     }
 
+    /** Maps the AVRCP §5.4.1 Tbl 5.26 enum (`mPlayStatus`) to the
+     *  IBTAvrcpMusicCallback contract's notifyPlaybackStatus byte:
+     *    AVRCP 0 STOPPED → cb 1 (stopped)
+     *    AVRCP 1 PLAYING → cb 2 (playing)
+     *    AVRCP 2 PAUSED  → cb 3 (paused)
+     *  Anything outside [0..2] collapses to PAUSED (cb 3) — defensive
+     *  default that matches the pre-three-state-coverage behavior. */
+    private byte callbackPlayStatusByte() {
+        switch (mPlayStatus) {
+            case 0: return 1;   // STOPPED
+            case 1: return 2;   // PLAYING
+            case 2: return 3;   // PAUSED
+            default: return 3;
+        }
+    }
+
     private void notifyPlaybackStatus(byte status) {
         Log.d(TAG, "notifyPlaybackStatus status=" + status
                 + " (" + (status == 2 ? "playing" : status == 3 ? "paused" : "stopped") + ")"
@@ -777,7 +804,7 @@ public class MediaBridgeService extends Service {
             // unchanged here so no spurious play emit) AND file[794] vs
             // state[10] (battery, just changed → emit CHANGED).
             sendMusicBroadcast("com.android.music.playstatechanged");
-            notifyPlaybackStatus(mIsPlaying ? (byte) 2 : (byte) 3);
+            notifyPlaybackStatus(callbackPlayStatusByte());
         }
     }
 
@@ -835,6 +862,13 @@ public class MediaBridgeService extends Service {
             String action = intent.getAction();
             Log.d(TAG, "onStartCommand: " + action);
             if (ACTION_SHUTDOWN.equals(action)) {
+                // ACTION_SHUTDOWN means "music app is going away" — that
+                // maps to AVRCP STOPPED (0x00), not PAUSED (0x02). Pre-fix
+                // this collapsed to PAUSED on the wire and onto the
+                // IBTAvrcpMusicCallback as cb=3 (paused), so a strict CT
+                // saw "paused" indefinitely after shutdown rather than
+                // "stopped".
+                mPlayStatus = 0;
                 mIsPlaying = false;
                 mStateChangeTime = SystemClock.elapsedRealtime();
                 // writeTrackInfoFile before any cross-process broadcast so
@@ -844,7 +878,8 @@ public class MediaBridgeService extends Service {
                 writeTrackInfoFile();
                 publishState();
                 sendMusicBroadcast("com.android.music.playstatechanged");
-                notifyPlaybackStatus((byte) 3);
+                notifyPlaybackStatus(callbackPlayStatusByte());
+                cancelPosTick();
             }
             // ACTION_PLAY_SONG: logcat monitor handles the actual state change.
         }
@@ -925,12 +960,23 @@ public class MediaBridgeService extends Service {
     private void publishState() {
         if (mRemoteControlClient == null) return;
         // Single-argument setPlaybackState(int) — the (state, pos, speed)
-        // overload was added in API 18 and we target API 17.
-        int state = mIsPlaying
-                ? RemoteControlClient.PLAYSTATE_PLAYING
-                : RemoteControlClient.PLAYSTATE_PAUSED;
+        // overload was added in API 18 and we target API 17. Map the
+        // three-valued AVRCP enum (mPlayStatus) into the matching
+        // RemoteControlClient.PLAYSTATE_* constants. STOPPED is its own
+        // RCC state (PLAYSTATE_STOPPED) — pre-fix it collapsed to
+        // PLAYSTATE_PAUSED, so any locally-listening RCC consumer (lock
+        // screen, system media UI, etc.) saw "paused" indefinitely after
+        // a STOPPED transition.
+        int state;
+        String label;
+        switch (mPlayStatus) {
+            case 1: state = RemoteControlClient.PLAYSTATE_PLAYING; label = "PLAYING"; break;
+            case 2: state = RemoteControlClient.PLAYSTATE_PAUSED;  label = "PAUSED";  break;
+            case 0:
+            default: state = RemoteControlClient.PLAYSTATE_STOPPED; label = "STOPPED"; break;
+        }
         mRemoteControlClient.setPlaybackState(state);
-        Log.d(TAG, "RCC state: " + (mIsPlaying ? "PLAYING" : "PAUSED"));
+        Log.d(TAG, "RCC state: " + label);
     }
 
     // =======================================================================
@@ -1026,12 +1072,24 @@ public class MediaBridgeService extends Service {
                     && (line.charAt(pos) == ' ' || line.charAt(pos) == '\t')) pos++;
             if (pos >= line.length()) return;
             char stateChar = line.charAt(pos);
-            final boolean playing;
-            if      (stateChar == '1') playing = true;
-            else if (stateChar == '3') playing = false;
+            // Y1 BaseActivity emits state-code chars after `播放状态切换 `
+            // ("playback state switch"). Observed mapping:
+            //   '1' → PLAYING (audio rolling)
+            //   '3' → PAUSED  (audio held; can resume)
+            //   '5' → STOPPED (FF/RW cascade terminated, end-of-stream, etc.)
+            // AVRCP 1.3 §5.4.1 Tbl 5.26 PlayStatus enum:
+            //   0=STOPPED, 1=PLAYING, 2=PAUSED, 3=FWD_SEEK, 4=REV_SEEK,
+            //   0xFF=ERROR. We currently map only the three states Y1
+            //   emits; FWD_SEEK / REV_SEEK could be added if Y1 is
+            //   observed emitting a hold-key state code, but the test
+            //   matrix has not surfaced one yet.
+            final byte avrcpStatus;
+            if      (stateChar == '1') avrcpStatus = 1;   // PLAYING
+            else if (stateChar == '3') avrcpStatus = 2;   // PAUSED
+            else if (stateChar == '5') avrcpStatus = 0;   // STOPPED
             else                       return;
             mMainHandler.post(new Runnable() {
-                @Override public void run() { onStateDetected(playing); }
+                @Override public void run() { onStateDetected(avrcpStatus); }
             });
         }
     }
@@ -1040,12 +1098,17 @@ public class MediaBridgeService extends Service {
     // State / track change handlers — always on main thread
     // =======================================================================
 
-    private void onStateDetected(boolean playing) {
-        if (playing == mIsPlaying) return;
-        Log.d(TAG, "State change: " + (playing ? "playing" : "paused")
+    private void onStateDetected(byte avrcpStatus) {
+        // avrcpStatus: 0=STOPPED, 1=PLAYING, 2=PAUSED (AVRCP §5.4.1 Tbl 5.26).
+        boolean playing = (avrcpStatus == 1);
+        if (avrcpStatus == mPlayStatus) return;
+        Log.d(TAG, "State change: avrcpStatus=" + avrcpStatus
+                + " (" + (avrcpStatus == 1 ? "PLAYING"
+                        : avrcpStatus == 0 ? "STOPPED" : "PAUSED") + ")"
                 + " callbacks=" + mAvrcpCallbacks.size());
         mPositionAtStateChange = computePosition();
         mStateChangeTime = SystemClock.elapsedRealtime();
+        mPlayStatus = avrcpStatus;
         mIsPlaying = playing;
         // Refresh the playing_flag byte at y1-track-info[792] BEFORE any
         // broadcast fires. Per AVRCP 1.3 §5.4.1 GetPlayStatus must report
@@ -1060,10 +1123,10 @@ public class MediaBridgeService extends Service {
         writeTrackInfoFile();
         publishState();
         sendMusicBroadcast("com.android.music.playstatechanged");
-        notifyPlaybackStatus(playing ? (byte) 2 : (byte) 3);
+        notifyPlaybackStatus(callbackPlayStatusByte());
         // Phase F3: drive the 1 s position-tick cadence. Start on play,
-        // stop on pause. The tick fires `playstatechanged` so T9 emits
-        // PLAYBACK_POS_CHANGED CHANGED with a fresh live-extrapolated
+        // stop on pause/stop. The tick fires `playstatechanged` so T9
+        // emits PLAYBACK_POS_CHANGED CHANGED with a fresh live-extrapolated
         // position.
         if (playing) {
             schedulePosTick();
@@ -1227,7 +1290,7 @@ public class MediaBridgeService extends Service {
         publishState();
         sendMusicBroadcast("com.android.music.metachanged");
         notifyTrackChanged(mCurrentAudioId);
-        notifyPlaybackStatus(mIsPlaying ? (byte) 2 : (byte) 3);
+        notifyPlaybackStatus(callbackPlayStatusByte());
     }
 
     // =======================================================================
@@ -1346,12 +1409,13 @@ public class MediaBridgeService extends Service {
             putBE32(buf, DURATION_OFFSET, (int) Math.min(duration, 0xFFFFFFFFL));
             putBE32(buf, POSITION_OFFSET, (int) Math.min(mPositionAtStateChange, 0xFFFFFFFFL));
             putBE32(buf, STATE_TIME_OFFSET, (int) (mStateChangeTime / 1000L));
-            // playing_flag: 0=STOPPED, 1=PLAYING, 2=PAUSED — direct mapping to
-            // AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus enum. We don't track a "stopped" state
-            // independently, so isPlaying maps to 1 (PLAYING) and !isPlaying
-            // maps to 2 (PAUSED). Deeper state (FWD_SEEK / REV_SEEK / ERROR)
-            // would require additional Y1MediaBridge plumbing.
-            buf[PLAY_STATUS_OFFSET] = (byte) (mIsPlaying ? 0x01 : 0x02);
+            // playing_flag: 0=STOPPED, 1=PLAYING, 2=PAUSED — direct mapping
+            // to AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus enum. mPlayStatus is
+            // maintained in lockstep with mIsPlaying by onStateDetected,
+            // which receives the three-valued AVRCP enum byte from
+            // LogcatMonitor (which now recognizes Y1's state-code '5' =
+            // STOPPED in addition to '1' PLAYING and '3' PAUSED).
+            buf[PLAY_STATUS_OFFSET] = mPlayStatus;
             // Phase F1: natural-end flag for the AVRCP T5 trampoline's
             // TRACK_REACHED_END gate. mPreviousTrackNaturalEnd is set in
             // onTrackDetected by comparing the previous track's extrapolated
