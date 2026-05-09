@@ -497,23 +497,26 @@ Item 9 is the gap. AVDTP 1.3 ICS Table 10 row 6 says it's Optional at the AVDTP 
 
 Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 
-| Profile | Stock advertises | Spec target | M-row gaps | Patch needed | Decision |
+| Profile | Stock advertises | Spec target | M-row gaps | Patch needed | Status |
 |---|---|---|---|---|---|
 | AVRCP | 1.0 | 1.3 | none | V1 (0xeba58 0x00→0x03) | ✓ shipped |
 | AVCTP | 1.0 (signaling) | 1.2 (paired with AVRCP 1.3) | none | V2 (0xeba6d 0x00→0x02) | ✓ shipped |
-| A2DP | 1.0 | 1.3 (era-correct) | inherits GAVDP gap on sig 0x0c | V3 (0xeb9f2 0x00→0x03) | **deferred — user approval point** |
-| AVDTP | 1.0 | 1.3 (paired with A2DP 1.3) | none at AVDTP layer; sig 0x0c is Optional here | V4 (0xeba09 0x00→0x03) | **deferred — user approval point** |
-| GAVDP | not separately advertised; piggybacks AVDTP version | 1.3 (transitive) | Table 5 row 9 (sig 0x0c GET_ALL_CAPABILITIES response, Mandatory at GAVDP-Acceptor) | implementation patch (~1-2 days) OR accept paper deviation | **deferred — user approval point** |
+| A2DP | 1.0 | 1.3 (era-correct) | inherits GAVDP gap on sig 0x0c | V3 (0xeb9f2 0x00→0x03) | source-side, pending V5 |
+| AVDTP | 1.0 | 1.3 (paired with A2DP 1.3) | none at AVDTP layer; sig 0x0c is Optional here | V4 (0xeba09 0x00→0x03) | source-side, pending V5 |
+| GAVDP | not separately advertised; piggybacks AVDTP version | 1.3 (transitive) | Table 5 row 9 (sig 0x0c GET_ALL_CAPABILITIES response, Mandatory at GAVDP-Acceptor) | V5 (mtkbt AVDTP dispatcher patch) | **dispatcher hunt in progress — see below** |
 
-**Audio-triad bump options summary:**
+**Decision (user-approved 2026-05-09): Option C — strict 1.3 conformance across the entire audio triad.** V3 + V4 + V5 ship together as a single coherent bump. V3 + V4 are landed in `patch_mtkbt.py` (output MD5 `8c5a23c203472b3c737a86ee0e1c1564`); V5 awaits dispatcher localisation.
 
-- **Option A — keep status quo (A2DP/AVDTP advertised at 1.0).** Spec-permissible. No GAVDP 1.3 claim → no GAVDP Table 5 row 9 obligation. Modern peers see 1.0 and skip 1.3-only commands; functional interop unchanged. Zero work.
-- **Option B — bump A2DP/AVDTP to 1.3 (V3 + V4, two-byte patch), accept GAVDP Table 5 row 9 paper deviation.** ICS-strict non-conforming on one row. Functional interop unchanged (peers fall back to GET_CAPABILITIES on General Reject). Per `feedback_avrcp_spec_compliance` memory rule this requires explicit user approval.
-- **Option C — bump A2DP/AVDTP to 1.3 (V3 + V4) AND implement sig 0x0c handler.** Strict-conforming on all rows. ~1-2 days of mtkbt disassembly + a new trampoline-or-byte-patch in `libextavrcp.so` / mtkbt that extends the existing GET_CAPABILITIES response builder. Empirical demand: zero peers in captured matrix have issued sig 0x0c — work is paper-conformance-driven.
+**V5 sub-workstream — sig 0x0c dispatcher hunt (in progress).** Static analysis to find mtkbt's AVDTP signal dispatcher converges slowly because mtkbt's AVDTP code uses dense MOVW/MOVT encoding that defeats string-xref grep. Located so far via static analysis:
 
-Recommendation: **Option A as default (no work needed; nothing breaks).** Option B if the user wants the version advertisement to match what we actually implement at the AVDTP layer; Option C if the user wants strict 1.3 conformance across the board.
+- `0x50b08` — AVDTP signal-frame parser entry (case dispatch on `[r0,#0]` format-id)
+- `0x50b96` — sig_id store (mask byte 1 of frame with `0x3f`, store at output struct +8)
+- `0x50c46` — parser convergence point (last insn before return)
+- `0xde26` — external caller (passes `r4 + 0x11c` to parser)
 
-The deviation in Option B fits the same shape as the iter19d sentinel-track-id decision (memory `feedback_avrcp_spec_compliance` records as approved-and-documented): a spec-permissible-vs-spec-complete tradeoff where the wire behavior is fine but the ICS proforma would have one row flipped to "no" for a feature no captured peer exercises.
+The actual per-sig_id dispatcher is several call levels deeper from the parser; finding it statically is taking longer than estimated. **Tooling: `tools/attach-mtkbt-gdb-avdtp.sh` adds runtime breakpoints at the four sites above and instructs the user to drive a peer-side stream-establishment session — when the BPs fire, gdb logs the LR / branch target after parser return, which gives us the dispatcher offset directly.** With the dispatcher offset confirmed, V5 will typically be a single-byte / instruction patch that aliases sig 0x0c → sig 0x02 in whatever cmp / TBB / fn-ptr-table the dispatcher uses (the response payload is byte-identical for our SEP's capability set since we don't advertise any AVDTP 1.3 service capabilities).
+
+Until V5 ships, the patcher's `OUTPUT_MD5` reflects V1+V2+V3+V4+S1+P1; the V3 + V4 bumps are in source but **the patcher should not be flashed to hardware until V5 lands** (flashing V3+V4 alone reaches Option-B effective state which is paper-non-conforming on GAVDP Table 5 row 9 — which the user explicitly chose to avoid by selecting Option C).
 
 ---
 

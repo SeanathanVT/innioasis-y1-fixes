@@ -18,8 +18,10 @@ known-working AVRCP 1.3 reference data + sdptool A / B captures recorded in
 docs/INVESTIGATION.md) plus the one structural attribute that even the
 reference record has and Y1 lacks at every patch level: a 0x0100 ServiceName.
 
-V1 — AVRCP 1.0 -> 1.3 (served ProfileDescList LSB)
-V2 — AVCTP 1.0 -> 1.2 (served ProtocolDescList AVCTP version LSB)
+V1 — AVRCP 1.0 -> 1.3 (served AVRCP TG ProfileDescList LSB)
+V2 — AVCTP 1.0 -> 1.2 (served AVRCP TG ProtocolDescList AVCTP version LSB)
+V3 — A2DP 1.0 -> 1.3 (served A2DP Source ProfileDescList LSB)
+V4 — AVDTP 1.0 -> 1.3 (served A2DP Source ProtocolDescList AVDTP version LSB)
 S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
      0x0100 ServiceName entry pointing at the existing "Advanced Audio"
      SDP string at file offset 0x0eb9ce. This sacrifices the SupportedFeatures
@@ -62,7 +64,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "a37d56c91beb00b021c55f7324f2cc09"
+OUTPUT_MD5        = "8c5a23c203472b3c737a86ee0e1c1564"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — mtkbt is a stripped-down ARM ELF without symbols or a Java
@@ -92,6 +94,32 @@ PATCHES = [
         "offset": 0x0eba6d,
         "before": bytes([0x00]),
         "after":  bytes([0x02]),
+    },
+    {
+        # A2DP 1.0 -> 1.3 in the served A2DP Source SDP record's
+        # BluetoothProfileDescriptorList entry (attribute 0x0009): UUID 0x110D
+        # AdvancedAudioDistribution + uint16 version. Per A2DP 1.3 §5.3
+        # Figure 5.1 the Mandatory version value is 0x0103. Pairs with V4 —
+        # peers consult our advertised AVDTP version before GAVDP setup
+        # per A2DP §3.1, so both bumps must ship together to avoid
+        # asymmetric advertisement.
+        "name":   "[V3] A2DP 1.0->1.3 LSB  A2DP Source ProfileDescList (served)",
+        "offset": 0x0eb9f2,
+        "before": bytes([0x00]),
+        "after":  bytes([0x03]),
+    },
+    {
+        # AVDTP 1.0 -> 1.3 in the served A2DP Source SDP record's
+        # ProtocolDescriptorList (attribute 0x0004): L2CAP / PSM=0x0019
+        # AVDTP, then UUID 0x0019 AVDTP + uint16 version. Per A2DP 1.3 §5.3
+        # the Mandatory AVDTP version is 0x0103. AVDTP 1.3 ICS Table 14
+        # confirms only Basic Transport Service Support is Mandatory for
+        # the Source role; Delay Reporting / GET_ALL_CAPABILITIES are
+        # Optional at the AVDTP layer.
+        "name":   "[V4] AVDTP 1.0->1.3 LSB  A2DP Source ProtocolDescList (served)",
+        "offset": 0x0eba09,
+        "before": bytes([0x00]),
+        "after":  bytes([0x03]),
     },
     {
         "name":   "[S1] 0x0311 SupportedFeatures -> 0x0100 ServiceName  Group D entry slot",
@@ -259,7 +287,8 @@ def main():
     print(f"  adb push {output_path} /system/bin/mtkbt")
     print(f"  adb shell chmod 755 /system/bin/mtkbt")
     print(f"  adb reboot")
-    print(f"  sdptool browse --xml <Y1_BT_ADDR>   # expect: AVCTP 0x0102, AVRCP 0x0103, attr 0x0100 present")
+    print(f"  sdptool browse --xml <Y1_BT_ADDR>   # expect (AVRCP TG record): AVCTP 0x0102, AVRCP 0x0103, attr 0x0100 present")
+    print(f"                                       # expect (A2DP Source record): AVDTP 0x0103, A2DP 0x0103")
 
     if output_md5_mismatch and not args.skip_md5:
         print("\nERROR: output MD5 doesn't match expected. Output was written but"
