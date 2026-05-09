@@ -10,7 +10,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every Y1MediaBridge broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
-| **A, B, C, E, H** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP routing per AV/C Panel Subunit Spec op_id table; H for foreground-activity propagation of `KEYCODE_MEDIA_PLAY/PAUSE/STOP` so AVRCP-driven media keys reach the receiver. |
+| **A, B, C, E, H, H′, H″** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREVIOUS routing per AV/C Panel Subunit Spec op_id table; H for foreground-activity propagation of `KEYCODE_MEDIA_PLAY/PAUSE/STOP/NEXT/PREVIOUS`; H′ for the same propagation in `BasePlayerActivity` (which overrides `dispatchKeyEvent` and bypasses BaseActivity); H″ adds a `repeatCount > 0 → silent consume` filter to both H and H′ so framework-synthesized key repeats from `InputDispatcher::synthesizeKeyRepeatLocked` don't trigger long-press FF/RW handlers. |
 | **su** | `/system/xbin/su` | Setuid-root `su` binary installed by `--root` flag. Replaces the historical adbd byte-patch attempts. |
 
 > **Not shipped (attempted and removed):** G1/G2 (mtkbt xlog redirect, crashed at NULL fmt — closed without root or daemon-side tooling); H1/H2/H3 (adbd setuid byte patches, broke ADB protocol — superseded by `src/su/`). Earlier byte-patch experiments preserved in [`INVESTIGATION.md`](INVESTIGATION.md).
@@ -245,7 +245,7 @@ Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. Four p
 
 **Patch C** in `smali/com/innioasis/y1/database/Y1Repository.smali` (field decl): `private final songDao` → `public final songDao` so AlbumsActivity (different package) can `iget-object` it without an `IllegalAccessError`. The Kotlin-generated `access$getSongDao$p` exists but exhibits unreliable `NoSuchMethodError` on this device's old Dalvik (API 17).
 
-**Patch E** in `smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali` at `:cond_c` — splits the short-press `KEY_PLAY → playOrPause()` branch into four discrete arms per AVRCP 1.3 §4.6.1 (PASS THROUGH command, op codes defined in AV/C Panel Subunit Specification ref [2]; concrete frame example in AVRCP 1.3 §19.3 Appendix D) and ICS Table 8 (Cat 1 op_id status):
+**Patch E** in `smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali` at `:cond_c` — splits the short-press `KEY_PLAY → playOrPause()` branch into six discrete arms per AVRCP 1.3 §4.6.1 (PASS THROUGH command, op codes defined in AV/C Panel Subunit Specification ref [2]; concrete frame example in AVRCP 1.3 §19.3 Appendix D) and ICS Table 8 (Cat 1 op_id status):
 
 | keyCode | Source | Action | ICS Table 8 status |
 |---|---|---|---|
@@ -253,14 +253,18 @@ Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. Four p
 | `KEYCODE_MEDIA_PLAY` (`0x7e` = 126) | PASSTHROUGH 0x44 → Linux `KEY_PLAYCD` (200) → AVRCP.kl `MEDIA_PLAY` | `play(Z)V` with `bool=true` | item 19 — **M (mandatory)** |
 | `KEYCODE_MEDIA_PAUSE` (`0x7f` = 127) | PASSTHROUGH 0x46 → Linux `KEY_PAUSECD` (201) → AVRCP.kl `MEDIA_PLAY_PAUSE` | `pause(IZ)V` with `reason=0x12, flag=true` | item 21 — O (optional) |
 | `KEYCODE_MEDIA_STOP` (`0x56` = 86) | PASSTHROUGH 0x45 → Linux `KEY_STOPCD` (166) → AVRCP.kl `MEDIA_STOP` | `stop()V` | item 20 — **M (mandatory)** |
+| `KEYCODE_MEDIA_NEXT` (`0x57` = 87) | PASSTHROUGH 0x4B → Linux `KEY_NEXTSONG` (163) → AVRCP.kl `MEDIA_NEXT` | `nextSong()V` | item 26 — O (optional) |
+| `KEYCODE_MEDIA_PREVIOUS` (`0x58` = 88) | PASSTHROUGH 0x4C → Linux `KEY_PREVIOUSSONG` (165) → AVRCP.kl `MEDIA_PREVIOUS` | `prevSong()V` | item 27 — O (optional) |
 
 Rationale per `PlayerService` method:
 - **`play(Z)V` `bool=true`** — AV/C Panel Subunit Spec PLAY (op_id 0x44): "transition to PLAYING from any state". The boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`. That singleton edge is what propagates the resume to the rest of the app (UI, RemoteControlClient, AudioFocus); without it the player resumes but other components don't see the edge and either fight back to paused or never reflect the change. Kotlin's `play$default(this, dummy, mask=1, null)` (which the music app's own `playOrPause()` resume path uses) overrides the boolean to `1` via the default-args mask, so passing `true` here matches.
 - **`pause(IZ)V` `reason=0x12, flag=true`** — AV/C Panel Subunit Spec PAUSE (op_id 0x46): "transition to PAUSED from any state". The reason byte is a diagnostic identifier PlayerService Timber-logs as `executed pause from %d`; existing reasons in stock span `0xc..0x11`, so `0x12` is a fresh tag for "PlayController discrete PASSTHROUGH PAUSE". The boolean flag virtually always resolves to `true` in stock (every observed callsite goes through Kotlin's `pause$default` helper with a mask byte that defaults p2 to true); we pass `true` explicitly.
 - **`stop()V`** — AV/C Panel Subunit Spec STOP (op_id 0x45): "transition to STOPPED state". `PlayerService.stop()` is `public final stop()V .locals 4` and calls `IjkMediaPlayer.stop() + reset() + MediaPlayer.stop()` — releasing the media position.
+- **`nextSong()V`** — AV/C Panel Subunit Spec FORWARD (op_id 0x4B): discrete next-track command, distinct from FAST_FORWARD (op 0x49). Reached only via Patch H/H′'s propagation path, which bypasses `BasePlayerActivity`'s KeyMap.KEY_RIGHT-arm long-press FF detection that misfires on framework-synthesized repeats.
+- **`prevSong()V`** — AV/C Panel Subunit Spec BACKWARD (op_id 0x4C): discrete prev-track command, distinct from REWIND (op 0x48). Symmetric to NEXT.
 - **`playOrPause()V`** — Y1's existing toggle; correct semantic for the legacy single-physical-key path.
 
-Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict / :cond_stop_strict` to alphanumeric `:cond_d / e / f / 10` on reassembly):
+Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict / :cond_stop_strict / :cond_next_strict / :cond_prev_strict` to alphanumeric `:cond_X` on reassembly):
 
 ```
 :cond_c
@@ -272,11 +276,15 @@ const/16 p1, 0x7f
 if-eq v2, p1, :cond_pause_strict         # 127 → pause(0x12, true)
 const/16 p1, 0x56
 if-eq v2, p1, :cond_stop_strict          # 86  → stop()
+const/16 p1, 0x57
+if-eq v2, p1, :cond_next_strict          # 87  → nextSong()
+const/16 p1, 0x58
+if-eq v2, p1, :cond_prev_strict          # 88  → prevSong()
 goto :cond_e                             # no match → existing fall-through
-[four labeled arms, each ending in goto :goto_5]
+[six labeled arms, each ending in goto :goto_5]
 ```
 
-Uses scratch registers `v0` (bool / reason) and `v3` (flag) which are dead at this point in the `.locals 6` `onReceive` method. apktool optimizes the no-match `goto :cond_e` to `goto :goto_5` since stock's `:cond_e` sits immediately before `:goto_5` (same control flow).
+Uses scratch registers `v0` (bool / reason) and `v3` (flag) which are dead at this point in the `.locals 6` `onReceive` method. The next/prev arms only need `p1` (PlayerService) and don't touch `v0` / `v3`. apktool optimizes the no-match `goto :cond_e` to `goto :goto_5` since stock's `:cond_e` sits immediately before `:goto_5` (same control flow).
 
 **Patch H** in `smali/com/innioasis/y1/base/BaseActivity.smali` — propagate unhandled discrete media keys.
 
@@ -302,28 +310,41 @@ Uses scratch registers `v0` (bool / reason) and `v3` (flag) which are dead at th
 
 `v0` is set to `0x1` at method entry and never reassigned — every KeyEvent the activity receives is consumed regardless of whether it acted. For the keycodes `KeyMap` covers (the device's hardware scroll-wheel: KEY_LEFT / RIGHT / UP / DOWN / MENU / PLAY / ENTER) the activity dispatches directly to `PlayerService` (`playOrPause`, `nextSong`, `prevSong`, etc.) and consuming-with-action is the right behaviour. For discrete media keycodes the activity does NOT recognise — `KEYCODE_MEDIA_PLAY` (`0x7e`), `KEYCODE_MEDIA_PAUSE` (`0x7f`), `KEYCODE_MEDIA_STOP` (`0x56`) — control falls through every if-eq check, reaches `:goto_2 / return v0`, and the events are silently swallowed. They never reach `PhoneFallbackEventHandler.handleMediaKeyEvent` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, so `PlayControllerReceiver` (which has discrete handlers from Patch E) never fires for them.
 
-This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end on a strict CT: kernel uinput via `/system/usr/keylayout/AVRCP.kl` correctly maps PASSTHROUGH 0x44 → `KEY_PLAYCD` (200) → `KEYCODE_MEDIA_PLAY` (126), the focused window's `BaseActivity.dispatchKeyEvent` receives it, the activity's `KeyMap` knows nothing about code 126, and the event terminates there. Captures showed 9/9 AVRCP 0x44 PLAY events dropped while PASSTHROUGH 0x46 PAUSE / 0x4B FORWARD / 0x4C BACKWARD all reached `PlayerService` directly (those map to `KEYCODE_MEDIA_PLAY_PAUSE` / `KEYCODE_MEDIA_NEXT` / `KEYCODE_MEDIA_PREVIOUS` and the activity has KeyMap branches for them).
+This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end on a strict CT: kernel uinput via `/system/usr/keylayout/AVRCP.kl` correctly maps PASSTHROUGH 0x44 → `KEY_PLAYCD` (200) → `KEYCODE_MEDIA_PLAY` (126), the focused window's `BaseActivity.dispatchKeyEvent` receives it, the activity's `KeyMap` knows nothing about code 126, and the event terminates there.
 
-Patched: insert an early `return false` immediately after `move-result v2`, gated on `keyCode == 0x7e || keyCode == 0x7f || keyCode == 0x56`.
+Patched: insert an early-return block immediately after `move-result v2` gated on `keyCode ∈ {0x7e, 0x7f, 0x56, 0x57, 0x58}`. For any matched keycode, check `KeyEvent.getRepeatCount()`: if `> 0` (framework synthesized repeat — see Patch H″ section below), silently consume by returning TRUE; if `== 0` (genuine first press), return FALSE so the framework continues dispatch via `PhoneFallbackEventHandler` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast → `PlayControllerReceiver` discrete arms (Patch E).
 
 ```
 [stock through `move-result v2`]
 const/16 v3, 0x7e
-if-eq v2, v3, :patch_h_propagate
+if-eq v2, v3, :patch_h_avrcp_key
 const/16 v3, 0x7f
-if-eq v2, v3, :patch_h_propagate
+if-eq v2, v3, :patch_h_avrcp_key
 const/16 v3, 0x56
-if-eq v2, v3, :patch_h_propagate
+if-eq v2, v3, :patch_h_avrcp_key
+const/16 v3, 0x57
+if-eq v2, v3, :patch_h_avrcp_key
+const/16 v3, 0x58
+if-eq v2, v3, :patch_h_avrcp_key
 goto :patch_h_continue
+:patch_h_avrcp_key
+invoke-virtual {p1}, KeyEvent;->getRepeatCount()I
+move-result v3
+if-eqz v3, :patch_h_propagate
+return v0                       # repeat: consume silently (v0 is still 1 from method entry)
 :patch_h_propagate
 const/4 v0, 0x0
-return v0                       # let the system continue dispatch
+return v0                       # first press: let the framework continue dispatch
 :patch_h_continue
 const/4 v3, 0x3                 # original next instruction
 [stock continues unchanged]
 ```
 
-`v3` is reused as scratch then overwritten by the next instruction; `v0` is set to 0 only on the propagate path which immediately returns. The patched method semantically becomes "consume only what we actually act on; let everything else fall through to the default Activity dispatch chain."
+`v3` is reused as scratch then overwritten by the next instruction (or by the `getRepeatCount()` result); `v0` is set to 0 only on the propagate path which immediately returns. The patched method semantically becomes "for AVRCP-derived keycodes, propagate the first press to the framework media-button path and silently swallow framework-synthesized repeats; for everything else, behave exactly as stock."
+
+**Keycode set: `0x7e MEDIA_PLAY`, `0x7f MEDIA_PAUSE`, `0x56 MEDIA_STOP`, `0x57 MEDIA_NEXT`, `0x58 MEDIA_PREVIOUS`.** Note: AVRCP.kl maps PASSTHROUGH 0x46 PAUSE → `KEY_PAUSECD` (201) → `KEYCODE_MEDIA_PLAY_PAUSE` (85), NOT MEDIA_PAUSE (127), so 0x7f comes from CTs that emit a discrete pause keycode (some Android-side AVRCP profile transformers do, on top of standard AV/C). 0x57 / 0x58 are added even though the activity's KeyMap.KEY_RIGHT / KEY_LEFT entries match them (87 / 88) because the existing `BasePlayerActivity` arms conflate AVRCP NEXT (op 0x4B) with hardware-wheel-RIGHT-LONG-press FF/scrub. AVRCP 1.3 §4.6.1 separates op 0x4B (NEXT) from op 0x49 (FAST_FORWARD); we honour that separation by routing 0x57 to the dedicated `nextSong()` arm in Patch E.
+
+**Side effect on hardware NEXT/PREV touch buttons (event2 mtk-tpd also emits keycodes 87/88): holding such a button no longer enters FF/RW; it produces a single nextSong()/prevSong() per tap. Matches the AVRCP-spec semantic but diverges from prior stock behaviour. The hardware scroll wheel uses different keycodes (KeyMap.KEY_UP=21 DPAD_LEFT, KEY_DOWN=22 DPAD_RIGHT) and is unaffected.**
 
 **Upstream-compatibility note.** This patch lives entirely inside the music app's APK. Other foreground apps installable on the device (e.g. Rockbox) extend `AppCompatActivity` directly and do not inherit from `com.innioasis.y1.base.BaseActivity`, so their AVRCP key handling is unaffected. The keylayout `/system/usr/keylayout/AVRCP.kl` stays stock — the kernel→`KeyEvent` mapping continues to deliver `KEYCODE_MEDIA_PLAY` (126) for op_id 0x44, which is the spec-correct keycode for any app that handles standard Android media keys.
 
@@ -353,27 +374,45 @@ Because this override is in the chain when the player screen is foreground, `Bas
 
 Empirical confirmation: TV postflash logcat 2026-05-09 shows zero `pause from 18` reasons (Patch E's discrete-pause tag) across an entire AVRCP test session even though Patch H was deployed — every pause traced to internal music-app sources or `playOrPause` toggle, every `play(Z)` traced to `BasePlayerActivity.onKeyUp:195` (the long-press-release-from-FF cleanup path on `KEY_RIGHT`).
 
-Patched: insert the same 0x7e / 0x7f / 0x56 early-return block at the top of `BasePlayerActivity.dispatchKeyEvent`, before the `Intrinsics.checkNotNull` call (defensive — matches Patch H's null-safe ordering in `BaseActivity`):
+Patched: insert the same five-keycode early-return block at the top of `BasePlayerActivity.dispatchKeyEvent`, with the same `repeatCount > 0 → silent consume` filter as Patch H, BEFORE the `Intrinsics.checkNotNull` call (defensive — matches Patch H's null-safe ordering in `BaseActivity`):
 
 ```
 [method header + .locals 2]
 invoke-virtual {p1}, KeyEvent;->getKeyCode()I
 move-result v0
 const/16 v1, 0x7e
-if-eq v0, v1, :patch_h2_propagate
+if-eq v0, v1, :patch_h2_avrcp_key
 const/16 v1, 0x7f
-if-eq v0, v1, :patch_h2_propagate
+if-eq v0, v1, :patch_h2_avrcp_key
 const/16 v1, 0x56
-if-eq v0, v1, :patch_h2_propagate
+if-eq v0, v1, :patch_h2_avrcp_key
+const/16 v1, 0x57
+if-eq v0, v1, :patch_h2_avrcp_key
+const/16 v1, 0x58
+if-eq v0, v1, :patch_h2_avrcp_key
 goto :patch_h2_continue
+:patch_h2_avrcp_key
+invoke-virtual {p1}, KeyEvent;->getRepeatCount()I
+move-result v0
+if-eqz v0, :patch_h2_propagate
+const/4 v0, 0x1
+return v0                       # repeat: consume silently
 :patch_h2_propagate
 const/4 v0, 0x0
-return v0                       # let the framework continue dispatch
+return v0                       # first press: let the framework continue dispatch
 :patch_h2_continue
 [stock method body resumes]
 ```
 
-`v0` and `v1` are the existing scratch locals (`.locals 2` covers both). Returning false from `BasePlayerActivity.dispatchKeyEvent` causes the framework to fall through to `PhoneFallbackEventHandler` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, where `PlayControllerReceiver`'s Patch E discrete arms then fire.
+`v0` and `v1` are the existing scratch locals (`.locals 2` covers both). Returning false from `BasePlayerActivity.dispatchKeyEvent` causes the framework to fall through to `PhoneFallbackEventHandler` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, where `PlayControllerReceiver`'s Patch E discrete arms then fire. Returning true on a repeat is the no-action consume path.
+
+**Patch H″** — framework-synthetic-repeat filter, paired with NEXT/PREV keycode propagation. Logically a single change embedded in both Patch H and Patch H′.
+
+The `repeatCount > 0 → silent consume` branch and the addition of `0x57` / `0x58` to the propagated keycode set are both Patch H″. Background:
+
+Android 4.2.2's `InputDispatcher::synthesizeKeyRepeatLocked` synthesizes `KeyEvent` repeats above the kernel's `evdev` layer for any key still in DOWN state without an UP. The kernel's `EV_REP` softrepeat is patched off by U1 (`libextavrcp_jni.so:0x74e8`), but the framework synthesizer is independent of `EV_REP` and keeps generating events with climbing `repeatCount` at ~50 ms intervals (after a ~400 ms initial delay). For AVRCP-derived keycodes that path triggers `BasePlayerActivity.onKeyLongPress` at `repeatCount == 8` → music app enters FF/RW mode. Empirical proof from the 2026-05-09 TV logcat: `getevent` shows ONE `KEY_NEXTSONG DOWN` at boottime 304186.40, no further events for 24 s, then ONE `UP` — yet `WindowManager.interceptKeyTi` shows `keyCode=87 down=true` firing repeatedly with `repeatCount` climbing 2 → 70+ over the same 24 s window. Same pattern for held `KEY_PLAYCD` (`repeatCount` 0 → 30+ at 50 ms).
+
+H″ collapses any held AVRCP keycode to a single one-shot action per genuine press by checking `KeyEvent.getRepeatCount()` after the keycode match: if `> 0`, return TRUE (silent consume — neither propagate nor dispatch to onKeyDown / Up); if `== 0`, propagate normally. Applies to both `BaseActivity` (Patch H location) and `BasePlayerActivity` (Patch H′ location). Closes the "stuck fast-forwarding" symptom on TV CTs that drop PASSTHROUGH RELEASE under subscribe load.
 
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 

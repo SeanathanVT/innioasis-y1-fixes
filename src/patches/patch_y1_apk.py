@@ -1629,9 +1629,10 @@ if DEBUG_LOGGING:
 with open(base_player_activity_path, 'w') as f:
     f.write(base_player_activity_src)
 print(
-    "  Patch H': BasePlayerActivity.dispatchKeyEvent -- same propagation as "
-    "Patch H, applied to the music player superclass which overrides "
-    "dispatchKeyEvent and bypasses BaseActivity entirely"
+    "  Patch H': BasePlayerActivity.dispatchKeyEvent -- same five-keycode "
+    "propagation + repeatCount filter as Patch H, applied to the music "
+    "player superclass which overrides dispatchKeyEvent and bypasses "
+    "BaseActivity entirely"
 )
 
 

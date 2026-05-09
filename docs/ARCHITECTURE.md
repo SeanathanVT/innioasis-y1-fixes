@@ -421,9 +421,16 @@ Independent of the trampoline-driven outbound metadata path. CT-driven transport
    _PREVIOUS (0x58).
 
 5. WindowManager → ViewRootImpl → Activity hierarchy. Foreground music-app
-   activities extend BaseActivity, whose dispatchKeyEvent receives the KeyEvent.
-   Patch H returns false for keycodes 0x7e / 0x7f / 0x56 (only those) so they
-   propagate past the foreground activity to the framework's fallback dispatch.
+   activities extend BaseActivity, OR — for the music player screen —
+   BasePlayerActivity (which itself extends BaseActivity but overrides
+   dispatchKeyEvent and never delegates up). dispatchKeyEvent receives the
+   KeyEvent. Patches H + H′ + H″ together apply the same early-return logic
+   in both classes for keycodes 0x7e / 0x7f / 0x56 / 0x57 / 0x58:
+       repeatCount == 0 → return false → propagate to framework fallback
+       repeatCount  > 0 → return true  → silent consume (collapse synthetic
+                                          repeats from
+                                          InputDispatcher::synthesizeKeyRepeatLocked
+                                          to a single one-shot per genuine press)
 
 6. PhoneFallbackEventHandler.handleMediaKeyEvent → AudioManager.dispatchMediaKeyEvent
    → AudioService routes ACTION_MEDIA_BUTTON.
@@ -441,6 +448,8 @@ Independent of the trampoline-driven outbound metadata path. CT-driven transport
        KEYCODE_MEDIA_PLAY (126)      → play(true)        (discrete PLAY)
        KEYCODE_MEDIA_PAUSE (127)     → pause(0x12, true) (discrete PAUSE)
        KEYCODE_MEDIA_STOP (86)       → stop()            (discrete STOP)
+       KEYCODE_MEDIA_NEXT (87)       → nextSong()        (discrete NEXT)
+       KEYCODE_MEDIA_PREVIOUS (88)   → prevSong()        (discrete PREV)
        others fall through to original receiver logic.
 
 9. PlayerService method runs → IjkMediaPlayer / MediaPlayer state change → audio
