@@ -262,22 +262,25 @@ This section catalogues the deviations relevant to AVRCP 1.3 conformance and pro
 
 ### 9.1 AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)
 
-**Spec.** AVRCP 1.3 §5.5: when a TG response exceeds the CT buffer or AVCTP MTU, TG sends `packet_type=01 START` with the first chunk and waits for CT to issue `RequestContinuingResponse` (PDU 0x40). TG then emits `packet_type=02 CONTINUE` or `packet_type=03 END` chunks. CT may abort partway with `AbortContinuingResponse` (PDU 0x41). ICS Table 7 rows 31-32: **Mandatory if `GetElementAttributes Response` is supported (C.2)** — which we do support, so per the strict letter of the ICS we should ship a stateful continuation handler.
+**Spec.** AVRCP 1.3 §5.5: when a TG response exceeds the CT buffer or AVCTP MTU, TG sends `packet_type=01 START` with the first chunk and waits for CT to issue `RequestContinuingResponse` (PDU 0x40). TG then emits `packet_type=02 CONTINUE` or `packet_type=03 END` chunks. CT may abort partway with `AbortContinuingResponse` (PDU 0x41). ICS Table 7 rows 31-32: **Mandatory if `GetElementAttributes Response` is supported (C.2)**.
 
-**Current state.** `T_continuation` (in `_trampolines.py::_emit_t_continuation`) explicit-rejects PDUs 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the `UNKNOW_INDICATION` fallback (msg=520). Counted as ✓ in §2 because zero captured CTs have driven 0x40 traffic — strict CTs with small buffers might, but no test-matrix CT has yet.
+**Current state.** `T_continuation` (in `_trampolines.py::_emit_t_continuation`) explicit-rejects PDUs 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the `UNKNOW_INDICATION` fallback (msg=520). Counted as ✓ in §2 because **the OEM TG never sets `packet_type=01`**: T4 emits via `btmtk_avrcp_send_get_element_attributes_rsp` which packs into an internal 644 B buffer and emits a single non-fragmented AVRCP frame; AVCTP-layer fragmentation happens transparently below. With no `packet_type=01` ever leaving the TG, no spec-conforming CT will send 0x40, and the empirical record matches: zero 0x40 / 0x41 PDUs across 43 captures.
 
-**Compliance plan.**
+**Why this is deferred.** A stateful re-emitter is only meaningful if the TG ever sets `packet_type=01` in the first place — i.e., after we've replaced the OEM `_send_get_element_attributes_rsp` with a manual META response builder that paginates at AVRCP layer instead of AVCTP layer (the §9.3 "optional follow-up" route). Without that bypass, a re-emitter is dead code: the CT never has anything to continue from.
 
-1. **Promote T_continuation from rejecter to stateful re-emitter.** It needs a tiny per-conn state struct (4-tuple: `pdu_id`, `total_size`, `bytes_sent_so_far`, pointer-to-buffered-response). The buffer can live in the existing 1652-byte trampoline blob region (~2368 B free); a 1024-byte reusable buffer is sufficient for the §5.3.4 worst case (7 attributes × maximum sane string lengths ≈ 1800 B; we'd cap each attribute to 240 B and accept truncation on extreme tags).
-2. **First-fragment emit sites** (T4 GetElementAttributes-7-attrs path, and any future PDU whose response can exceed AVCTP MTU): copy the response into the continuation buffer, set `packet_type` to 01 START in the first AVCTP frame, set `bytes_sent` after the emit.
-3. **0x40 RequestContinuing**: read state, emit next chunk with `packet_type` 02 CONTINUE or 03 END based on `bytes_sent + chunk_size >= total_size`. Update `bytes_sent`. On END, free the state.
-4. **0x41 AbortContinuing**: free the state, ack with `packet_type` SINGLE NOT_IMPLEMENTED-or-success per §5.5. Spec is permissive on the ack shape.
+The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AVRCP META REJECTED with `INVALID_PARAMETER` (status 0x05) per §6.15.2 — also runs into a binary-shape barrier. `libextavrcp.so` exposes no META REJECTED builder; the only generic frame sender is `btmtk_avrcp_send_cmd_frame_ind_rsp` (= `..._pass_through_rsp`, 0x1cbc), and the existing `0x65bc` UNKNOW_INDICATION call site passes opaque magic constants (`byte_5=8 / byte_6=9`) whose mapping to AV/C ctype / subunit / opcode is not derivable without binary-experiment cycles. The wire-shape difference between NOT_IMPLEMENTED and INVALID_PARAMETER is functionally indistinguishable from the CT's perspective (both are AV/C reject frames; CT abandons the continuation flow either way), so the change buys ICS-letter purity at non-trivial regression risk for every other unhandled-PDU path.
 
-**Effort estimate.** ~2 days. The blob-budget check: stateful continuation is ~120 B of code + a 1024-B buffer = 1144 B added; we have 2368 B free past 0xb2c8.
+**Compliance plan when revisited.**
 
-**Where the fix goes.** `src/patches/_trampolines.py::_emit_t_continuation`, plus T4's outbound emit site. No mtkbt-side patches required because mtkbt's outbound AVCTP layer already does packet-level fragmentation; this is the AVRCP-META-layer paging on top of that.
+1. Replace `T4`'s `btmtk_avrcp_send_get_element_attributes_rsp` call with a manual META response builder that fragments at AVRCP layer when total response size > a tunable threshold (e.g., AVCTP MTU - headers, ~480 B). Set `packet_type=01 START` on the first fragment, cache the rest in a per-conn state struct (`pdu_id`, `total_size`, `bytes_sent_so_far`, pointer-to-buffered-response).
+2. Upgrade `T_continuation` to a stateful re-emitter: on PDU 0x40, look up state, emit next chunk with `packet_type=02 CONTINUE` or `=03 END`; on PDU 0x41, drop state and ack `packet_type=00 SINGLE`.
+3. Buffer can live in the trampoline blob region (~2368 B free past 0xb2c8); 1024 B is sufficient for the §5.3.4 worst case (7 attrs × 240 B per §9.3 + headers ≈ 1800 B trimmable to 1024).
 
-**Verification.** Capture against a strict CT with a small AVCTP MTU; confirm three-fragment GetElementAttributes flow lands intact (msg=540 split into three msg=540 frames with the right packet_type field).
+**Effort estimate.** ~3 days when revisited. Step 1 requires disassembling `AVRCP_SendMessage` (libextavrcp.so:0x18ec) to learn the IPC payload shape it expects, since a manual builder must produce a buffer matching what the OEM builders produce internally.
+
+**Where the fix would go.** `src/patches/_trampolines.py::_emit_t4` (manual META builder) + `_emit_t_continuation` (stateful re-emit). No mtkbt-side patches.
+
+**Verification.** Capture against a CT after manually injecting a `packet_type=01` response; confirm CT sends PDU 0x40, confirm we re-emit the buffered tail with `packet_type=03 END`.
 
 ### 9.2 AVRCP playback state ↔ AVDTP source state coupling
 
@@ -338,8 +341,8 @@ This section catalogues the deviations relevant to AVRCP 1.3 conformance and pro
 
 ### 9.6 Remaining workstream order
 
-1. **§9.1 stateful T_continuation** — addresses the strict-CT-small-buffer scenario. Self-contained in `_trampolines.py`; no cross-component changes.
-2. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses", but most cross-component work. Requires an IPC surface that doesn't currently exist.
+1. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses". Cross-component work (Y1MediaBridge ↔ MtkBt.odex ↔ libmtkbtextadpa2dp.so).
+2. **§9.1 stateful T_continuation** — deferred behind §9.1's two prereqs (manual META builder OR observed CT 0x40 demand). See §9.1 above.
 
 Both should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
