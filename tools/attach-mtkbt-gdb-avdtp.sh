@@ -86,21 +86,46 @@ if ! adb devices | grep -q "device$"; then
     exit 1
 fi
 
-# Find mtkbt PID + PIE base
-MTKBT_PID=$(adb shell 'su -c "ls -d /proc/[0-9]*/comm 2>/dev/null | while read f; do read c < \"\$f\" 2>/dev/null && [ \"\$c\" = mtkbt ] && echo \"\$f\" | sed -e s,/proc/,, -e s,/comm,,; done"' | tr -d '\r' | head -1)
-if [[ -z "$MTKBT_PID" ]]; then
-    echo "ERROR: mtkbt not running" >&2
+# Stock toybox on Y1 lacks pidof / head / awk / sed — do parsing host-side
+# from `adb shell ps` + `cat /proc/<pid>/maps` (the latter under su). Same
+# approach as tools/attach-mtkbt-gdb.sh.
+echo "==> Discovering mtkbt PID + PIE base.."
+ps_out=$(adb shell 'ps' 2>/dev/null | tr -d '\r')
+MTKBT_PID=""
+while IFS= read -r row; do
+    case "$row" in
+        *' /system/bin/mtkbt'|*' mtkbt')
+            set -- $row
+            MTKBT_PID=$2
+            break
+            ;;
+    esac
+done <<< "$ps_out"
+
+if [ -z "$MTKBT_PID" ]; then
+    echo "ERROR: mtkbt not running. BT enabled? Check 'adb shell ps | grep mtkbt'." >&2
     exit 1
 fi
-echo "mtkbt PID: $MTKBT_PID"
+echo "    mtkbt PID: $MTKBT_PID"
 
-PIE_BASE_HEX=$(adb shell "su -c \"cat /proc/$MTKBT_PID/maps\"" 2>/dev/null | grep -E "r-xp.*mtkbt$" | head -1 | awk -F- '{print $1}' | tr -d '\r')
-if [[ -z "$PIE_BASE_HEX" ]]; then
-    echo "ERROR: failed to read /proc/$MTKBT_PID/maps for PIE base" >&2
+maps_out=$(adb shell "su -c 'cat /proc/${MTKBT_PID}/maps'" 2>/dev/null | tr -d '\r')
+PIE_BASE_HEX=""
+while IFS= read -r row; do
+    case "$row" in
+        *'/system/bin/mtkbt')
+            range=${row%% *}
+            PIE_BASE_HEX=${range%%-*}
+            break
+            ;;
+    esac
+done <<< "$maps_out"
+
+if [ -z "$PIE_BASE_HEX" ]; then
+    echo "ERROR: couldn't read /proc/${MTKBT_PID}/maps. su working?" >&2
     exit 1
 fi
 PIE_BASE=$((16#$PIE_BASE_HEX))
-echo "PIE base: 0x$PIE_BASE_HEX"
+printf "    PIE base: 0x%x\n" "$PIE_BASE"
 
 fileoff_to_live() {
     printf "0x%x" $((PIE_BASE + 16#${1#0x}))
