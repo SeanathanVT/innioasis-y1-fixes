@@ -2,74 +2,32 @@
 
 This document grew organically over the 2026-05-02 / 2026-05-03 sessions. **Read this top section first** — sections below preserve the original investigation narrative including hypotheses that were later refuted, so reading top-down without this summary is misleading.
 
-## Final state (after all traces complete)
+## Final state — what ships today
 
-The shipped patch set:
-- `mtkbt.patched` (11 patches: **B1-B3, C1-C3, A1, D1, E3, E4, E8**) — MD5 `d47c904063e7d201f626cf2cc3ebd50b`
-- `libextavrcp_jni.so.patched` (4 patches: **C2a / b, C3a / b**)
-- `libextavrcp.so.patched` (1 patch: **C4**)
-- `MtkBt.odex.patched` (2 patches: **F1, F2**)
-- `com.innioasis.y1*.apk.patched` (smali Patches **A**, **B**, **C**, **E**, **H**) — Patch H (iter31, 2026-05-08) added: `BaseActivity.dispatchKeyEvent` previously returned TRUE for every KeyEvent, swallowing `KEYCODE_MEDIA_PLAY (0x7e)` / `MEDIA_PAUSE (0x7f)` / `MEDIA_STOP (0x56)` because the activity has no `KeyMap` branch for them. iter30 captures (Kia EV6, dual-kia-iter30/) showed 9/9 AVRCP PASSTHROUGH 0x44 PLAY events terminating at the foreground activity instead of reaching `PlayControllerReceiver`; the framework smali (`PhoneWindowManager.interceptKeyBeforeQueueing` / `dispatchMediaKeyWithWakeLock`, `AudioService.dispatchMediaKeyEvent` / `isValidMediaKeyEvent` / `isValidVoiceInputKeyCode`, `PhoneFallbackEventHandler.onKeyDown` / `onKeyUp`, `mediatek-framework.odex`) was deodexed and ruled out as the filter. Fix: insert an early `return false` for those three keycodes immediately after `getKeyCode()` so they propagate to the standard fallback path and reach Patch E's discrete arms. Implication: `/system/usr/keylayout/AVRCP.kl` stays stock, leaving the kernel→KeyEvent mapping spec-correct for any other foreground app installed on the device (e.g. Rockbox).
-- **iter32 (2026-05-08): Phase D + Phase F1 shipped** — Phase D adds an explicit `T_continuation` trampoline branched from T4's pre-check on PDU 0x40 (RequestContinuingResponse) / 0x41 (AbortContinuingResponse); routes both to the existing UNKNOW_INDICATION path that emits AV/C NOT_IMPLEMENTED via msg=520. AVRCP 1.3 §6.15.2 specifies INVALID_PARAMETER (status 0x05) as the strict-spec reject for receiving 0x40 without prior fragmentation; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject and is functionally indistinguishable to the CT (both abandon the continuation flow). Closes ICS Table 7 rows 31-32. Phase F1 extends T5 to emit the AVRCP 1.3 §5.4.2 track-edge 3-tuple (TRACK_REACHED_END 0x03 → TRACK_CHANGED 0x02 → TRACK_REACHED_START 0x04 in spec order) on every track edge; the 0x03 frame is gated on a `previous_track_natural_end` flag at `y1-track-info[793]` written by Y1MediaBridge `onTrackDetected()` after comparing the previous track's extrapolated `computePosition()` against `mCurrentDuration` (within `[-1000ms..+2000ms]` of duration counts as natural end). Closes ICS Table 7 rows 25-26. T5's frame grew from 24 B to 816 B (16 state + 800 file_buf, mirroring T9). Trampoline blob 1500 B → 1548 B; `libextavrcp_jni.so` MD5 `bd3554d38486856cfbb17a37c02fd0a0` → `92e6c7ee5d43ab0c65f27a6da60dd320`. Y1MediaBridge versionCode 17→18, versionName 2.0→2.1.
-- **iter33 (2026-05-08): Phase F2 shipped** — proactive `BATT_STATUS_CHANGED` (event 0x06) CHANGED-on-edge piggybacked on T9. **Trigger-path discovery during build:** stock MtkBt's battery dispatch chain through `BTAvrcpSystemListener.onBatteryStatusChange` is dead because `BTAvrcpMusicAdapter$2` overrides the dispatcher with a `Log.i(...)` stub that never calls super; even if the listener's `mIsRegBattery` gate is bypassed (which we identified at file offset `0x3af72` in MtkBt.odex), no notification reaches the JNI native layer. There is also no AIDL surface on `IBTAvrcpMusic` exposing `notificationBatteryStatusChanged` for Y1MediaBridge to invoke directly. Cheapest spec-compliant alternative: reuse the existing `playstatechanged` broadcast as the trigger and have T9 check whether `y1-track-info[794]` (battery_status) differs from `y1-trampoline-state[10]` (`last_battery_status`, was pad) alongside the existing play-status compare. T8 event-0x06 INTERIM also reads from byte 794 instead of canned `0x00 NORMAL`. Y1MediaBridge gains a `BroadcastReceiver` for `Intent.ACTION_BATTERY_CHANGED` that bucket-maps level + plugged-state to the AVRCP §5.4.2 Tbl 5.35 enum (`STATUS_FULL → 4 FULL_CHARGE; plugged != 0 → 3 EXTERNAL; pct ≤ 15 → 2 CRITICAL; pct ≤ 30 → 1 WARNING; else → 0 NORMAL`) on every bucket transition, persists to byte 794, and fires `playstatechanged` to drive T9. Cold-boot reads the sticky broadcast via the `registerReceiver` return value. **No MtkBt.odex change** — the existing cardinality NOP at sswitch_18a / `0x3c4fe` is what makes T9 fire on every `playstatechanged`. Closes ICS Table 7 row 28. Trampoline blob 1548 B → 1596 B; `libextavrcp_jni.so` MD5 `92e6c7ee5d43ab0c65f27a6da60dd320` → `d2409751abc6f35e6adc0cc8447afe2a`. Y1MediaBridge versionCode 18→19, versionName 2.1→2.2.
-- **iter34 (2026-05-08): Phase F3 shipped** — periodic `PLAYBACK_POS_CHANGED` (event 0x05) CHANGED at 1 s cadence while playing, piggybacked on T9. T9's epilogue extends with a position-emit block that runs unconditionally if `file[792] == PLAYING`: stack-allocated `struct timespec`, `clock_gettime(CLOCK_BOOTTIME, &ts)` via `svc 0` (NR=263, clk_id=7 — same monotonic source Y1MediaBridge stamps `mStateChangeTime` from), `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` (same arithmetic T6 does for GetPlayStatus, so polled GetPlayStatus and notification CHANGED report consistent positions), then `reg_notievent_pos_changed_rsp` (PLT 0x3360) with `r2=REASON_CHANGED`, `r3=live_pos`. T9's frame grew 816 → 824 to add 8 B for the timespec at sp+816..823. Y1MediaBridge gains an `mPosTickRunnable` 1 s `Handler.postDelayed` loop that fires `playstatechanged` while `mIsPlaying`, started on every play edge in `onStateDetected` and cancelled on every pause/stop edge and in `onDestroy`. **Spec deviation, documented and accepted:** the CT-supplied `playback_interval` is ignored; we emit at our 1 s cadence regardless. The spec text "shall be emitted at this interval" defines a maximum interval ceiling (not a minimum cadence floor) — emitting more frequently over-serves a CT subscribed for a longer interval, which all CTs in the test matrix tolerate. Capturing the CT-supplied interval would require AV/C-buffer parsing in T8's INTERIM arm and persisting it in `y1-trampoline-state`; the cost is not worth the up-front complexity for a deviation the spec allows. Closes ICS Table 7 row 27. Trampoline blob 1596 B → 1652 B; `libextavrcp_jni.so` MD5 `d2409751abc6f35e6adc0cc8447afe2a` → `a2d41f924e07abff4a18afb87989b04c`. Y1MediaBridge versionCode 19→20, versionName 2.2→2.3.
-- **iter35 (2026-05-08): LogcatMonitor STOPPED state-code fix** — `MediaBridgeService.LogcatMonitor` previously recognized only Y1 `BaseActivity` state codes `'1'` (PLAYING) and `'3'` (PAUSED) and dropped everything else, including `'5'` (observed after FF cascades terminate — likely STOPPED). AVRCP §5.4.1 Tbl 5.26 distinguishes STOPPED (0x00) from PAUSED (0x02) as separate `PlayStatus` values; pre-fix the schema's `playing_flag` byte at `y1-track-info[792]` only ever held 1 or 2, never 0, so T6 GetPlayStatus and T9 PLAYBACK_STATUS_CHANGED collapsed STOPPED into a stale-PAUSED report on the wire. **Fix:** LogcatMonitor's state-char dispatch now maps `'1' → 1 PLAYING, '3' → 2 PAUSED, '5' → 0 STOPPED`. `onStateDetected` was refactored to take a `byte avrcpStatus` argument instead of a `boolean playing`; a new `mPlayStatus` field carries the three-valued AVRCP enum and is written directly to `y1-track-info[792]`. `mIsPlaying` boolean preserved for the `IBTAvrcpMusicCallback` (different 1=stopped/2=playing/3=paused enum — `callbackPlayStatusByte()` helper bridges) and `IMediaPlaybackService.isPlaying` contracts. `RemoteControlClient.setPlaybackState` gains a STOPPED → `PLAYSTATE_STOPPED` arm (pre-fix it collapsed STOPPED into `PLAYSTATE_PAUSED`). `ACTION_SHUTDOWN` now sets `mPlayStatus = 0 STOPPED` instead of just clearing `mIsPlaying` and also cancels the Phase F3 position tick. Quality fix to already-shipped functionality, no new spec rows. Y1MediaBridge versionCode 20→21, versionName 2.3→2.4.
+Wire target: AVRCP 1.3 / AVCTP 1.2 (V1+V2 SDP byte patches), implemented via a JNI-side trampoline chain in `libextavrcp_jni.so` that bypasses mtkbt's compiled-1.0 AVRCP command dispatcher. Full per-patch reference in [`PATCHES.md`](PATCHES.md); ICS Table 7 scorecard in [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §2.
 
-Patches **E5, E7a, E7b were tested and removed** — they patched live code that was never exercised at runtime for our peer state, so they had no observable effect.
+Current shipped patches by binary:
 
-**E8 added 2026-05-02 and tested same-day as inert.** NOPing `bge #0x30688` at `0x3065e` in fn `0x3060c` (op_code=4 dispatcher slot 0) had no observable effect on cardinality:0. Inspection of the test logcat showed only msg_ids 505 and 506 received — **no GetCapabilities (`op_code=4`) ever arrives at any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`). The gate is upstream of the dispatcher table itself — somewhere in mtkbt's AVCTP receive path between L2CAP and the dispatcher. E8 left in place as a verified-correct patch even though inert.
+| Binary | Patches |
+|---|---|
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte), V2 (AVCTP 1.0→1.2 SDP byte), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame) |
+| `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard) |
+| `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
+| `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
+| `libaudio.a2dp.default.so` | AH1 (skip `a2dp_stop` in `standby_l` so AudioFlinger silence-timeout leaves the AVDTP source stream alive across pauses) |
+| `Y1MediaBridge.apk` | Installed as the metadata source / play-state-edge driver; provides `IBTAvrcpMusic` + `IMediaPlaybackService` Binders to MtkBt and writes `y1-track-info` / `y1-trampoline-state` for the trampoline chain to read |
 
-**G1 / G2 attempt 1 (2026-05-02) — reverted (SIGSEGV at NULL).** 12-byte thunk forwarded r2 (fmt) as both tag and fmt for android_log_print. mtkbt SIGSEGV at addr 0 immediately at startup — at least one xlog callsite passes NULL in r2; bionic's `__android_log_print` at API 17 doesn't NULL-check the tag, so `strlen(NULL)` faulted.
+Pre-v2.0.0 the project shipped a different set against the same binaries (B1-B3 / C1-C3 / A1 / D1 / E3 / E4 / E8 in `mtkbt`; C2a / b / C3a / b in `libextavrcp_jni.so`; C4 in `libextavrcp.so`; H1-H3 in `/sbin/adbd`) that advertised AVRCP 1.4 / AVCTP 1.3 / SupportedFeatures 0x0033 on the SDP wire but couldn't deliver on the claim — mtkbt's compiled-1.0 dispatcher NACK'd every metadata COMMAND a 1.4-class CT then sent. The `Conclusion (2026-05-04)` section below documents that pivot. The legacy patch IDs remain referenced throughout the audit trail (Traces #1 etc) but no longer exist in the shipped tree; `git log` is the authoritative byte-level archive.
 
-**G1 attempt 2 (2026-05-03) — reverted (BT does not turn on).** 20-byte thunk added a `cbz r2, .L_null` guard. NULL guard didn't help. BT framework log shows `bt_sendmsg(cmd=100, ...)` returns ENOENT — mtkbt's abstract socket never came up. Either mtkbt crashed on a non-NULL but invalid pointer (small int, stack pointer), or the redirected log volume flooded logd and slowed mtkbt's init past the framework timeout.
-
-**Conclusion: blanket xlog→logcat redirect at the consolidated wrapper is too fragile.** The wrapper at `0x675c0` is hit 2988 times across mtkbt's lifecycle including very early init when bionic's logd may not be ready, and the calling-convention assumption (r2 = valid fmt pointer) doesn't hold for every callsite. Future diagnostic instrumentation, if attempted, must be surgical: explicit `bl __android_log_print` calls at a small number of high-value sites (dispatcher entries, AVCTP RX handler at fn `0x6d9ba`, the silent-drop site at `0x0513a4`) with hardcoded tag / fmt string args. That requires finding free space in mtkbt for tag / fmt strings and either a trampoline or in-place call-site rewrite — significantly more complex than what was attempted.
-
-## Verified true (with corrections from earlier in this doc)
+## Static-analysis findings still load-bearing
 
 - **mtkbt IS the AVRCP processor** on this device. (Earlier in this doc I hypothesized the BT chip firmware was the processor — that was wrong. The chip firmware blob is the WMT common subsystem, contains zero AVRCP code.)
-- **None of mtkbt's documented AVRCP / AVCTP functions are dead code** in the sense earlier in this doc claimed. (Earlier I concluded they were dead because no caller mechanism I searched found references — that conclusion was wrong.) `0x29e98` is reached via PIC-style callback registration through `register_callback` at `0x2fecc`, called from `0x28a5e` with the fn ptr computed by `ldr r1, [pc, #0x17c]; add r1, pc` (literal `0x1439`). `0x3096c` is reached via `R_ARM_RELATIVE` relocation installing it into a 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc` (slot 2). Same for the other 0-caller functions: they are reached, just through callback-registration mechanisms my earlier scans missed. The AV/C parser at `0x6d04a` is the **only** function still confirmed dead — multiple independent scans found zero references via every mechanism (literal pools, `R_ARM_RELATIVE`, ADR/ADD-PC, MOVW+MOVT, `ABS32`, no callers).
-- **The `mtkbt` SDP layer patches all land on the wire.** sdptool confirms AVRCP 1.4 + AVCTP 1.3 + SupportedFeatures 0x0033 served by mtkbt to peers.
-- **The Java layer (`MtkBt.apk`) is correctly initialized for AVRCP 1.4** post-F1 / F2. `getSupportVersion()` returns 0xe (1.4) when `sPlayServiceInterface == true`. `checkCapability()` builds the 1.4-aware EventList `[1, 2, 9, 10, 11]` (PLAYBACK_STATUS_CHANGED, TRACK_CHANGED, NOW_PLAYING_CONTENT_CHANGED, AVAILABLE_PLAYERS_CHANGED, ADDRESSED_PLAYER_CHANGED). `BTAvrcpMusicAdapter.registerNotification(eventId)` would correctly handle events 1/2/9 if invoked, log `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d`, and update the cardinality bitset.
-- **`Y1MediaBridge.apk` is correctly implemented** as a dual-interface (IBTAvrcpMusic + IMediaPlaybackService) Binder bridge. F1 / F2 + the bridge + the SDP-layer patches form a complete & correct user-space chain.
+- **mtkbt's documented AVRCP / AVCTP functions are NOT dead code.** Earlier scans (Trace #1 / 1b / 1c) missed the indirect-call mechanism — `0x29e98` is reached via PIC-style callback registration through `register_callback` at `0x2fecc`, called from `0x28a5e`; `0x3096c` is reached via `R_ARM_RELATIVE` relocation into a 3-slot fn-ptr table at vaddr `0xf94b0..0xf94bc`. Trace #1d / 1e / 1f / 1g resolved this. The AV/C parser at `0x6d04a` is the only function still confirmed dead.
+- **`Y1MediaBridge.apk` is correctly implemented** as a dual-interface (IBTAvrcpMusic + IMediaPlaybackService) Binder bridge. The bridge + V1/V2/S1/P1 + F1/F2 + cardinality NOPs + the trampoline chain together form the user-space command-handling pipeline that mtkbt's compiled-1.0 native dispatcher cannot deliver on its own.
 
-## Where the cardinality:0 gate is
+## The cardinality:0 gate question — resolved by the v2.0.0 pivot
 
-Logcat across multiple full connection cycles shows neither:
-- `[BT][AVRCP](test1) registerNotificationInd eventId:%d` (the JNI→Java entry log) nor
-- `[BT][AVRCP] mRegBit set %d Reg:%b cardinality:%d` (the cardinality update log) nor
-- `[BT][AVRCP] MusicAdapter blocks support register event:%d` (the rejection log)
-
-So no inbound REGISTER_NOTIFICATION events reach Java. Combined with the existing observation that no `Recv AVRCP indication` msg_ids beyond 501/505/506/512 (ACTIVATE_CNF / connect_ind / CONNECT_CNF / DISCONNECT_CNF) reach the JNI receive loop, **the gate is unambiguously inside mtkbt's native AVRCP layer, between AVCTP RX and the JNI dispatch socket**.
-
-**Refined 2026-05-02 (post-E8 test):** Logcat over the E8 test cycle confirms only msg_ids 505 and 506 ever arrive. **No `op_code=4` (GetCapabilities) message ever reaches any of the three dispatchers** (`0x3060c`, `0x30708`, `0x3096c`) — verified because E8 NOP'd the gate at `0x3065e` in fn `0x3060c` and the patch had zero observable effect, AND the post-dispatcher init path at `0x2fd34` is never logged either. **The gate is upstream of the dispatcher table itself.** The most plausible upstream points are:
-
-- mtkbt's AVCTP receive handler at fn `0x6d9ba` — silently drops the inbound L2CAP frame before dispatch.
-- The silent-drop site at `0x0513a4` (`[AVRCP][WRN] AVRCP receive too many data. Throw it!`) — sized check that may reject GetCapabilities under unknown conditions.
-- The L2CAP→AVCTP demux logic upstream of `0x6d9ba` — wrong PSM routing, missing peer-state guard, etc.
-- The `bws:0 tg_feature:0 ct_featuer:0` in the CONNECT_CNF log line suggests mtkbt's per-connection feature negotiation is failing on the daemon side — peers may be classified as "no AVRCP capability" before any GetCapabilities even gets a chance to arrive.
-
-Which one is the real gate cannot be determined statically without observing runtime decisions, and runtime visibility into mtkbt is the chronic blind spot — it logs only via `__xlog_buf_printf` (separate buffer, invisible without root or daemon-side tooling).
-
-**Strengthened 2026-05-03 (post Trace #7):** the four `libbluetooth*.so` libs were inspected end-to-end and confirmed HCI / transport-only — zero AVRCP / AVCTP code anywhere outside `mtkbt`. The gate has no other place it could live. See "Trace #7 — Findings" for full details.
-
-**New observation 2026-05-03 (test.log, peer `38:42:0B:38:A3:3E`):** `MSG_ID_BT_AVRCP_CONNECT_CNF conn_id:1  result:4096`. The `result` field on a successful AVRCP connect should be `0`. **`4096 = 0x1000` is non-zero**, suggesting mtkbt is reporting the connection as accepted-but-degraded (encryption pending, version downgrade flag, or feature-mismatch indicator). This pairs with the `bws:0 tg_feature:0 ct_featuer:0` line — both fields read straight off the message mtkbt sends over the JNI socket. The non-zero `result` is consistent with the peer never escalating to GetCapabilities and is now the most concrete static-investigation target. Strings present in mtkbt that would name the relevant branch under root + xlog visibility: `AVRCP register activeVersion:%d`, `[AVRCP] AVRCP activate version:%d`, `[AVRCP] avctpCB state:%d retryCount:%d retryFlag:%d`. This had not been called out in prior log analyses.
-
-## Remaining diagnostic options
-
-All require capabilities we don't have:
-- **HCI snoop / btsnoop** — needs root.
-- **Capture daemon-side `__xlog_buf_printf` traces** — Mediatek's separate log buffer, requires special tooling.
-- **Runtime instrumentation patches that redirect xlog → logcat** — attempted twice (G1 / G2 with NULL guard) and broke Bluetooth both times. The wrapper at `0x675c0` is hit ~3000 times across mtkbt's lifecycle, including very early init when bionic's logd may not be ready, and the calling-convention assumption (r2 = valid fmt pointer) doesn't hold uniformly. Path now considered closed within current constraints.
-- **Surgical instrumentation at specific high-value sites** (dispatcher entries, AVCTP RX handler, silent-drop site) with hardcoded tag / fmt strings via a trampoline. Doable in principle but each site is its own potential crash vector and requires finding free space in the binary for tag / fmt strings.
-
-## Single concrete patch candidate identified but not shipped — UPDATE: shipped
-
-Trace #1g exposed a clean-looking patch site in fn `0x3060c` (slot 0 of the dispatcher table): NOP the `bge` at `0x3065e` to force the 1.3/1.4 init path regardless of `[conn+0x149]`'s sign. Single-byte change `13 da → 00 bf`.
-
-**Originally not shipped** because (a) we can't tell whether fn `0x3060c` is selected at runtime for our peers vs. fn `0x30708` or fn `0x3096c`, and (b) for "correctly classified" peers (high bit set in `[conn+0x149]`) the gate doesn't fire and the patch is inert.
-
-**Reversed 2026-05-02 — now shipped as E8.** Re-examination of the brute-force "patch all three" plan showed the other two dispatcher candidates do not have analogous clean patch sites (see Final state above), so the cost calculus changed: E8 is the only viable single-instruction probe of the three, it's a one-byte change to a code path that's either the runtime gate (fix) or unexercised for our peers (no-op), and shipping it is strictly more informative than not. If E8 does not change cardinality:0, runtime selection is not fn `0x3060c` and the only remaining static analysis option is Option B — redirecting `__xlog_buf_printf` to `__android_log_print` to make mtkbt's daemon-side decisions visible in logcat.
+Pre-v2.0.0 traces tried to find where in mtkbt's native AVRCP layer inbound REGISTER_NOTIFICATION events were being dropped (the "cardinality:0 gate") so that the legacy SDP-claim approach could deliver actual COMMANDs. Conclusion (2026-05-04, below) showed the gate could not be located within static-analysis budget. v2.0.0 pivoted to the user-space proxy approach: `P1` reroutes inbound VENDOR_DEPENDENT frames into the JNI emit path (msg=519), where the trampoline chain in `libextavrcp_jni.so` synthesises the AVRCP 1.3 responses directly — bypassing mtkbt's dispatcher entirely. Static-analysis traces on the gate (Trace #1 / 1b / 1c / 1d / 1e / 1f / 1g, plus #4 / #7) are preserved below as historical context but the question they investigated is no longer load-bearing for the shipped pipeline.
 
 ---
 
@@ -906,12 +864,13 @@ This section's table previously enumerated the legacy 11-patch `--avrcp` set aga
 
 ## Binary Reference Data
 
+Stock MD5s and structural reference for every binary the patcher chain touches. Output (patched) MD5s are not pinned here — each `src/patches/patch_*.py` carries its own `STOCK_MD5` + `OUTPUT_MD5` constants and updates them in lockstep with the patch logic; that's the authoritative source.
+
 ### `mtkbt`
 
 | Property | Value |
 |---|---|
 | Stock MD5 | `3af1d4ad8f955038186696950430ffda` |
-| Patched MD5 (full `--avrcp`, 11 patches: B1-B3, C1-C3, A1, D1, E3, E4, E8) | `d47c904063e7d201f626cf2cc3ebd50b` |
 | File size | 1,029,140 bytes |
 | Format | ELF32 LE ARM, **ET_DYN** (PIE), base `0x00000000` (live PIE base on v3.0.2: `0x400c1000` per probe v3) |
 | ISA | ARM Thumb-2 throughout |
@@ -930,7 +889,6 @@ This section's table previously enumerated the legacy 11-patch `--avrcp` set aga
 | Property | Value |
 |---|---|
 | Stock MD5 | `11566bc23001e78de64b5db355238175` |
-| Patched MD5 | `acc578ada5e41e27475340f4df6afa59` |
 | Format | ODEX `dey\n036\0`, embedded DEX `dex\n035\0` at offset `0x28` |
 
 ### `libextavrcp_jni.so`
@@ -938,14 +896,13 @@ This section's table previously enumerated the legacy 11-patch `--avrcp` set aga
 | Property | Value |
 |---|---|
 | Stock MD5 | `fd2ce74db9389980b55bccf3d8f15660` |
-| Patched MD5 | `6c348ed9b2da4bb9cc364c16d20e3527` |
 | Format | ELF32 LE ARM, ET_DYN, base `0x00000000` |
 | Global `g_tg_feature` | `0xD29C` |
 | Global `g_ct_feature` | `0xD004` |
 | CONNECT_CNF handler | `0x62EA` (msg_id=505, TBH index=4) |
 | connect_ind handler | `0x619C` (msg_id=506, TBH index=5) |
-| `getCapabilitiesRspNative` | `0x5DE8` (FUN_005de8; C3a at 0x5e56, C3b at 0x5e5c) |
-| `activateConfig_3req` | `0x375C` (C2a at 0x3764, C2b at 0x37a8) |
+| `getCapabilitiesRspNative` | `0x5DE8` (FUN_005de8) |
+| `activateConfig_3req` | `0x375C` |
 
 **ILM layout in CONNECT_CNF receive loop stack frame:**
 
@@ -962,22 +919,24 @@ This section's table previously enumerated the legacy 11-patch `--avrcp` set aga
 | Property | Value |
 |---|---|
 | Stock MD5 | `6442b137d3074e5ac9a654de83a4941a` |
-| Patched MD5 | `943d406bfbb7669fd62cf1c450d34c42` |
 | File size | 17,552 bytes |
 | `btmtk_avrcp_send_activate_req` | `0x19CC` |
 | `AVRCP_SendMessage` | `0x18EC` |
 
-### `/sbin/adbd` (boot.img ramdisk, historical)
+(`libextavrcp.so` carried the legacy C4 patch through v1.x; deleted in v2.0.0. Stock now ships unmodified.)
+
+### `libaudio.a2dp.default.so`
 
 | Property | Value |
 |---|---|
-| Stock MD5 | `9e7091f1699f89dc905dee3d9d5b23d8` |
-| Patched MD5 (arg-zero) | `9eeb6b3bef1bef19b132936cc3b0b230` |
-| Patched MD5 (NOP-the-blx, superseded — caused "device offline") | `ccebb66b25200f7e154ec23eb79ea9b4` |
-| File size | 223,132 bytes (unchanged after patching) |
-| Format | ELF32 LE ARM, EXEC (statically linked, stripped) |
-| RX segment | file_off `0x0`, vaddr `0x8000`, size `0x34594` |
-| Privilege-drop block | vaddr `0x94b8` (file_off `0x14b8`) |
+| Stock MD5 | `0d909a0bcf7972d6e5d69a1704d35d1f` |
+| File size | 58,660 bytes |
+| Format | ELF32 LE ARM, ET_DYN |
+| `A2dpAudioStreamOut::standby_l` | `0x8654` (AH1 patch site at file offset `0x000086ab`) |
+| `A2dpAudioStreamOut::standby` | `0x86c0` |
+| `A2dpAudioStreamOut::setSuspended(bool)` | `0x8958` |
+
+(The legacy `/sbin/adbd` Binary Reference Data subsection — Stock + arg-zero + NOP-the-blx Patched MD5s — was removed when `patch_adbd.py` / `patch_bootimg.py` were deleted in v2.1.0. See "adbd Root Patches (H1 / H2 / H3)" earlier in this doc for the historical analysis. Current root mechanism is `/system/xbin/su` per `src/su/`.)
 
 ## Eliminated Paths — Do Not Pursue
 
@@ -1015,20 +974,21 @@ This section's table previously enumerated the legacy 11-patch `--avrcp` set aga
 
 ## Post-Flash Verification Checklist
 
-For the (now-deprecated) `--avrcp` patch set, when verifying that the flash landed correctly:
+After `apply.bash --avrcp [other flags]` lands on the device, sanity-check from a host with `adb shell`:
 
-- `sdptool browse <Y1_BT_ADDR>` → `AV Remote (0x110e) Version: 0x0104`
-- `sdptool browse` → `AVCTP uint16: 0x0103`
-- `sdptool browse` → `SupportedFeatures = 0x0033`
-- D1 flashed — mtkbt no longer crashes, CONNECT_CNF received
-- `tg_feature:0` confirmed cosmetic — JNI CONNECT_CNF handler does not gate on it
-- mtkbt patched MD5 `d47c904063e7d201f626cf2cc3ebd50b` confirmed device-side
-- `libextavrcp_jni.so` patched MD5 `6c348ed9b2da4bb9cc364c16d20e3527` confirmed
-- `libextavrcp.so` patched MD5 `943d406bfbb7669fd62cf1c450d34c42` confirmed
-- `MtkBt.odex` patched MD5 `acc578ada5e41e27475340f4df6afa59` confirmed
-- `/system/xbin/su` setuid escalator — hardware-verified 2026-05-04. `adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`; prompt `$`→`#`.
-- ~~logcat → `cardinality > 0` in ACTION_REG_NOTIFY lines~~ — **STILL 0 across all peers**. This is the bug that the user-space proxy work is intended to fix.
-- ~~`getCapabilitiesRspNative` log~~ — never fires; confirms mtkbt is not dispatching inbound AVRCP commands to the JNI for any tested peer.
+- **SDP record shape** — `sdptool browse <Y1_BT_ADDR>` from a paired peer:
+  - AVRCP TG record (UUID `0x110c`): `AV Remote (0x110e) Version: 0x0103` (V1) and `AVCTP uint16: 0x0102` (V2)
+  - Attribute `0x0100` ServiceName "Advanced Audio" present (S1); attribute `0x0311` SupportedFeatures absent (S1 swap)
+- **Patcher output MD5 ↔ on-device MD5** — pull each patched binary and compare against the `OUTPUT_MD5` constant pinned in the corresponding patcher:
+  - `mtkbt` → `src/patches/patch_mtkbt.py::OUTPUT_MD5`
+  - `libextavrcp_jni.so` → `src/patches/patch_libextavrcp_jni.py::OUTPUT_MD5` (regenerated when the trampoline blob changes)
+  - `MtkBt.odex` → `src/patches/patch_mtkbt_odex.py::OUTPUT_MD5`
+  - `libaudio.a2dp.default.so` → `src/patches/patch_libaudio_a2dp.py::OUTPUT_MD5`
+- **Y1MediaBridge installed and running** — `dumpsys package com.y1.mediabridge | grep versionCode` matches `src/Y1MediaBridge/app/build.gradle`; `ps | grep com.y1.mediabridge` shows the service.
+- **Trampoline chain emitting metadata** — `tools/dual-capture.sh` against a peer CT exercising play/pause + metadata fetch; in the resulting btlog look for outbound `msg=540` (GetElementAttributes response) frames carrying the seven §5.3.4 attributes after a CT-side metadata query.
+- **AVRCP NACKs absent** — same capture, count of inbound `msg=520` (NOT_IMPLEMENTED) reject frames should be zero (or scoped to the explicit T_continuation reject for unsolicited 0x40 / 0x41).
+- **AH1 holding A2DP up across pauses** — pause + wait ≥3 s + resume from peer; capture should show zero `[A2DP] a2dp_stop. is_streaming:1` lines around the pause/resume window.
+- **Root works** — `adb shell` → `su` → `id` returns `uid=0(root) gid=0(root)`; prompt `$`→`#`.
 
 ## Log Tags
 
