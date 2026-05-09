@@ -1513,10 +1513,41 @@ Risk — **unverified as of 2026-05-09**: response wire sig_id may be hardcoded 
 
 Drive a fresh pair attempt against any A2DP Sink CT (Sonos / Bolt / TV); the BPs at 0xaa72c will fire for every inbound AVDTP signal and let us cross-correlate sig_id source with the response builder's input.
 
-### Open V5 sub-questions
+### Trace #13 follow-up (2026-05-09 evening) — 0xaa72c hypothesis invalidated, real dispatcher relocated to fcn.000b0c30
 
-1. Where does the response wire sig_id originate? Candidates: (a) preserved from request via the cmd struct that survives the dispatch, (b) re-derived from a session-state byte (e.g. [r6+1]), (c) hardcoded by each handler. Static analysis suggests (a) but runtime confirmation pending.
-2. Can sig 0x08 (CLOSE) and sig 0x09 (SUSPEND) jump-table entries (both → 0xab786 epilogue) actually handle the wire signal somehow, or is this a stock-mtkbt bug? The CLOSE/SUSPEND handlers may live elsewhere and be invoked through a different path. Not load-bearing for V5 but worth checking when extending the runtime trace.
+The 6-BP run captured in `/work/logs/mtkbt-gdb-avdtp.log` (828 lines) shows:
+
+- **267 fires at 0xaa72c** with `[r1] = 0x17` (dec 23) — out of AVDTP wire signal range (0x01..0x0d). Single fire with `[r1] = 0x10` (dec 16). Same r0 across all hits (`r0 = 0x415e92b8`, equal to `[r1+4]`).
+- **Zero fires** at 0xaa924 (sig 0x02 handler), 0xab4de / 0xab51a (sig 0x0c stub + error path), 0xaeb9c, 0xaf4cc.
+
+Conclusion: **0xaa72c is NOT the AVDTP wire-signal dispatcher.** It's BlueAngel's internal task-message dispatcher — the function pointer at `[r4+0x464]` referenced from the orchestrator at 0xb1bc2 (a `blx r3` indirect call). The TBH at 0xaa81a routes 41 internal task-message types, of which AVDTP wire signals are not one. My V5 design (jump-table alias at 0xaa834) was therefore based on the wrong jump table — patching it would change internal-message-type-12 routing, not AVDTP sig 0x0c.
+
+**The real AVDTP RX dispatcher**: `fcn.000b0c30` (file 0xb0c30). 6482 bytes, 239 basic blocks, 152 cyclomatic complexity — radare2's `aaa` linear sweep had silently skipped it because invalid bytes at 0xb0c20-0xb0c2e trap the analyser. Manual disasm at 0xb0c30:
+
+```
+0xb0c30: push.w {r4-r8,sb,sl,fp,lr}
+0xb0c34: mov r8, r0                    ; r0 = stream / channel struct
+0xb0c40: mov r5, r1                    ; r1 = AVDTP signal frame ptr
+0xb0c44: ldrb r3, [r1]                 ; r3 = AVDTP byte 0 (header[0])
+0xb0c4c: cmp r3, 7                     ; bound check
+0xb0c4e: bhi.w 0xb19c8                 ; oob error
+0xb0c52: tbh [pc, r3, lsl 1]           ; state-machine dispatch
+```
+
+Confirmed dispatcher because:
+
+1. fcn.000afeec (`AvdtpSigParseConfigCmd` — confirmed via the `[AvdtpSigParseConfigCmd]insert stream to channl stream list` log string at 0xea67a) is called from `bl` at 0xb1012, which lies inside fcn.000b0c30's body.
+2. Six other avsigmgr.c-tagged functions (0xafd5c, 0xb01b4, 0xb0270, 0xb0468, 0xaedd8, 0xafeec) are reachable from inside this function.
+3. The byte-0 dispatch (cmp r3, 7) appears to be on AVDTP state code (8 states), not on signal_id — the signal_id parse happens after state selection. This matches BlueAngel's "stream signaling state machine" architecture.
+
+Per AVDTP V13 §8.5, sig_id lives in **byte 1 (low 6 bits)** of the signal frame, not byte 0. Earlier interpretation (sig_id = [r1+0]) was geometrically wrong — that would have been transaction-label/packet-type/msg-type, not signal_id. The new BPs read `[r1+1] & 0x3f` for the wire signal_id.
+
+`tools/attach-mtkbt-gdb-avdtp.sh` re-targeted at 0xb0c30 + 0xafeec + 0xb1012 + 0xb0b50. Re-run on next pair attempt will show:
+- Sig_id of every inbound AVDTP signal (decoded from wire byte 1).
+- AVDTP state code on each dispatch.
+- SET_CONFIGURATION path (b1012 → afeec) for cross-confirmation.
+
+V5 design TBD — depends on next capture's data on how sig 0x0c is currently rejected (or if it is at all) inside fcn.000b0c30.
 
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
