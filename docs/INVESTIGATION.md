@@ -1416,20 +1416,109 @@ Both bytes at 0xeb9f2 and 0xeba09 read 0x0100 in stock and remain unpatched in t
 
 ## AVDTP signal coverage — codepoints vs handlers
 
-ARCHITECTURE.md §"AVDTP signal codes" lists sig_id 0x01..0x0d as confirmed in mtkbt code. Re-checking under disassembly: sig_ids 0x0c GET_ALL_CAPABILITIES and 0x0d DELAYREPORT (both AVDTP 1.3 additions) appear in the BlueAngel sig-id enum but produce **no log strings** in mtkbt (`grep -iE 'delay.?rep|GET_ALL_CAP'` returns only HFP role-change wording, not AVDTP signalling). Provisional read: codepoint allocation without runtime handlers — these signals would silently drop or NOT_IMPLEMENTED-reject, not honour.
+ARCHITECTURE.md §"AVDTP signal codes" lists sig_id 0x01..0x0d as confirmed in mtkbt code. Provisional read superseded — the dispatcher disassembly in Trace #13 below shows real handler entries for **all** of sig 0x01..0x0d. Sig 0x0c (GET_ALL_CAPABILITIES) reaches a stub at 0xab4de that always returns BAD_LENGTH; sig 0x0d (DELAYREPORT) reaches 0xab540 with substantive logic. Sig 0x08 (CLOSE) and sig 0x09 (SUSPEND) jump-table entries point to the dispatcher's epilogue (0xab786) — handled elsewhere or trivially.
 
-Implication for a future A2DP / AVDTP version-byte bump: advertising AVDTP 1.2 implies DELAY_REPORT, advertising AVDTP 1.3 implies that plus GET_ALL_CAPABILITIES. Without backing handlers we'd reproduce the same shape of mismatch the legacy `--avrcp` set introduced (advertise > implement → strict CT distrusts and gives up).
+The pre-Trace-#13 read ("no log strings → silent drop") was wrong because:
+1. radare2's `aaa` linear sweep failed to analyse the dispatcher at 0xaa72c (invalid bytes at 0xaa720 trapped its analyser → it silently skipped the function).
+2. `grep` for log strings doesn't pick up handlers that don't emit log lines for the per-sig case (the dispatcher logs via fcn.000675c0 with a small per-sig string-id inside the prologue, before the TBH dispatch).
+
+Implication for AVDTP version-byte bump (V3+V4 — AVDTP 1.0→1.3 in served A2DP Source SDP): now corroborated by disassembly. Advertising AVDTP 1.3 is not a pure paper claim — sigs 0x0c (GET_ALL_CAPABILITIES, AVDTP 1.3 ICS Acceptor Mandatory row 9) and 0x0d (DELAYREPORT, Optional) both have dispatch entries, though sig 0x0c's stub fails the response. V5 (sig 0x0c → sig 0x02 alias) closes the row 9 gap.
 
 ## A2DP codec scope
 
 Confirmed SBC-only. `GavdpAvdtpEventCallback` rejects non-SBC SEPs (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC` → "try another SEP" fallback). No AAC / MP3 / ATRAC strings in `mtkbt` or `libmtkbtextadpa2dp.so`. SBC is Mandatory for A2DP 1.0+ TGs, so this is spec-compliant; AAC is Optional and not advertised.
 
+## Trace #13 (2026-05-09) — AVDTP signal dispatcher disassembled, V5 design candidate identified
+
+### Why this trace exists
+
+Open-question items 1+2 ("AVDTP DELAY_REPORT and GET_ALL_CAPABILITIES handler — real or NOT_IMPLEMENTED stub?") and the V3+V4 SDP version bumps (A2DP/AVDTP 1.0→1.3) needed empirical answers from the binary. Static analysis using `grep` / `objdump` had been inconclusive because mtkbt is stripped + heavily MOVW/MOVT-encoded.
+
+### Tooling pivot
+
+Per `feedback_install_proper_tools.md` memory rule, switched from grep-grinding to `dnf install -y radare2` (one command, ~30 s), then used `axt` xref analysis on candidate per-sig handler functions. radare2's auto-analysis (`aaa`) had silently SKIPPED the dispatcher function because invalid bytes at 0xaa720 trapped its linear-sweep analyser — manual disassembly via `r2 -c "pd 200 @ 0xaa72c"` was needed.
+
+### The dispatcher
+
+Located at file offset **0xaa72c** in stock mtkbt (md5 `3af1d4ad…`). Prologue:
+
+```
+0xaa72c: push.w {r4-r8,sb,sl,fp,lr}    ; full-context save
+0xaa73a: ldrb.w sb, [r1]               ; sig_id = first byte of cmd struct
+0xaa7f6: add.w sb, sb, -1              ; sb = sig_id - 1 (TBH index)
+0xaa812: cmp.w sb, 0x28                ; bounds check (accepts 0..0x28 = 41 entries)
+0xaa816: bhi.w 0xab786                 ; OOB → epilogue
+0xaa81a: tbh [pc, sb, lsl 1]           ; jump-table dispatch
+0xaa81e: <halfword table>              ; entry n*2 → target = 0xaa81e + 2*halfword
+```
+
+### Decoded jump table (sig_id 1..13)
+
+| sb | sig_id | wire signal           | target  | meaning                                  |
+|----|--------|-----------------------|---------|------------------------------------------|
+| 0  | 0x01   | DISCOVER              | 0xaa870 | full handler                             |
+| 1  | 0x02   | GET_CAPABILITIES      | 0xaa924 | full handler — capability list builder   |
+| 2  | 0x03   | SET_CONFIGURATION     | 0xab66e | full handler                             |
+| 3  | 0x04   | GET_CONFIGURATION     | 0xaaaf6 | full handler                             |
+| 4  | 0x05   | RECONFIGURE           | 0xaab64 | full handler                             |
+| 5  | 0x06   | OPEN                  | 0xaac6c | full handler                             |
+| 6  | 0x07   | START                 | 0xaacde | full handler                             |
+| 7  | 0x08   | CLOSE                 | 0xab786 | jump to epilogue (handled elsewhere — TBD) |
+| 8  | 0x09   | SUSPEND               | 0xab786 | jump to epilogue (handled elsewhere — TBD) |
+| 9  | 0x0a   | ABORT                 | 0xab008 | full handler                             |
+| 10 | 0x0b   | SECURITY_CONTROL      | 0xab072 | full handler                             |
+| 11 | **0x0c** | **GET_ALL_CAPABILITIES** | **0xab4de** | **STUB — always returns BAD_LENGTH error** |
+| 12 | 0x0d   | DELAYREPORT           | 0xab540 | full handler (sufficient for AVDTP 1.3)  |
+
+### Sig 0x0c stub anatomy (file 0xab4de)
+
+```
+0xab4de: ldrb.w lr, [r4, 8]      ; load response-buffer state byte
+0xab4e2: cmp.w lr, 8
+0xab4e6: bls 0xab51a              ; if state <= 8 → error path
+0xab4e8: ldrb.w r8, [r4, 9]
+0xab4ec: cmp.w r8, 0
+0xab4f0: bne 0xab51a               ; if [r4+9] != 0 → error path
+... (small "main" path that just calls a logger and returns to epilogue —
+     no actual capability-list construction)
+0xab51a: <error path>
+  movs r0, 8 ; strb [r4, 8]    ; "8" stored
+  movs r1, 6 ; strb [r6, 1]    ; "6" stored — internal state code
+  bl fcn.000af4cc               ; error-response sender
+  b 0xab786                     ; epilogue
+```
+
+A fresh inbound GET_ALL_CAPABILITIES has [r4+8] (response-buffer length) initially 0 or small → `bls 0xab51a` taken → error response. **In effect mtkbt advertises sig 0x0c as supported but always rejects it.**
+
+### V5 design candidate — 2-byte jump-table alias
+
+Cleanest V5: change the halfword at file offset **0xaa834** from `60 06` (target 0xab4de stub) to `83 00` (target 0xaa924 sig 0x02 handler).
+
+Pros:
+- 2 bytes total. No code injection / trampoline needed.
+- Sig 0x0c response body is a wire-compatible subset of GET_ALL_CAPABILITIES per V13 §8.8 (response = GET_CAPABILITIES content + optional service capabilities; we send only the GET_CAPABILITIES core, peer reads it as "no extended caps").
+- Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES_RSP).
+
+Risk — **unverified as of 2026-05-09**: response wire sig_id may be hardcoded to 0x02 by the sig 0x02 handler. At 0xaa9fa the handler does `strb r2, [r6, 1]` with r2=2. Whether [r6+1] is the response wire sig_id field or an internal state byte is ambiguous from static analysis alone. Other per-sig handlers also write to [r6+1] (sig 5 writes 5, sig 0x0c stub writes 6) suggesting it's a state code, but the response wire sig_id origin needs runtime confirmation before V5 lands.
+
+### Validation plan
+
+`tools/attach-mtkbt-gdb-avdtp.sh` updated to BP at:
+- 0xaa72c (dispatcher entry — captures sig_id from [r1] and full cmd-buffer first 16 B)
+- 0xaa924 (sig 0x02 handler entry — captures r4/r5/r6/r1 for state struct mapping)
+- 0xab4de (sig 0x0c stub entry — confirms which inbound triggers it)
+- 0xab51a (sig 0x0c error path — confirms always-reject behavior)
+- 0xaeb9c (response sender called from sig 0x02 — captures sig_id arg location)
+- 0xaf4cc (error response sender called from sig 0x0c — captures error format)
+
+Drive a fresh pair attempt against any A2DP Sink CT (Sonos / Bolt / TV); the BPs at 0xaa72c will fire for every inbound AVDTP signal and let us cross-correlate sig_id source with the response builder's input.
+
+### Open V5 sub-questions
+
+1. Where does the response wire sig_id originate? Candidates: (a) preserved from request via the cmd struct that survives the dispatch, (b) re-derived from a session-state byte (e.g. [r6+1]), (c) hardcoded by each handler. Static analysis suggests (a) but runtime confirmation pending.
+2. Can sig 0x08 (CLOSE) and sig 0x09 (SUSPEND) jump-table entries (both → 0xab786 epilogue) actually handle the wire signal somehow, or is this a stock-mtkbt bug? The CLOSE/SUSPEND handlers may live elsewhere and be invoked through a different path. Not load-bearing for V5 but worth checking when extending the runtime trace.
+
 ## Open questions
-
-Resolved during the spec-PDF cross-reference + further disassembly:
-
-1. **AVDTP DELAY_REPORT (sig 0x0d) handler** — disassemble the sig-id dispatch in mtkbt and confirm whether the codepoint reaches a real handler or a NOT_IMPLEMENTED fall-through. Determines whether AVDTP 1.2 / 1.3 advertisement is honest.
-2. **AVDTP GET_ALL_CAPABILITIES (sig 0x0c) handler** — same question.
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
 5. **AVCTP-multiplicity** — V2 patches one of three AVCTP version sites. The other two (0xeba25 / 0xeba37) are unpatched at 0x0100 and may sit on dead code paths; verifying static-vs-runtime authority via experimental patch is the cheapest answer.

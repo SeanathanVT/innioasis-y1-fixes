@@ -222,29 +222,43 @@ fileoff_to_live() {
     printf "0x%x" $(( off + PIE_BASE ))
 }
 
-# Radare2 xref analysis identified these as functions containing assertion
-# strings from avdtp.c / avsigmgr.c — i.e., functions whose source lives in
-# mtkbt's AVDTP layer. Put BPs at each entry; at least one must fire during
-# AVDTP signaling.
+# Dispatcher located via radare2 (2026-05-09): r2 missed analyzing the big
+# function at 0xaa72c-0xab2a2 because invalid bytes at 0xaa720 trapped its
+# linear-sweep analyzer. Manual disasm at 0xaa72c shows:
+#   0xaa72c: push.w {r4-r8,sb,sl,fp,lr}    ; full-context save = function entry
+#   0xaa73a: ldrb.w sb, [r1]               ; sig_id = first byte of cmd struct
+#   0xaa7f6: add.w sb, sb, -1              ; sb = sig_id - 1
+#   0xaa812: cmp.w sb, 0x28                ; bounds check
+#   0xaa816: bhi.w 0xab786                 ; oob → epilogue
+#   0xaa81a: tbh [pc, sb, lsl 1]           ; jump-table dispatch
+#   0xaa81e: <halfword table; entry n*2 → target = 0xaa81e + 2*halfword>
 #
-# avdtp.c functions (src/.../avdtp/avdtp.c):
-BP_af4cc=$(fileoff_to_live 0xaf4cc)   # avdtp.c fn (4 callers; xrefs Stream lookup)
-BP_af698=$(fileoff_to_live 0xaf698)   # avdtp.c fn
-
-# avsigmgr.c functions (src/.../avdtp/avsigmgr.c — the signal manager):
-BP_aedd8=$(fileoff_to_live 0xaedd8)   # avsigmgr.c large dispatcher (size 6616, 12 out-edges)
-BP_afd5c=$(fileoff_to_live 0xafd5c)   # avsigmgr.c capability parser ("n <= MAX_CAPABILITY_SIZE" assert)
-BP_b01b4=$(fileoff_to_live 0xb01b4)   # avsigmgr.c stream-id lookup ("strm->locStrmId != 0xFF")
-BP_b0270=$(fileoff_to_live 0xb0270)   # avsigmgr.c stream lookup ("Stream->locStrmId != 0xFF")
-BP_b0468=$(fileoff_to_live 0xb0468)   # avsigmgr.c fn (called from fcn.000af624)
-BP_b0b50=$(fileoff_to_live 0xb0b50)   # major orchestrator — calls b01b4/b0270, called from b18a8
-BP_b15a0=$(fileoff_to_live 0xb15a0)   # 1070-byte fn — likely the AVDTP signal RX dispatcher
-                                      # (contains the call to b0b50 + multiple sig handler bls)
-
-# Keep the original parser BPs just in case (low cost):
-BP_50b08=$(fileoff_to_live 0x50b08)   # parser entry (case dispatch on input fmt-id)
-BP_50b96=$(fileoff_to_live 0x50b96)   # parser case-1 sig_id store (= AVDTP sig_id if hit)
-BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — about to bl validator + return
+# Decoded jump table for sigs 1-13 (sb-indexed):
+#   sb=0  sig 1  DISCOVER          → 0xaa870
+#   sb=1  sig 2  GET_CAPABILITIES  → 0xaa924
+#   sb=2  sig 3  SET_CONFIGURATION → 0xab66e
+#   sb=3  sig 4  GET_CONFIGURATION → 0xaaaf6
+#   sb=4  sig 5  RECONFIGURE       → 0xaab64
+#   sb=5  sig 6  OPEN              → 0xaac6c
+#   sb=6  sig 7  START             → 0xaacde
+#   sb=7  sig 8  CLOSE             → 0xab786 (epilogue — handled elsewhere?)
+#   sb=8  sig 9  SUSPEND           → 0xab786 (epilogue — handled elsewhere?)
+#   sb=9  sig 10 ABORT             → 0xab008
+#   sb=10 sig 11 SECURITY_CONTROL  → 0xab072
+#   sb=11 sig 12 GET_ALL_CAPABILITIES → 0xab4de  *** STUB / NOT_SUPPORTED ***
+#   sb=12 sig 13 DELAYREPORT       → 0xab540
+#
+# V5 design candidate: alias jump-table sb=11 entry from 0x0660→0x0083 (2-byte
+# patch at file 0xaa834) to route sig 0x0c through sig 0x02 handler. RISK:
+# response wire sig_id may be set by sig 0x02 handler internals (need runtime
+# verify before committing patch — see captures below).
+BP_aa72c=$(fileoff_to_live 0xaa72c)   # AVDTP sig dispatcher entry
+BP_aa924=$(fileoff_to_live 0xaa924)   # sig 0x02 GET_CAPABILITIES handler
+BP_ab4de=$(fileoff_to_live 0xab4de)   # sig 0x0c GET_ALL_CAPABILITIES stub
+BP_ab51a=$(fileoff_to_live 0xab51a)   # sig 0x0c stub error path entry
+BP_aeb9c=$(fileoff_to_live 0xaeb9c)   # response sender called from sig 0x02 handler
+                                      # (capture sig_id source on its arg buffer)
+BP_af4cc=$(fileoff_to_live 0xaf4cc)   # error-response sender (called from sig 0x0c stub)
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -282,117 +296,73 @@ set arm force-mode thumb
 
 target remote :${PORT}
 
-# AVDTP signal-frame parser entry (file 0x50b08). Input arg r0 points at a
-# struct: byte 0 = format-id (0/1/2/4/0xff), offset 4 = pointer to inbound
-# AV/C frame buffer. LR tells us who called the parser.
-break *${BP_50b08}
+# --- AVDTP signal dispatcher (file 0xaa72c) ---
+# This MUST fire on every inbound AVDTP signal. Captures sig_id (=[r1]) and
+# the full first 16 bytes of the cmd buffer for cross-reference with the
+# wire frame format from spec V13 §8.5.
+break *${BP_aa72c}
 commands
 silent
-printf "BP@0x50b08 parser entry: r0=0x%08x [r0+0]=%u (fmt-id) [r0+4]=0x%08x (frame ptr)  LR=0x%08x\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4), \$lr
-printf "  frame@[r0+4][0..15]: "
-x/8xb *(unsigned int*)(\$r0+4)
+printf "BP@dispatcher:0xaa72c entry: r0=0x%x r1=0x%x  sig_id=[r1]=0x%02x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, \$lr
+printf "  cmd@[r1][0..15]: "
+x/16xb \$r1
 continue
 end
 
-# Parser stores sig_id at output struct +8 (file 0x50b96).
-# At this point, register lr (low byte) holds the masked sig_id (& 0x3f).
-break *${BP_50b96}
+# --- sig 0x02 GET_CAPABILITIES handler entry ---
+# Fires for the normal capability query. We need to capture (a) the
+# response sig_id source and (b) the response buffer initial state, to
+# decide whether the V5 jump-table alias will produce a sig_id-correct
+# response when sig 0x0c maps here. r6 likely holds session/state struct,
+# r4 the SEP / response struct, r5 the request struct.
+break *${BP_aa924}
 commands
 silent
-printf "BP@0x50b96 sig_id stored: lr-low=0x%02x (sig_id) → [r1+8] (r1=0x%08x)\n", \$lr & 0xff, \$r1
+printf "BP@sig02:0xaa924 GET_CAPABILITIES: r4=0x%x r5=0x%x r6=0x%x r1=0x%x  LR=0x%x\n", \$r4, \$r5, \$r6, \$r1, \$lr
+printf "  [r6+0..7]: " ; x/8xb \$r6
+printf "  [r4+0..15]: " ; x/16xb \$r4
+printf "  [r1+0..15]: " ; x/16xb \$r1
 continue
 end
 
-# Parser convergence point (file 0x50c46) — about to bl 0x50a48 (validator)
-# then return. r0 / r1 hold the parsed-struct pointer.
-break *${BP_50c46}
+# --- sig 0x0c GET_ALL_CAPABILITIES stub entry ---
+# Should fire on any peer that sends sig 0x0c. Captures the inbound state
+# so we know where the stub gates. cmp [r4+8] <= 8 is the gate; if it
+# passes, we go to error path 0xab51a; if it falls through, real(?) path.
+break *${BP_ab4de}
 commands
 silent
-printf "BP@0x50c46 parser exit: r0=0x%x r1=0x%x  output struct sig_id=0x%02x\n", \$r0, \$r1, *(unsigned char*)(\$r1+8)
+printf "BP@sig0c:0xab4de GET_ALL_CAPABILITIES STUB: [r4+8]=0x%02x [r4+9]=0x%02x  LR=0x%x\n", *(unsigned char*)(\$r4+8), *(unsigned char*)(\$r4+9), \$lr
 continue
 end
 
-# --- avdtp.c / avsigmgr.c function-entry BPs (radare2-located) ---
-# At least one of these MUST fire during AVDTP signal RX.
+# --- sig 0x0c stub error path ---
+# If this fires, mtkbt is rejecting the peer's GET_ALL_CAPABILITIES with
+# an error response. Captures whether the peer's request was
+# format-rejectable (peer fault) or always-rejected (V5 needed).
+break *${BP_ab51a}
+commands
+silent
+printf "BP@sig0c-err:0xab51a (stub error path) — sig 0x0c rejected\n"
+continue
+end
 
+# --- response sender called from sig 0x02 handler (fcn.000aeb9c) ---
+# Confirm whether sig_id is in arg0/arg1 (would be in the response builder)
+# or stored in some struct field that we can override.
+break *${BP_aeb9c}
+commands
+silent
+printf "BP@resp-sender:0xaeb9c: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
+printf "  caller=0x%x  [r0+0..15]: ", \$lr ; x/16xb \$r0
+continue
+end
+
+# --- error response sender (fcn.000af4cc, called from sig 0x0c stub) ---
 break *${BP_af4cc}
 commands
 silent
-printf "BP@avdtp.c:0xaf4cc fcn entry: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
-continue
-end
-
-break *${BP_af698}
-commands
-silent
-printf "BP@avdtp.c:0xaf698 fcn entry: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
-continue
-end
-
-break *${BP_aedd8}
-commands
-silent
-printf "BP@avsigmgr.c:0xaedd8 LARGE fcn entry: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
-continue
-end
-
-break *${BP_afd5c}
-commands
-silent
-printf "BP@avsigmgr.c:0xafd5c (cap parser): r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
-continue
-end
-
-break *${BP_b01b4}
-commands
-silent
-printf "BP@avsigmgr.c:0xb01b4 (strm-id lookup): r0=0x%x r1=0x%x  LR=0x%x\n", \$r0, \$r1, \$lr
-continue
-end
-
-break *${BP_b0270}
-commands
-silent
-printf "BP@avsigmgr.c:0xb0270 (stream lookup): r0=0x%x  LR=0x%x\n", \$r0, \$lr
-continue
-end
-
-break *${BP_b0468}
-commands
-silent
-printf "BP@avsigmgr.c:0xb0468 fcn entry: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
-continue
-end
-
-break *${BP_b0b50}
-commands
-silent
-printf "BP@avsigmgr.c:0xb0b50 ORCHESTRATOR: r0=0x%x r1=0x%x  LR=0x%x\n", \$r0, \$r1, \$lr
-printf "  [r0+0x341]=%u [r1+6]=0x%x [r1+8]=0x%x (sig_id?)\n", *(unsigned char*)(\$r0+0x341), *(unsigned short*)(\$r1+6), *(unsigned char*)(\$r1+8)
-continue
-end
-
-break *${BP_b15a0}
-commands
-silent
-printf "BP@avsigmgr.c:0xb15a0 LIKELY-DISPATCHER: sp=%p  LR=0x%x\n", \$sp, \$lr
-printf "  [sp+0x40]=0x%x (likely cmd struct ptr)\n", *(unsigned int*)(\$sp+0x40)
-continue
-end
-
-# Original parser BP — kept in case one of the avdtp.c fns calls it
-break *${BP_50b08}
-commands
-silent
-printf "BP@parser:0x50b08: r0=0x%x [r0+0]=%u (fmt-id) LR=0x%x\n", \$r0, *(unsigned char*)\$r0, \$lr
-continue
-end
-
-# Case-1 sig_id store (only fires if AVDTP signaling routes through this parser)
-break *${BP_50b96}
-commands
-silent
-printf "*** BP@parser:0x50b96 sig_id stored (case 1 = AVDTP path!): sig_id=0x%02x at [r1+8]\n", \$lr & 0xff
+printf "BP@err-resp:0xaf4cc: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
 continue
 end
 
