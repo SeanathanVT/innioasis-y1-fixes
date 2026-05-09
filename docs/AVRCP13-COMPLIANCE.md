@@ -288,30 +288,28 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 **Current state.** No code path in `mtkbt` or its adapters wires AVRCP playback-state edges to AVDTP source-state changes. The legacy `libaudio.a2dp.default.so::standby_l` (the only HAL hook that emits AVDTP SUSPEND via `a2dp_stop`) intentionally skips that call when `mSuspendedParam != 0` — and we have no evidence in captured logs that AudioFlinger ever calls `setParameters("A2dpSuspended=true")` on MediaPlayer pause.
 
-**Compliance plan.**
+**Why this is deferred.** The reachability constraint dominates. `btmtk_a2dp_pause_immediately` and `btmtk_a2dp_send_stream_start_req` live in `libmtkbtextadpa2dp.so` (loaded by `mtkbt`). `libextavrcp_jni.so` (where every Y1 trampoline currently lives) has no PLT entry for either symbol, so a trampoline cannot call them directly. Three possible call routes, all with substantial prereq cost:
 
-1. **Wire MediaPlayer state edges into AVDTP source state at the bridge layer.** Y1MediaBridge already observes Y1 player state via `LogcatMonitor` (`'1'` PLAYING, `'3'` PAUSED, `'5'` STOPPED). Extend `MediaBridgeService.notifyPlaybackStatus` to additionally call into an AVDTP source-state hook on edge transitions:
-   - PLAYING → PAUSED: trigger AVDTP SUSPEND
-   - PAUSED → PLAYING: trigger AVDTP START
-   - any → STOPPED: trigger AVDTP CLOSE
+1. **Add `dlsym` + `dlopen` to libextavrcp_jni.so's PLT, then resolve `btmtk_a2dp_pause_immediately` at runtime.** Requires ELF surgery to extend `.dynsym` + `.dynstr` + `.rel.plt` + `.plt` + `.got.plt` (libdl is already mapped into mtkbt; the bindings just aren't on this .so). Doable but invasive enough that the existing "patch-byte-offsets" patch model won't carry it; would need a new PLT-grafting helper. Then T9 calls `dlsym(RTLD_DEFAULT, "btmtk_a2dp_pause_immediately")` once per process lifetime, caches the resolved address in `y1-trampoline-state`, and invokes from there.
+2. **Hook mtkbt directly.** mtkbt's main binary calls `btmtk_a2dp_pause_immediately` somewhere internally (it's the A2DP source manager). Find that call site, route a `playstatechanged`-driven external trigger through it. Requires reverse-engineering mtkbt's internal A2DP state machine — ~2 days of disassembly to find a stable hook point.
+3. **Add a new BT-process helper APK.** Load a Java helper into the BT-process (uid 1002) at boot; helper does `System.loadLibrary("mtkbtextadpa2dp")` + JNI call. Cleanest from a maintenance angle but requires Y1's AOSP init scaffolding to load a system app into the BT uid, which it doesn't currently do.
 
-2. **The hook itself.** Cleanest reach is `libmtkbtextadpa2dp.so::btmtk_a2dp_pause_immediately` (synchronous AVDTP SUSPEND wrapper) + `btmtk_a2dp_send_stream_start_req` (AVDTP START). These are exported from the BT-process .so and would need an IPC entry point so Y1MediaBridge (a separate process) can invoke them. Two viable shapes:
+All three need hardware verification cycles (capture btlog, confirm AVDTP SUSPEND sig_id 0x09 / START sig_id 0x07 on the AVDTP signaling channel). Our existing patch pipeline handles in-place byte edits well; PLT extension or new-helper-APK is a different category of change.
 
-   - **a. Bridge-direct via Binder.** Add an `IBTAvrcpMusic.pauseAvdtpSource(flag)` method served by `MediaBridgeService` and consumed by `BTAvrcpMusicAdapter` (Java side), which would in turn invoke the .so's exported function. Requires Java-layer bridging in MtkBt.apk.
+The Y1MediaBridge-side scaffolding (debounce, edge-detect, IPC call site) is also non-trivial — ~250 ms transient-pause debounce to avoid thrashing the A2DP source on pause-then-play taps within a single user gesture. That part's cheap to write but pointless without a target IPC method to call.
 
-   - **b. mtkbt-direct via abstract socket.** `mtkbt` already accepts AVRCP-related IPC over `bt.ext.adp.avrcp` (msg=519 etc.). Add a new msg-id (say 600) for "external pause/resume A2DP source" and have Y1MediaBridge connect to that socket directly to fire it. No Java/IBinder surgery, but we'd be defining a new protocol surface in mtkbt.
+**Compliance plan when revisited.**
 
-   Of the two, **option (a)** is preferred because it keeps the IPC vocabulary inside the existing `IBTAvrcpMusic` interface. Option (b) is the upstream-spec-correct location (this *should* be a framework-side `setParameters` call), but Y1's AOSP build doesn't have the framework hook in place to make that a tractable patch site.
+1. **Pick the call route** (`dlsym` extension, mtkbt internal hook, or BT-process helper APK). `dlsym` is most likely the lowest-risk path — keeps the existing patch-pipeline shape and isolates change to a single .so.
+2. **Y1MediaBridge edge detection.** Extend `MediaBridgeService.LogcatMonitor` / `onStateDetected` to compute a 250 ms-debounced state edge. Fire a new IPC method (Binder or socket) on each debounced edge: PLAYING→PAUSED, PAUSED→PLAYING, any→STOPPED.
+3. **MtkBt-side dispatch.** Receive the IPC, invoke `btmtk_a2dp_pause_immediately` (PAUSED), `btmtk_a2dp_send_stream_start_req` (PLAYING), or AVDTP CLOSE (STOPPED).
+4. **Avoid double-dispatch.** If MtkBt's internal A2DP source state machine ever sends SUSPEND on its own (e.g. on AudioFlinger no-data-timeout), our hook would race. Guard with a "last source-state edge fired by us in the past N ms" check, or read mtkbt's source state before issuing a redundant call.
 
-3. **Avoid double-dispatch.** If MtkBt's own A2DP source state machine ever does start sending SUSPEND on its own (e.g., on AudioFlinger no-data-timeout), our hook would race. Guard with a "last source-state edge fired by us in the past N ms" check, or read mtkbt's source state before issuing a redundant SUSPEND.
+**Effort estimate.** ~3 days when revisited, dominated by route-(1) ELF surgery + hardware-test cycles. Route-(2) mtkbt hook discovery would balloon to ~5 days if internal state machine is non-trivial.
 
-**Effort estimate.** ~3 days. Discovery of `btmtk_a2dp_pause_immediately` calling convention is required — argument shape is undocumented and would need disassembly per the "Adding a new PDU handler" recipe.
-
-**Where the fix goes.** Y1MediaBridge `MediaBridgeService.notifyPlaybackStatus`, plus a new IPC method in `IBTAvrcpMusic`, plus a Java-side bridging trampoline in MtkBt.odex (or a new helper APK loaded into the BT process). No `libextavrcp_jni.so` trampoline changes.
+**Where the fix would go.** `Y1MediaBridge/MediaBridgeService.java` (edge detection + debounce + IPC call) + new ELF surgery in `src/patches/` (route 1) OR new mtkbt patch (route 2) OR new helper APK + init.rc entry (route 3).
 
 **Verification.** Pause / resume via AVRCP from a controller that publishes its A2DP source state; capture btlog and confirm AVDTP SUSPEND (sig_id 0x09) and AVDTP START (sig_id 0x07) on the AVDTP signaling channel (typically cid 0x41 or whatever PSM 0x19 was assigned).
-
-**Risks.** Over-aggressive SUSPEND on transient pauses (e.g., user taps pause-then-play within 200 ms) could thrash the A2DP source; guard with a debounce of ~250 ms before firing SUSPEND.
 
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp`
 
@@ -341,10 +339,12 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 ### 9.6 Remaining workstream order
 
-1. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses". Cross-component work (Y1MediaBridge ↔ MtkBt.odex ↔ libmtkbtextadpa2dp.so).
-2. **§9.1 stateful T_continuation** — deferred behind §9.1's two prereqs (manual META builder OR observed CT 0x40 demand). See §9.1 above.
+Both §9.1 and §9.2 are deferred behind hard binary-analysis prereqs:
 
-Both should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` to be replaced by a manual AVRCP META builder (so the TG ever sets `packet_type=01`, otherwise re-emit is dead code), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day of binary-experiment cycles for what's a functionally-indistinguishable wire-shape change).
+- **§9.2 AVRCP↔AVDTP coupling**: needs ELF surgery to add `dlsym` to `libextavrcp_jni.so`'s PLT (or a different call route into `libmtkbtextadpa2dp.so::btmtk_a2dp_pause_immediately`), plus hardware-iterate cycles to verify the AVDTP SUSPEND / START call shape.
+
+Both should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6 when the prereq work is unblocked.
 
 ---
 
