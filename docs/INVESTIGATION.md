@@ -1539,3 +1539,89 @@ Hyundai Motor Group head unit. Polls GetPlayStatus (PDU 0x30) at ~1 Hz, subscrib
 - Pre-iter22d: Kia hid the playback-progress scrubber during playback because T6 returned static `position_at_state_change_ms` (iter20a deferral). Closed by iter22d's `clock_gettime(CLOCK_BOOTTIME)`-based live extrapolation.
 - `mIBTAvrcpMusic` binder doesn't connect — zero `IBTAvrcpMusic.*` log entries in iter22c / d captures. AVRCP transport commands reach the music app via the libextavrcp_jni `avrcp_input_sendkey` → uinput path only. Open investigation.
 - **2026-05-08 postflash (`/work/logs/dual-kia-postflash/`):** play-during-pause broken on the discrete-key chain (same symptom as Sonos — `KEY_PLAYCD` reaches kernel cleanly, `play(Z)` never fires in music app). **2026-05-09 re-test of an attempted fix (drop `registerMediaButtonEventReceiver`) confirmed MtkBt depends on the registered MediaButton client to locate Y1MediaBridge's `IBTAvrcpMusic` Binder** — the change broke metadata delivery on Kia entirely (no Title / Artist / Album), and AVRCP behavior degraded toward 1.0 fallback. Reverted. The discrete-key chain-break remains open; whatever fix we try has to keep the registration intact. Track playing time + scrub-bar advance verified working pre-revert.
+
+# Lower BT profile-stack disassembly (2026-05-09)
+
+Trigger: scoping the per-profile ICS-scoreboard pass (BT-COMPLIANCE.md §9.9). Goal: stock-vs-spec-target baseline for A2DP / AVDTP / AVCTP / GAVDP so the existing AVRCP-1.3-paired V1 (AVRCP 1.0→1.3) and V2 (AVCTP 1.0→1.2) patches can be sanity-checked against ground truth and the missing patches for the audio triad can be designed.
+
+## Binary inventory
+
+In-scope BT-related ELFs in stock v3.0.2 (md5 = file md5sum at the time of disassembly):
+
+| Path | Size | md5 | Role |
+|---|---:|---|---|
+| `bin/mtkbt`                       | 1029140 | `3af1d4ad8f955038186696950430ffda` | BlueAngel daemon — L2CAP, HCI, AVCTP, AVDTP, GAVDP, A2DP, AVRCP TG |
+| `lib/libextavrcp.so`              |   17552 | `6442b137d3074e5ac9a654de83a4941a` | AVRCP response builders (T-trampoline targets) |
+| `lib/libextavrcp_jni.so`          |   50992 | `fd2ce74db9389980b55bccf3d8f15660` | JNI bridge — trampoline blob host |
+| `lib/libmtka2dp.so`               |   17552 | `6dc3e453cd3ea05d7c0a7a07a100c0f7` | userspace A2DP stream socket bridge |
+| `lib/libmtkbtextadpa2dp.so`       |   50320 | `b41be49baeeefbdb427e00bba2e0d2e2` | Java↔mtkbt A2DP shim (SEP register / stream-state IPC) |
+| `lib/libmtkbtextadp.so`           |   17504 | `f084b8b3973c39bcb54a98dfaf068a31` | Java↔mtkbt main extadp (binder ↔ IPC) |
+| `lib/libaudio.a2dp.default.so`    |   58660 | `0d909a0bcf7972d6e5d69a1704d35d1f` | AOSP A2DP HAL (`A2dpAudioStreamOut::standby_l`, `A2dpSuspended` parameter) |
+| `lib/libbtcust.so`                |    5204 | `898de90dcdca935f9acc563e491209d7` | customisation flags |
+| `lib/libbtcusttable.so`           |    5256 | `271139c43691f90ed5d83aea342c19d0` | customisation tables |
+| `lib/libem_bt_jni.so`             |   17764 | `2376b561f10267e1d047a06b11ba3948` | engineer-mode JNI |
+
+Of these, every profile from L2CAP up through AVRCP TG lives in the single `mtkbt` ELF. The `lib*.so` files are adapters / shims; only `libaudio.a2dp.default.so` carries a BT-protocol-relevant function (`standby_l` → `a2dp_stop` → AVDTP SUSPEND on the wire) and that's already covered by the §9.2 A2dpSuspended hook.
+
+## SDP record region
+
+Profile-version bytes in mtkbt's SDP-record source data live in a contiguous block at file offset `0xeb9d0..0xebd00` (LOAD #1 rodata, vaddr == file_off). Static analysis with a DataElement decoder finds **eight** UUID-paired version entries inside the block:
+
+| File offset (LSB byte of uint16 version) | Profile UUID | Role | Stock value | V1/V2-patched? |
+|---|---|---|---|---|
+| 0x0eb9f2 | 0x110D AdvancedAudioDistribution | A2DP profile descriptor | `0x0100` (1.0) | — |
+| 0x0eba09 | 0x0019 AVDTP                     | AVDTP protocol descriptor | `0x0100` (1.0) | — |
+| 0x0eba25 | 0x0017 AVCTP                     | AVCTP protocol descriptor (Browse PSM 0x001b path) | `0x0100` (1.0) | — |
+| 0x0eba37 | 0x0017 AVCTP                     | AVCTP protocol descriptor #2 | `0x0100` (1.0) | — |
+| 0x0eba4b | 0x110E AVRCP (legacy)            | AVRCP profile descriptor #1 | `0x0100` (1.0) | — |
+| 0x0eba58 | 0x110E AVRCP (legacy)            | AVRCP profile descriptor #2 | `0x0100` (1.0) | **V1: 0x00 → 0x03** |
+| 0x0eba6d | 0x0017 AVCTP                     | AVCTP protocol descriptor #3 | `0x0100` (1.0) | **V2: 0x00 → 0x02** |
+| 0x0eba77 | 0x110E AVRCP (legacy)            | AVRCP profile descriptor #3 | `0x0103` (1.3) | already 1.3 in stock |
+
+A separate 12-byte-stride attribute table at vaddr `0xfa700..0xfa9c0` indexes these byte ranges by SDP attribute ID (`{ uint32 ptr; uint32 reserved; uint16 attr_id; uint16 length }`). Five SDP records are described: A2DP record A (entries 1-5), A2DP record B (entries 6-10), AVRCP record A (entries 11-16, including attr 0x0311 SupportedFeatures + attr 0x000d AdditionalProtocolDescriptorList for the Browse channel), AVRCP record B (entries 17-22), HFP record + others (later entries).
+
+## Ground-truth from sdptool capture
+
+`/work/logs/y1-sdptool-records-avrcp.log` — sdptool browse against a Y1 flashed without `--avrcp` and `--bluetooth` (i.e., V1 / V2 / S1 / P1 NOT applied):
+
+| Record | ProtocolDescList version | ProfileDescList version |
+|---|---|---|
+| A2DP Source (handle 0x10002, UUID 0x110A) | AVDTP **0x0100** | A2DP (0x110D) **0x0100** |
+| AVRCP TG (handle 0x10003, UUID 0x110C)    | AVCTP **0x0103** | AVRCP (0x110E) **0x0104** |
+
+The A2DP record's wire versions match the static bytes at 0xeb9f2 / 0xeba09. The AVRCP record's wire versions **don't** match the static bytes (which are 0x0100 in 7 of 8 sites and 0x0103 in one) — confirming mtkbt has runtime SDP-record-build logic for AVRCP that overrides the static template. The runtime hook is `AVRCP register activeVersion:%d` (mtkbt log string at file offset 0xc88b7); F1's MtkBt.odex patch flips a related BlueAngel-internal version flag.
+
+## V1 / V2 design intent — reinterpretation
+
+Pre-disassembly framing (per stale `patch_mtkbt.py` docstrings + early INVESTIGATION notes): "V1 patches AVRCP 1.0 → 1.3 to upgrade the served version." Post-disassembly framing: stock device already advertises **AVRCP 1.4 / AVCTP 1.3** at the wire level (per sdptool ground truth above). V1 (AVRCP 1.4 → 1.3) and V2 (AVCTP 1.3 → 1.2) **downgrade** the advertised versions to match what we actually implement: AVRCP 1.3 wire shape via the trampoline chain, paired with AVCTP 1.2 per AVRCP 1.3 §6 + ESR07 §2.1 / Erratum 4969. Without the downgrades, peer CTs negotiate against advertised 1.4 features (the V14 set) but our trampolines + mtkbt's AV/C dispatcher only handle 1.3, so a strict CT can NACK or distrust the metadata path. The downgrade aligns advertisement with implementation.
+
+The AVRCP-record version source at runtime is the activated-version flag, not the static SDP bytes. So V1's static-byte patch at 0xeba58 is *probably* dead-code (the runtime flag dominates) but remains in the patch set as a defensive measure against any code path that consults the template directly.
+
+A2DP / AVDTP have no equivalent runtime override evidence — `[A2DP] a2dp init, deactive first` is the only A2DP/AVDTP version-related log string, and its argument is a state code, not a version field. So upgrading A2DP / AVDTP advertisements should be doable via byte patches at 0xeb9f2 (A2DP) and 0xeba09 (AVDTP) — pending verification by an experimental flash + sdptool re-capture.
+
+## AVDTP signal-id table — codepoint allocation vs handler
+
+ARCHITECTURE.md §"AVDTP signal codes" lists sig_id 0x01..0x0d as "confirmed in mtkbt code". Re-checked under disassembly: 0x0c GET_ALL_CAPABILITIES (AVDTP 1.3) and 0x0d DELAYREPORT (AVDTP 1.3) appear as enum constants but **no log strings** for DELAY_REPORT processing exist in mtkbt (`grep -i delay.?rep` matches only HFP role-change wording, not AVDTP signaling). Same for GET_ALL_CAPABILITIES. Provisional read: codepoint allocation in the BlueAngel sig-id enum without a runtime handler — these signals would be either ignored or NOT_IMPLEMENTED-rejected, *not* honored.
+
+Implication: bumping the AVDTP version byte at 0xeba09 from `0x0100` to `0x0103` without first wiring DELAY_REPORT inbound handling would advertise a feature we can't service — same shape of mismatch as stock's pre-V1 AVRCP 1.4 advertisement vs 1.0 dispatch. AVDTP 1.2 (`0x0102`) is the version that introduced DELAY_REPORT, so 1.0 → 1.2 has the same problem. The clean targets are either:
+- **Stay at AVDTP 1.0** if we ship no DELAY_REPORT support (matches actual capability — spec-acceptable, just not spec-complete).
+- **Verify DELAY_REPORT inbound handling exists and works**, then advertise 1.3.
+
+Same logic chains to A2DP 1.3 vs A2DP 1.0 — A2DP 1.3 advertisement implies AVDTP 1.3, which implies DELAY_REPORT.
+
+## A2DP codec scope
+
+Confirmed: SBC-only. The GAVDP layer's `GavdpAvdtpEventCallback` rejects non-SBC SEPs (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC` → "try another SEP" fallback). No AAC / MP3 / ATRAC strings in `mtkbt` or `libmtkbtextadpa2dp.so`. SBC is Mandatory for A2DP 1.0+ TGs, so this is spec-compliant; AAC is Optional and not advertised.
+
+## Open questions (for the spec-PDF cross-reference pass)
+
+Each one will need an answer before we can ship a coherent triad-version-bump:
+
+1. **A2DP 1.3 SupportedFeatures bits** — what feature mask should the SDP record advertise? A2DP 1.3 §3.1 defines source-side feature bits (Headphone / Speaker / Recorder / Amplifier). Stock A2DP record has attr 0x0311 SupportedFeatures with what value? (Need to dump the static bytes at the table-pointed offset and see.)
+2. **AVDTP DELAY_REPORT inbound handler** — disassemble the AVDTP signal-id dispatch table in mtkbt and confirm whether 0x0d DELAYREPORT has a real handler or hits a NOT_IMPLEMENTED fall-through. If it has a handler: AVDTP 1.3 advertisement is honest. If not: stay at 1.0 or wire one up.
+3. **AVDTP GET_ALL_CAPABILITIES (0x0c) coverage** — same disassembly question for sig_id 0x0c.
+4. **AVCTP version-byte multiplicity** — three AVCTP version sites in static SDP region (0xeba25 / 0xeba37 / 0xeba6d). V2 patches only 0xeba6d. Are the other two on dead code paths or do they need patching too? Ground-truth sdptool shows AVCTP 1.3 in the AVRCP record's ProtocolDescList — single value, so the runtime build is consulting one source. The Browse-channel AdditionalProtocolDescriptorList (sdptool didn't fetch this attr — it shows in the XML output of the dump but with the same `0x0103` value) may be a separate consumer.
+5. **GAVDP** — no separate SDP record advertised (UUID 0x1203 hits in the SDP region are part of the HFP record, not GAVDP). Per GAVDP 1.3 §6, GAVDP versioning piggybacks on AVDTP versioning; no independent byte-patch needed.
+6. **Static-vs-runtime SDP authority** — confirm by experimental patch + sdptool re-capture: bump 0xeb9f2 (A2DP version) from 0x00 to 0x03, flash, capture sdptool. If A2DP record now shows 1.3, static bytes drive the wire (no runtime override) and the patch site is correct. If still 1.0, mtkbt has runtime A2DP version logic too and we need to find it.
+
+Verification path for any A2DP / AVDTP bump: experimental flash + `dual-capture.sh` + sdptool browse + `btlog-parse.py` against a peer CT that uses GET_CAPABILITIES (AVDTP 1.3 sig 0x02) — the captured exchange tells us what we advertise *and* what the peer does with it.
