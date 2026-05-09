@@ -224,15 +224,28 @@ fileoff_to_live() {
     printf "0x%x" $(( off + PIE_BASE ))
 }
 
+# Radare2 xref analysis identified these as functions containing assertion
+# strings from avdtp.c / avsigmgr.c — i.e., functions whose source lives in
+# mtkbt's AVDTP layer. Put BPs at each entry; at least one must fire during
+# AVDTP signaling.
+#
+# avdtp.c functions (src/.../avdtp/avdtp.c):
+BP_af4cc=$(fileoff_to_live 0xaf4cc)   # avdtp.c fn (4 callers; xrefs Stream lookup)
+BP_af698=$(fileoff_to_live 0xaf698)   # avdtp.c fn
+
+# avsigmgr.c functions (src/.../avdtp/avsigmgr.c — the signal manager):
+BP_aedd8=$(fileoff_to_live 0xaedd8)   # avsigmgr.c large dispatcher (size 6616, 12 out-edges)
+BP_afd5c=$(fileoff_to_live 0xafd5c)   # avsigmgr.c capability parser ("n <= MAX_CAPABILITY_SIZE" assert)
+BP_b01b4=$(fileoff_to_live 0xb01b4)   # avsigmgr.c stream-id lookup ("strm->locStrmId != 0xFF")
+BP_b0270=$(fileoff_to_live 0xb0270)   # avsigmgr.c stream lookup ("Stream->locStrmId != 0xFF")
+BP_b0468=$(fileoff_to_live 0xb0468)   # avsigmgr.c fn (called from fcn.000af624)
+BP_b0b50=$(fileoff_to_live 0xb0b50)   # major orchestrator — calls b01b4/b0270, called from b18a8
+BP_b15a0=$(fileoff_to_live 0xb15a0)   # 1070-byte fn — likely the AVDTP signal RX dispatcher
+                                      # (contains the call to b0b50 + multiple sig handler bls)
+
+# Keep the original parser BP just in case (low cost):
 BP_50b08=$(fileoff_to_live 0x50b08)   # parser entry (case dispatch on input fmt-id)
-BP_50b96=$(fileoff_to_live 0x50b96)   # parser case-1 sig_id store (byte1 & 0x3f = AVDTP sig_id)
-BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — last insn before validator + return
-BP_de26=$(fileoff_to_live 0xde26)     # parser caller A — passes r4+0x11c
-BP_de2a=$(fileoff_to_live 0xde2a)     # post-return at caller A (dispatch decision downstream)
-BP_df26=$(fileoff_to_live 0xdf26)     # parser caller B — same outer fn as A, alt path
-BP_df2a=$(fileoff_to_live 0xdf2a)     # post-return at caller B
-BP_50dfa=$(fileoff_to_live 0x50dfa)   # parser caller C — different fn, alloc'd 24B struct
-BP_50dfe=$(fileoff_to_live 0x50dfe)   # post-return at caller C
+BP_50b96=$(fileoff_to_live 0x50b96)   # parser case-1 sig_id store (= AVDTP sig_id if hit)
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -300,62 +313,87 @@ printf "BP@0x50c46 parser exit: r0=0x%x r1=0x%x  output struct sig_id=0x%02x\n",
 continue
 end
 
-# Parser caller A at 0xde26 (in fn near 0xdc00, alongside caller B at 0xdf26).
-break *${BP_de26}
+# --- avdtp.c / avsigmgr.c function-entry BPs (radare2-located) ---
+# At least one of these MUST fire during AVDTP signal RX.
+
+break *${BP_af4cc}
 commands
 silent
-printf "BP@0xde26 caller-A: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
+printf "BP@avdtp.c:0xaf4cc fcn entry: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
 continue
 end
 
-# Post-return at caller A. After parser exits, the calling code branches based
-# on parsed-struct contents. Disassemble PC to locate the dispatch site.
-break *${BP_de2a}
+break *${BP_af698}
 commands
 silent
-printf "BP@0xde2a post-return-A: parser returned r0=%d  parsed-struct sig_id=[r4+0x11c+8]=%u\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c+8)
-printf "  next 8 insns @PC=%p:\n", \$pc
-disassemble \$pc, \$pc+32
+printf "BP@avdtp.c:0xaf698 fcn entry: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
 continue
 end
 
-# Parser caller B at 0xdf26 (same outer fn as A, alternate path; passes same
-# r4+0x11c arg).
-break *${BP_df26}
+break *${BP_aedd8}
 commands
 silent
-printf "BP@0xdf26 caller-B: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
+printf "BP@avsigmgr.c:0xaedd8 LARGE fcn entry: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
 continue
 end
 
-# Post-return at caller B.
-break *${BP_df2a}
+break *${BP_afd5c}
 commands
 silent
-printf "BP@0xdf2a post-return-B: parser returned r0=%d  parsed-struct sig_id=[r4+0x11c+8]=%u\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c+8)
-printf "  next 8 insns @PC=%p:\n", \$pc
-disassemble \$pc, \$pc+32
+printf "BP@avsigmgr.c:0xafd5c (cap parser): r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
 continue
 end
 
-# Parser caller C at 0x50dfa (different fn entirely — wrapper allocates a 24-B
-# struct via 0x6a29c, sets struct[4]=byte, then calls parser with r0=incoming
-# arg + r1=alloc+8). Followed by bl 0x50c58 with msg_id=312 (0x138). This
-# might be where AVDTP RX is funneled in.
-break *${BP_50dfa}
+break *${BP_b01b4}
 commands
 silent
-printf "BP@0x50dfa caller-C: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
+printf "BP@avsigmgr.c:0xb01b4 (strm-id lookup): r0=0x%x r1=0x%x  LR=0x%x\n", \$r0, \$r1, \$lr
 continue
 end
 
-# Post-return at caller C — followed by bl 0x50c58 (msg=312 dispatch).
-break *${BP_50dfe}
+break *${BP_b0270}
 commands
 silent
-printf "BP@0x50dfe post-return-C: parser returned r0=%d  about to bl 0x50c58 (msg=312)\n", (int)\$r0
-printf "  next 8 insns @PC=%p:\n", \$pc
-disassemble \$pc, \$pc+32
+printf "BP@avsigmgr.c:0xb0270 (stream lookup): r0=0x%x  LR=0x%x\n", \$r0, \$lr
+continue
+end
+
+break *${BP_b0468}
+commands
+silent
+printf "BP@avsigmgr.c:0xb0468 fcn entry: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
+continue
+end
+
+break *${BP_b0b50}
+commands
+silent
+printf "BP@avsigmgr.c:0xb0b50 ORCHESTRATOR: r0=0x%x r1=0x%x  LR=0x%x\n", \$r0, \$r1, \$lr
+printf "  [r0+0x341]=%u [r1+6]=0x%x [r1+8]=0x%x (sig_id?)\n", *(unsigned char*)(\$r0+0x341), *(unsigned short*)(\$r1+6), *(unsigned char*)(\$r1+8)
+continue
+end
+
+break *${BP_b15a0}
+commands
+silent
+printf "BP@avsigmgr.c:0xb15a0 LIKELY-DISPATCHER: sp=%p  LR=0x%x\n", \$sp, \$lr
+printf "  [sp+0x40]=0x%x (likely cmd struct ptr)\n", *(unsigned int*)(\$sp+0x40)
+continue
+end
+
+# Original parser BP — kept in case one of the avdtp.c fns calls it
+break *${BP_50b08}
+commands
+silent
+printf "BP@parser:0x50b08: r0=0x%x [r0+0]=%u (fmt-id) LR=0x%x\n", \$r0, *(unsigned char*)\$r0, \$lr
+continue
+end
+
+# Case-1 sig_id store (only fires if AVDTP signaling routes through this parser)
+break *${BP_50b96}
+commands
+silent
+printf "*** BP@parser:0x50b96 sig_id stored (case 1 = AVDTP path!): sig_id=0x%02x at [r1+8]\n", \$lr & 0xff
 continue
 end
 
