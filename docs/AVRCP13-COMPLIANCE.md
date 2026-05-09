@@ -284,32 +284,22 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 ### 9.2 AVRCP playback state ↔ AVDTP source state coupling
 
-**Spec.** Not a hard AVRCP 1.3 requirement, but a conformance expectation: when AVRCP TG signals PLAYBACK_STATUS_CHANGED to PAUSED, the A2DP source should send AVDTP SUSPEND (sig_id 0x09); on transition to PLAYING, AVDTP START (sig_id 0x07). AVDTP 1.3 §8.13 + §8.15. Some controllers gate their UI play-state on the AVDTP source state and won't honour an AVRCP-driven pause if the audio stream remains in STREAMING.
+**Spec.** Not a hard AVRCP 1.3 requirement, but a conformance expectation: when AVRCP TG signals PLAYBACK_STATUS_CHANGED to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down). On transition to PLAYING, the source should resume feeding samples without renegotiating the stream. AVDTP 1.3 §8.13 / §8.15.
 
-**Current state.** No code path in `mtkbt` or its adapters wires AVRCP playback-state edges to AVDTP source-state changes. The legacy `libaudio.a2dp.default.so::standby_l` (the only HAL hook that emits AVDTP SUSPEND via `a2dp_stop`) intentionally skips that call when `mSuspendedParam != 0` — and we have no evidence in captured logs that AudioFlinger ever calls `setParameters("A2dpSuspended=true")` on MediaPlayer pause.
+**Original deviation (pre-fix).** No code path in `mtkbt` or its adapters wired AVRCP playback-state edges to AVDTP source-state. AudioFlinger's silence-timeout (`kStandbyTimeMs ≈ 3 s`) reached `libaudio.a2dp.default.so::standby_l` with `mSuspended_param == 0` (never explicitly suspended), which called `a2dp_stop` → AVDTP SUSPEND on the wire. Peer CTs (notably TVs that aggressively power-cycle their A2DP sink on silence) closed and reopened the stream once per pause-of-≥3s. Empirical evidence from `/work/logs/dual-tv-20260509-1410`: 8 such cycles in a 3-min capture, each correlated with `Audio hardware entering standby ... suspend count 0` then `[A2DP] a2dp_stop. is_streaming:1`. User-visible symptoms: garbled-burst audio on resume (encoder/decoder buffer drain+refill catch-up at >1× speed) and momentary playhead drift on the AVRCP-reported position (T9 extrapolates linearly while real audio bursts then catches up).
 
-**Why this is deferred.** The reachability constraint dominates. `btmtk_a2dp_pause_immediately` and `btmtk_a2dp_send_stream_start_req` live in `libmtkbtextadpa2dp.so` (loaded by `mtkbt`). `libextavrcp_jni.so` (where every Y1 trampoline currently lives) has no PLT entry for either symbol, so a trampoline cannot call them directly. Three possible call routes, all with substantial prereq cost:
+**Current state.** Y1MediaBridge `MediaBridgeService.onStateDetected` calls `audioManager.setParameters("A2dpSuspended=" + (paused ? "true" : "false"))` on every play-state edge before the broadcast / callback chain. This flips `mSuspended_param` in `libaudio.a2dp.default.so`; `standby_l` then skips `a2dp_stop` while paused. The AVDTP stream stays in STREAMING during the pause. On PAUSED→PLAYING the parameter goes back to `false` and AudioFlinger resumes feeding samples without any AVDTP renegotiation. STOPPED leaves it at `false` so AudioFlinger naturally idles the HAL output and AVDTP CLOSE fires (the spec-correct wire shape for real stop). Pure Java change in Y1MediaBridge — no native trampoline / ELF / mtkbt-side surgery required. Symbol-scope verified: `A2dpSuspended` is referenced only by `libaudio.a2dp.default.so`; absent from `mtkbt`, `libmtka2dp.so`, and `libmtkbtextadpa2dp.so`, so no MtkBt / BlueAngel side-effects.
 
-1. **Add `dlsym` + `dlopen` to libextavrcp_jni.so's PLT, then resolve `btmtk_a2dp_pause_immediately` at runtime.** Requires ELF surgery to extend `.dynsym` + `.dynstr` + `.rel.plt` + `.plt` + `.got.plt` (libdl is already mapped into mtkbt; the bindings just aren't on this .so). Doable but invasive enough that the existing "patch-byte-offsets" patch model won't carry it; would need a new PLT-grafting helper. Then T9 calls `dlsym(RTLD_DEFAULT, "btmtk_a2dp_pause_immediately")` once per process lifetime, caches the resolved address in `y1-trampoline-state`, and invokes from there.
-2. **Hook mtkbt directly.** mtkbt's main binary calls `btmtk_a2dp_pause_immediately` somewhere internally (it's the A2DP source manager). Find that call site, route a `playstatechanged`-driven external trigger through it. Requires reverse-engineering mtkbt's internal A2DP state machine — ~2 days of disassembly to find a stable hook point.
-3. **Add a new BT-process helper APK.** Load a Java helper into the BT-process (uid 1002) at boot; helper does `System.loadLibrary("mtkbtextadpa2dp")` + JNI call. Cleanest from a maintenance angle but requires Y1's AOSP init scaffolding to load a system app into the BT uid, which it doesn't currently do.
+**Why the cheaper path was missed initially.** Earlier drafts of this section assumed the fix had to drive `btmtk_a2dp_pause_immediately` directly through `libmtkbtextadpa2dp.so`, which is reachability-blocked from `libextavrcp_jni.so` trampolines (no PLT entry; would need ELF surgery for a `dlsym` graft). The empirical investigation of the TV burst (2026-05-09) surfaced the AOSP-HAL-layer parameter as a one-layer-up hook that achieves the same effect through the existing AudioFlinger flow rather than around it.
 
-All three need hardware verification cycles (capture btlog, confirm AVDTP SUSPEND sig_id 0x09 / START sig_id 0x07 on the AVDTP signaling channel). Our existing patch pipeline handles in-place byte edits well; PLT extension or new-helper-APK is a different category of change.
+**Where the fix lives.** `Y1MediaBridge/MediaBridgeService.java::onStateDetected` — single `audioManager.setParameters(...)` call wrapped in `try/catch(Throwable)`, before the `writeTrackInfoFile()` / broadcast / callback chain. ~10 lines of code plus block comment. Y1MediaBridge versionCode bumped on the change.
 
-The Y1MediaBridge-side scaffolding (debounce, edge-detect, IPC call site) is also non-trivial — ~250 ms transient-pause debounce to avoid thrashing the A2DP source on pause-then-play taps within a single user gesture. That part's cheap to write but pointless without a target IPC method to call.
+**Verification.** Pause / resume via AVRCP from a CT that aggressively power-cycles A2DP on silence (TV postures). Capture btlog and confirm: zero `[A2DP] a2dp_stop. is_streaming:1` lines around pause windows, zero `Audio hardware entering standby ... suspend count 0` lines, peer A2DP `mPlayingA2dpDevice` does NOT cycle to null during the pause. Audio resume should be clean (no burst) and CT playhead should track real audio.
 
-**Compliance plan when revisited.**
-
-1. **Pick the call route** (`dlsym` extension, mtkbt internal hook, or BT-process helper APK). `dlsym` is most likely the lowest-risk path — keeps the existing patch-pipeline shape and isolates change to a single .so.
-2. **Y1MediaBridge edge detection.** Extend `MediaBridgeService.LogcatMonitor` / `onStateDetected` to compute a 250 ms-debounced state edge. Fire a new IPC method (Binder or socket) on each debounced edge: PLAYING→PAUSED, PAUSED→PLAYING, any→STOPPED.
-3. **MtkBt-side dispatch.** Receive the IPC, invoke `btmtk_a2dp_pause_immediately` (PAUSED), `btmtk_a2dp_send_stream_start_req` (PLAYING), or AVDTP CLOSE (STOPPED).
-4. **Avoid double-dispatch.** If MtkBt's internal A2DP source state machine ever sends SUSPEND on its own (e.g. on AudioFlinger no-data-timeout), our hook would race. Guard with a "last source-state edge fired by us in the past N ms" check, or read mtkbt's source state before issuing a redundant call.
-
-**Effort estimate.** ~3 days when revisited, dominated by route-(1) ELF surgery + hardware-test cycles. Route-(2) mtkbt hook discovery would balloon to ~5 days if internal state machine is non-trivial.
-
-**Where the fix would go.** `Y1MediaBridge/MediaBridgeService.java` (edge detection + debounce + IPC call) + new ELF surgery in `src/patches/` (route 1) OR new mtkbt patch (route 2) OR new helper APK + init.rc entry (route 3).
-
-**Verification.** Pause / resume via AVRCP from a controller that publishes its A2DP source state; capture btlog and confirm AVDTP SUSPEND (sig_id 0x09) and AVDTP START (sig_id 0x07) on the AVDTP signaling channel (typically cid 0x41 or whatever PSM 0x19 was assigned).
+**Risks / edge cases.**
+- `setParameters` is permission-gated (`MODIFY_AUDIO_SETTINGS`); Y1MediaBridge holds it as a system app, but a hardened build / SELinux denial would throw. Wrapped in `try/catch(Throwable)` so the state-edge dispatch never fails.
+- If AudioFlinger or another process also sets `A2dpSuspended` (e.g. on incoming call routing on different builds), there's a potential race. We always set the value matching our current state on every edge, so a transient external override self-corrects on the next state edge.
+- A peer CT that gates UI play-state on AVDTP source state (rare in practice; most key on AVRCP PLAYBACK_STATUS_CHANGED) would need a different fix — either drive AVDTP SUSPEND/START explicitly via the original deferred ELF-graft routes, or accept that those CTs see continuous "streaming silence" during pause.
 
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp`
 
@@ -339,12 +329,11 @@ The Y1MediaBridge-side scaffolding (debounce, edge-detect, IPC call site) is als
 
 ### 9.6 Remaining workstream order
 
-Both §9.1 and §9.2 are deferred behind hard binary-analysis prereqs:
+§9.2 (AVRCP↔AVDTP coupling) and §9.3 (per-attribute cap) are shipped. §9.1 remains deferred:
 
-- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` to be replaced by a manual AVRCP META builder (so the TG ever sets `packet_type=01`, otherwise re-emit is dead code), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day of binary-experiment cycles for what's a functionally-indistinguishable wire-shape change).
-- **§9.2 AVRCP↔AVDTP coupling**: needs ELF surgery to add `dlsym` to `libextavrcp_jni.so`'s PLT (or a different call route into `libmtkbtextadpa2dp.so::btmtk_a2dp_pause_immediately`), plus hardware-iterate cycles to verify the AVDTP SUSPEND / START call shape.
+- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` to be replaced by a manual AVRCP META builder (so the TG ever sets `packet_type=01`, otherwise re-emit is dead code), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day of binary-experiment cycles for what's a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions to date.
 
-Both should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6 when the prereq work is unblocked.
+When §9.1 is revisited it should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
 ---
 
