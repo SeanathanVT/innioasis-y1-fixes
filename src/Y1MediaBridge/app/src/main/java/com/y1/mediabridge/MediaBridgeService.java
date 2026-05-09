@@ -1382,6 +1382,17 @@ public class MediaBridgeService extends Service {
     private static final int TOTAL_LEN          = GENRE_OFFSET + FIELD_LEN;       // 1104
     private static final int STATE_LEN          = 16;
 
+    /** Per-attribute byte cap for the GetElementAttributes response builder
+     *  in `libextavrcp.so:btmtk_avrcp_send_get_element_attributes_rsp`. The
+     *  OEM builder enforces a 511-byte hard cap and silently drops any
+     *  attribute that exceeds it (`[BT][AVRCP][ERR] too large attr_index:%d`).
+     *  We truncate at 240 B at the y1-track-info layer so even with multi-byte
+     *  UTF-8 expansion the per-attribute payload stays well under 511 — and a
+     *  strict CT receives a complete (if truncated) value instead of a
+     *  silent attribute drop. AVRCP 1.3 §5.3.4 places no per-attribute cap
+     *  itself; the cap is purely a deviation in the OEM TG response builder. */
+    private static final int AVRCP_ATTR_MAX_BYTES = 240;
+
     private void writeTrackInfoFile() {
         try {
             byte[] buf = new byte[TOTAL_LEN];  // zero-initialized
@@ -1475,8 +1486,18 @@ public class MediaBridgeService extends Service {
             // UTF-8 is always supported by the JVM — this branch is unreachable.
             return;
         }
-        // Truncate to slot-1 to guarantee at least one trailing null byte for strlen.
-        int n = src.length < slot ? src.length : slot - 1;
+        // Cap = min(slot-1, AVRCP_ATTR_MAX_BYTES). slot-1 guarantees a trailing
+        // null byte for the trampoline's strlen+memcpy chain; AVRCP_ATTR_MAX_BYTES
+        // keeps each value under the OEM 511-byte per-attribute hard cap.
+        int cap = slot - 1;
+        if (cap > AVRCP_ATTR_MAX_BYTES) cap = AVRCP_ATTR_MAX_BYTES;
+        int n = src.length < cap ? src.length : cap;
+        // UTF-8 codepoint-safe truncation: if the byte just past our truncation
+        // point is a continuation byte (10xxxxxx, i.e. 0x80..0xBF), we'd be
+        // cutting a multi-byte codepoint in half and leaving a partial sequence
+        // — strict CTs reject that as malformed UTF-8 per AVRCP 1.3 §5.3.4
+        // CharacterSet=0x6A (UTF-8). Walk back to the codepoint boundary.
+        while (n > 0 && n < src.length && (src[n] & 0xC0) == 0x80) n--;
         System.arraycopy(src, 0, dst, off, n);
     }
 

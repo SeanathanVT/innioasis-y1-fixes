@@ -314,18 +314,11 @@ This section catalogues the deviations relevant to AVRCP 1.3 conformance and pro
 
 **Spec.** AVRCP 1.3 §5.3.4 places no per-attribute byte cap. TG fragments via §5.5 if the total response exceeds AVCTP MTU.
 
-**Current state.** `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap; on overflow it emits `[BT][AVRCP][ERR] too large attr_index:%d` and drops the attribute silently. Tracks with extreme-length tags (e.g., 1000-character album titles in some OEM DRM-laden albums) lose the offending attribute. Most real-world content stays well under 511 B per attribute.
+**OEM TG deviation.** `libextavrcp.so:0x2188` (`btmtk_avrcp_send_get_element_attributes_rsp`) enforces a 511-byte per-attribute hard cap; on overflow it emits `[BT][AVRCP][ERR] too large attr_index:%d` and drops the attribute silently.
 
-**Compliance plan.**
+**Current state.** `Y1MediaBridge/MediaBridgeService.java::putUtf8Padded` caps each string attribute at `AVRCP_ATTR_MAX_BYTES = 240` bytes before it lands in `y1-track-info`. The cap is well below the OEM 511 hard cap so even after multi-byte UTF-8 expansion at the CT side the attribute survives. Truncation is codepoint-safe — if the chosen byte position would split a multi-byte codepoint, the helper walks back to the codepoint boundary so a strict CT never sees a malformed UTF-8 sequence (AVRCP 1.3 §5.3.4 CharacterSet=0x6A). Numeric attributes (TrackNumber 4, TotalNumber 5, PlayingTime 7) are bounded to 15 bytes by `NUMERIC_STR_LEN` and unaffected.
 
-1. **Cap each `y1-track-info` attribute slot to 240 B in Y1MediaBridge** (well under the OEM 511 cap). UTF-8 multi-byte characters need careful truncation to avoid landing mid-codepoint.
-2. Optionally: bypass `…send_get_element_attributes_rsp` entirely and build the GetElementAttributes response wire frame directly in the trampoline, using the full §5.5 fragmentation flow from §9.1 above. This removes the 511 cap as a constraint. Larger effort (~3 days), only worth it if §9.1 is shipping anyway.
-
-**Effort estimate.** ~0.5 days for the Y1MediaBridge truncation. ~3 days for the bypass approach (paired with §9.1).
-
-**Where the fix goes.** `Y1MediaBridge/MediaBridgeService.java::writeTrackInfoFile` truncation logic, OR the wire-shape bypass at the trampoline layer.
-
-**Verification.** Manually craft a test track with 800-character title; confirm Title attribute lands intact in the AVRCP response (or, with the truncation approach, lands at 240 B with no `too large` log).
+**Optional follow-up.** Bypass `…send_get_element_attributes_rsp` entirely and build the GetElementAttributes response wire frame directly in the trampoline, using the full §5.5 fragmentation flow from §9.1 above. Removes the 511 cap as a constraint. ~3 days if paired with §9.1 (no value as a standalone change — 240 B already fits everything we'd realistically ship).
 
 ### 9.4 AVCTP MTU negotiation discoverability
 
@@ -343,13 +336,12 @@ This section catalogues the deviations relevant to AVRCP 1.3 conformance and pro
 
 **Compliance plan.** No action required for AVRCP 1.3 conformance. SBC suffices for §5.3.4 metadata transport (audio codec choice doesn't affect AVRCP wire shape). Listed here so the SBC-only constraint is explicit in the doc.
 
-### 9.6 Suggested implementation order
+### 9.6 Remaining workstream order
 
-1. **§9.3 partial fix** (Y1MediaBridge truncation to 240 B) — smallest blast radius, cheapest to verify, no `libextavrcp_jni.so` changes. Ship this first as belt-and-braces hygiene.
-2. **§9.1 stateful T_continuation** — addresses the strict-CT-small-buffer scenario. Self-contained in `_trampolines.py`; no cross-component changes. Pair with §9.3-bypass if also doing the bypass route.
-3. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses", but most cross-component work. Requires an IPC surface that doesn't currently exist.
+1. **§9.1 stateful T_continuation** — addresses the strict-CT-small-buffer scenario. Self-contained in `_trampolines.py`; no cross-component changes.
+2. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses", but most cross-component work. Requires an IPC surface that doesn't currently exist.
 
-Each of the three should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+Both should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
 ---
 
