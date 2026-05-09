@@ -222,31 +222,41 @@ fileoff_to_live() {
     printf "0x%x" $(( off + PIE_BASE ))
 }
 
-# 2026-05-09 capture invalidated the original 0xaa72c hypothesis: the TBH
-# function at 0xaa72c is BlueAngel's INTERNAL task-message dispatcher (267
-# fires with msg_type=0x17, none in AVDTP wire range 0x01..0x0d). The real
-# AVDTP signal RX dispatcher is fcn.000b0c30 — a 6482-byte function with
-# 239 basic blocks that radare2's `aaa` skipped because invalid bytes at
-# 0xb0c20-0xb0c2e trap its analyser. Manual disasm at 0xb0c30:
-#   0xb0c30: push.w {r4-r8,sb,sl,fp,lr}
-#   0xb0c34: mov r8, r0                    ; r0 = stream / channel struct
-#   0xb0c40: mov r5, r1                    ; r1 = AVDTP signal frame ptr
-#   0xb0c42: ldrh r0, [r1, 2]              ; AVDTP header bytes 2-3
-#   0xb0c44: ldrb r3, [r1]                 ; r3 = AVDTP byte 0 (header[0])
-#   0xb0c4c: cmp r3, 7
-#   0xb0c4e: bhi.w 0xb19c8                 ; oob error
-#   0xb0c52: tbh [pc, r3, lsl 1]           ; state-machine dispatch on byte 0
-# fcn.000b0c30 contains the bl to AvdtpSigParseConfigCmd (fcn.000afeec) at
-# 0xb1012, confirming it's on the SET_CONFIGURATION path. The byte-0 dispatch
-# is likely on AVDTP state code (8 states), with sig_id parsed downstream.
+# 0xaa72c is the AVDTP-layer DISPATCHER for both wire signals (entries
+# sb=0..12 → sig_id 1-13) AND internal task messages (sb=14..40, e.g. 0x17
+# fired in 2026-05-09-22:18 capture — internal state-machine drive event).
+# Same TBH table at 0xaa81e routes both. So this fires for AVDTP wire signals
+# IFF a peer actually transmits an AVDTP signal frame during gdb attach.
+# Earlier captures showed no wire fires only because no pair attempt happened
+# during attach, NOT because the dispatcher is wrong.
 #
-# Capture goal for V5: confirm fcn.000b0c30 is THE AVDTP RX entry by seeing
-# it fire on every inbound signal, and capture sig_id from [r1+1] (low 6
-# bits of AVDTP byte 1 = signal_id per V13 §8.5).
-BP_b0c30=$(fileoff_to_live 0xb0c30)   # AVDTP signal RX dispatcher entry
-BP_afeec=$(fileoff_to_live 0xafeec)   # AvdtpSigParseConfigCmd (sig 0x03 path)
-BP_b0b50=$(fileoff_to_live 0xb0b50)   # AVDTP helper called from b18a8 (state machine helper)
-BP_b1012=$(fileoff_to_live 0xb1012)   # bl AvdtpSigParseConfigCmd site (sig 0x03 dispatch confirm)
+# Decoded table (file offset 0xaa834 = entry for sig 0x0c → 0xab4de stub):
+#   sig 0x01 DISCOVER          → 0xaa870 (full)
+#   sig 0x02 GET_CAPABILITIES  → 0xaa924 (full)
+#   sig 0x03 SET_CONFIGURATION → 0xab66e (full)
+#   sig 0x04 GET_CONFIGURATION → 0xaaaf6 (full)
+#   sig 0x05 RECONFIGURE       → 0xaab64 (full)
+#   sig 0x06 OPEN              → 0xaac6c (full)
+#   sig 0x07 START             → 0xaacde (full)
+#   sig 0x08 CLOSE             → 0xab786 (epilogue stub)
+#   sig 0x09 SUSPEND           → 0xab786 (epilogue stub)
+#   sig 0x0a ABORT             → 0xab008 (full)
+#   sig 0x0b SECURITY_CONTROL  → 0xab072 (full)
+#   sig 0x0c GET_ALL_CAPABILITIES → 0xab4de (STUB — always BAD_LENGTH)
+#   sig 0x0d DELAYREPORT       → 0xab540 (full)
+#
+# fcn.000b0c30 (different fn) is an AVDTP-layer state-machine driver called
+# internally — fires constantly during stream lifecycle but with different
+# arg shape than wire frames. Useful as a positive control showing the AVDTP
+# state machine is alive, but not the wire-RX dispatch path itself.
+BP_aa72c=$(fileoff_to_live 0xaa72c)   # AVDTP dispatcher (wire signals + internal msgs)
+BP_aa924=$(fileoff_to_live 0xaa924)   # sig 0x02 GET_CAPABILITIES handler
+BP_ab4de=$(fileoff_to_live 0xab4de)   # sig 0x0c GET_ALL_CAPABILITIES STUB
+BP_aeb9c=$(fileoff_to_live 0xaeb9c)   # response sender called from sig 0x02
+BP_afeec=$(fileoff_to_live 0xafeec)   # AvdtpSigParseConfigCmd (sig 0x03 inner)
+BP_afd5c=$(fileoff_to_live 0xafd5c)   # AVDTP capability parser
+BP_b0c30=$(fileoff_to_live 0xb0c30)   # AVDTP state-machine driver (positive control)
+BP_b0b50=$(fileoff_to_live 0xb0b50)   # AVDTP helper
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -284,51 +294,96 @@ set arm force-mode thumb
 
 target remote :${PORT}
 
-# --- fcn.000b0c30 entry — AVDTP-layer state-machine dispatcher ---
-# 6482-byte function with TBH on [r1] (8 states, 0..7). Hypothesised as
-# the AVDTP signal RX path because it contains the bl to AvdtpSigParseConfigCmd
-# at 0xb1012, but first capture (2026-05-09 evening) shows byte0=0x00 +
-# byte1=0x37 — the small struct at r1 is NOT the raw AVDTP wire frame
-# (frame byte 1 in AVDTP V13 §8.5 has sig_id in low 6 bits, max 0x0d, but
-# we saw 0x37). So fcn.000b0c30 sits between L2CAP RX and the per-sig
-# parsers and reads from a higher-level request struct, not the wire.
-# Dump 32 bytes so we can identify which field carries the wire sig_id.
-break *${BP_b0c30}
+# --- 0xaa72c: AVDTP dispatcher entry (wire signals + internal msgs) ---
+# THE AVDTP wire-signal dispatcher. [r1] is the message-type byte:
+#   0x01..0x0d → AVDTP wire signal_id (DISCOVER..DELAYREPORT)
+#   0x0e+      → internal state-machine events (drove the prior 267 fires
+#                with msg=0x17 in the absence of a peer pair attempt)
+# To get a wire fire here you MUST drive a fresh pair attempt while gdb
+# is attached. After re-pair, expect to see [r1] = 1, 2 (and 3, 4, 6, 7
+# during stream setup), then NACK on 0x0c if the peer probes 1.3 features.
+break *${BP_aa72c}
 commands
 silent
-printf "BP@b0c30: r0=0x%x r1=0x%x  state=[r1]=0x%02x [r1+1]=0x%02x [r1+2..3]=0x%04x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, *(unsigned char*)(\$r1+1), *(unsigned short*)(\$r1+2), \$lr
-printf "  struct@[r1][0..31]:\n"
+printf "BP@dispatcher:0xaa72c: r0=0x%x r1=0x%x  msg=[r1]=0x%02x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, \$lr
+printf "  msg-struct@[r1][0..31]:\n"
 x/32xb \$r1
 continue
 end
 
-# --- AvdtpSigParseConfigCmd entry (named function — sig 0x03 SET_CONFIGURATION) ---
-# Confirms SET_CONFIGURATION RX path. Should fire on any peer pair attempt.
-# arg2 (r1) is the parsed signal frame; first byte is signal_id-related.
+# --- 0xaa924: sig 0x02 GET_CAPABILITIES handler entry ---
+# Fires when peer sends sig 0x02 (mandatory in pair handshake). Capture
+# r4/r5/r6 to understand the response builder calling convention. The
+# value of [r6+1] BEFORE the handler runs tells us if it's the wire
+# sig_id or a state byte (V5 design risk hinges on this).
+break *${BP_aa924}
+commands
+silent
+printf "BP@sig02:0xaa924 GET_CAPABILITIES handler: r4=0x%x r5=0x%x r6=0x%x\n", \$r4, \$r5, \$r6
+printf "  [r6+0..7]:\n"
+x/8xb \$r6
+printf "  [r4+0..15]:\n"
+x/16xb \$r4
+continue
+end
+
+# --- 0xab4de: sig 0x0c GET_ALL_CAPABILITIES stub entry ---
+# Fires only if peer sends sig 0x0c. Captures the gate state ([r4+8])
+# that decides whether the stub goes to error path 0xab51a or attempts
+# the (mostly-no-op) main path.
+break *${BP_ab4de}
+commands
+silent
+printf "*** BP@sig0c:0xab4de GET_ALL_CAPABILITIES stub fired ***  [r4+8]=0x%02x [r4+9]=0x%02x  LR=0x%x\n", *(unsigned char*)(\$r4+8), *(unsigned char*)(\$r4+9), \$lr
+continue
+end
+
+# --- 0xaeb9c: response sender called from sig 0x02 handler at 0xaa948 ---
+# Critical for V5 design: identifies whether the response wire sig_id is
+# carried via r0/r1/r2 args or via a struct field. r0 likely points to
+# the response payload buffer; first 16 bytes show the AVDTP response
+# header (which must mirror the request's sig_id).
+break *${BP_aeb9c}
+commands
+silent
+printf "BP@resp-sender:0xaeb9c: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
+printf "  resp@[r0][0..15]:\n"
+x/16xb \$r0
+continue
+end
+
+# --- 0xafeec: AvdtpSigParseConfigCmd (named via log-string xref at 0xea67a) ---
+# Fires on sig 0x03 SET_CONFIGURATION dispatch. Confirms wire-RX flow
+# reached the per-sig parser layer.
 break *${BP_afeec}
 commands
 silent
-printf "BP@AvdtpSigParseConfigCmd:0xafeec: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
-printf "  arg-r1@[0..15]:\n"
+printf "BP@AvdtpSigParseConfigCmd:0xafeec: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
+printf "  cmd-struct@[r1][0..15]:\n"
 x/16xb \$r1
 continue
 end
 
-# --- bl AvdtpSigParseConfigCmd site inside fcn.000b0c30 (file 0xb1012) ---
-# Dispatches sig 0x03 from inside b0c30 state-machine. r5 carries the
-# preserved arg2 from b0c30 entry (the small struct, not wire frame).
-break *${BP_b1012}
+# --- 0xafd5c: AVDTP capability parser (cap MAX_CAPABILITY_SIZE assert) ---
+# Fires inside GET_CAPABILITIES / GET_ALL_CAPABILITIES response build.
+break *${BP_afd5c}
 commands
 silent
-printf "BP@b1012 (call AvdtpSigParseConfigCmd from b0c30): r4=0x%x r5=0x%x r6=0x%x\n", \$r4, \$r5, \$r6
-printf "  r5-struct@[0..15]:\n"
-x/16xb \$r5
+printf "BP@cap-parser:0xafd5c: r0=0x%x r1=0x%x r2=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$lr
 continue
 end
 
-# --- fcn.000b0b50 (AVDTP helper called from b18a8 in fcn.000b0c30) ---
-# 214-byte fn. r0/r1 args show what's being dispatched. Useful for
-# tracing the state-machine flow inside b0c30.
+# --- 0xb0c30: AVDTP state-machine driver (positive control) ---
+# Fires continuously during stream lifecycle (267+ fires per session
+# observed). Captures aren't wire-RX but confirm AVDTP layer is alive.
+break *${BP_b0c30}
+commands
+silent
+printf "BP@b0c30 state-driver: r0=0x%x r1=0x%x  state=[r1]=0x%02x [r1+1]=0x%02x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, *(unsigned char*)(\$r1+1), \$lr
+continue
+end
+
+# --- 0xb0b50: AVDTP helper (called from inside b0c30) ---
 break *${BP_b0b50}
 commands
 silent
