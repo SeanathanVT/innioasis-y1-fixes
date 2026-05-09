@@ -127,6 +127,18 @@ fi
 PIE_BASE=$((16#$PIE_BASE_HEX))
 printf "    PIE base: 0x%x\n" "$PIE_BASE"
 
+# Pull mtkbt off the device so we can hand it to gdb as the exec-file. Without
+# this, host gdb has no idea the target is ARM (manifests as "Architecture
+# rejected target-supplied description" + garbled register state).
+MTKBT_LOCAL="/tmp/mtkbt-live"
+echo "==> Pulling mtkbt off device for gdb exec-file (architecture detection).."
+adb pull /system/bin/mtkbt "$MTKBT_LOCAL" >/dev/null 2>&1
+if [ ! -s "$MTKBT_LOCAL" ]; then
+    echo "ERROR: failed to pull /system/bin/mtkbt to $MTKBT_LOCAL" >&2
+    exit 1
+fi
+echo "    saved to: $MTKBT_LOCAL"
+
 fileoff_to_live() {
     printf "0x%x" $((PIE_BASE + 16#${1#0x}))
 }
@@ -150,6 +162,12 @@ cat > "$CMDFILE" <<EOF
 set arm fallback-mode thumb
 set arm force-mode thumb
 set print pretty on
+
+# Tell gdb the target is ARM via the locally-pulled mtkbt binary. This must
+# happen BEFORE 'target remote' or gdb negotiates a default architecture
+# (often x86_64) with the remote and rejects the ARM register description.
+file ${MTKBT_LOCAL}
+set sysroot /
 
 # AVDTP signal-frame parser entry (file 0x50b08)
 break *${BP_50b08}
