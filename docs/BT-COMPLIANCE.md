@@ -341,9 +341,29 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 - **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day for a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions.
 - **§1 Phase F4 PApp Settings**: ~5 days, all-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30. Highest-value remaining AVRCP work.
-- **§9.5 / §9.8 ICS-scoreboard pass**: half-day to acquire A2DP / AVDTP / AVCTP / GAVDP ICS PDFs, then audit Y1 against each. Output drives the AAC + DELAY_REPORT investigations and surfaces any missed Optional rows.
+- **§9.5 / §9.8 ICS-scoreboard pass**: in progress (§9.10 below); spec PDFs landed at `docs/spec/<PROFILE>/`. Per-profile audits incrementally added.
 
 Each ships with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+
+### 9.10 AVCTP 1.2 ICS audit — *AVCTP* — VERIFIED
+
+Anchored against `docs/spec/AVCTP 1.2/AVCTP.ICS.p10.pdf` Table 3 (Target Features). Per Table 0, AVCTP 1.0 / 1.2 / 1.3 are all deprecated 2022-02-01 + withdrawn 2023-02-01; only AVCTP 1.4 is in current SIG qualification scope. We target 1.2 because that's the version paired with AVRCP 1.3 per AVRCP 1.3 §6 + ESR07 §2.1 / Erratum 4969 — same shipping-window argument as AVRCP 1.3 (deprecated 2023-02-01 / withdrawn 2027-02-01).
+
+| ICS Table 3 row | Capability | Status | Y1 |
+|---|---|---|---|
+| 1 | Message fragmentation | O | ✓ — mtkbt outbound path implements pkt_type 0/1/2/3 (SINGLE/START/CONTINUE/END) per ARCHITECTURE.md §"AVCTP packet types" |
+| **2** | **Transaction label management** | **M** | ✓ — `transId` routed from `conn[17]` into every response builder; stamping into byte 5 of IPC frame is the response-builder's responsibility (cross-ref ARCHITECTURE.md cross-profile coupling table item 4). Empirically wire-confirmed via Trace #12 — Sonos sends real AV/C VENDOR_DEPENDENT GetCapabilities and the trampoline-chain response is accepted |
+| **3** | **Packet type field management** | **M** | ✓ — pkt_type written by the AVCTP-layer fragmentation logic; Trace #12 captures show 100% pkt_type=0x00 SINGLE for the GetElementAttributes 644 B body (no fragmentation triggered) |
+| **4** | **Message type field management** | **M** | ✓ — RESPONSE / COMMAND distinction set per AV/C body type; mtkbt's response builders write the correct type bit |
+| **5** | **PID field management** | **M** | ✓ — AVRCP TG PID=0x110E served correctly per the AVRCP record's ProfileDescList; AVCTP layer uses this PID for routing |
+| **6** | **IPID field management** | **M** | ✓ — Invalid Profile Identifier handling delegated to mtkbt's AVCTP layer; no observed deviation across captured sessions |
+| **7** | **Message information management** | **M** | ✓ — AV/C body parsing + response synthesis lives in the trampoline chain (see ARCHITECTURE.md §"Trampoline chain") |
+| 8-13 | Event registration / connect / disconnect / send variants | O | mtkbt provides the connect / disconnect / send paths used by the JNI bridge; event-registration optional and not separately exposed |
+| 14 | Multiple AVCTP channel establishment | O — Controller-only row | n/a (TG row table doesn't include this) |
+
+**All Mandatory rows covered.** Optional row 1 (fragmentation) shipped for completeness; remaining Optional rows (8-13) are CT/TG event-registration APIs not exercised by our stack.
+
+**Static AVCTP version-byte multiplicity question (resolved).** Three AVCTP version sites in mtkbt's static SDP-record region; V2 patches one. Per the SDP attribute table at vaddr `0xfa700`, only one served AVRCP TG record references AVCTP — the served-record entries (table file offset `0xf97c0..0xf9808`) include attr 0x0004 ProtocolDescriptorList (containing the V2-patched AVCTP version at `0xeba6d`) but NOT attr 0x000d AdditionalProtocolDescriptorList (which is what would carry the Browse-channel AVCTP descriptor at `0xeba25`). The unpatched site `0xeba37` falls inside a separate template record that is not selected at runtime. sdptool ground truth (Trace #12, post-V1+V2 flash) shows the served record advertises AVCTP `0x0102` — only one version on the wire. Conclusion: **V2 patches the only consulted site; the other two are dead bytes.** Verification path if the static-vs-runtime authority assumption breaks in a future build: experimental flash with all three sites patched + sdptool browse → expect identical AVCTP 0x0102 output.
 
 ---
 
