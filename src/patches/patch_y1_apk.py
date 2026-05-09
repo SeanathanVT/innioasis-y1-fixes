@@ -871,7 +871,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 # toggle when already paused) are also common in practice.
 #
 # Per the AVRCP ICS Table 8 (operation_id of category 1 for TG, see
-# `docs/spec/AVRCP.ICS.p17.pdf` §1.5), op_ids 0x44 PLAY (item 19) and 0x45
+# `docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` §1.5), op_ids 0x44 PLAY (item 19) and 0x45
 # STOP (item 20) are **Mandatory** for any TG advertising PASS THROUGH
 # Cat 1 (which we do via the V1 SDP record patch). 0x46 PAUSE (item 21)
 # and 0x4B/0x4C FORWARD/BACKWARD (items 26/27) are Optional.
@@ -940,7 +940,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       `public final stop()V .locals 4` and calls IjkMediaPlayer.stop() +
 #       reset() + MediaPlayer.stop() — releasing the media position.
 #       Spec-mandated for any TG advertising PASS THROUGH Cat 1, per the
-#       AVRCP ICS Table 8 item 20 (`docs/spec/AVRCP.ICS.p17.pdf` §1.5).
+#       AVRCP ICS Table 8 item 20 (`docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` §1.5).
 #
 #   - KEYCODE_MEDIA_NEXT (0x57, 87) → `nextSong()V`, AV/C op 0x4B.
 #   - KEYCODE_MEDIA_PREVIOUS (0x58, 88) → `prevSong()V`, AV/C op 0x4C.

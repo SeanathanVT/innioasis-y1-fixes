@@ -83,7 +83,7 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 `--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play / pause / skip from car / headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
 
-**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see all seven §5.3.4 element attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime), current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**. Implemented PDU set per [`docs/spec/AVRCP_SPEC_V13.pdf`](docs/spec/) (V13 + ESR07 errata):
+**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see all seven §5.3.4 element attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime), current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**. Implemented PDU set per `docs/spec/AVRCP 1.3/AVRCP_SPEC_V13.pdf` (V13 + ESR07 errata):
 
 | Spec § | PDU | Coverage |
 |---|---|---|

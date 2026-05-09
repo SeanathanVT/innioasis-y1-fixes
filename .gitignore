@@ -20,12 +20,23 @@ tools/gdbserver
 tools/_attach-mtkbt-gdb-commands.gdb
 tools/apktool-*.jar
 
-# AVRCP spec PDFs are referenced by docs/AVRCP13-COMPLIANCE-PLAN.md §0 but
-# not redistributable (Bluetooth SIG copyright). Place locally for citation
-# verification; do not commit. Expected files (download from
-# https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/):
-#   AVRCP_SPEC_V13.pdf      — base spec (V13, 16 April 2007, 93 p.)
-#   ESR07_ESR_V10.pdf       — Errata Service Release 07 (2013-12-03, 41 p.)
-#   AVRCP.ICS.p17.pdf       — Implementation Conformance Statement (2024-07-01, 25 p.)
-#   AVRCP.IXIT.1.6.0.pdf    — IXIT proforma (2014-09-18, 12 p.)
+# Bluetooth SIG spec PDFs referenced by docs/BT-COMPLIANCE.md §0 but not
+# redistributable (Bluetooth SIG copyright). Place locally for citation
+# verification; do not commit. Expected layout (per-profile subdirs):
+#
+#   docs/spec/AVRCP 1.3/  — primary wire target
+#     AVRCP_SPEC_V13.pdf, ESR07_ESR_V10.pdf,
+#     AVRCP.ICS.p17.pdf, AVRCP.IXIT.1.6.0.pdf
+#   docs/spec/AVCTP 1.2/  — paired with AVRCP 1.3 per §6 + ESR07 §2.1
+#     AVCTP_SPEC_V12.pdf, AVCTP.ICS.p10.pdf, AVCTP.TS.p12.pdf
+#   docs/spec/A2DP 1.3/   — audio profile triad
+#     A2DP_SPEC_V13.pdf, ESR08_V1.0.0.pdf
+#   docs/spec/AVDTP 1.3/  — A2DP transport
+#     AVDTP_SPEC_V13.pdf, AVDTP.ICS.p14.pdf, AVDTP.TS.p23.pdf,
+#     Erratum_23224_Update_Conformance_Section.pdf
+#   docs/spec/GAVDP 1.3/  — A2DP role coordinator
+#     GAVDP_SPEC_V13.pdf, GAVDP.ICS.p12.pdf, GAVDP.TS_.p8.pdf,
+#     Erratum_23224_Update_Conformance_Section.pdf
+#
+# Source: https://www.bluetooth.com/specifications/specs/
 docs/spec/

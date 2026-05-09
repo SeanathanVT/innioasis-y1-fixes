@@ -8,18 +8,27 @@ For why we have a proxy at all, the current trampoline chain shape, and the call
 
 ## 0. Spec target + citation discipline
 
-**Primary wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
+**Primary wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs live under `docs/spec/<PROFILE>/` (gitignored — Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/>):
 
-- `docs/spec/AVRCP_SPEC_V13.pdf` — AVRCP 1.3 base spec, 93 pages.
-- `docs/spec/ESR07_ESR_V10.pdf` — AVRCP 1.3 Errata Service Release 07 (2013-12-03); §2.1 contains Erratum 4969 (SDP record AVCTP version clarification, the only formal 1.3 erratum); §2.2 carries supplementary clarifications that resolve printed typos in 1.3 wire-format tables (e.g., the 8-byte `Identifier` sentinel form for TRACK_CHANGED).
-- `docs/spec/AVRCP.ICS.p17.pdf` — AVRCP 1.3 Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
-- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — AVRCP 1.3 Implementation eXtra Information for Testing Proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
+**AVRCP 1.3 (primary):**
+- `docs/spec/AVRCP 1.3/AVRCP_SPEC_V13.pdf` — base spec, 93 pages.
+- `docs/spec/AVRCP 1.3/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains Erratum 4969 (SDP record AVCTP version clarification, the only formal 1.3 erratum); §2.2 carries supplementary clarifications that resolve printed typos in 1.3 wire-format tables (e.g., the 8-byte `Identifier` sentinel form for TRACK_CHANGED).
+- `docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` — Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
+- `docs/spec/AVRCP 1.3/AVRCP.IXIT.1.6.0.pdf` — IXIT proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
 
-**Adjacent-profile spec citations** (when §9 references them): A2DP 1.3, AVDTP 1.3, AVCTP 1.4, GAVDP 1.3 — each available from the corresponding Bluetooth SIG specification page; same `docs/spec/` drop directory + same redistribution caveat. Pursued for spec-completeness where tractable on this hardware; see §9 for the per-issue plan.
+**AVCTP 1.2 (paired, §6 + ESR07 §2.1 / Erratum 4969):**
+- `docs/spec/AVCTP 1.2/AVCTP_SPEC_V12.pdf` — base spec.
+- `docs/spec/AVCTP 1.2/AVCTP.ICS.p10.pdf` — ICS proforma.
+- `docs/spec/AVCTP 1.2/AVCTP.TS.p12.pdf` — Test Specification.
+
+**A2DP / AVDTP / GAVDP triad (audio path, §9 references):**
+- `docs/spec/A2DP 1.3/A2DP_SPEC_V13.pdf` + `ESR08_V1.0.0.pdf`.
+- `docs/spec/AVDTP 1.3/AVDTP_SPEC_V13.pdf` + `AVDTP.ICS.p14.pdf` + `AVDTP.TS.p23.pdf` + `Erratum_23224_Update_Conformance_Section.pdf`.
+- `docs/spec/GAVDP 1.3/GAVDP_SPEC_V13.pdf` + `GAVDP.ICS.p12.pdf` + `GAVDP.TS_.p8.pdf` + `Erratum_23224_Update_Conformance_Section.pdf`.
 
 Per ICS §1.2 Table 2b, AVRCP 1.3 was deprecated 2023-02-01 and is scheduled for withdrawal 2027-02-01. We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping.
 
-**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against `docs/spec/AVRCP_SPEC_V13.pdf` table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where the spec text contains a printed typo, cite ESR07's clarification: `AVRCP 1.3 §X.Y + ESR07 §2.2`. Section numbers must appear in the AVRCP 1.3 spec PDF's table of contents — anything else is a citation error. Adjacent-profile citations follow the same shape: `A2DP 1.3 §X.Y`, `AVDTP 1.3 §X.Y`, etc.
+**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against the spec PDF's table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where the spec text contains a printed typo, cite ESR07's clarification: `AVRCP 1.3 §X.Y + ESR07 §2.2`. Section numbers must appear in the spec PDF's table of contents — anything else is a citation error. Adjacent-profile citations follow the same shape: `A2DP 1.3 §X.Y`, `AVDTP 1.3 §X.Y`, `AVCTP 1.2 §X.Y`, `GAVDP 1.3 §X.Y`.
 
 ---
 
@@ -39,7 +48,7 @@ The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's Bl
 
 ## 2. Coverage matrix — current vs spec
 
-Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP.ICS.p17.pdf` §1.5, which is the canonical M/O determination. M/O status is conditional on what other features the TG claims; the ICS encodes the conditionals explicitly. PDU = "PDU ID" byte at AV/C body offset +4. AVRCP 1.3 V13 spec sections in `docs/spec/AVRCP_SPEC_V13.pdf`.
+Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` §1.5, which is the canonical M/O determination. M/O status is conditional on what other features the TG claims; the ICS encodes the conditionals explicitly. PDU = "PDU ID" byte at AV/C body offset +4. AVRCP 1.3 V13 spec sections in `docs/spec/AVRCP 1.3/AVRCP_SPEC_V13.pdf`.
 
 **Our claims that drive the conditionals:** PASS THROUGH Cat 1 (V1 SDP record, ICS Table 7 item 7), GetElementAttributes Response (T4, item 20). Combining these:
 
@@ -298,7 +307,7 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 ### 9.4 AVCTP MTU negotiation discoverability — *AVCTP* — NO ACTION
 
-**Spec.** AVCTP 1.4 §5: each side independently advertises its MTU during L2CAP CONFIG; the smaller value wins. AVRCP 1.3 §6 specifies the AVCTP version pairing only.
+**Spec.** AVCTP 1.2 §5: each side independently advertises its MTU during L2CAP CONFIG; the smaller value wins. AVRCP 1.3 §6 specifies the AVCTP version pairing only.
 
 **Current state.** mtkbt advertises `AVRCP_MAX_PACKET_LEN:512` regardless of peer capability. Captured logs show `(10+u2MtuPayload) <= 512` enforcement. Most peers agree to 512; some negotiate higher in L2CAP CONFIG but we cap at 512.
 
