@@ -1,50 +1,59 @@
 #!/usr/bin/env bash
-# attach-mtkbt-gdb-avdtp.sh — attach gdbserver to the live mtkbt daemon
-# for breakpoint-driven RE of the AVDTP signal dispatcher.
+# attach-mtkbt-gdb-avdtp.sh — attach gdbserver to the live mtkbt daemon for
+# breakpoint-driven RE of the AVDTP signal dispatcher (V5 dispatcher hunt).
 #
-# Goal: find the per-sig_id dispatch site so we can design V5 (the
-# sig 0x0c GET_ALL_CAPABILITIES handler that closes GAVDP 1.3 ICS
-# Acceptor Table 5 row 9 — see docs/BT-COMPLIANCE.md §9.13).
+# Sibling of attach-mtkbt-gdb.sh which targets the AVCTP-RX classifier.
+# Goal: find the per-sig_id dispatch site so V5 (the sig 0x0c
+# GET_ALL_CAPABILITIES handler that closes GAVDP 1.3 ICS Acceptor Table 5
+# row 9 — see docs/BT-COMPLIANCE.md §9.13) can be designed.
 #
-# Static analysis converges slowly because mtkbt's AVDTP layer uses
-# dense MOVW/MOVT encoding that defeats string-xref grep. Runtime
-# trace from a known parser site (0x50b08) is much faster.
+# Static analysis converges slowly because mtkbt's AVDTP code uses dense
+# MOVW/MOVT encoding that defeats string-xref grep. Runtime trace from
+# the parser site (0x50b08) is much faster.
 #
 # Pre-reqs:
-#   - --root flashed (su via `adb shell su -c ...`)
-#   - tools/gdbserver present (install-gdbserver.sh)
-#   - host: gdb-multiarch or arm-linux-gnu-gdb
+#   - --root flashed (su needs to work via `adb shell su -c ...`)
+#   - gdbserver binary on the host at one of:
+#         tools/gdbserver  (preferred — in-tree)
+#         $GDBSERVER       (env var override)
+#         $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver
+#     Must be ARM 32-bit, statically linked, API 17 / Android 4.2 compatible.
+#
+# Host side: gdb-multiarch (Debian/Ubuntu) or arm-linux-gnu-gdb (Fedora).
 #
 # What this does:
-#   1. Validates gdbserver + adb device
-#   2. Reads /proc/<mtkbt-pid>/maps for the PIE base
-#   3. Pushes gdbserver, attaches over forward port
-#   4. Generates a gdb command file with breakpoints at:
-#        - 0x50b08 (AVDTP signal-frame parser entry — confirmed)
-#        - 0x50b96 (sig_id store at output struct +8)
-#        - 0x50c46 (parser convergence point — last instruction before return)
-#        - 0xde26 (one of the parser's external callers — likely the AVDTP
-#          RX dispatcher entry; logs the post-parse sig_id and the
-#          downstream branch target)
-#   5. Each BP logs: PC, LR, key registers, frame bytes
-#   6. User drives a peer-side AVDTP session that issues GET_CAPABILITIES
-#      (sig 0x02) to seed the dispatch path, then optionally a peer at
-#      AVDTP 1.3 issues GET_ALL_CAPABILITIES (sig 0x0c) — but the
-#      common case (0x02) is enough to trace the dispatcher
+#   1. Validates gdbserver and adb device.
+#   2. Finds live mtkbt PID + reads /proc/<pid>/maps to get the PIE base.
+#   3. Pushes gdbserver to /data/local/tmp/.
+#   4. Starts `gdbserver --attach :<port> <pid>` on the device under su.
+#   5. Sets up `adb forward tcp:<port> tcp:<port>`.
+#   6. Generates a gdb command file with breakpoints at the AVDTP-RX
+#      sites located via static analysis: parser entry (0x50b08), sig_id
+#      store (0x50b96), parser exit (0x50c46), and a candidate caller
+#      (0xde26 + 0xde2a). Translated to live addresses using PIE base.
+#   7. Prints the one-line command for the user to launch gdb against the
+#      generated command file.
 #
-# Driving the capture:
-#   1. Drive a peer-side stream-establishment: pair Y1 with a peer Sink,
-#      let it issue DISCOVER (sig 0x01) and GET_CAPABILITIES (sig 0x02).
-#      Capture the gdb trace.
-#   2. Look at the LR / branch target at the dispatcher BP.
-#   3. With the dispatcher offset confirmed, design V5 — typically a
-#      single byte / instruction patch that aliases sig 0x0c → 0x02 in
-#      whatever cmp / TBB / fn-ptr-table the dispatcher uses.
+# Usage:
+#   ./tools/attach-mtkbt-gdb-avdtp.sh                       # default flow
+#   ./tools/attach-mtkbt-gdb-avdtp.sh --port 5040           # default — coexists with attach-mtkbt-gdb.sh's 5039
+#   ./tools/attach-mtkbt-gdb-avdtp.sh --gdbserver /path/to/gdbserver
+#
+# Driving the capture (once gdb is running):
+#   1. Pair Y1 with any A2DP Sink (Sonos / Bolt / TV).
+#   2. The pairing exchange will issue DISCOVER (sig 0x01) +
+#      GET_CAPABILITIES (sig 0x02) — breakpoints will fire.
+#   3. Watch BP@0x50c46 (parser exit): note the post-return PC the
+#      caller branches to. That branch site is the AVDTP signal
+#      dispatcher we need to find for V5.
+#   4. The gdb command file's `commands` blocks log register + memory state
+#      at each BP and continue automatically.
 #
 # Watch-items:
-#   - Each BP halt freezes the mtkbt RX thread; peer may time out.
-#     Keep `commands` blocks short (silent printf + continue).
-#   - mtkbt may wedge after detach — BT off → on resets it.
+#   - Each BP halt freezes mtkbt's RX thread for as long as the BP commands
+#     run. Most peer CTs time out after a few seconds. Keep `commands` blocks
+#     short (silent + printf + continue) so peers don't disconnect mid-capture.
+#   - After detach, mtkbt may be in a wedged state. `BT off → on` resets it.
 
 set -u
 
@@ -52,49 +61,122 @@ show_help() {
     cat <<'EOF'
 Usage: ./tools/attach-mtkbt-gdb-avdtp.sh [--port N] [--gdbserver PATH]
 
-Attach gdbserver to mtkbt and prepare an AVDTP-dispatcher-hunt gdb
-command file. See script header for full usage.
+Attach gdbserver to the live mtkbt daemon and prepare a gdb command file
+for breakpoint-driven RE of the AVDTP signal dispatcher (V5 hunt).
 
 Options:
-    --port N            TCP port (default 5040; offset from 5039 used
-                        by attach-mtkbt-gdb.sh so both can run side-by-side)
-    --gdbserver PATH    gdbserver binary (default: tools/gdbserver)
-    -h, --help          this message
+    --port N            TCP port for the gdbserver tunnel (default 5040
+                        — offset from 5039 used by attach-mtkbt-gdb.sh
+                        so both can run side-by-side)
+    --gdbserver PATH    Override gdbserver binary path
+
+The script doesn't launch gdb itself — it sets up the device side and
+prints the command to invoke gdb against the generated command file.
+
+Pre-reqs: --root flashed. gdbserver ARM 32-bit static binary at
+tools/gdbserver, $GDBSERVER, or under $ANDROID_NDK_HOME/prebuilt/.
 EOF
 }
 
 PORT=5040
-GDBSERVER_HOST="$(dirname "$0")/gdbserver"
+GDBSERVER=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)       PORT="$2"; shift 2 ;;
-        --gdbserver)  GDBSERVER_HOST="$2"; shift 2 ;;
+        --gdbserver)  GDBSERVER="$2"; shift 2 ;;
         -h|--help)    show_help; exit 0 ;;
-        *)            echo "ERROR: unknown arg: $1" >&2; show_help; exit 1 ;;
+        *)            echo "ERROR: unknown option '$1'" >&2; show_help >&2; exit 1 ;;
     esac
 done
 
-if [[ ! -f "$GDBSERVER_HOST" ]]; then
-    echo "ERROR: gdbserver not found at $GDBSERVER_HOST" >&2
-    echo "       Run tools/install-gdbserver.sh first" >&2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Locate gdbserver: explicit flag > env var > tools/gdbserver > NDK prebuilt
+if [ -z "$GDBSERVER" ]; then
+    GDBSERVER="${GDBSERVER:-${ENV_GDBSERVER:-}}"
+fi
+if [ -z "$GDBSERVER" ] && [ -n "${GDBSERVER:-}" ]; then
+    :
+fi
+for candidate in \
+        "${GDBSERVER:-}" \
+        "${SCRIPT_DIR}/gdbserver" \
+        "${ANDROID_NDK_HOME:-/dev/null}/prebuilt/android-arm/gdbserver/gdbserver" \
+        ; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        GDBSERVER="$candidate"; break
+    fi
+done
+
+if [ -z "$GDBSERVER" ] || [ ! -x "$GDBSERVER" ]; then
+    cat >&2 <<'EOF'
+ERROR: gdbserver not found.
+
+Easiest fix:
+  ./tools/install-gdbserver.sh
+
+Or manually place an ARM 32-bit, statically-linked, API-17-compatible
+gdbserver at one of:
+  - tools/gdbserver  (in-tree, preferred)
+  - $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver
+  - explicit path via --gdbserver <path> or $GDBSERVER env var
+
+Verify it's the right shape:
+  file /path/to/gdbserver
+  # → ELF 32-bit LSB executable, ARM, EABI5, statically linked
+EOF
     exit 1
 fi
 
-if ! adb devices | grep -q "device$"; then
-    echo "ERROR: no adb device found" >&2
+# Host-side gdb. Check up-front rather than after all the device-side setup —
+# nothing useful happens without it. Also lets the user install in parallel
+# while the script does the device-side attach.
+HOST_GDB=""
+for c in gdb-multiarch arm-linux-gnu-gdb arm-linux-gnueabi-gdb gdb; do
+    if command -v "$c" >/dev/null 2>&1; then HOST_GDB="$c"; break; fi
+done
+
+if [ -z "$HOST_GDB" ]; then
+    cat >&2 <<'EOF'
+ERROR: no ARM-aware gdb on host. The device-side gdbserver needs a gdb on
+       this machine to talk to it. Install one of (per distro):
+
+  Debian/Ubuntu:  sudo apt install gdb-multiarch
+  Fedora/RHEL:    sudo dnf install gdb
+                  (modern Fedora gdb auto-detects ARM targets)
+  Arch:           sudo pacman -S gdb-multiarch
+
+       Then re-run this script.
+
+       Probed binaries: gdb-multiarch arm-linux-gnu-gdb arm-linux-gnueabi-gdb gdb
+EOF
     exit 1
 fi
 
-# Stock toybox on Y1 lacks pidof / head / awk / sed — do parsing host-side
-# from `adb shell ps` + `cat /proc/<pid>/maps` (the latter under su). Same
-# approach as tools/attach-mtkbt-gdb.sh.
+# Validate adb
+if ! adb get-state >/dev/null 2>&1; then
+    echo "ERROR: no device. Connect the Y1 and retry." >&2
+    exit 1
+fi
+
+# Validate gdbserver binary architecture
+gdb_file=$(file "$GDBSERVER")
+if ! echo "$gdb_file" | grep -q 'ARM.*statically linked'; then
+    echo "WARNING: $GDBSERVER may not be ARM/static. file says: $gdb_file" >&2
+fi
+
 echo "==> Discovering mtkbt PID + PIE base.."
+
+# Stock toybox on Y1 lacks pidof/head/awk — do parsing host-side from
+# `adb shell ps` and `cat /proc/<pid>/maps` (the latter under su).
 ps_out=$(adb shell 'ps' 2>/dev/null | tr -d '\r')
 MTKBT_PID=""
 while IFS= read -r row; do
     case "$row" in
         *' /system/bin/mtkbt'|*' mtkbt')
+            # toybox ps: USER PID PPID VSIZE RSS WCHAN PC NAME
             set -- $row
             MTKBT_PID=$2
             break
@@ -106,13 +188,13 @@ if [ -z "$MTKBT_PID" ]; then
     echo "ERROR: mtkbt not running. BT enabled? Check 'adb shell ps | grep mtkbt'." >&2
     exit 1
 fi
-echo "    mtkbt PID: $MTKBT_PID"
 
 maps_out=$(adb shell "su -c 'cat /proc/${MTKBT_PID}/maps'" 2>/dev/null | tr -d '\r')
 PIE_BASE_HEX=""
 while IFS= read -r row; do
     case "$row" in
         *'/system/bin/mtkbt')
+            # maps line format: <start>-<end> rwxp <off> <dev> <inode>  <path>
             range=${row%% *}
             PIE_BASE_HEX=${range%%-*}
             break
@@ -125,103 +207,145 @@ if [ -z "$PIE_BASE_HEX" ]; then
     exit 1
 fi
 PIE_BASE=$((16#$PIE_BASE_HEX))
-printf "    PIE base: 0x%x\n" "$PIE_BASE"
 
-# Pull mtkbt off the device so we can hand it to gdb as the exec-file. Without
-# this, host gdb has no idea the target is ARM (manifests as "Architecture
-# rejected target-supplied description" + garbled register state).
-MTKBT_LOCAL="/tmp/mtkbt-live"
-echo "==> Pulling mtkbt off device for gdb exec-file (architecture detection).."
-adb pull /system/bin/mtkbt "$MTKBT_LOCAL" >/dev/null 2>&1
-if [ ! -s "$MTKBT_LOCAL" ]; then
-    echo "ERROR: failed to pull /system/bin/mtkbt to $MTKBT_LOCAL" >&2
-    exit 1
-fi
-echo "    saved to: $MTKBT_LOCAL"
+printf "    mtkbt pid=%s  PIE base=0x%x\n" "$MTKBT_PID" "$PIE_BASE"
 
+# Compute live addresses (file_offset + PIE_base, plain even address).
+# mtkbt is entirely Thumb-2. We DON'T OR the address with 1 here because:
+#   - gdb plants a Thumb-aware BKPT via `set arm force-mode thumb` below
+#     (this prevents the 4-byte ARM BKPT corruption we hit on the first try).
+#   - Bit 0 in the *registered* address breaks gdb's trap-time PC lookup:
+#     when the BKPT fires the CPU reports PC = even byte-address, gdb's BP
+#     list has odd address, lookup misses, gdb treats the trap as a generic
+#     SIGTRAP and the `commands` block never runs.
+# Both failure modes verified the hard way 2026-05-05.
 fileoff_to_live() {
-    printf "0x%x" $((PIE_BASE + 16#${1#0x}))
+    local off=$1
+    printf "0x%x" $(( off + PIE_BASE ))
 }
 
-# Breakpoints
-BP_50b08=$(fileoff_to_live 0x50b08)   # AVDTP signal-frame parser entry
-BP_50b96=$(fileoff_to_live 0x50b96)   # parser stores sig_id at output[8]
-BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence (last insn before return)
-BP_de26=$(fileoff_to_live 0xde26)     # external caller of parser — candidate AVDTP RX dispatcher
+BP_50b08=$(fileoff_to_live 0x50b08)   # AVDTP signal-frame parser entry (case dispatch on input fmt-id)
+BP_50b96=$(fileoff_to_live 0x50b96)   # parser stores sig_id (mask byte 1 of frame with 0x3f) at output[8]
+BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — last insn before bl validator + return
+BP_de26=$(fileoff_to_live 0xde26)     # external caller of parser (passes r4+0x11c)
+BP_de2a=$(fileoff_to_live 0xde2a)     # right after parser returns at 0xde26 — dispatch decision is downstream
 
-# Push gdbserver + start
-adb push "$GDBSERVER_HOST" /data/local/tmp/gdbserver
-adb shell "su -c 'chmod 755 /data/local/tmp/gdbserver'"
-adb shell "su -c 'pkill -f gdbserver' 2>/dev/null"
-adb shell "su -c '/data/local/tmp/gdbserver --attach :$PORT $MTKBT_PID' &" &
-sleep 1
-adb forward tcp:$PORT tcp:$PORT
+echo "==> Cleaning up stale gdbserver from any prior run.."
+# toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
+# (no-op if nothing to kill). Necessary because a prior mtkbt crash mid-debug
+# can leave gdbserver wedged with the dead PID's ptrace slot, blocking the
+# next --attach with "Operation not permitted".
+adb shell 'su -c "for d in /proc/[0-9]*; do n=\$(cat \$d/comm 2>/dev/null); if [ \"\$n\" = gdbserver ]; then kill -9 \${d#/proc/} 2>/dev/null; fi; done"' >/dev/null 2>&1
+adb forward --remove "tcp:${PORT}" >/dev/null 2>&1 || true
 
-CMDFILE="/tmp/_mtkbt-gdb-avdtp-commands.gdb"
-cat > "$CMDFILE" <<EOF
+echo "==> Pushing gdbserver to /data/local/tmp/.."
+adb push "$GDBSERVER" /data/local/tmp/gdbserver >/dev/null
+adb shell 'su -c "chmod 755 /data/local/tmp/gdbserver"'
+
+echo "==> Setting up adb forward localhost:${PORT} → device:${PORT}.."
+adb forward "tcp:${PORT}" "tcp:${PORT}"
+
+GDB_CMDS="${REPO_ROOT}/tools/_attach-mtkbt-gdb-avdtp-commands.gdb"
+cat > "$GDB_CMDS" <<EOF
+# Auto-generated by tools/attach-mtkbt-gdb-avdtp.sh — do not edit; regenerate.
+# PIE base: ${PIE_BASE_HEX}, mtkbt PID: ${MTKBT_PID}, port: ${PORT}.
+
+set pagination off
+set confirm off
+set print pretty on
+set logging file /tmp/mtkbt-gdb-avdtp.log
+set logging overwrite on
+set logging on
+
+# mtkbt is all Thumb-2. force-mode thumb makes gdb plant a 2-byte Thumb BKPT
+# at every breakpoint regardless of address parity / symbol info. fallback-mode
+# is the looser version (only when gdb can't otherwise decide) — keep both so
+# disassembly + BP planting are unambiguous.
 set arm fallback-mode thumb
 set arm force-mode thumb
-set print pretty on
 
-# Tell gdb the target is ARM via the locally-pulled mtkbt binary. This must
-# happen BEFORE 'target remote' or gdb negotiates a default architecture
-# (often x86_64) with the remote and rejects the ARM register description.
-file ${MTKBT_LOCAL}
-set sysroot /
+target remote :${PORT}
 
-# AVDTP signal-frame parser entry (file 0x50b08)
+# AVDTP signal-frame parser entry (file 0x50b08). Input arg r0 points at a
+# struct: byte 0 = format-id (0/1/2/4/0xff), offset 4 = pointer to inbound
+# AV/C frame buffer. LR tells us who called the parser.
 break *${BP_50b08}
 commands
 silent
-printf "BP@0x50b08 parser entry: r0=0x%08x [r0]={fmt=%u, ptr=0x%08x}, LR=0x%08x\\n", \$r0, *(unsigned char*)\$r0, *(unsigned*)(\$r0+4), \$lr
+printf "BP@0x50b08 parser entry: r0=0x%08x [r0+0]=%u (fmt-id) [r0+4]=0x%08x (frame ptr)  LR=0x%08x\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4), \$lr
+printf "  frame@[r0+4][0..15]: "
+x/8xb *(unsigned int*)(\$r0+4)
 continue
 end
 
-# Parser stores sig_id at output struct +8 (file 0x50b96)
+# Parser stores sig_id at output struct +8 (file 0x50b96).
+# At this point, register lr (low byte) holds the masked sig_id (& 0x3f).
 break *${BP_50b96}
 commands
 silent
-printf "BP@0x50b96 sig_id stored: lr=0x%02x (sig_id) at [r1+8] (r1=0x%08x)\\n", \$lr & 0xff, \$r1
+printf "BP@0x50b96 sig_id stored: lr-low=0x%02x (sig_id) → [r1+8] (r1=0x%08x)\n", \$lr & 0xff, \$r1
 continue
 end
 
-# Parser convergence (file 0x50c46) — about to return
+# Parser convergence point (file 0x50c46) — about to bl 0x50a48 (validator)
+# then return. r0 / r1 hold the parsed-struct pointer.
 break *${BP_50c46}
 commands
 silent
-printf "BP@0x50c46 parser exit: r0=0x%x, output struct sig_id=0x%02x\\n", \$r0, *(unsigned char*)(\$r1+8)
+printf "BP@0x50c46 parser exit: r0=0x%x r1=0x%x  output struct sig_id=0x%02x\n", \$r0, \$r1, *(unsigned char*)(\$r1+8)
 continue
 end
 
-# External caller of parser (file 0xde26) — candidate dispatcher entry
-# When this hits, the next-instruction LR after the bl 0x50b08 will tell
-# us where the dispatcher branches based on the parsed sig_id.
+# External caller of parser at file 0xde26 (passes r4+0x11c as arg). Tells
+# us which higher-level function in the AVDTP RX chain hosts the parser
+# call. Critical for identifying the dispatcher.
 break *${BP_de26}
 commands
 silent
-printf "BP@0xde26 dispatcher candidate caller: r0=0x%08x (struct ptr) — next 8 instrs after parser ret are the dispatch site\\n", \$r0
-# stop here so we can step into the dispatch
-end
-
-# Also break right AFTER the parser returns (de26+4 = de2a)
-break *$(fileoff_to_live 0xde2a)
-commands
-silent
-printf "BP@0xde2a parser-return: r0=%d (parse OK?), [struct+0]=%u (fmt-id), [struct+8]=%u (sig_id)\\n", \$r0, *(unsigned char*)(\$r4+0x11c), *(unsigned char*)(\$r4+0x11c+8)
+printf "BP@0xde26 caller-of-parser: r0=0x%08x (parser arg) r4=0x%08x [r4+0x11c+0]=%u (fmt-id pre-parse)\n", \$r0, \$r4, *(unsigned char*)(\$r4+0x11c)
 continue
 end
 
-target remote :$PORT
-echo Now drive a peer-side AVDTP exchange (e.g. pair Y1 with a peer Sink).
-echo Watch for sig_id=2 (GET_CAPABILITIES) traces — note the LR / next BP after parser exit.
-echo Resume with: continue
+# Right after parser returns at file 0xde2a — the dispatch decision (cmp +
+# branch on sig_id) is the next several instructions. Watch the LR and PC
+# trajectory from this BP to locate the actual per-sig dispatch site.
+break *${BP_de2a}
+commands
+silent
+printf "BP@0xde2a parser-return: r0=%d (parse OK?) [struct+0]=%u (fmt-id) [struct+8]=%u (sig_id)\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c), *(unsigned char*)(\$r4+0x11c+8)
+printf "  next 8 insns at PC=%p — *** the dispatch on sig_id is here ***\n", \$pc
+disassemble \$pc, \$pc+32
+continue
+end
+
+continue
 EOF
 
+echo "==> gdb command file written to ${GDB_CMDS}"
+echo "==> Starting gdbserver --attach :${PORT} ${MTKBT_PID} on device.."
+echo "    (Ctrl-C this script when done; it will leave gdbserver on the device"
+echo "     for the gdb session to drive.  When you exit gdb, gdbserver dies"
+echo "     too and mtkbt resumes.)"
 echo
-echo "gdb command file written to: $CMDFILE"
+echo "In a SECOND terminal, run:"
+
+# HOST_GDB was validated up-front (see check after gdbserver discovery).
+echo "    ${HOST_GDB} -x ${GDB_CMDS} <path-to-stock-mtkbt>"
+echo "    # symbols are optional but help with disassembly; the stock mtkbt"
+echo "    # extracted from /work/v3.0.2/system.img.extracted/bin/mtkbt works fine"
+
 echo
-echo "Now run:"
-echo "  arm-linux-gnu-gdb -x $CMDFILE   # or: gdb-multiarch -x $CMDFILE"
+echo "Then drive a peer-side AVDTP exchange:"
+echo "    1. Pair Y1 with any A2DP Sink (Sonos / Bolt / TV)."
+echo "    2. The pairing exchange will issue DISCOVER (sig 0x01) +"
+echo "       GET_CAPABILITIES (sig 0x02) — breakpoints will fire."
+echo "    3. The critical capture is BP@0x50c46 / BP@0xde2a — those tell"
+echo "       us where the dispatcher branches based on the parsed sig_id."
+echo "       The 'disassemble \$pc' output at BP@0xde2a is the dispatch site."
+echo "    Output is logged to /tmp/mtkbt-gdb-avdtp.log."
 echo
-echo "Drive a peer-side AVDTP session (pair Y1 with a Sink) and capture the trace."
-echo "The dispatcher is the function that branches based on output[8] (sig_id) right after the parser returns."
+
+# Run gdbserver in foreground; ctrl-C kills it (and mtkbt's ptrace slot is freed
+# when gdb on the host detaches). The gdbserver process exits when the gdb
+# client disconnects.
+adb shell "su -c '/data/local/tmp/gdbserver --attach :${PORT} ${MTKBT_PID}'"
