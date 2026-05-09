@@ -1513,6 +1513,38 @@ Risk — **unverified as of 2026-05-09**: response wire sig_id may be hardcoded 
 
 Drive a fresh pair attempt against any A2DP Sink CT (Sonos / Bolt / TV); the BPs at 0xaa72c will fire for every inbound AVDTP signal and let us cross-correlate sig_id source with the response builder's input.
 
+### Trace #13c (2026-05-09 night) — 0xaa72c reconfirmed as AVDTP dispatcher; full TBH table decoded
+
+The 8-BP run (with peer driving a pair attempt) captured 13 wire-tagged dispatch fires through 0xaa72c with `[r1]` carrying AVDTP wire signal_ids. Sequence (chronological from `/work/logs/mtkbt-gdb-avdtp.log`):
+
+| Fire | sig_id | wire signal           | LR        | notes |
+|------|--------|-----------------------|-----------|-------|
+| 1    | 0x0d   | DELAYREPORT           | 0x401a483b | pre-config |
+| 2    | 0x03   | SET_CONFIGURATION     | 0x401a49cd | |
+| 3    | 0x01   | DISCOVER              | 0x401a49cd | same caller |
+| 4-7  | 0x04   | GET_CONFIGURATION ×4  | 0x401a54b3 | per-SEP polling |
+| 8    | 0x05   | RECONFIGURE           | 0x401a5803 | |
+| 9    | -      | cap-parser fcn.000afd5c | 0x401a557d | one fire only |
+| 10   | 0x06   | OPEN                  | 0x401a3e91 | |
+| 11   | 0x07   | START                 | 0x401a3ec3 | streaming begins |
+| 12   | 0x18   | (internal)            | 0x401a5803 | |
+| 13   | 0x0b   | SECURITY_CONTROL      | 0x401a5bc5 | |
+| 14   | 0x0f   | (internal)            | 0x401a5803 | |
+| -    | 0x17   | heartbeat ×308        | 0x401a5bc5 | background |
+
+**Notably absent**: sig 0x02 (GET_CAPABILITIES) and sig 0x0c (GET_ALL_CAPABILITIES) — peer skipped capability probing entirely. Likely cached capabilities from a prior pair, or the peer trusts the SDP record. This means V5 (sig 0x0c handler) is mechanically valid (dispatcher confirmed; jump-table entry at 0xaa834 routes sig 0x0c to 0xab4de stub) but won't be empirically tested against this CT — needs a stricter peer or unprimed re-pair to fire.
+
+**Struct geometry** (constant across all dispatch fires):
+- `[r1+0]`: msg/sig_id byte (the dispatched value)
+- `[r1+4..7]`: pointer back to r0 (state struct ref, always 0x415e92b8)
+- `[r1+8..11]`: function pointer (0x4028b8d4 = file 0xb8d4 — likely a shared completion callback)
+- `[r1+12..15]`: per-msg payload (e.g., 0x14 for OPEN, 0x18 for sig 0x18)
+- `[r1+24..27]`: 0x40290d29 (file 0x19cd29) — common state struct ptr
+
+So `[r1]` is an **internal mtkbt event message** tagged with AVDTP wire-format sig_ids, not a raw L2CAP frame. The dispatcher routes 41 codepoints: sig_id 1-13 (AVDTP wire) + sig_id 14+ (internal events 0x17 background, 0x18 / 0x0f synthetic). Same TBH function handles both — V5's jump-table alias edit is geometrically sound.
+
+**Reverting Trace #13 follow-up's claim** that fcn.000b0c30 is the real dispatcher: that function fired but only as the AVDTP state-machine driver (positive control), not as the wire-RX path. r1 args at fcn.000b0c30 had state=0x00 (7 fires) and state=0x03 (7 fires) with [r1+1] varying — internal state transitions, not signal frames. fcn.000b0c30 is a state-handler called BY the dispatcher's per-sig handlers, not the dispatcher itself.
+
 ### Trace #13 follow-up (2026-05-09 evening) — 0xaa72c hypothesis invalidated, real dispatcher relocated to fcn.000b0c30
 
 The 6-BP run captured in `/work/logs/mtkbt-gdb-avdtp.log` (828 lines) shows:
