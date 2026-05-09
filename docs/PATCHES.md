@@ -327,6 +327,54 @@ const/4 v3, 0x3                 # original next instruction
 
 **Upstream-compatibility note.** This patch lives entirely inside the music app's APK. Other foreground apps installable on the device (e.g. Rockbox) extend `AppCompatActivity` directly and do not inherit from `com.innioasis.y1.base.BaseActivity`, so their AVRCP key handling is unaffected. The keylayout `/system/usr/keylayout/AVRCP.kl` stays stock — the kernel→`KeyEvent` mapping continues to deliver `KEYCODE_MEDIA_PLAY` (126) for op_id 0x44, which is the spec-correct keycode for any app that handles standard Android media keys.
 
+**Patch H′** in `smali_classes2/com/innioasis/y1/base/BasePlayerActivity.smali` — same propagation, applied to the music-player superclass.
+
+`MusicPlayerActivity` (and any other player-screen activity) extends `BasePlayerActivity`, which overrides `dispatchKeyEvent` itself and never delegates up the chain. Stock implementation:
+
+```
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 2
+    invoke-static {p1}, Intrinsics;->checkNotNull(Object;)V
+    invoke-virtual {p1}, KeyEvent;->getAction()I
+    move-result v0
+    if-nez v0, :cond_2
+    [DOWN path: repeatCount==8 + KeyMap match → onKeyLongPress; else → onKeyDown]
+    :cond_2
+    invoke-virtual {p1}, KeyEvent;->getKeyCode()I
+    move-result v0
+    invoke-virtual {p0, v0, p1}, BasePlayerActivity;->onKeyUp(I, KeyEvent;)Z
+    :goto_0
+    const/4 p1, 0x1
+    return p1                       # always TRUE — never delegates to BaseActivity
+.end method
+```
+
+Because this override is in the chain when the player screen is foreground, `BaseActivity.dispatchKeyEvent` (and Patch H) is unreachable. `BasePlayerActivity.onKeyUp` matches keycodes only against `KeyMap` entries — `KEY_LEFT=88` (MEDIA_PREVIOUS), `KEY_RIGHT=87` (MEDIA_NEXT), `KEY_MENU=4` (BACK), `KEY_ENTER=66` (DPAD_CENTER), `KEY_PLAY=85` (MEDIA_PLAY_PAUSE). The discrete media keycodes (126 / 127 / 86) match none, fall through `:cond_8 / :goto_1`, and `return v1=1` silently consumes them.
+
+Empirical confirmation: TV postflash logcat 2026-05-09 shows zero `pause from 18` reasons (Patch E's discrete-pause tag) across an entire AVRCP test session even though Patch H was deployed — every pause traced to internal music-app sources or `playOrPause` toggle, every `play(Z)` traced to `BasePlayerActivity.onKeyUp:195` (the long-press-release-from-FF cleanup path on `KEY_RIGHT`).
+
+Patched: insert the same 0x7e / 0x7f / 0x56 early-return block at the top of `BasePlayerActivity.dispatchKeyEvent`, before the `Intrinsics.checkNotNull` call (defensive — matches Patch H's null-safe ordering in `BaseActivity`):
+
+```
+[method header + .locals 2]
+invoke-virtual {p1}, KeyEvent;->getKeyCode()I
+move-result v0
+const/16 v1, 0x7e
+if-eq v0, v1, :patch_h2_propagate
+const/16 v1, 0x7f
+if-eq v0, v1, :patch_h2_propagate
+const/16 v1, 0x56
+if-eq v0, v1, :patch_h2_propagate
+goto :patch_h2_continue
+:patch_h2_propagate
+const/4 v0, 0x0
+return v0                       # let the framework continue dispatch
+:patch_h2_continue
+[stock method body resumes]
+```
+
+`v0` and `v1` are the existing scratch locals (`.locals 2` covers both). Returning false from `BasePlayerActivity.dispatchKeyEvent` causes the framework to fall through to `PhoneFallbackEventHandler` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, where `PlayControllerReceiver`'s Patch E discrete arms then fire.
+
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 
 **Deployment:** `adb root && adb remount && adb push <apk> /system/app/com.innioasis.y1/com.innioasis.y1.apk && adb reboot`. Do **not** use `adb install` — PackageManager rejects re-signed system app APKs.

@@ -69,8 +69,9 @@ DEPLOYMENT
 
 WHAT THIS PATCH DOES
 --------------------
-  Four smali patches (A / B / C for Artist→Album navigation, E for discrete
-  PASSTHROUGH PLAY / PAUSE / STOP coverage per AVRCP 1.3 §4.6.1 + ICS Table 8),
+  Six smali patches (A / B / C for Artist→Album navigation, E for discrete
+  PASSTHROUGH PLAY / PAUSE / STOP coverage per AVRCP 1.3 §4.6.1 + ICS Table 8,
+  H + H' for foreground-activity propagation of unhandled discrete media keys),
   no new files, no Manifest changes.
 
   Patch A -- ArtistsActivity.confirm():
@@ -1400,6 +1401,137 @@ print(
 )
 
 
+# ============================================================
+# Patch H': BasePlayerActivity.smali — same propagation, music-player class
+# ============================================================
+#
+# Background
+# ----------
+# Patch H modifies `BaseActivity.dispatchKeyEvent` to early-return FALSE for
+# 0x7e / 0x7f / 0x56 so the framework's fallback path (AudioService → media
+# button broadcast → PlayControllerReceiver) can dispatch them. That works
+# for activities that inherit BaseActivity directly. But the music player
+# foreground (`MusicPlayerActivity` and similar) extends a deeper class:
+# `BasePlayerActivity` — which overrides `dispatchKeyEvent` itself and
+# never delegates up the chain. Its override always returns TRUE, dispatches
+# directly to onKeyDown/onKeyUp/onKeyLongPress, and `onKeyUp` only matches
+# against KeyMap entries (KEY_LEFT=88, KEY_RIGHT=87, KEY_MENU=4, KEY_ENTER=66,
+# KEY_PLAY=85). KEYCODE_MEDIA_PLAY (126), MEDIA_PAUSE (127), MEDIA_STOP (86)
+# fail every check and `return v1` (TRUE) silently consumes them.
+#
+# Empirical confirmation: TV postflash logcat 2026-05-09 shows zero
+# `pause from 18` reasons (Patch E's discrete-pause tag) across an entire
+# AVRCP test session. All pause calls trace to internal music-app sources
+# (12, 14, 16) or playOrPause's pause-arm; all play(Z) calls trace to
+# `BasePlayerActivity.onKeyUp:195` (the long-press-release-from-FF cleanup
+# path on KEY_RIGHT). Patch H is reachable — but the music player
+# foreground bypasses it entirely.
+#
+# The fix
+# -------
+# Insert the same 0x7e / 0x7f / 0x56 early-return block at the top of
+# `BasePlayerActivity.dispatchKeyEvent` so AVRCP discrete keys propagate
+# to the framework media-button path before this class's onKeyDown/onKeyUp
+# routing has a chance to silently consume them.
+#
+# Stock prologue:
+#     .method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+#         .locals 2
+#         invoke-static {p1}, Intrinsics;->checkNotNull(Object;)V
+#         invoke-virtual {p1}, KeyEvent;->getAction()I
+#         move-result v0
+#         if-nez v0, :cond_2
+#         ...
+#
+# Patched: insert 0x7e / 0x7f / 0x56 detection BEFORE the checkNotNull call
+# (so even null events on those keycodes propagate; defensive — matches
+# Patch H's null-safe ordering in BaseActivity).
+
+BASE_PLAYER_ACTIVITY_SMALI = (
+    "smali_classes2/com/innioasis/y1/base/BasePlayerActivity.smali"
+)
+base_player_activity_path = os.path.join(UNPACKED_DIR, BASE_PLAYER_ACTIVITY_SMALI)
+if not os.path.exists(base_player_activity_path):
+    sys.exit(f"ERROR: Expected smali not found: {base_player_activity_path}")
+
+with open(base_player_activity_path, 'r') as f:
+    base_player_activity_src = f.read()
+
+OLD_PLAYER_DISPATCH_HEAD = """\
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 2
+
+    .line 304
+    invoke-static {p1}, Lkotlin/jvm/internal/Intrinsics;->checkNotNull(Ljava/lang/Object;)V
+
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getAction()I
+
+    move-result v0"""
+
+NEW_PLAYER_DISPATCH_HEAD = """\
+.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
+    .locals 2
+
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getKeyCode()I
+
+    move-result v0
+
+    const/16 v1, 0x7e
+
+    if-eq v0, v1, :patch_h2_propagate
+
+    const/16 v1, 0x7f
+
+    if-eq v0, v1, :patch_h2_propagate
+
+    const/16 v1, 0x56
+
+    if-eq v0, v1, :patch_h2_propagate
+
+    goto :patch_h2_continue
+
+    :patch_h2_propagate
+    const/4 v0, 0x0
+
+    return v0
+
+    :patch_h2_continue
+
+    .line 304
+    invoke-static {p1}, Lkotlin/jvm/internal/Intrinsics;->checkNotNull(Ljava/lang/Object;)V
+
+    invoke-virtual {p1}, Landroid/view/KeyEvent;->getAction()I
+
+    move-result v0"""
+
+if OLD_PLAYER_DISPATCH_HEAD not in base_player_activity_src:
+    sys.exit(
+        "ERROR: BasePlayerActivity dispatchKeyEvent prologue not found.\n"
+        f"  File: {base_player_activity_path}\n"
+        "  The smali shape may differ from 3.0.2."
+    )
+
+base_player_activity_src = base_player_activity_src.replace(
+    OLD_PLAYER_DISPATCH_HEAD, NEW_PLAYER_DISPATCH_HEAD, 1
+)
+
+if DEBUG_LOGGING:
+    base_player_activity_src = _inject_log_d(
+        base_player_activity_src,
+        r'dispatchKeyEvent\(Landroid/view/KeyEvent;\)Z',
+        "BasePlayerActivity.dispatchKeyEvent entry",
+    )
+    print("  + BasePlayerActivity.dispatchKeyEvent entry")
+
+with open(base_player_activity_path, 'w') as f:
+    f.write(base_player_activity_src)
+print(
+    "  Patch H': BasePlayerActivity.dispatchKeyEvent -- same propagation as "
+    "Patch H, applied to the music player superclass which overrides "
+    "dispatchKeyEvent and bypasses BaseActivity entirely"
+)
+
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1408,6 +1540,7 @@ print(f"\nPatched smali file md5s (deterministic — same across machines):")
 PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
     PLAY_CONTROLLER_RECEIVER_SMALI, BASE_ACTIVITY_SMALI,
+    BASE_PLAYER_ACTIVITY_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
