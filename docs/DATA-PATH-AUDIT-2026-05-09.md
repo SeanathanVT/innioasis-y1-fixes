@@ -4,7 +4,7 @@ End-to-end fact-check of every Bluetooth / AVRCP / Y1MediaBridge data path the p
 
 Scope of this pass: read-only. No code touched. Inputs read:
 
-- `/work/koensayr/docs/ARCHITECTURE.md`, `PATCHES.md`, `AVRCP13-COMPLIANCE.md`, `INVESTIGATION.md`
+- `/work/koensayr/docs/ARCHITECTURE.md`, `PATCHES.md`, `BT-COMPLIANCE.md`, `INVESTIGATION.md`
 - `/work/v3.0.2/MtkBt.dex` — class metadata + raw bytecode at sPlayServiceInterface read / write sites
 - `/work/v3.0.2/system.img.extracted/lib/libextavrcp_jni.so` — symbol table cross-reference (already documented in ARCHITECTURE)
 - `/work/koensayr/src/Y1MediaBridge/app/src/main/AndroidManifest.xml`, `MediaBridgeService.java`, `PlaySongReceiver.java`

@@ -1,12 +1,12 @@
 # AVRCP Metadata Architecture
 
-How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) to peer Controllers, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. We advertise 1.3 over AVCTP 1.2 (see `patch_mtkbt.py` V1/V2, with ESR07 §2.1 / Erratum 4969 SDP-record clarifications applied) and implement the 1.3 metadata feature set: `GetCapabilities` 0x10, `InformDisplayableCharacterSet` 0x17, `InformBatteryStatusOfCT` 0x18, `GetElementAttributes` 0x20 (all 7 §5.3.4 attributes packed in a single response), `GetPlayStatus` 0x30 (with `clock_gettime(CLOCK_BOOTTIME)` live-position extrapolation), `RegisterNotification` 0x31 with INTERIM coverage of events 0x01..0x07 and proactive CHANGED-on-edge for 0x01..0x06 (PLAYBACK_STATUS / TRACK_CHANGED / TRACK_REACHED_END / TRACK_REACHED_START / PLAYBACK_POS / BATT_STATUS), and explicit AV/C reject for Continuation 0x40/0x41. F1's MtkBt-internal-version flip is a Java-side dispatcher-unblock flag (BlueAngel internal value), not a wire-shape upgrade. See [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §0 for spec citation discipline and §2 for the ICS Table 7 coverage scorecard.
+How the Innioasis Y1 delivers AVRCP 1.3 metadata (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime) to peer Controllers, given that the OEM Bluetooth stack is fundamentally an AVRCP 1.0 implementation that auto-rejects 1.3+ commands. We advertise 1.3 over AVCTP 1.2 (see `patch_mtkbt.py` V1/V2, with ESR07 §2.1 / Erratum 4969 SDP-record clarifications applied) and implement the 1.3 metadata feature set: `GetCapabilities` 0x10, `InformDisplayableCharacterSet` 0x17, `InformBatteryStatusOfCT` 0x18, `GetElementAttributes` 0x20 (all 7 §5.3.4 attributes packed in a single response), `GetPlayStatus` 0x30 (with `clock_gettime(CLOCK_BOOTTIME)` live-position extrapolation), `RegisterNotification` 0x31 with INTERIM coverage of events 0x01..0x07 and proactive CHANGED-on-edge for 0x01..0x06 (PLAYBACK_STATUS / TRACK_CHANGED / TRACK_REACHED_END / TRACK_REACHED_START / PLAYBACK_POS / BATT_STATUS), and explicit AV/C reject for Continuation 0x40/0x41. F1's MtkBt-internal-version flip is a Java-side dispatcher-unblock flag (BlueAngel internal value), not a wire-shape upgrade. See [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §0 for spec citation discipline and §2 for the ICS Table 7 coverage scorecard.
 
 This document covers the **full proxy architecture**: the trampoline chain that intercepts inbound AVRCP commands in `libextavrcp_jni.so`, calls the existing C response-builder functions (which were never wired up by the OEM Java side), and delivers spec-compliant 1.3 responses on the wire.
 
 For **per-patch byte details**: see [`PATCHES.md`](PATCHES.md).
 For **investigation history** (how we got here): see [`INVESTIGATION.md`](INVESTIGATION.md).
-For **AVRCP 1.3 spec-coverage state**: see [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md).
+For **AVRCP 1.3 spec-coverage state**: see [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md).
 
 ---
 
@@ -175,7 +175,7 @@ The connected-and-streaming case (`mSuspendedParam != 0`) intentionally **skips*
 
 ### Cross-profile coupling gaps relevant to AVRCP 1.3
 
-These are the spec-conformance deviations that affect AVRCP-1.3-class controllers in the wild. Each is filed for the [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §9 plan:
+These are the spec-conformance deviations that affect AVRCP-1.3-class controllers in the wild. Each is filed for the [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §9 plan:
 
 | # | Coupling gap | What spec says | What Y1 currently does |
 |---|---|---|---|
@@ -737,7 +737,7 @@ See [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT" for th
 
 Two files, both in `/data/data/com.y1.mediabridge/files/`:
 
-- **y1-track-info** (1104 B, written by Y1MediaBridge on every state change, mode 0644 so the BT process can open it). Full byte-level layout in [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §4.
+- **y1-track-info** (1104 B, written by Y1MediaBridge on every state change, mode 0644 so the BT process can open it). Full byte-level layout in [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §4.
 - **y1-trampoline-state** (16 B, pre-created by Y1MediaBridge at startup, updated by the trampolines):
   - 0..7  = last track_id we told the CT about (updated by T4 after emitting CHANGED, and by extended_T2 / T5 after emitting CHANGED)
   - 8     = last RegisterNotification transId (updated by extended_T2)
@@ -830,7 +830,7 @@ Every state read or write that crosses process boundaries. The 2026-05-08 attemp
 
 ## See also
 
-- [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred).
+- [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred).
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture work and dead-end paths.
 - [`DATA-PATH-AUDIT-2026-05-09.md`](DATA-PATH-AUDIT-2026-05-09.md) — verification record for every claim in this doc, plus open empirical questions.

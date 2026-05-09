@@ -7,7 +7,7 @@ and design rationale (including the wire-level `track_id` sentinel choice
 and the `r1=0` calling convention shared by all `reg_notievent_*_rsp`
 builders): see `docs/PATCHES.md` `## patch_libextavrcp_jni.py`. Stack-frame
 + `saveRegEventSeqId` calling convention: `docs/ARCHITECTURE.md`. Schema
-of the on-disk file the trampolines read: `docs/AVRCP13-COMPLIANCE.md` §4.
+of the on-disk file the trampolines read: `docs/BT-COMPLIANCE.md` §4.
 PLT inventory: `PLT_*` constants below; full table in COMPLIANCE.md §3.
 
 Trampolines emitted by this module (T1 + T2 stub are written separately by

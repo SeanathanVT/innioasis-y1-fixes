@@ -1,6 +1,6 @@
 # Patch Reference
 
-Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before / after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §0.
+Byte-level reference for the patches currently shipped by this repo. Each section describes what the patch ships **today** (offsets, before / after bytes, rationale, ICS status). For the commit-by-commit evolution that produced the current shape — including reverts, dead-end attempts, and the empirical evidence that motivated each behavior change — see [`INVESTIGATION.md`](INVESTIGATION.md) and `git log`. Spec citations follow the discipline in [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §0.
 
 ## Patch ID Legend
 
@@ -156,7 +156,7 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/AVRCP13-COMPLIANCE.md` §2).
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
 
 ### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED
 
@@ -223,7 +223,7 @@ Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte p
 
 Patches `MtkBt.odex` with four byte edits and recomputes the DEX adler32 checksum embedded in the ODEX header.
 
-**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns the BlueAngel-internal flag value 14 instead of 10. This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling on a stack that was originally compiled for an earlier AVRCP version. The wire shape is unchanged; we ship AVRCP 1.3 PDUs only. See [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §1.
+**F1** at file `0x3e0ea` (1 byte): `0a → 0e`. `BTAvrcpProfile.getPreferVersion()` returns the BlueAngel-internal flag value 14 instead of 10. This is internal flag bookkeeping inside MtkBt's Java-side dispatcher — it unblocks 1.3+ command handling on a stack that was originally compiled for an earlier AVRCP version. The wire shape is unchanged; we ship AVRCP 1.3 PDUs only. See [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) §1.
 
 **F2** at file `0x03f21a`: `BluetoothAvrcpService.disable()` resets `sPlayServiceInterface = false`. Fixes a BT-toggle bug where the service tears itself down prematurely on second activation because the flag is left stale across restarts.
 

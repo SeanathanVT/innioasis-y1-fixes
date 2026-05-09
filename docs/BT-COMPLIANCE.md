@@ -1,6 +1,6 @@
-# AVRCP 1.3 Spec Compliance
+# Bluetooth profile-stack spec compliance
 
-Current AVRCP 1.3 spec coverage. Anchored against ICS Table 7 in `docs/spec/AVRCP.ICS.p17.pdf`. Per-CT empirical observations behind each design choice live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT".
+Current spec compliance state across the Bluetooth profile stack the Y1 talks to peer Controllers (CTs) over. **AVRCP 1.3 is the primary target** — full ICS Table 7 scorecard with M/O accounting in §2 — because that's where most of the Y1's stock behaviour was non-conformant. **Adjacent profiles (A2DP, AVDTP, AVCTP, GAVDP) are in scope when their behaviour bleeds into AVRCP-level CT interop**, with targeted fixes per §9 rather than full per-profile compliance scoreboards. Per-CT empirical observations behind each design choice live in [`INVESTIGATION.md`](INVESTIGATION.md) "Hardware test history per CT".
 
 For why we have a proxy at all, the current trampoline chain shape, and the calling conventions of the response builders we use, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For per-patch byte-level reference, see [`PATCHES.md`](PATCHES.md).
 
@@ -8,24 +8,28 @@ For why we have a proxy at all, the current trampoline chain shape, and the call
 
 ## 0. Spec target + citation discipline
 
-**Wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
+**Primary wire protocol target: AVRCP 1.3 (V13, adopted 16 April 2007), with ESR07 errata applied.** AVCTP 1.2 paired per §6 SDP record. Canonical PDFs (local-only — not committed because Bluetooth SIG copyright disallows redistribution; download from <https://www.bluetooth.com/specifications/specs/a-v-remote-control-profile-1-3/> and drop into `docs/spec/`, which is `.gitignore`d):
 
-- `docs/spec/AVRCP_SPEC_V13.pdf` — base spec, 93 pages.
-- `docs/spec/ESR07_ESR_V10.pdf` — Errata Service Release 07 (2013-12-03); §2.1 contains Erratum 4969 (SDP record AVCTP version clarification, the only formal 1.3 erratum); §2.2 carries supplementary clarifications that resolve printed typos in 1.3 wire-format tables (e.g., the 8-byte `Identifier` sentinel form for TRACK_CHANGED).
-- `docs/spec/AVRCP.ICS.p17.pdf` — Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
-- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — Implementation eXtra Information for Testing Proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
+- `docs/spec/AVRCP_SPEC_V13.pdf` — AVRCP 1.3 base spec, 93 pages.
+- `docs/spec/ESR07_ESR_V10.pdf` — AVRCP 1.3 Errata Service Release 07 (2013-12-03); §2.1 contains Erratum 4969 (SDP record AVCTP version clarification, the only formal 1.3 erratum); §2.2 carries supplementary clarifications that resolve printed typos in 1.3 wire-format tables (e.g., the 8-byte `Identifier` sentinel form for TRACK_CHANGED).
+- `docs/spec/AVRCP.ICS.p17.pdf` — AVRCP 1.3 Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
+- `docs/spec/AVRCP.IXIT.1.6.0.pdf` — AVRCP 1.3 Implementation eXtra Information for Testing Proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
+
+**Adjacent-profile spec citations** (when §9 references them): A2DP 1.3, AVDTP 1.3, AVCTP 1.4, GAVDP 1.3 — each available from the corresponding Bluetooth SIG specification page; same `docs/spec/` drop directory + same redistribution caveat. We don't pursue ICS-style scorecard coverage on these — only targeted fixes with empirical motivation from observed CT interop issues.
 
 Per ICS §1.2 Table 2b, AVRCP 1.3 was deprecated 2023-02-01 and is scheduled for withdrawal 2027-02-01. We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping.
 
-**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against `docs/spec/AVRCP_SPEC_V13.pdf` table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where the spec text contains a printed typo, cite ESR07's clarification: `AVRCP 1.3 §X.Y + ESR07 §2.2`. Section numbers must appear in the AVRCP 1.3 spec PDF's table of contents — anything else is a citation error.
+**Citation hygiene rule.** Cite by **PDU name + AVRCP 1.3 section number** verified against `docs/spec/AVRCP_SPEC_V13.pdf` table-of-contents. Where a behavior comes from AV/C Panel Subunit Spec (PASS THROUGH op codes / press-release semantics), cite as `AVRCP 1.3 §4.6.1 (defined in AV/C Panel Subunit Spec, ref [2])`. Where the spec text contains a printed typo, cite ESR07's clarification: `AVRCP 1.3 §X.Y + ESR07 §2.2`. Section numbers must appear in the AVRCP 1.3 spec PDF's table of contents — anything else is a citation error. Adjacent-profile citations follow the same shape: `A2DP 1.3 §X.Y`, `AVDTP 1.3 §X.Y`, etc.
 
 ---
 
 ## 1. Current coverage state
 
-The goal is AVRCP 1.3 spec-completeness so any spec-compliant 1.3+ controller renders our metadata. Scope is the latest revision of the AVRCP 1.3 spec (V13 + ESR07). Anything outside that revision is out of scope.
+**AVRCP 1.3 (primary target).** The goal is AVRCP 1.3 spec-completeness so any spec-compliant 1.3+ controller renders our metadata. Scope is the latest revision of the AVRCP 1.3 spec (V13 + ESR07). Anything outside that revision is out of scope for the AVRCP scoreboard.
 
 The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's BlueAngel-internal `getPreferVersion()` value — internal flag bookkeeping inside MtkBt's Java-side dispatcher that unblocks 1.3+ command handling on a stack that was originally compiled against AVRCP 1.0. F1 sets the flag and unblocks 1.3 dispatch; nothing in our wire shape is changed by it.
+
+**Lower BT profile stack (adjacent).** A2DP, AVDTP, AVCTP, GAVDP fixes are filed in §9. Selection criteria: an observed deviation in a captured CT interop session, OR a documented spec-divergence in the OEM stack that affects AVRCP-1.3-class controllers. We don't enumerate full ICS-style M/O matrices for these. Each entry in §9 has an empirical motivation, a fix scope (or explicit defer-with-rationale), and a verification path. Currently shipped: §9.2 (AVRCP↔AVDTP coupling via `A2dpSuspended` HAL parameter) and §9.3 (per-attribute byte cap in Y1MediaBridge).
 
 **Closed:** every Mandatory row of ICS Table 7, plus every Optional row except 12-17 + 30 (PlayerApplicationSettings).
 
@@ -254,13 +258,15 @@ Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for thi
 
 ---
 
-## 9. Lower BT profile stack — current deviations and compliance plan
+## 9. Lower BT profile stack — targeted fixes
 
-AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled by GAVDP. All four lower profiles are implemented inside `mtkbt` (BlueAngel internal stack — source-tree fingerprint visible in [`ARCHITECTURE.md`](ARCHITECTURE.md) "Lower BT profile stack"). Deviations in those profiles bleed upward into AVRCP 1.3 controller compatibility, even when our AVRCP TG itself is spec-compliant.
+AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled by GAVDP. All four lower profiles are implemented inside `mtkbt` (BlueAngel internal stack — source-tree fingerprint visible in [`ARCHITECTURE.md`](ARCHITECTURE.md) "Lower BT profile stack"). Deviations in those profiles bleed upward into AVRCP-1.3-class controller compatibility, even when our AVRCP TG itself is spec-compliant.
 
-This section catalogues the deviations relevant to AVRCP 1.3 conformance and proposes the upstream-layer fix per the [`feedback_y1_upstream_spec_compliance`] preference (fix at the spec-deviation layer, not via app-side workarounds).
+**Scope, deliberately bounded.** We don't pursue full A2DP / AVDTP / AVCTP / GAVDP ICS-style scorecards — the OEM stack is functional and chasing exhaustive compliance on each profile would consume effort with diminishing returns on real-world CT interop. Instead, each subsection below is a **targeted fix** anchored to either (a) an observed deviation in a captured CT session, or (b) a documented spec-divergence in the OEM stack that bleeds up to AVRCP-level user-visible behaviour. Per the [`feedback_y1_upstream_spec_compliance`] memory rule, fixes go at the spec-deviation layer (e.g. A2DP HAL, AVDTP signalling), not via AVRCP-level workarounds.
 
-### 9.1 AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)
+Subsections are organised per-issue rather than per-profile, with the affected profile noted in the heading.
+
+### 9.1 AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41) — *AVRCP / AVCTP* — DEFERRED
 
 **Spec.** AVRCP 1.3 §5.5: when a TG response exceeds the CT buffer or AVCTP MTU, TG sends `packet_type=01 START` with the first chunk and waits for CT to issue `RequestContinuingResponse` (PDU 0x40). TG then emits `packet_type=02 CONTINUE` or `packet_type=03 END` chunks. CT may abort partway with `AbortContinuingResponse` (PDU 0x41). ICS Table 7 rows 31-32: **Mandatory if `GetElementAttributes Response` is supported (C.2)**.
 
@@ -282,7 +288,7 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 **Verification.** Capture against a CT after manually injecting a `packet_type=01` response; confirm CT sends PDU 0x40, confirm we re-emit the buffered tail with `packet_type=03 END`.
 
-### 9.2 AVRCP playback state ↔ AVDTP source state coupling
+### 9.2 AVRCP playback state ↔ AVDTP source state coupling — *A2DP / AVDTP* — SHIPPED
 
 **Spec.** Not a hard AVRCP 1.3 requirement, but a conformance expectation: when AVRCP TG signals PLAYBACK_STATUS_CHANGED to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down). On transition to PLAYING, the source should resume feeding samples without renegotiating the stream. AVDTP 1.3 §8.13 / §8.15.
 
@@ -301,7 +307,7 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 - If AudioFlinger or another process also sets `A2dpSuspended` (e.g. on incoming call routing on different builds), there's a potential race. We always set the value matching our current state on every edge, so a transient external override self-corrects on the next state edge.
 - A peer CT that gates UI play-state on AVDTP source state (rare in practice; most key on AVRCP PLAYBACK_STATUS_CHANGED) would need a different fix — either drive AVDTP SUSPEND/START explicitly via the original deferred ELF-graft routes, or accept that those CTs see continuous "streaming silence" during pause.
 
-### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp`
+### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp` — *AVRCP* — SHIPPED
 
 **Spec.** AVRCP 1.3 §5.3.4 places no per-attribute byte cap. TG fragments via §5.5 if the total response exceeds AVCTP MTU.
 
@@ -311,7 +317,7 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 **Optional follow-up.** Bypass `…send_get_element_attributes_rsp` entirely and build the GetElementAttributes response wire frame directly in the trampoline, using the full §5.5 fragmentation flow from §9.1 above. Removes the 511 cap as a constraint. ~3 days if paired with §9.1 (no value as a standalone change — 240 B already fits everything we'd realistically ship).
 
-### 9.4 AVCTP MTU negotiation discoverability
+### 9.4 AVCTP MTU negotiation discoverability — *AVCTP* — NO ACTION
 
 **Spec.** AVCTP 1.4 §5: each side independently advertises its MTU during L2CAP CONFIG; the smaller value wins. AVRCP 1.3 §6 specifies the AVCTP version pairing only.
 
@@ -319,7 +325,7 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 **Compliance plan.** Not currently a deviation worth fixing — 512 is the standard L2CAP signaling MTU and most CTs are fine with it. Filed here for completeness; revisit if a future capture shows a CT requesting >512 and degrading on the cap.
 
-### 9.5 GAVDP / AVDTP discovery hygiene
+### 9.5 GAVDP / AVDTP discovery hygiene — *GAVDP / AVDTP* — NO ACTION
 
 **Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. SBC is mandatory; advanced codecs (AAC, aptX, LDAC) are optional.
 

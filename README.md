@@ -96,7 +96,7 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 | §5.5 | 0x40 / 0x41 RequestContinuingResponse / Abort | explicit AV/C reject (we never fragment, so a CT shouldn't see these in valid flow) |
 | §4.6.1 | PASS THROUGH (PLAY / PAUSE / STOP / FORWARD / BACKWARD / etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
 
-Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/AVRCP13-COMPLIANCE.md`](docs/AVRCP13-COMPLIANCE.md) §2 — every mandatory row hits. Architecture, calling conventions, and the ELF-segment-extension technique that hosts the trampoline blob past the original LOAD #1 segment end: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Full investigation history including refuted hypotheses: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
+Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md) §2 — every mandatory row hits. Architecture, calling conventions, and the ELF-segment-extension technique that hosts the trampoline blob past the original LOAD #1 segment end: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Full investigation history including refuted hypotheses: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 `--bluetooth` covers only pairing-essential config edits — it does not modify SDP / AVRCP behavior; that's all under `--avrcp`.
 
@@ -125,7 +125,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
 - [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain, response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
-- [docs/AVRCP13-COMPLIANCE.md](docs/AVRCP13-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred)
+- [docs/BT-COMPLIANCE.md](docs/BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log
 - [docs/PATCHES.md](docs/PATCHES.md) — per-patch byte-level reference (offsets, before/after bytes, rationale)
 
