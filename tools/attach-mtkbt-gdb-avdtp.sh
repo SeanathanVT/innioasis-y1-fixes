@@ -36,7 +36,6 @@
 #
 # Usage:
 #   ./tools/attach-mtkbt-gdb-avdtp.sh                       # default flow
-#   ./tools/attach-mtkbt-gdb-avdtp.sh --port 5040           # default — coexists with attach-mtkbt-gdb.sh's 5039
 #   ./tools/attach-mtkbt-gdb-avdtp.sh --gdbserver /path/to/gdbserver
 #
 # Driving the capture (once gdb is running):
@@ -65,9 +64,8 @@ Attach gdbserver to the live mtkbt daemon and prepare a gdb command file
 for breakpoint-driven RE of the AVDTP signal dispatcher (V5 hunt).
 
 Options:
-    --port N            TCP port for the gdbserver tunnel (default 5040
+    --port N            TCP port for the gdbserver tunnel (default 5039)
                         — offset from 5039 used by attach-mtkbt-gdb.sh
-                        so both can run side-by-side)
     --gdbserver PATH    Override gdbserver binary path
 
 The script doesn't launch gdb itself — it sets up the device side and
@@ -78,7 +76,7 @@ tools/gdbserver, $GDBSERVER, or under $ANDROID_NDK_HOME/prebuilt/.
 EOF
 }
 
-PORT=5040
+PORT=5039
 GDBSERVER=""
 
 while [[ $# -gt 0 ]]; do
@@ -272,7 +270,7 @@ set confirm off
 set print pretty on
 set logging file /tmp/mtkbt-gdb-avdtp.log
 set logging overwrite on
-set logging on
+set logging enabled on
 
 # mtkbt is all Thumb-2. force-mode thumb makes gdb plant a 2-byte Thumb BKPT
 # at every breakpoint regardless of address parity / symbol info. fallback-mode
