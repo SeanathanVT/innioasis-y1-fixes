@@ -224,11 +224,15 @@ fileoff_to_live() {
     printf "0x%x" $(( off + PIE_BASE ))
 }
 
-BP_50b08=$(fileoff_to_live 0x50b08)   # AVDTP signal-frame parser entry (case dispatch on input fmt-id)
-BP_50b96=$(fileoff_to_live 0x50b96)   # parser stores sig_id (mask byte 1 of frame with 0x3f) at output[8]
-BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — last insn before bl validator + return
-BP_de26=$(fileoff_to_live 0xde26)     # external caller of parser (passes r4+0x11c)
-BP_de2a=$(fileoff_to_live 0xde2a)     # right after parser returns at 0xde26 — dispatch decision is downstream
+BP_50b08=$(fileoff_to_live 0x50b08)   # parser entry (case dispatch on input fmt-id)
+BP_50b96=$(fileoff_to_live 0x50b96)   # parser case-1 sig_id store (byte1 & 0x3f = AVDTP sig_id)
+BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — last insn before validator + return
+BP_de26=$(fileoff_to_live 0xde26)     # parser caller A — passes r4+0x11c
+BP_de2a=$(fileoff_to_live 0xde2a)     # post-return at caller A (dispatch decision downstream)
+BP_df26=$(fileoff_to_live 0xdf26)     # parser caller B — same outer fn as A, alt path
+BP_df2a=$(fileoff_to_live 0xdf2a)     # post-return at caller B
+BP_50dfa=$(fileoff_to_live 0x50dfa)   # parser caller C — different fn, alloc'd 24B struct
+BP_50dfe=$(fileoff_to_live 0x50dfe)   # post-return at caller C
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
@@ -296,24 +300,61 @@ printf "BP@0x50c46 parser exit: r0=0x%x r1=0x%x  output struct sig_id=0x%02x\n",
 continue
 end
 
-# External caller of parser at file 0xde26 (passes r4+0x11c as arg). Tells
-# us which higher-level function in the AVDTP RX chain hosts the parser
-# call. Critical for identifying the dispatcher.
+# Parser caller A at 0xde26 (in fn near 0xdc00, alongside caller B at 0xdf26).
 break *${BP_de26}
 commands
 silent
-printf "BP@0xde26 caller-of-parser: r0=0x%08x (parser arg) r4=0x%08x [r4+0x11c+0]=%u (fmt-id pre-parse)\n", \$r0, \$r4, *(unsigned char*)(\$r4+0x11c)
+printf "BP@0xde26 caller-A: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
 continue
 end
 
-# Right after parser returns at file 0xde2a — the dispatch decision (cmp +
-# branch on sig_id) is the next several instructions. Watch the LR and PC
-# trajectory from this BP to locate the actual per-sig dispatch site.
+# Post-return at caller A. After parser exits, the calling code branches based
+# on parsed-struct contents. Disassemble PC to locate the dispatch site.
 break *${BP_de2a}
 commands
 silent
-printf "BP@0xde2a parser-return: r0=%d (parse OK?) [struct+0]=%u (fmt-id) [struct+8]=%u (sig_id)\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c), *(unsigned char*)(\$r4+0x11c+8)
-printf "  next 8 insns at PC=%p — *** the dispatch on sig_id is here ***\n", \$pc
+printf "BP@0xde2a post-return-A: parser returned r0=%d  parsed-struct sig_id=[r4+0x11c+8]=%u\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c+8)
+printf "  next 8 insns @PC=%p:\n", \$pc
+disassemble \$pc, \$pc+32
+continue
+end
+
+# Parser caller B at 0xdf26 (same outer fn as A, alternate path; passes same
+# r4+0x11c arg).
+break *${BP_df26}
+commands
+silent
+printf "BP@0xdf26 caller-B: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
+continue
+end
+
+# Post-return at caller B.
+break *${BP_df2a}
+commands
+silent
+printf "BP@0xdf2a post-return-B: parser returned r0=%d  parsed-struct sig_id=[r4+0x11c+8]=%u\n", (int)\$r0, *(unsigned char*)(\$r4+0x11c+8)
+printf "  next 8 insns @PC=%p:\n", \$pc
+disassemble \$pc, \$pc+32
+continue
+end
+
+# Parser caller C at 0x50dfa (different fn entirely — wrapper allocates a 24-B
+# struct via 0x6a29c, sets struct[4]=byte, then calls parser with r0=incoming
+# arg + r1=alloc+8). Followed by bl 0x50c58 with msg_id=312 (0x138). This
+# might be where AVDTP RX is funneled in.
+break *${BP_50dfa}
+commands
+silent
+printf "BP@0x50dfa caller-C: r0=0x%08x [r0+0]=%u (fmt-id pre-parse) [r0+4]=0x%08x (frame ptr)\n", \$r0, *(unsigned char*)\$r0, *(unsigned int*)(\$r0+4)
+continue
+end
+
+# Post-return at caller C — followed by bl 0x50c58 (msg=312 dispatch).
+break *${BP_50dfe}
+commands
+silent
+printf "BP@0x50dfe post-return-C: parser returned r0=%d  about to bl 0x50c58 (msg=312)\n", (int)\$r0
+printf "  next 8 insns @PC=%p:\n", \$pc
 disassemble \$pc, \$pc+32
 continue
 end
