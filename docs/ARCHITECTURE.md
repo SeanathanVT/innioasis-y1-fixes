@@ -40,6 +40,154 @@ The trampolines call these directly. No new IPC, no Java surgery for the core ha
 
 ---
 
+## Lower BT profile stack (A2DP / AVDTP / AVCTP / GAVDP)
+
+AVRCP doesn't run in a vacuum. It rides on AVCTP, which rides on L2CAP. Audio rides on A2DP, which rides on AVDTP, which is signalled via GAVDP, which rides on L2CAP. All four lower profiles are implemented in a single MediaTek "BlueAngel" daemon (`/system/bin/mtkbt`). A handful of `.so` files surround it as adapters / shims / userspace plumbing. There is no separate `libavctp.so` / `libavdtp.so` / `libgavdp.so`; everything from L2CAP up through AVRCP TG lives inside `mtkbt`.
+
+### Where each profile lives
+
+Source-tree fingerprint (paths embedded in `mtkbt` strings — confirms BlueAngel internal codebase):
+
+| Profile | BlueAngel source files (inside mtkbt) | External adapter / shim |
+|---|---|---|
+| L2CAP | `btcore/btstack/stack/l2cap/{l2cap,l2cap_if,l2cap_sm,l2cap_utl}.c` | — |
+| HCI | `btcore/btstack/stack/hci/{hci,hci_evnt,hci_proc,hci_util,hci_meta,hci_amp}.c` | — |
+| AVCTP | `btcore/btstack/stack/avctp/{avctp,avctpcon,avctpmsg}.c` | — |
+| AVDTP | `btcore/btstack/stack/avdtp/{avdtp,avsigmgr}.c` | — |
+| GAVDP | `btcore/btstack/stack/gavdp/gavdp.c` | — |
+| A2DP | `btcore/btprofiles/a2dp/a2dp.c` | `libmtka2dp.so` (userspace stream socket), `libmtkbtextadpa2dp.so` (Java↔mtkbt shim), `libaudio.a2dp.default.so` (legacy AOSP `a2dp.default` HAL) |
+| AVRCP TG | `btcore/btprofiles/avrcp/{avrcp,avrcpevent,avrcputil}.c` + `btadp_int/profiles/avrcp/bt_adp_avrcp.c` | `libextavrcp.so` (response builders), `libextavrcp_jni.so` (JNI bridge — our trampoline host) |
+
+mtkbt internal version tag: `[AVRCP] AVRCP V10 compiled` — built against AVRCP 1.0. F1's BlueAngel-internal version flip unblocks 1.3+ command dispatch in the Java layer; the wire-shape upgrade is what our trampolines provide.
+
+### AVCTP — transport for AVRCP
+
+L2CAP PSM 0x17 (signaling channel). Browse PSM 0x1B exists in mtkbt code paths but no captured CT in the test matrix has ever opened a Browse channel — Browse-related strings (`[AVRCP][BWS] No av/c parse`, `[AVRCP][BWS] Receive browse-packet`) are dead code from a later AVRCP version that was never claimed in our SDP record (V1 patch advertises 1.3, not 1.4+).
+
+**MTU bookkeeping**:
+
+```
+[AVRCP] AVRCP_NUM_TX_PACKETS:4 AVRCP_MAX_PACKET_LEN:512
+```
+
+advertised at AVRCP service init. Per-packet ceiling enforced via the runtime check `(10 + u2MtuPayload) <= 512` — anything above the ceiling triggers one of `MTU violation 1..5` log lines and the packet is dropped. `4 × 512 = 2048` is the practical ceiling for fragmented AVRCP responses.
+
+**AVCTP packet types** (from `cmdFrame->type` / `rawFrame->type` log fields, and the `pkt_type` 2-bit field at byte 0 of every AVCTP frame):
+
+| pkt_type | Meaning |
+|---|---|
+| 0 | SINGLE — entire AV/C body in one AVCTP packet |
+| 1 | START — first fragment of a multi-fragment AV/C body; byte 1 = num_packets |
+| 2 | CONTINUE — middle fragment |
+| 3 | END — final fragment |
+
+Fragmentation is mandatory at the AVCTP layer when the AV/C body exceeds the negotiated AVCTP MTU. mtkbt's outbound path implements this transparently to AVRCP — the `AVRCP_SendMessage` IPC frame size (e.g., the `len=644 size=672` we observe in EXTADP_AVRCP logs for `GetElementAttributes` responses) is the IPC payload, which mtkbt then fragments into multiple AVCTP packets if the body > AVCTP MTU.
+
+**AVCTP transaction model** (events visible at the JNI boundary as `AVCTP_EVENT:N`):
+
+| EVENT | Direction | Meaning |
+|---|---|---|
+| 1 | inbound | `CONNECT_IND` — peer opened the AVCTP signaling channel |
+| 2 | inbound | `DISCONNECT_IND` — peer closed |
+| 4 | inbound | `DATA_IND` — peer sent an AV/C COMMAND |
+| 7 | outbound | `DATA_CFM` — confirmation that our outbound write completed (verified empirically — paired 1:1 with EVENT:4 at the lib level for COMMAND/RESPONSE round-trips) |
+
+### AVDTP + GAVDP — transport + setup for A2DP
+
+AVDTP runs on L2CAP PSM 0x19 (separate channels for signaling and media stream). GAVDP is the role-coordinator profile that sits above AVDTP and below A2DP — it handles SEP discovery, capability negotiation, and stream lifecycle.
+
+**Codec scope**: `[GAVDP][GavdpAvdtpEventCallback][AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC` — non-SBC stream endpoints are rejected by `try another SEP` fallback. Only SBC sinks are accepted.
+
+**AVDTP signal codes** (sig_id field at byte 1 of every AVDTP signaling frame; only the codes we have confirmed in mtkbt code are listed):
+
+| sig_id | Operation | Spec § (AVDTP 1.3) |
+|---|---|---|
+| 0x01 | DISCOVER | §8.6 |
+| 0x02 | GET_CAPABILITIES | §8.7 |
+| 0x03 | SET_CONFIGURATION | §8.9 |
+| 0x04 | GET_CONFIGURATION | §8.10 |
+| 0x05 | RECONFIGURE | §8.11 |
+| 0x06 | OPEN | §8.12 |
+| 0x07 | START | §8.13 |
+| 0x08 | CLOSE | §8.14 |
+| 0x09 | SUSPEND | §8.15 |
+| 0x0a | ABORT | §8.16 |
+| 0x0b | SECURITY_CONTROL | §8.17 |
+| 0x0c | GET_ALL_CAPABILITIES | §8.8 (1.3 addition) |
+| 0x0d | DELAYREPORT | §8.19 |
+
+**State machine surface** (visible state names from log strings — most transitions are silent):
+
+- `GAVDP_STATE_DEINITIALIZING` (init/teardown path)
+- `AVDP_STATE_SIG_PASSIVE_DISCONNECTING` / `AVDP_STATE_SIG_PASSIVE_DISCONNECTED` (signaling channel teardown)
+- `AVDTP_EVENT_CAPABILITY` / `AVDTP_EVENT_GET_CAP_CNF` / `AVDTP_EVENT_STREAM_CLOSED` (event names emitted by AVDTP into GAVDP via `GavdpAvdtpEventCallback`)
+
+The full state graph isn't logged in production — confirming any transition beyond what's visible above requires disassembly of `avdtp.c` / `avsigmgr.c` / `gavdp.c` symbols.
+
+### A2DP source state
+
+A2DP is the only one of the four lower profiles with a userspace bridge: `libmtka2dp.so` opens `/dev/socket/bt.a2dp.stream` (an abstract Unix socket created by mtkbt) and shuttles SBC-encoded audio frames from the legacy AOSP `a2dp.default` HAL to mtkbt's AVDTP source.
+
+**The HAL → BT stack chain**:
+
+```
+AudioFlinger (audioflinger process)
+   ↓ writes audio frames
+A2dpAudioStreamOut::write()  (libaudio.a2dp.default.so)
+   ↓ writes to /dev/socket/bt.a2dp.stream
+libmtka2dp.so (linked into the BT process)
+   ↓ MSG_ID_BT_A2DP_STREAM_DATA_*
+mtkbt internal A2DP source state machine
+   ↓ packetizes as RTP-over-AVDTP MEDIA
+peer A2DP sink (cid 0x40 in our captures)
+```
+
+**A2DP source state machine** (function names from `libmtkbtextadpa2dp.so` exports — these are the IPC entry points mtkbt uses):
+
+| State change | Function |
+|---|---|
+| OPEN_REQ / IND / CNF | `btmtk_a2dp_send_stream_open_req` / `_handle_stream_open_ind` / `_handle_stream_open_cnf` |
+| START_REQ / IND / CNF | `btmtk_a2dp_send_stream_start_req` / `_handle_stream_start_ind` / `_handle_stream_start_cnf` |
+| SUSPEND (`pause`) REQ / IND / CNF | `btmtk_a2dp_send_stream_pause_req` / `_handle_stream_suspend_ind` / `_handle_stream_suspend_cnf` |
+| CLOSE_REQ / IND / CNF | `btmtk_a2dp_send_stream_close_req` / `_handle_stream_close_ind` / `_handle_stream_close_cnf` |
+| ABORT_REQ / IND / CNF | `btmtk_a2dp_send_stream_abort_req` / `_handle_stream_abort_ind` / `_handle_stream_abort_cnf` |
+| RECONFIGURE_REQ / RES | `btmtk_a2dp_send_stream_reconfig_req` / `_send_stream_reconfig_res` |
+| Direct AVDTP SUSPEND | `btmtk_a2dp_pause_immediately` |
+
+`btmtk_a2dp_send_stream_pause_req` emits AVDTP SUSPEND on the wire. `btmtk_a2dp_pause_immediately` is a synchronous wrapper. Both are reachable from mtkbt-internal IPC handlers — neither is called from `libaudio.a2dp.default.so` directly.
+
+**`A2dpAudioStreamOut::standby_l` (legacy HAL)** at `libaudio.a2dp.default.so:0x8654`:
+
+```
+if (mStandby || !mSuspendedLocal) {
+    if (mSuspendedParam != 0) {
+        // Already suspended via setParameters("A2dpSuspended=true") —
+        // do NOT call a2dp_stop. Just mark mStandby = 1 and release wake_lock.
+        release_wake_lock(); mStandby = 1; return 0;
+    }
+    if (handle == 0) { release_wake_lock(); mStandby = 1; return 0; }
+    r5 = a2dp_stop(handle);   // ← only path that triggers AVDTP SUSPEND from the HAL
+    release_wake_lock(); mStandby = 1; return r5;
+}
+```
+
+The connected-and-streaming case (`mSuspendedParam != 0`) intentionally **skips** `a2dp_stop`, which is the only HAL-side path that would emit AVDTP SUSPEND. The framework is expected to flip `mSuspendedParam` via `setParameters("A2dpSuspended=true")` when AudioFlinger / AudioPolicyManager wants the BT route to go idle. We have no evidence in any captured log that this `setParameters` call happens when MediaPlayer transitions from PLAYING to PAUSED — meaning the AVDTP source remains in STREAMING for the lifetime of the L2CAP connection regardless of AVRCP playback state.
+
+### Cross-profile coupling gaps relevant to AVRCP 1.3
+
+These are the spec-conformance deviations that affect AVRCP-1.3-class controllers in the wild. Each is filed for the [`AVRCP13-COMPLIANCE.md`](AVRCP13-COMPLIANCE.md) §9 plan:
+
+| # | Coupling gap | What spec says | What Y1 currently does |
+|---|---|---|---|
+| 1 | **AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)** | AVRCP 1.3 §5.5: when a TG response exceeds the CT-buffer / AVCTP-MTU budget, TG sends packet_type=START with the first chunk and waits for CT to send `RequestContinuingResponse` (0x40). TG then sends CONTINUE / END chunks until the response is exhausted. C.2 makes this Mandatory if `GetElementAttributes Response` is supported. | T_continuation explicit-rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED. Currently spec-acceptable because no captured CT has driven 0x40 traffic yet — but a strict CT with a small buffer will hit this and lose metadata mid-fragment. |
+| 2 | **AVRCP playback state ↔ AVDTP source state** | Common spec hygiene (not a hard 1.3 requirement, but a conformance expectation): when AVRCP TG transitions to PAUSED, the A2DP source should call AVDTP SUSPEND (sig_id 0x09). On resume to PLAYING, the source should call AVDTP START (sig_id 0x07). This lets the peer A2DP sink actually stop / resume audio output. | No code path in mtkbt or its adapters wires AVRCP playback-state edges to AVDTP source-state changes. Source stays in STREAMING regardless. Sinks that locally mute on stream silence may behave correctly; sinks that decode whatever arrives may keep playing. |
+| 3 | **Per-attribute size cap in `…send_get_element_attributes_rsp`** | AVRCP 1.3 §5.3.4 places no per-attribute byte cap; TG fragments via §5.5 if total response doesn't fit. | `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap and emits `[BT][AVRCP][ERR] too large attr_index:%d` then drops the attribute on overflow. Tracks with extreme-length tags lose the offending attribute silently. |
+| 4 | **AVCTP transaction-label management** | AVCTP 1.4 §6: TG response transaction label must match the inbound COMMAND label (4-bit field at byte 0 high nibble). | mtkbt routes `transId` from `conn[17]` into every response builder, but the response builders (`…send_*_rsp`) are responsible for stamping it into byte 5 of the IPC frame. This appears correct for everything we've shipped — flagged here for completeness, no observed deviation. |
+
+The complete cross-profile dependency table (state files, broadcasts, IBinder fields, etc.) lives in the "Cross-component state dependencies" section near the bottom of this doc. The four entries above are the spec-conformance deviations specifically; the table at the bottom catalogues runtime state crossings.
+
+---
+
 ## How MtkBt discovers and binds to Y1MediaBridge
 
 For metadata + state-event delivery to peer CTs, two things must be true at runtime:

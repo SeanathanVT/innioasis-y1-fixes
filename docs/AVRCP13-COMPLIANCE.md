@@ -254,7 +254,106 @@ Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for thi
 
 ---
 
-## 9. See also
+## 9. Lower BT profile stack — current deviations and compliance plan
+
+AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled by GAVDP. All four lower profiles are implemented inside `mtkbt` (BlueAngel internal stack — source-tree fingerprint visible in [`ARCHITECTURE.md`](ARCHITECTURE.md) "Lower BT profile stack"). Deviations in those profiles bleed upward into AVRCP 1.3 controller compatibility, even when our AVRCP TG itself is spec-compliant.
+
+This section catalogues the deviations relevant to AVRCP 1.3 conformance and proposes the upstream-layer fix per the [`feedback_y1_upstream_spec_compliance`] preference (fix at the spec-deviation layer, not via app-side workarounds).
+
+### 9.1 AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)
+
+**Spec.** AVRCP 1.3 §5.5: when a TG response exceeds the CT buffer or AVCTP MTU, TG sends `packet_type=01 START` with the first chunk and waits for CT to issue `RequestContinuingResponse` (PDU 0x40). TG then emits `packet_type=02 CONTINUE` or `packet_type=03 END` chunks. CT may abort partway with `AbortContinuingResponse` (PDU 0x41). ICS Table 7 rows 31-32: **Mandatory if `GetElementAttributes Response` is supported (C.2)** — which we do support, so per the strict letter of the ICS we should ship a stateful continuation handler.
+
+**Current state.** `T_continuation` (in `_trampolines.py::_emit_t_continuation`) explicit-rejects PDUs 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the `UNKNOW_INDICATION` fallback (msg=520). Counted as ✓ in §2 because zero captured CTs have driven 0x40 traffic — strict CTs with small buffers might, but no test-matrix CT has yet.
+
+**Compliance plan.**
+
+1. **Promote T_continuation from rejecter to stateful re-emitter.** It needs a tiny per-conn state struct (4-tuple: `pdu_id`, `total_size`, `bytes_sent_so_far`, pointer-to-buffered-response). The buffer can live in the existing 1652-byte trampoline blob region (~2368 B free); a 1024-byte reusable buffer is sufficient for the §5.3.4 worst case (7 attributes × maximum sane string lengths ≈ 1800 B; we'd cap each attribute to 240 B and accept truncation on extreme tags).
+2. **First-fragment emit sites** (T4 GetElementAttributes-7-attrs path, and any future PDU whose response can exceed AVCTP MTU): copy the response into the continuation buffer, set `packet_type` to 01 START in the first AVCTP frame, set `bytes_sent` after the emit.
+3. **0x40 RequestContinuing**: read state, emit next chunk with `packet_type` 02 CONTINUE or 03 END based on `bytes_sent + chunk_size >= total_size`. Update `bytes_sent`. On END, free the state.
+4. **0x41 AbortContinuing**: free the state, ack with `packet_type` SINGLE NOT_IMPLEMENTED-or-success per §5.5. Spec is permissive on the ack shape.
+
+**Effort estimate.** ~2 days. The blob-budget check: stateful continuation is ~120 B of code + a 1024-B buffer = 1144 B added; we have 2368 B free past 0xb2c8.
+
+**Where the fix goes.** `src/patches/_trampolines.py::_emit_t_continuation`, plus T4's outbound emit site. No mtkbt-side patches required because mtkbt's outbound AVCTP layer already does packet-level fragmentation; this is the AVRCP-META-layer paging on top of that.
+
+**Verification.** Capture against a strict CT with a small AVCTP MTU; confirm three-fragment GetElementAttributes flow lands intact (msg=540 split into three msg=540 frames with the right packet_type field).
+
+### 9.2 AVRCP playback state ↔ AVDTP source state coupling
+
+**Spec.** Not a hard AVRCP 1.3 requirement, but a conformance expectation: when AVRCP TG signals PLAYBACK_STATUS_CHANGED to PAUSED, the A2DP source should send AVDTP SUSPEND (sig_id 0x09); on transition to PLAYING, AVDTP START (sig_id 0x07). AVDTP 1.3 §8.13 + §8.15. Some controllers gate their UI play-state on the AVDTP source state and won't honour an AVRCP-driven pause if the audio stream remains in STREAMING.
+
+**Current state.** No code path in `mtkbt` or its adapters wires AVRCP playback-state edges to AVDTP source-state changes. The legacy `libaudio.a2dp.default.so::standby_l` (the only HAL hook that emits AVDTP SUSPEND via `a2dp_stop`) intentionally skips that call when `mSuspendedParam != 0` — and we have no evidence in captured logs that AudioFlinger ever calls `setParameters("A2dpSuspended=true")` on MediaPlayer pause.
+
+**Compliance plan.**
+
+1. **Wire MediaPlayer state edges into AVDTP source state at the bridge layer.** Y1MediaBridge already observes Y1 player state via `LogcatMonitor` (`'1'` PLAYING, `'3'` PAUSED, `'5'` STOPPED). Extend `MediaBridgeService.notifyPlaybackStatus` to additionally call into an AVDTP source-state hook on edge transitions:
+   - PLAYING → PAUSED: trigger AVDTP SUSPEND
+   - PAUSED → PLAYING: trigger AVDTP START
+   - any → STOPPED: trigger AVDTP CLOSE
+
+2. **The hook itself.** Cleanest reach is `libmtkbtextadpa2dp.so::btmtk_a2dp_pause_immediately` (synchronous AVDTP SUSPEND wrapper) + `btmtk_a2dp_send_stream_start_req` (AVDTP START). These are exported from the BT-process .so and would need an IPC entry point so Y1MediaBridge (a separate process) can invoke them. Two viable shapes:
+
+   - **a. Bridge-direct via Binder.** Add an `IBTAvrcpMusic.pauseAvdtpSource(flag)` method served by `MediaBridgeService` and consumed by `BTAvrcpMusicAdapter` (Java side), which would in turn invoke the .so's exported function. Requires Java-layer bridging in MtkBt.apk.
+
+   - **b. mtkbt-direct via abstract socket.** `mtkbt` already accepts AVRCP-related IPC over `bt.ext.adp.avrcp` (msg=519 etc.). Add a new msg-id (say 600) for "external pause/resume A2DP source" and have Y1MediaBridge connect to that socket directly to fire it. No Java/IBinder surgery, but we'd be defining a new protocol surface in mtkbt.
+
+   Of the two, **option (a)** is preferred because it keeps the IPC vocabulary inside the existing `IBTAvrcpMusic` interface. Option (b) is the upstream-spec-correct location (this *should* be a framework-side `setParameters` call), but Y1's AOSP build doesn't have the framework hook in place to make that a tractable patch site.
+
+3. **Avoid double-dispatch.** If MtkBt's own A2DP source state machine ever does start sending SUSPEND on its own (e.g., on AudioFlinger no-data-timeout), our hook would race. Guard with a "last source-state edge fired by us in the past N ms" check, or read mtkbt's source state before issuing a redundant SUSPEND.
+
+**Effort estimate.** ~3 days. Discovery of `btmtk_a2dp_pause_immediately` calling convention is required — argument shape is undocumented and would need disassembly per the "Adding a new PDU handler" recipe.
+
+**Where the fix goes.** Y1MediaBridge `MediaBridgeService.notifyPlaybackStatus`, plus a new IPC method in `IBTAvrcpMusic`, plus a Java-side bridging trampoline in MtkBt.odex (or a new helper APK loaded into the BT process). No `libextavrcp_jni.so` trampoline changes.
+
+**Verification.** Pause / resume via AVRCP from a controller that publishes its A2DP source state; capture btlog and confirm AVDTP SUSPEND (sig_id 0x09) and AVDTP START (sig_id 0x07) on the AVDTP signaling channel (typically cid 0x41 or whatever PSM 0x19 was assigned).
+
+**Risks.** Over-aggressive SUSPEND on transient pauses (e.g., user taps pause-then-play within 200 ms) could thrash the A2DP source; guard with a debounce of ~250 ms before firing SUSPEND.
+
+### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp`
+
+**Spec.** AVRCP 1.3 §5.3.4 places no per-attribute byte cap. TG fragments via §5.5 if the total response exceeds AVCTP MTU.
+
+**Current state.** `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap; on overflow it emits `[BT][AVRCP][ERR] too large attr_index:%d` and drops the attribute silently. Tracks with extreme-length tags (e.g., 1000-character album titles in some OEM DRM-laden albums) lose the offending attribute. Most real-world content stays well under 511 B per attribute.
+
+**Compliance plan.**
+
+1. **Cap each `y1-track-info` attribute slot to 240 B in Y1MediaBridge** (well under the OEM 511 cap). UTF-8 multi-byte characters need careful truncation to avoid landing mid-codepoint.
+2. Optionally: bypass `…send_get_element_attributes_rsp` entirely and build the GetElementAttributes response wire frame directly in the trampoline, using the full §5.5 fragmentation flow from §9.1 above. This removes the 511 cap as a constraint. Larger effort (~3 days), only worth it if §9.1 is shipping anyway.
+
+**Effort estimate.** ~0.5 days for the Y1MediaBridge truncation. ~3 days for the bypass approach (paired with §9.1).
+
+**Where the fix goes.** `Y1MediaBridge/MediaBridgeService.java::writeTrackInfoFile` truncation logic, OR the wire-shape bypass at the trampoline layer.
+
+**Verification.** Manually craft a test track with 800-character title; confirm Title attribute lands intact in the AVRCP response (or, with the truncation approach, lands at 240 B with no `too large` log).
+
+### 9.4 AVCTP MTU negotiation discoverability
+
+**Spec.** AVCTP 1.4 §5: each side independently advertises its MTU during L2CAP CONFIG; the smaller value wins. AVRCP 1.3 §6 specifies the AVCTP version pairing only.
+
+**Current state.** mtkbt advertises `AVRCP_MAX_PACKET_LEN:512` regardless of peer capability. Captured logs show `(10+u2MtuPayload) <= 512` enforcement. Most peers agree to 512; some negotiate higher in L2CAP CONFIG but we cap at 512.
+
+**Compliance plan.** Not currently a deviation worth fixing — 512 is the standard L2CAP signaling MTU and most CTs are fine with it. Filed here for completeness; revisit if a future capture shows a CT requesting >512 and degrading on the cap.
+
+### 9.5 GAVDP / AVDTP discovery hygiene
+
+**Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. SBC is mandatory; advanced codecs (AAC, aptX, LDAC) are optional.
+
+**Current state.** mtkbt rejects non-SBC SEPs in `GavdpAvdtpEventCallback` (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC` log line). This is conservative and spec-acceptable.
+
+**Compliance plan.** No action required for AVRCP 1.3 conformance. SBC suffices for §5.3.4 metadata transport (audio codec choice doesn't affect AVRCP wire shape). Listed here so the SBC-only constraint is explicit in the doc.
+
+### 9.6 Suggested implementation order
+
+1. **§9.3 partial fix** (Y1MediaBridge truncation to 240 B) — smallest blast radius, cheapest to verify, no `libextavrcp_jni.so` changes. Ship this first as belt-and-braces hygiene.
+2. **§9.1 stateful T_continuation** — addresses the strict-CT-small-buffer scenario. Self-contained in `_trampolines.py`; no cross-component changes. Pair with §9.3-bypass if also doing the bypass route.
+3. **§9.2 AVRCP↔AVDTP coupling** — biggest payoff for "audio actually pauses on the peer when CT pauses", but most cross-component work. Requires an IPC surface that doesn't currently exist.
+
+Each of the three should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+
+---
+
+## 10. See also
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — proxy architecture and existing trampoline chain.
 - [`PATCHES.md`](PATCHES.md) — per-patch byte detail.
