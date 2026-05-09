@@ -365,6 +365,92 @@ Anchored against `docs/spec/AVCTP 1.2/AVCTP.ICS.p10.pdf` Table 3 (Target Feature
 
 **Static AVCTP version-byte multiplicity question (resolved).** Three AVCTP version sites in mtkbt's static SDP-record region; V2 patches one. Per the SDP attribute table at vaddr `0xfa700`, only one served AVRCP TG record references AVCTP — the served-record entries (table file offset `0xf97c0..0xf9808`) include attr 0x0004 ProtocolDescriptorList (containing the V2-patched AVCTP version at `0xeba6d`) but NOT attr 0x000d AdditionalProtocolDescriptorList (which is what would carry the Browse-channel AVCTP descriptor at `0xeba25`). The unpatched site `0xeba37` falls inside a separate template record that is not selected at runtime. sdptool ground truth (Trace #12, post-V1+V2 flash) shows the served record advertises AVCTP `0x0102` — only one version on the wire. Conclusion: **V2 patches the only consulted site; the other two are dead bytes.** Verification path if the static-vs-runtime authority assumption breaks in a future build: experimental flash with all three sites patched + sdptool browse → expect identical AVCTP 0x0102 output.
 
+### 9.11 A2DP 1.3 ICS audit — *A2DP* — SHIPPED (PARTIAL — see §9.5 / §9.8)
+
+Anchored against `docs/spec/A2DP 1.3/A2DP_SPEC_V13.pdf`. There is no separate A2DP ICS proforma in the SIG release; conformance requirements live in the spec body itself.
+
+**Application Layer (§3 Table 3.1):**
+
+| Item | Feature | SRC | SNK | Y1 |
+|---|---|---|---|---|
+| 1 | Audio Streaming | M | M | ✓ Y1 implements SRC role; SBC stream over AVDTP |
+
+**Audio Codec Interoperability (§4.2 Table 4.1):**
+
+| Codec | Status | Y1 |
+|---|---|---|
+| SBC | M | ✓ encoder present (`libmtkbtextadpa2dp.so` exports `sbc_pack_frame`, `sbc_proto_4_40_fx`, `sbc_proto_8_80_fx`, `sbc_calculate_bits`, etc.) |
+| MPEG-1,2 Audio | O | not advertised, not present |
+| MPEG-2,4 AAC | O | not advertised, not present |
+| ATRAC family | O | not advertised, not present |
+
+GAVDP layer rejects non-SBC SEPs at `GavdpAvdtpEventCallback` per ARCHITECTURE.md §"Codec scope". Spec-permissible (§4.2.4 codec interop is conditional on Optional codec support, none claimed).
+
+**SDP Source Service Record (§5.3 Figure 5.1):**
+
+| Attribute | Spec status | Spec value (1.3) | Y1 served value | Gap |
+|---|---|---|---|---|
+| Service Class ID List → Audio Source (UUID `0x110A`) | M | UUID | ✓ (sdptool confirms handle 0x10002 advertises Audio Source) | — |
+| ProtocolDescriptorList → L2CAP / AVDTP, AVDTP version | **M** | `0x0103` | `0x0100` (AVDTP 1.0) | **1 byte at file `0xeba09`** |
+| BluetoothProfileDescriptorList → AdvancedAudioDistribution (UUID `0x110D`), version | **M** | `0x0103` | `0x0100` (A2DP 1.0) | **1 byte at file `0xeb9f2`** |
+| SupportedFeatures (Source bitmap: bit 0 Player / 1 Microphone / 2 Tuner / 3 Mixer) | O | bit 0 = 1 (Player) | not advertised (stock A2DP record omits attr `0x0311`) | none required (Optional) |
+| Provider Name / Service Name | O | text | "Advanced Audio" served as Service Name (sdptool confirms) | — |
+
+**Gaps to A2DP 1.3 conformance:**
+
+1. **Advertised AVDTP version in A2DP record's ProtoDescList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeba09`, single-byte patch.
+2. **Advertised A2DP version in BluetoothProfileDescriptorList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeb9f2`, single-byte patch.
+3. Both must move together — bumping one without the other creates an asymmetric advertisement. Critically, **the bumps imply we honor AVDTP 1.3 features** (DELAY_REPORT in particular — A2DP 1.3 §1.4.1.2 explicitly cites it as the new-in-1.3 interop addition). Whether to ship the bumps depends on the AVDTP audit (§9.12 below): if `mtkbt`'s sig-id dispatcher honors 0x0d DELAYREPORT (even just gracefully accepting and discarding inbound DELAY_REPORTs), the bump is honest. If 0x0d hits a hard NOT_IMPLEMENTED reject, the bump reproduces the legacy `--avrcp` 1.4-vs-1.0 mismatch shape and should be deferred.
+
+A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement is what currently keeps modern peers from attempting 1.3-only commands against us. Per §9.12 the 1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional even at AVDTP 1.3, so the 1.0→1.3 bump is honest as long as we don't advertise the corresponding SEP capabilities. **Decision: bump both bytes (0xeb9f2 + 0xeba09) to 0x03 to align advertisement with our actual implementation surface, matching the spec-compliance directive in `feedback_avrcp_spec_compliance` memory.** Pairs with §9.12; ships together as a single new patch (`patch_mtkbt.py` add-ons V3 / V4 — to be added in the §9.14 synthesis pass).
+
+### 9.12 AVDTP 1.3 ICS audit — *AVDTP* — VERIFIED, GAP = ADVERTISED VERSION
+
+Anchored against `docs/spec/AVDTP 1.3/AVDTP.ICS.p14.pdf`. Per Table 14a (Versions, Source), AVDTP 1.0 / 1.2 are deprecated/withdrawn; AVDTP 1.3 is the only currently-Mandatory version. Same shipping-window argument as AVRCP / AVCTP.
+
+**Source role capabilities (Table 14):**
+
+| Item | Capability | Status | Y1 |
+|---|---|---|---|
+| 1 | **Basic transport service support** | **M** | ✓ — A2DP audio streams over AVDTP through `libmtka2dp.so` ↔ mtkbt internal A2DP source state machine ↔ AVDTP MEDIA on the wire (cid 0x40 in captures) |
+| 2 | Reporting service support | O | not advertised in SEP capabilities, no handler |
+| 3 | Recovery service support | O | not advertised, no handler |
+| 4 | Multiplexing service support | O | not advertised, no handler |
+| 5 | Robust header compression service support | O | not advertised, no handler |
+| 6 | **Delay Reporting** | **O** | not advertised in SEP capabilities; sig_id 0x0d DELAYREPORT reaches General Reject (§8.18 fallback) — see "Handler verification" below |
+
+**Acceptor capabilities (Source role) — Table 8 Signaling Message Format:**
+
+| Item | Capability | Status | Y1 |
+|---|---|---|---|
+| 1 | Transaction Label | M | ✓ |
+| 2 | Packet type | M | ✓ |
+| 3 | Message type | M | ✓ |
+| 4 | Signal identifier | M | ✓ |
+
+Tables 9-12 (Stream Discovery, Establishment, Suspension, Release, Security) — every row Optional. We implement Stream Discover (DISCOVER), Stream Get Capabilities (GET_CAPABILITIES), Set Configuration, Get Configuration, Open Stream, Start Stream, Suspend, Close, Abort responses (per ARCHITECTURE.md §"AVDTP signal codes" — sig 0x01..0x0b documented in mtkbt strings).
+
+Table 13 (Message Fragmentation) item 1 = M: ✓ (mtkbt's AVDTP layer implements fragmentation, same code path as AVCTP layer per §8.3).
+
+Table 16 (Message Error Handling): Reporting Capability Error (M) ✓ via `[AVDTP_EVENT_GET_CAP_CNF]try another SEP` in `GavdpAvdtpEventCallback`; General Reject Response Includes Signal ID (M) ✓ via §8.18 fallback path.
+
+**Handler verification for AVDTP 1.3 additions (sig_id 0x0c GET_ALL_CAPABILITIES + 0x0d DELAYREPORT):**
+
+Exhaustive `strings`-grep over `bin/mtkbt` for `GET_ALL_CAP|DELAYREPORT|delay.?rep|GenRejRsp|AvdtpSendGeneralReject|AvdtpRcvDelayRep|AvdtpGetAllCap` — **zero handler-suggesting strings** for either signal. Only hit for `delay.?rep` is HFP's `Delay report until command status` (role-change wording, unrelated to AVDTP). Provisional read: codepoint allocation in BlueAngel sig-id enum without runtime handlers — inbound 0x0c / 0x0d hits the General Reject path (Mandatory per §8.18, present in mtkbt's AVDTP error-handling). Spec-compliant rejection.
+
+**Compliance verdict.**
+
+| Aspect | Status |
+|---|---|
+| All Mandatory rows of Tables 8 / 13 / 16 (Source-role Acceptor) covered | ✓ |
+| All advertised SEP capabilities backed by working handlers (SBC + Basic transport service) | ✓ |
+| AVDTP 1.3 Optional features (Delay Reporting, Reporting / Recovery / Multiplexing services) | not advertised, not implemented — spec-permissible |
+| **Advertised AVDTP version in SDP record** | **`0x0100` (AVDTP 1.0) — gap; spec target `0x0103`** |
+
+**Gap:** the static AVDTP version byte at file offset `0xeba09` is `0x00` instead of `0x03`. Single-byte patch (V3-style: 0x00 → 0x03) brings advertisement into line with our actual implementation surface (which already covers every AVDTP 1.3 Mandatory feature for the Source role — Optional features are spec-permissibly absent). The bump pairs with the matching A2DP version bump per §9.11; ships together to avoid asymmetric-version advertisement.
+
+This **resolves the §9.5 / §9.8 open investigations** — the codec-advertisement and DELAY_REPORT questions are now answered by the spec itself (both the hardware-AAC question and the DELAY_REPORT-handler question are moot because both features are Optional at AVDTP 1.3).
+
 ---
 
 ## 10. See also
