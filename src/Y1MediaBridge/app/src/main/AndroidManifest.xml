@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="22"
-    android:versionName="2.5">
+    android:versionCode="21"
+    android:versionName="2.4">
 
     <!--
         READ_LOGS is signatureOrSystem on Android 4.2.
@@ -60,13 +60,14 @@
                 <action android:name="com.innioasis.y1.ABOUT_SHUT_DOWN" />
             </intent-filter>
             <!--
-                Deliberately no ACTION_MEDIA_BUTTON intent-filter. The music
-                app's PlayControllerReceiver declares one at priority MAX_VALUE
-                and is the canonical media-button receiver; AudioService's
-                ordered-broadcast fallback delivers AVRCP-driven keys to it
-                directly. A filter here would race PlayControllerReceiver in
-                ordered dispatch and produce duplicate forwarding paths.
+                MEDIA_BUTTON is received via AudioManager.registerMediaButton-
+                EventReceiver in MediaBridgeService. The runtime registration
+                is what actually wires us into the media button chain; this
+                filter is here for manifest completeness.
             -->
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
         </receiver>
 
     </application>

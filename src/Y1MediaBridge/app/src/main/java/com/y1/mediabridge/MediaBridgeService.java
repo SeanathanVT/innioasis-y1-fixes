@@ -893,6 +893,9 @@ public class MediaBridgeService extends Service {
         if (mRemoteControlClient != null) {
             mAudioManager.unregisterRemoteControlClient(mRemoteControlClient);
         }
+        if (mMediaButtonReceiver != null) {
+            mAudioManager.unregisterMediaButtonEventReceiver(mMediaButtonReceiver);
+        }
         if (mBatteryReceiver != null) {
             try { unregisterReceiver(mBatteryReceiver); }
             catch (IllegalArgumentException ignore) { }
@@ -913,23 +916,9 @@ public class MediaBridgeService extends Service {
     // =======================================================================
 
     private void setupRemoteControlClient() {
-        // Point the RCC PendingIntent at the music app's PlayControllerReceiver
-        // directly so lock-screen / system-UI media controls dispatch there
-        // without rerouting through this service.
-        //
-        // Deliberately do NOT call registerMediaButtonEventReceiver here:
-        // AudioManager only honors a single MediaButton receiver at a time, and
-        // grabbing the slot blocks AudioService's ordered-broadcast fallback
-        // for ACTION_MEDIA_BUTTON. The music app's PlayControllerReceiver
-        // declares an intent-filter for ACTION_MEDIA_BUTTON at priority MAX_VALUE,
-        // so the fallback delivers AVRCP-driven keys to it directly and
-        // PlayControllerReceiver's discrete arms (Patch E in patch_y1_apk.py)
-        // route 0x44 PLAY / 0x46 PAUSE / 0x45 STOP to play(true) / pause(0x12, true)
-        // / stop(). Postflash hardware verification (2026-05-08) confirmed that
-        // claiming the slot here silently dropped 0x44 PLAY across Sonos / Kia / TV.
-        mMediaButtonReceiver = new ComponentName(
-                "com.innioasis.y1",
-                "com.innioasis.y1.receiver.PlayControllerReceiver");
+        mMediaButtonReceiver = new ComponentName(getPackageName(),
+                PlaySongReceiver.class.getName());
+        mAudioManager.registerMediaButtonEventReceiver(mMediaButtonReceiver);
 
         Intent mediaButtonIntent = new Intent(Intent.ACTION_MEDIA_BUTTON);
         mediaButtonIntent.setComponent(mMediaButtonReceiver);
