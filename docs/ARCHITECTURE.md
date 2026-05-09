@@ -159,19 +159,20 @@ peer A2DP sink (cid 0x40 in our captures)
 **`A2dpAudioStreamOut::standby_l` (legacy HAL)** at `libaudio.a2dp.default.so:0x8654`:
 
 ```
-if (mStandby || !mSuspendedLocal) {
-    if (mSuspendedParam != 0) {
-        // Already suspended via setParameters("A2dpSuspended=true") —
-        // do NOT call a2dp_stop. Just mark mStandby = 1 and release wake_lock.
-        release_wake_lock(); mStandby = 1; return 0;
-    }
-    if (handle == 0) { release_wake_lock(); mStandby = 1; return 0; }
-    r5 = a2dp_stop(handle);   // ← only path that triggers AVDTP SUSPEND from the HAL
-    release_wake_lock(); mStandby = 1; return r5;
-}
+8654: push {r3,r4,r5,lr}
+8658: mov  r4, r0
+865c: ldrb r3, [r0, #8]              ; r3 = mStandby
+...
+86a0: ldrb r5, [r4, #48]
+86a4: cmp  r5, #0
+86a8: beq  8684                      ; AH1 patches this to `b 8684` — always skip a2dp_stop
+86ac: ldr  r0, [r4, #40]
+86b0: bl   a2dp_stop@plt              ; only HAL-side path that emits AVDTP SUSPEND
+86b4: mov  r5, r0
+86b8: b    8684                      ; release_wake_lock + mStandby=1 + return r5
 ```
 
-The connected-and-streaming case (`mSuspendedParam != 0`) intentionally **skips** `a2dp_stop`, which is the only HAL-side path that would emit AVDTP SUSPEND. The framework is expected to flip `mSuspendedParam` via `setParameters("A2dpSuspended=true")` when AudioFlinger / AudioPolicyManager wants the BT route to go idle. Stock AOSP doesn't wire this to the MediaPlayer state machine — Y1MediaBridge `MediaBridgeService.onStateDetected` does it explicitly: on every play-state edge it issues `audioManager.setParameters("A2dpSuspended=true|false")` so AudioFlinger's silence-timeout standby skips `a2dp_stop` while the player is paused, and resumes feeding samples without renegotiation when the player returns to PLAYING. The `A2dpSuspended` key is referenced only by `libaudio.a2dp.default.so`; absent from `mtkbt`, `libmtka2dp.so`, and `libmtkbtextadpa2dp.so`, so this is a self-contained AOSP-HAL switch with no MtkBt-side side effects.
+`a2dp_stop` at vaddr `0x86b0` is the **only** HAL-side path that would emit AVDTP SUSPEND on the wire. AudioFlinger calls `standby_l` after a ~3 s silence-timeout when the music app stops writing samples; stock behaviour is to tear down the AVDTP source stream every time, which TV-class peers respond to by closing + reopening their A2DP sink and produce burst-on-resume + playhead drift. `patch_libaudio_a2dp.py` (AH1) flips the conditional `beq 8684` at `0x86a8` to an unconditional `b 8684`, making the call site at `0x86b0` unreachable. Standby still completes (release_wake_lock, mStandby = 1, return 0); the AVDTP stream is left alive across pauses. See [`PATCHES.md`](PATCHES.md) §`patch_libaudio_a2dp.py` for the byte-level reference.
 
 ### Cross-profile coupling gaps relevant to AVRCP 1.3
 
@@ -180,7 +181,7 @@ These are the spec-conformance deviations that affect AVRCP-1.3-class controller
 | # | Coupling gap | What spec says | What Y1 currently does |
 |---|---|---|---|
 | 1 | **AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)** | AVRCP 1.3 §5.5: when a TG response exceeds the CT-buffer / AVCTP-MTU budget, TG sends packet_type=START with the first chunk and waits for CT to send `RequestContinuingResponse` (0x40). TG then sends CONTINUE / END chunks until the response is exhausted. C.2 makes this Mandatory if `GetElementAttributes Response` is supported. | T_continuation explicit-rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED. Currently spec-acceptable because no captured CT has driven 0x40 traffic yet — but a strict CT with a small buffer will hit this and lose metadata mid-fragment. |
-| 2 | **AVRCP playback state ↔ AVDTP source state** | Common spec hygiene (not a hard 1.3 requirement, but a conformance expectation): when AVRCP TG transitions to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down). On resume to PLAYING, the source should resume feeding samples without renegotiating the stream. AVDTP 1.3 §8.13 / §8.15. | Y1MediaBridge `onStateDetected` issues `setParameters("A2dpSuspended=true")` on PLAYING→PAUSED edges so AudioFlinger's silence-timeout standby skips `a2dp_stop` (= AVDTP SUSPEND on the wire); on PAUSED→PLAYING edges it sets `=false` so the source resumes cleanly. STOPPED leaves it `false` so AudioFlinger naturally idles the HAL and AVDTP CLOSE fires. Resolved the burst-on-resume + playhead-drift symptom on TV-class CTs that aggressively close+reopen the AVDTP stream on silence-induced SUSPEND. |
+| 2 | **AVRCP playback state ↔ AVDTP source state** | AVDTP 1.3 §8.13 / §8.15: when AVRCP TG transitions to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down); SUSPEND is reserved for explicit policy changes. | `patch_libaudio_a2dp.py` (AH1) flips `beq 8684` to unconditional `b 8684` at `libaudio.a2dp.default.so:0x86a8`, making the call to `a2dp_stop@plt` inside `standby_l` unreachable. Silence-timeout standby leaves the AVDTP source stream alive; the next `write()` after PLAYING resumes pushes samples into the same session. Resolves the burst-on-resume + playhead-drift symptom on TV-class CTs. (Earlier `setParameters("A2dpSuspended=...")` Java approach reverted in v2.9 — it triggered the SUSPEND it was trying to prevent because the HAL implements `setSuspended(true)` as a synchronous tear-down.) |
 | 3 | **Per-attribute size cap in `…send_get_element_attributes_rsp`** | AVRCP 1.3 §5.3.4 places no per-attribute byte cap; TG fragments via §5.5 if total response doesn't fit. | `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap and emits `[BT][AVRCP][ERR] too large attr_index:%d` then drops the attribute on overflow. Y1MediaBridge `putUtf8Padded` caps each string attribute at 240 B (codepoint-safe) before it lands in `y1-track-info`, well below the OEM 511 limit, so the silent-drop branch never fires for content we ship. |
 | 4 | **AVCTP transaction-label management** | AVCTP 1.4 §6: TG response transaction label must match the inbound COMMAND label (4-bit field at byte 0 high nibble). | mtkbt routes `transId` from `conn[17]` into every response builder, but the response builders (`…send_*_rsp`) are responsible for stamping it into byte 5 of the IPC frame. This appears correct for everything we've shipped — flagged here for completeness, no observed deviation. |
 

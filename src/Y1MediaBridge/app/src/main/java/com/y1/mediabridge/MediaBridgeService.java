@@ -1110,16 +1110,6 @@ public class MediaBridgeService extends Service {
         mStateChangeTime = SystemClock.elapsedRealtime();
         mPlayStatus = avrcpStatus;
         mIsPlaying = playing;
-        // PAUSED → A2dpSuspended=true so standby_l skips a2dp_stop (= AVDTP
-        // SUSPEND on the wire). Without this, the silence-timeout tears down
-        // the AVDTP stream → burst-on-resume + playhead drift on TV-class
-        // CTs. See docs/BT-COMPLIANCE.md §9.2.
-        try {
-            mAudioManager.setParameters(
-                    "A2dpSuspended=" + (avrcpStatus == 2 ? "true" : "false"));
-        } catch (Throwable t) {
-            Log.w(TAG, "setParameters(A2dpSuspended): " + t);
-        }
         // Refresh the playing_flag byte at y1-track-info[792] BEFORE any
         // broadcast fires. Per AVRCP 1.3 §5.4.1 GetPlayStatus must report
         // the current play_status, and per §5.4.2 (Table 5.29

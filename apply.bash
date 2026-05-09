@@ -47,6 +47,9 @@ FLAGS:
                      cardinality NOPs in handleKeyMessage so Java fires
                      notificationTrackChangedNative + notification-
                      PlayStatusChangedNative on every Y1 broadcast)
+                   - patch_libaudio_a2dp.py (HAL standby_l: skip
+                     a2dp_stop unconditionally so silence-timeout leaves
+                     the AVDTP source stream alive across pauses)
                    - Y1MediaBridge.apk install (track_id + Title / Artist /
                      Album written to /data/data/com.y1.mediabridge/files/)
 
@@ -618,9 +621,10 @@ if [[ "$FLAG_AVRCP" == true ]]; then
     exit 1
   fi
 
-  patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
-  patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
-  patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni.py"   644
+  patch_in_place_bytes "app/MtkBt.odex"               "patch_mtkbt_odex.py"        644
+  patch_in_place_bytes "bin/mtkbt"                    "patch_mtkbt.py"             755
+  patch_in_place_bytes "lib/libextavrcp_jni.so"       "patch_libextavrcp_jni.py"   644
+  patch_in_place_bytes "lib/libaudio.a2dp.default.so" "patch_libaudio_a2dp.py"     644
 fi
 
 # Configure Bluetooth fixes

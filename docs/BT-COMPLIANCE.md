@@ -276,13 +276,15 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 ### 9.2 AVRCP playback state ↔ AVDTP source state coupling — *A2DP / AVDTP* — SHIPPED
 
-**Spec.** AVDTP 1.3 §8.13 / §8.15: when AVRCP TG signals PAUSED, the A2DP source should keep the stream paused (NOT torn down); resume without renegotiation on PLAYING.
+**Spec.** AVDTP 1.3 §8.13 / §8.15: when AVRCP TG signals PAUSED, the A2DP source should keep the stream paused (NOT torn down); resume without renegotiation on PLAYING. SUSPEND is reserved for explicit policy changes (phone call routing, etc.), not for normal pause / silence handling.
 
-**Pre-fix deviation.** AudioFlinger's silence-timeout (~3 s) hit `libaudio.a2dp.default.so::standby_l` with `mSuspended_param == 0`, calling `a2dp_stop` → AVDTP SUSPEND on the wire. Peer CTs (notably TVs) closed/reopened their sink once per pause-of-≥3 s — producing burst-on-resume audio and playhead drift. Empirical: 8 cycles in a 3-min TV capture (`/work/logs/dual-tv-20260509-1410`).
+**Pre-fix deviation.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) hit `libaudio.a2dp.default.so::A2dpAudioStreamOut::standby_l` and the function called `a2dp_stop` unconditionally → AVDTP SUSPEND on the wire. Peer CTs (notably TVs) closed/reopened their A2DP sink once per pause-of-≥3 s — producing burst-on-resume audio and playhead drift. Empirical: 8 cycles in a 3-min TV capture (`/work/logs/dual-tv-20260509-1410`).
 
-**Current state.** `Y1MediaBridge/MediaBridgeService.java::onStateDetected` issues `audioManager.setParameters("A2dpSuspended=" + (paused ? "true" : "false"))` on every play-state edge. PAUSED → `mSuspended_param != 0` → `standby_l` skips `a2dp_stop`; PAUSED→PLAYING → `false` → resume without renegotiation; STOPPED → `false` → AudioFlinger idles the HAL naturally → AVDTP CLOSE on real stop. Symbol-scope verified: `A2dpSuspended` exists only in `libaudio.a2dp.default.so`, no MtkBt-side side effects.
+**Current state.** `patch_libaudio_a2dp.py` patches `standby_l` at file offset `0x000086ab` (1 byte: ARM cond `0x0a` EQ → `0xea` AL). The `beq` that conditionally branched past `a2dp_stop` is now an unconditional `b`, so the call site is unreachable. AudioFlinger's silence-timeout still completes the standby (releases the wake lock, sets `mStandby = 1`), but the AVDTP stream is left alive; the next `write()` after PLAYING resumes pushes samples into the same session. See [`PATCHES.md`](PATCHES.md) §`patch_libaudio_a2dp.py` for the byte-level reference.
 
-**Verification.** Capture btlog around a pause: zero `a2dp_stop` lines, zero `Audio hardware entering standby ... suspend count 0`, peer A2DP `mPlayingA2dpDevice` does not cycle to null. Audio resume clean, CT playhead tracks real audio.
+**Verification.** Capture btlog around a pause: zero `[A2DP] a2dp_stop. is_streaming:1` lines, peer A2DP sink does not cycle, audio resumes clean with no burst, CT playhead tracks real audio.
+
+**Earlier approach (reverted).** First fix attempt drove `audioManager.setParameters("A2dpSuspended=true|false")` from `Y1MediaBridge/MediaBridgeService.java::onStateDetected`. Hardware capture (`/work/logs/dual-tv-20260509-1538`) showed the AOSP A2DP HAL implements `setSuspended(true)` as a *synchronous* tear-down — `setParameters("A2dpSuspended=true")` calls `a2dp_stop` directly before any silence-timeout standby fires, so the Java approach actively triggered the AVDTP SUSPEND it was trying to prevent. Reverted in v2.9; replaced by the HAL byte patch above. The Java path never sees A2dpSuspended now.
 
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp` — *AVRCP* — SHIPPED
 

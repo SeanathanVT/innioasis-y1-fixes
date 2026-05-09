@@ -15,8 +15,8 @@ android {
         applicationId = "com.y1.mediabridge"
         minSdk = 17
         targetSdk = 17
-        versionCode = 27
-        versionName = "2.8"
+        versionCode = 29
+        versionName = "2.9"
     }
 
     compileOptions {

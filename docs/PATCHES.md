@@ -11,6 +11,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every Y1MediaBridge broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
 | **A, B, C, E, H, H′, H″** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREVIOUS routing per AV/C Panel Subunit Spec op_id table; H for foreground-activity propagation of `KEYCODE_MEDIA_PLAY/PAUSE/STOP/NEXT/PREVIOUS`; H′ for the same propagation in `BasePlayerActivity` (which overrides `dispatchKeyEvent` and bypasses BaseActivity); H″ adds a `repeatCount > 0 → silent consume` filter to both H and H′ so framework-synthesized key repeats from `InputDispatcher::synthesizeKeyRepeatLocked` don't trigger long-press FF/RW handlers. |
+| **AH1** | `libaudio.a2dp.default.so` | `A2dpAudioStreamOut::standby_l` cond-flip: `beq 8684` → `b 8684` at file offset `0x000086ab` so silence-timeout standby skips `a2dp_stop` unconditionally. Keeps the AVDTP source stream alive across pauses; matches AVDTP 1.3 §8.13 / §8.15 expectation that PAUSED leaves the stream paused-but-up. |
 | **su** | `/system/xbin/su` | Setuid-root `su` binary installed by `--root` flag. Replaces the historical adbd byte-patch attempts. |
 
 > **Not shipped (attempted and removed):** G1/G2 (mtkbt xlog redirect, crashed at NULL fmt — closed without root or daemon-side tooling); H1/H2/H3 (adbd setuid byte patches, broke ADB protocol — superseded by `src/su/`). Earlier byte-patch experiments preserved in [`INVESTIGATION.md`](INVESTIGATION.md).
@@ -232,6 +233,22 @@ Patches `MtkBt.odex` with four byte edits and recomputes the DEX adler32 checksu
 **Cardinality NOP — PLAYBACK_STATUS_CHANGED** at file `0x03c4fe`: same idiom for sswitch_18a (event 0x01 case). Without this, `notificationPlayStatusChangedNative` is never invoked. With it, the native fires on every `playstatechanged` broadcast and lands in T9. Pairs with T9.
 
 **MD5s:** Stock `11566bc23001e78de64b5db355238175` → Output `fa2e34b178bee4dfae4a142bc5c1b701`.
+
+---
+
+## `patch_libaudio_a2dp.py`
+
+Single-byte cond-flip in `_ZN20android_audio_legacy18A2dpAudioInterface18A2dpAudioStreamOut9standby_lEv` (the AOSP A2DP HAL's standby path).
+
+**AH1 — `beq 8684 → b 8684`** at file `0x000086ab` (1 byte): `0x0a` → `0xea`. ARM condition-code flip from `EQ` to `AL` (always). Forces standby_l's `if (mIsStreaming != 0) call a2dp_stop` guard to ALWAYS skip the call site. The instructions at 0x86ac-0x86b8 (`ldr r0, [r4,#40]; bl a2dp_stop@plt; mov r5, r0; b 8684`) become unreachable; standby still completes (`release_wake_lock`, `mStandby = 1`, return) but no AVDTP SUSPEND fires on the wire.
+
+**Why this site.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) calls `A2dpAudioStreamOut::standby` → `standby_l`, and standby_l is the *only* HAL-side path that calls `a2dp_stop`. Removing that one call leaves the AVDTP source stream alive while AudioFlinger thinks the HAL is in standby; the next `write()` after PLAYING resumes pushes samples into the same open AVDTP session. TV-class CTs that aggressively close + reopen their A2DP sink on AVDTP SUSPEND no longer cycle, eliminating the burst-on-resume + playhead-drift symptom (capture `/work/logs/dual-tv-20260509-1538` empirically grounded the design).
+
+**Why not the Java-side `setParameters("A2dpSuspended=...")` approach.** Tried first as the §9.2 fix; reverted in v2.9. Empirical capture showed the AOSP A2DP HAL implements `setSuspended(true)` as a *synchronous* tear-down — calls `a2dp_stop` directly inside the setSuspended path, before silence-timeout standby ever fires. The Java approach ended up triggering exactly the SUSPEND it was trying to prevent. The HAL byte patch short-circuits the only standby path that calls a2dp_stop instead, with no Java-side coupling.
+
+**MD5s:** Stock `0d909a0bcf7972d6e5d69a1704d35d1f` → Output `adbd98afeb5593f1ffe3b90acd0f2536`.
+
+Spec citation: AVDTP 1.3 §8.13 / §8.15 — PAUSED leaves the source stream paused-but-up, SUSPEND is reserved for explicit policy changes.
 
 ---
 

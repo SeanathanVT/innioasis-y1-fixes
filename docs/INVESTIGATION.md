@@ -1563,7 +1563,7 @@ In-scope BT-related ELFs in stock v3.0.2:
 | `lib/libbtcusttable.so`        |    5256 | `271139c43691f90ed5d83aea342c19d0` | customisation tables |
 | `lib/libem_bt_jni.so`          |   17764 | `2376b561f10267e1d047a06b11ba3948` | engineer-mode JNI |
 
-Every profile from L2CAP up through AVRCP TG lives in `mtkbt`. Of the surrounding `lib*.so` files only `libaudio.a2dp.default.so` carries a BT-protocol-relevant function (`standby_l` → `a2dp_stop` → AVDTP SUSPEND on the wire), already covered by the §9.2 A2dpSuspended hook.
+Every profile from L2CAP up through AVRCP TG lives in `mtkbt`. Of the surrounding `lib*.so` files only `libaudio.a2dp.default.so` carries a BT-protocol-relevant function (`standby_l` → `a2dp_stop` → AVDTP SUSPEND on the wire), now covered by `patch_libaudio_a2dp.py` (AH1) — see §9.2 in BT-COMPLIANCE.md.
 
 ## Static SDP record region
 
@@ -1612,3 +1612,31 @@ Resolved during the spec-PDF cross-reference + further disassembly:
 6. **GAVDP** — no separate SDP record advertised (UUID 0x1203 hits in the SDP region are part of the HFP / HSP records, not GAVDP). Per GAVDP 1.3 §6 versioning piggybacks AVDTP; no independent byte-patch needed.
 
 Verification path for any triad version-byte bump: experimental flash + `tools/dual-capture.sh` + sdptool browse + a peer CT that exercises GET_CAPABILITIES (AVDTP sig 0x02) — the captured exchange tells us what we advertise *and* what the peer does with it.
+
+# §9.2 A2dpSuspended Java approach reverted, HAL byte-patch landed (2026-05-09)
+
+Context: §9.2 of `BT-COMPLIANCE.md` shipped in v2.7-v2.8 driving `audioManager.setParameters("A2dpSuspended=true|false")` from `Y1MediaBridge/MediaBridgeService.java::onStateDetected` on every play-state edge. Theory: setting A2dpSuspended=true would make `libaudio.a2dp.default.so::standby_l` skip its `a2dp_stop` call, leaving the AVDTP source stream alive across pauses (per AVDTP 1.3 §8.13 / §8.15).
+
+**Empirical falsification** in capture `/work/logs/dual-tv-20260509-1538` (TV pause/play exercise, post-flash with §9.2 + Patch H″):
+
+```
+15:38:40.527 D Y1MediaBridge: State change: avrcpStatus=2 (PAUSED)
+15:38:40.529 D A2dpAudioInterface: +setSuspended 1
+15:38:40.546 I [A2DP] a2dp_stop. is_streaming:1            ← stream torn down INSIDE setSuspended(1)
+15:38:40.546 D A2dpAudioInterface: -setSuspended 1
+```
+
+Every PAUSED edge produces this pattern: `+setSuspended 1` is followed within 17-31ms by `[A2DP] a2dp_stop. is_streaming:1`, on the same thread, before `-setSuspended 1` returns. The AOSP A2DP HAL implements `setSuspended(true)` as a *synchronous* tear-down. Stock semantics: A2dpSuspended is the system's way of telling A2DP "drop the stream so I can route audio elsewhere (e.g., for a phone call)" — not the protective skip we assumed.
+
+Net effect comparison (TV pause/play exercises):
+
+| Capture | Standby events | a2dp_stop (streaming) |
+|---|---:|---:|
+| `dual-tv-20260509-1410` (pre-§9.2) | 8 | 8 |
+| `dual-tv-20260509-1538` (post-§9.2 Java) | 3 | 7 |
+
+§9.2 reduced silence-induced standby events (8→3) but **introduced** an equal number of pause-edge-triggered teardowns (1 per PAUSED edge). Burst-on-resume + playhead-drift symptom unchanged.
+
+**Pivot:** drop the Java setParameters call entirely. Add `patch_libaudio_a2dp.py` (AH1) which flips a single ARM cond byte (`0x0a` → `0xea` at file offset `0x000086ab`) inside `A2dpAudioStreamOut::standby_l`. Original conditional `beq 8684` becomes unconditional `b 8684`, making the call to `a2dp_stop@plt` at vaddr `0x86b0` unreachable. Standby still completes; AVDTP stream stays alive. No Java-side coupling.
+
+**Patch H″ verification (same capture):** ✓ working — 0 kernel REPEAT events on `event4` (U1 holds), 0 `repeatCount=N>0` lines in `dumpsys-input.txt` (framework synthetic-repeat filter stays inactive because there are no synthetic repeats), clean DOWN/UP pairs in getevent. The framework-synthetic-FF cascade is closed.

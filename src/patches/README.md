@@ -10,6 +10,7 @@ Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the
 | **`patch_libextavrcp_jni.py`** | `libextavrcp_jni.so` — R1 redirect, T1/T2-stub trampolines, the dynamically-assembled trampoline blob in LOAD #1 padding (extended_T2/T4/T5/T_charset/T_battery/T_continuation/T6/T8/T9), U1 kernel-auto-repeat NOP, and the LOAD #1 program-header extension. Blob built by `_trampolines.py` using the Thumb-2 assembler in `_thumb2asm.py`. | `--avrcp` |
 | **`patch_mtkbt_odex.py`** | `MtkBt.odex` — F1 (`getPreferVersion()` flag), F2 (`disable()` reset of `sPlayServiceInterface`), and two cardinality NOPs that wake `notificationTrackChangedNative` / `notificationPlayStatusChangedNative` on every Y1MediaBridge broadcast. Recomputes DEX adler32. | `--avrcp` |
 | **`patch_y1_apk.py`** | `com.innioasis.y1*.apk` — smali patches A/B/C (Artist→Album navigation), Patch E (discrete PASSTHROUGH PLAY/PAUSE/STOP routing in `PlayControllerReceiver`), Patch H (`BaseActivity.dispatchKeyEvent` propagates unhandled media keys past the foreground activity). Uses androguard + apktool. | `--music-apk` (A/B/C/H), `--avrcp` (E) |
+| **`patch_libaudio_a2dp.py`** | `libaudio.a2dp.default.so` — single-byte cond-flip in `A2dpAudioStreamOut::standby_l` so AudioFlinger's silence-timeout standby leaves the AVDTP source stream alive (no SUSPEND on the wire). Matches AVDTP 1.3 §8.13 / §8.15 expectation that PAUSED leaves the stream paused-but-up. | `--avrcp` |
 
 Per-patch byte-level reference (offsets, before/after bytes, rationale, ICS row coverage, spec citations): [`../../docs/PATCHES.md`](../../docs/PATCHES.md).
 
@@ -51,7 +52,7 @@ The bash's `patch_in_place_bytes` helper detects "already patched" exit-0-withou
 ## Status
 
 Active patchers (wired into the bash):
-- `patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp_jni.py`, `patch_y1_apk.py`
+- `patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp_jni.py`, `patch_libaudio_a2dp.py`, `patch_y1_apk.py`
 
 Earlier byte-patch attempts at `/sbin/adbd` (the H1/H2/H3 patches in `patch_adbd.py` / `patch_bootimg.py`, both broke ADB protocol on hardware) were removed in v2.1.0 and superseded by [`../su/`](../su/) (setuid `/system/xbin/su`). The historical analysis is preserved in [`../../CHANGELOG.md`](../../CHANGELOG.md) and [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) §"adbd Root Patches (H1/H2/H3)".
 
