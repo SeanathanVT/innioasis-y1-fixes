@@ -1110,32 +1110,14 @@ public class MediaBridgeService extends Service {
         mStateChangeTime = SystemClock.elapsedRealtime();
         mPlayStatus = avrcpStatus;
         mIsPlaying = playing;
-        // Drive AVDTP source state via the A2DP HAL's `A2dpSuspended` parameter
-        // BEFORE the broadcast / callback chain. Without this, AudioFlinger's
-        // silence-timeout (~3 s) hits `standby_l` in libaudio.a2dp.default.so
-        // with `mSuspended_param == 0` (never explicitly suspended), which
-        // calls `a2dp_stop` → AVDTP SUSPEND on the wire. Peer CTs (e.g. TVs)
-        // then close+reopen their sink across every pause-of-≥3s, which
-        // causes audible burst-on-resume (encoder/decoder buffer drain+refill)
-        // and momentary playhead drift on the AVRCP-reported position.
-        // Setting `A2dpSuspended=true` on PAUSED edges flips
-        // `mSuspended_param != 0`; `standby_l` then skips `a2dp_stop` and the
-        // AVDTP stream stays in STREAMING state during the pause. On
-        // PAUSED→PLAYING we flip it back to `false` and AudioFlinger resumes
-        // feeding samples into the same live stream — no AVDTP renegotiation,
-        // no buffer churn. STOPPED leaves it at `false` so AudioFlinger can
-        // naturally idle and tear the HAL output down (AVDTP CLOSE is the
-        // correct wire shape for real stop). The `A2dpSuspended` key only
-        // exists in `libaudio.a2dp.default.so` (verified: not in mtkbt /
-        // libmtka2dp.so / libmtkbtextadpa2dp.so), so this is a self-contained
-        // AOSP-HAL switch with no MtkBt-side side effects.
+        // PAUSED → A2dpSuspended=true so standby_l skips a2dp_stop (= AVDTP
+        // SUSPEND on the wire). Without this, the silence-timeout tears down
+        // the AVDTP stream → burst-on-resume + playhead drift on TV-class
+        // CTs. See docs/BT-COMPLIANCE.md §9.2.
         try {
             mAudioManager.setParameters(
                     "A2dpSuspended=" + (avrcpStatus == 2 ? "true" : "false"));
         } catch (Throwable t) {
-            // setParameters is permission-gated (MODIFY_AUDIO_SETTINGS); we
-            // hold it as a system app, but a hardened build / SELinux denial
-            // could still throw. Don't let it fail the state-edge dispatch.
             Log.w(TAG, "setParameters(A2dpSuspended): " + t);
         }
         // Refresh the playing_flag byte at y1-track-info[792] BEFORE any

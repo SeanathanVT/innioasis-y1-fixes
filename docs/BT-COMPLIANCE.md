@@ -15,7 +15,7 @@ For why we have a proxy at all, the current trampoline chain shape, and the call
 - `docs/spec/AVRCP.ICS.p17.pdf` — AVRCP 1.3 Implementation Conformance Statement Proforma, revision p17 (2024-07-01, TCRL.2024-1, 25 pages). Authoritative TG/CT feature M/O matrix with conditional logic. Used to anchor the scorecard in §2 below.
 - `docs/spec/AVRCP.IXIT.1.6.0.pdf` — AVRCP 1.3 Implementation eXtra Information for Testing Proforma. Companion to ICS; defines per-implementation values a tester needs (timer values, parameter ranges, declared PASSTHROUGH op_id support).
 
-**Adjacent-profile spec citations** (when §9 references them): A2DP 1.3, AVDTP 1.3, AVCTP 1.4, GAVDP 1.3 — each available from the corresponding Bluetooth SIG specification page; same `docs/spec/` drop directory + same redistribution caveat. We don't pursue ICS-style scorecard coverage on these — only targeted fixes with empirical motivation from observed CT interop issues.
+**Adjacent-profile spec citations** (when §9 references them): A2DP 1.3, AVDTP 1.3, AVCTP 1.4, GAVDP 1.3 — each available from the corresponding Bluetooth SIG specification page; same `docs/spec/` drop directory + same redistribution caveat. Pursued for spec-completeness where tractable on this hardware; see §9 for the per-issue plan.
 
 Per ICS §1.2 Table 2b, AVRCP 1.3 was deprecated 2023-02-01 and is scheduled for withdrawal 2027-02-01. We're patching a 2012 firmware that was originally qualified against AVRCP 1.0; the deprecation schedule does not block us from shipping.
 
@@ -29,7 +29,7 @@ Per ICS §1.2 Table 2b, AVRCP 1.3 was deprecated 2023-02-01 and is scheduled for
 
 The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's BlueAngel-internal `getPreferVersion()` value — internal flag bookkeeping inside MtkBt's Java-side dispatcher that unblocks 1.3+ command handling on a stack that was originally compiled against AVRCP 1.0. F1 sets the flag and unblocks 1.3 dispatch; nothing in our wire shape is changed by it.
 
-**Lower BT profile stack (adjacent).** A2DP, AVDTP, AVCTP, GAVDP fixes are filed in §9. Selection criteria: an observed deviation in a captured CT interop session, OR a documented spec-divergence in the OEM stack that affects AVRCP-1.3-class controllers. We don't enumerate full ICS-style M/O matrices for these. Each entry in §9 has an empirical motivation, a fix scope (or explicit defer-with-rationale), and a verification path. Currently shipped: §9.2 (AVRCP↔AVDTP coupling via `A2dpSuspended` HAL parameter) and §9.3 (per-attribute byte cap in Y1MediaBridge).
+**Lower BT profile stack (adjacent).** A2DP, AVDTP, AVCTP, GAVDP fixes are filed in §9. Goal: spec-completeness where tractable on this hardware (every Optional row we can implement, not just observed-deviation fixes). Each entry in §9 has motivation, scope (or defer-with-rationale), and a verification path. Currently shipped: §9.2 (A2DP HAL coupling), §9.3 (AVRCP attribute cap), §9.6 (U1 AVCTP subscribe-storm mitigation), §9.7 (V2 SDP AVCTP version correction).
 
 **Closed:** every Mandatory row of ICS Table 7, plus every Optional row except 12-17 + 30 (PlayerApplicationSettings).
 
@@ -258,54 +258,31 @@ Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for thi
 
 ---
 
-## 9. Lower BT profile stack — targeted fixes
+## 9. Lower BT profile stack
 
-AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled by GAVDP. All four lower profiles are implemented inside `mtkbt` (BlueAngel internal stack — source-tree fingerprint visible in [`ARCHITECTURE.md`](ARCHITECTURE.md) "Lower BT profile stack"). Deviations in those profiles bleed upward into AVRCP-1.3-class controller compatibility, even when our AVRCP TG itself is spec-compliant.
+AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled by GAVDP. All four lower profiles live in `mtkbt` (BlueAngel internal stack — see [`ARCHITECTURE.md`](ARCHITECTURE.md) "Lower BT profile stack").
 
-**Scope, deliberately bounded.** We don't pursue full A2DP / AVDTP / AVCTP / GAVDP ICS-style scorecards — the OEM stack is functional and chasing exhaustive compliance on each profile would consume effort with diminishing returns on real-world CT interop. Instead, each subsection below is a **targeted fix** anchored to either (a) an observed deviation in a captured CT session, or (b) a documented spec-divergence in the OEM stack that bleeds up to AVRCP-level user-visible behaviour. Per the [`feedback_y1_upstream_spec_compliance`] memory rule, fixes go at the spec-deviation layer (e.g. A2DP HAL, AVDTP signalling), not via AVRCP-level workarounds.
-
-Subsections are organised per-issue rather than per-profile, with the affected profile noted in the heading.
+**Scope.** Spec-completeness where tractable on this hardware — every Optional row we can implement, not just observed-deviation fixes. Per the [`feedback_y1_upstream_spec_compliance`] memory rule, fixes go at the spec-deviation layer, not via AVRCP-level workarounds. Subsections are organised per-issue with the affected profile noted in the heading.
 
 ### 9.1 AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41) — *AVRCP / AVCTP* — DEFERRED
 
-**Spec.** AVRCP 1.3 §5.5: when a TG response exceeds the CT buffer or AVCTP MTU, TG sends `packet_type=01 START` with the first chunk and waits for CT to issue `RequestContinuingResponse` (PDU 0x40). TG then emits `packet_type=02 CONTINUE` or `packet_type=03 END` chunks. CT may abort partway with `AbortContinuingResponse` (PDU 0x41). ICS Table 7 rows 31-32: **Mandatory if `GetElementAttributes Response` is supported (C.2)**.
+**Spec.** AVRCP 1.3 §5.5: when a TG response exceeds CT buffer / AVCTP MTU, TG sends `packet_type=01 START`; CT responds with PDU 0x40 (Continuing) or 0x41 (Abort). ICS Table 7 rows 31-32: Mandatory if GetElementAttributes Response is supported (C.2).
 
-**Current state.** `T_continuation` (in `_trampolines.py::_emit_t_continuation`) explicit-rejects PDUs 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the `UNKNOW_INDICATION` fallback (msg=520). Counted as ✓ in §2 because **the OEM TG never sets `packet_type=01`**: T4 emits via `btmtk_avrcp_send_get_element_attributes_rsp` which packs into an internal 644 B buffer and emits a single non-fragmented AVRCP frame; AVCTP-layer fragmentation happens transparently below. With no `packet_type=01` ever leaving the TG, no spec-conforming CT will send 0x40, and the empirical record matches: zero 0x40 / 0x41 PDUs across 43 captures.
+**Current state.** `T_continuation` rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the UNKNOW_INDICATION fallback. Counted as ✓ in §2 because the OEM `_send_get_element_attributes_rsp` packs into a 644 B buffer and emits a single non-fragmented frame — TG never sets `packet_type=01`, so a spec-conforming CT never sends 0x40. Zero 0x40 / 0x41 PDUs across 43 captures.
 
-**Why this is deferred.** A stateful re-emitter is only meaningful if the TG ever sets `packet_type=01` in the first place — i.e., after we've replaced the OEM `_send_get_element_attributes_rsp` with a manual META response builder that paginates at AVRCP layer instead of AVCTP layer (the §9.3 "optional follow-up" route). Without that bypass, a re-emitter is dead code: the CT never has anything to continue from.
+**Why deferred.** A stateful re-emitter is only meaningful after the OEM `_send_get_element_attributes_rsp` is replaced by a manual META builder that fragments at AVRCP layer (i.e., the TG actually sets `packet_type=01`). Until that bypass lands, the re-emitter is dead code. Cheaper INVALID_PARAMETER (status 0x05 per §6.15.2) reject hits a binary-shape barrier: `libextavrcp.so` exposes no META REJECTED builder, and changing the existing `cmd_frame_ind_rsp` arg shape carries regression risk for every unhandled-PDU path with no observable wire-shape benefit (CT can't tell the two reject codes apart).
 
-The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AVRCP META REJECTED with `INVALID_PARAMETER` (status 0x05) per §6.15.2 — also runs into a binary-shape barrier. `libextavrcp.so` exposes no META REJECTED builder; the only generic frame sender is `btmtk_avrcp_send_cmd_frame_ind_rsp` (= `..._pass_through_rsp`, 0x1cbc), and the existing `0x65bc` UNKNOW_INDICATION call site passes opaque magic constants (`byte_5=8 / byte_6=9`) whose mapping to AV/C ctype / subunit / opcode is not derivable without binary-experiment cycles. The wire-shape difference between NOT_IMPLEMENTED and INVALID_PARAMETER is functionally indistinguishable from the CT's perspective (both are AV/C reject frames; CT abandons the continuation flow either way), so the change buys ICS-letter purity at non-trivial regression risk for every other unhandled-PDU path.
-
-**Compliance plan when revisited.**
-
-1. Replace `T4`'s `btmtk_avrcp_send_get_element_attributes_rsp` call with a manual META response builder that fragments at AVRCP layer when total response size > a tunable threshold (e.g., AVCTP MTU - headers, ~480 B). Set `packet_type=01 START` on the first fragment, cache the rest in a per-conn state struct (`pdu_id`, `total_size`, `bytes_sent_so_far`, pointer-to-buffered-response).
-2. Upgrade `T_continuation` to a stateful re-emitter: on PDU 0x40, look up state, emit next chunk with `packet_type=02 CONTINUE` or `=03 END`; on PDU 0x41, drop state and ack `packet_type=00 SINGLE`.
-3. Buffer can live in the trampoline blob region (~2368 B free past 0xb2c8); 1024 B is sufficient for the §5.3.4 worst case (7 attrs × 240 B per §9.3 + headers ≈ 1800 B trimmable to 1024).
-
-**Effort estimate.** ~3 days when revisited. Step 1 requires disassembling `AVRCP_SendMessage` (libextavrcp.so:0x18ec) to learn the IPC payload shape it expects, since a manual builder must produce a buffer matching what the OEM builders produce internally.
-
-**Where the fix would go.** `src/patches/_trampolines.py::_emit_t4` (manual META builder) + `_emit_t_continuation` (stateful re-emit). No mtkbt-side patches.
-
-**Verification.** Capture against a CT after manually injecting a `packet_type=01` response; confirm CT sends PDU 0x40, confirm we re-emit the buffered tail with `packet_type=03 END`.
+**Plan when revisited.** Replace T4's `_send_get_element_attributes_rsp` call with a manual META builder that paginates at AVRCP layer (set `packet_type=01` on first fragment, cache the rest in a per-conn state struct in the trampoline blob region). Upgrade T_continuation: on 0x40 emit next chunk with `packet_type=02/03`; on 0x41 drop state. ~3 days; needs `AVRCP_SendMessage` (libextavrcp.so:0x18ec) IPC shape disassembly.
 
 ### 9.2 AVRCP playback state ↔ AVDTP source state coupling — *A2DP / AVDTP* — SHIPPED
 
-**Spec.** Not a hard AVRCP 1.3 requirement, but a conformance expectation: when AVRCP TG signals PLAYBACK_STATUS_CHANGED to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down). On transition to PLAYING, the source should resume feeding samples without renegotiating the stream. AVDTP 1.3 §8.13 / §8.15.
+**Spec.** AVDTP 1.3 §8.13 / §8.15: when AVRCP TG signals PAUSED, the A2DP source should keep the stream paused (NOT torn down); resume without renegotiation on PLAYING.
 
-**Original deviation (pre-fix).** No code path in `mtkbt` or its adapters wired AVRCP playback-state edges to AVDTP source-state. AudioFlinger's silence-timeout (`kStandbyTimeMs ≈ 3 s`) reached `libaudio.a2dp.default.so::standby_l` with `mSuspended_param == 0` (never explicitly suspended), which called `a2dp_stop` → AVDTP SUSPEND on the wire. Peer CTs (notably TVs that aggressively power-cycle their A2DP sink on silence) closed and reopened the stream once per pause-of-≥3s. Empirical evidence from `/work/logs/dual-tv-20260509-1410`: 8 such cycles in a 3-min capture, each correlated with `Audio hardware entering standby ... suspend count 0` then `[A2DP] a2dp_stop. is_streaming:1`. User-visible symptoms: garbled-burst audio on resume (encoder/decoder buffer drain+refill catch-up at >1× speed) and momentary playhead drift on the AVRCP-reported position (T9 extrapolates linearly while real audio bursts then catches up).
+**Pre-fix deviation.** AudioFlinger's silence-timeout (~3 s) hit `libaudio.a2dp.default.so::standby_l` with `mSuspended_param == 0`, calling `a2dp_stop` → AVDTP SUSPEND on the wire. Peer CTs (notably TVs) closed/reopened their sink once per pause-of-≥3 s — producing burst-on-resume audio and playhead drift. Empirical: 8 cycles in a 3-min TV capture (`/work/logs/dual-tv-20260509-1410`).
 
-**Current state.** Y1MediaBridge `MediaBridgeService.onStateDetected` calls `audioManager.setParameters("A2dpSuspended=" + (paused ? "true" : "false"))` on every play-state edge before the broadcast / callback chain. This flips `mSuspended_param` in `libaudio.a2dp.default.so`; `standby_l` then skips `a2dp_stop` while paused. The AVDTP stream stays in STREAMING during the pause. On PAUSED→PLAYING the parameter goes back to `false` and AudioFlinger resumes feeding samples without any AVDTP renegotiation. STOPPED leaves it at `false` so AudioFlinger naturally idles the HAL output and AVDTP CLOSE fires (the spec-correct wire shape for real stop). Pure Java change in Y1MediaBridge — no native trampoline / ELF / mtkbt-side surgery required. Symbol-scope verified: `A2dpSuspended` is referenced only by `libaudio.a2dp.default.so`; absent from `mtkbt`, `libmtka2dp.so`, and `libmtkbtextadpa2dp.so`, so no MtkBt / BlueAngel side-effects.
+**Current state.** `Y1MediaBridge/MediaBridgeService.java::onStateDetected` issues `audioManager.setParameters("A2dpSuspended=" + (paused ? "true" : "false"))` on every play-state edge. PAUSED → `mSuspended_param != 0` → `standby_l` skips `a2dp_stop`; PAUSED→PLAYING → `false` → resume without renegotiation; STOPPED → `false` → AudioFlinger idles the HAL naturally → AVDTP CLOSE on real stop. Symbol-scope verified: `A2dpSuspended` exists only in `libaudio.a2dp.default.so`, no MtkBt-side side effects.
 
-**Why the cheaper path was missed initially.** Earlier drafts of this section assumed the fix had to drive `btmtk_a2dp_pause_immediately` directly through `libmtkbtextadpa2dp.so`, which is reachability-blocked from `libextavrcp_jni.so` trampolines (no PLT entry; would need ELF surgery for a `dlsym` graft). The empirical investigation of the TV burst (2026-05-09) surfaced the AOSP-HAL-layer parameter as a one-layer-up hook that achieves the same effect through the existing AudioFlinger flow rather than around it.
-
-**Where the fix lives.** `Y1MediaBridge/MediaBridgeService.java::onStateDetected` — single `audioManager.setParameters(...)` call wrapped in `try/catch(Throwable)`, before the `writeTrackInfoFile()` / broadcast / callback chain. ~10 lines of code plus block comment. Y1MediaBridge versionCode bumped on the change.
-
-**Verification.** Pause / resume via AVRCP from a CT that aggressively power-cycles A2DP on silence (TV postures). Capture btlog and confirm: zero `[A2DP] a2dp_stop. is_streaming:1` lines around pause windows, zero `Audio hardware entering standby ... suspend count 0` lines, peer A2DP `mPlayingA2dpDevice` does NOT cycle to null during the pause. Audio resume should be clean (no burst) and CT playhead should track real audio.
-
-**Risks / edge cases.**
-- `setParameters` is permission-gated (`MODIFY_AUDIO_SETTINGS`); Y1MediaBridge holds it as a system app, but a hardened build / SELinux denial would throw. Wrapped in `try/catch(Throwable)` so the state-edge dispatch never fails.
-- If AudioFlinger or another process also sets `A2dpSuspended` (e.g. on incoming call routing on different builds), there's a potential race. We always set the value matching our current state on every edge, so a transient external override self-corrects on the next state edge.
-- A peer CT that gates UI play-state on AVDTP source state (rare in practice; most key on AVRCP PLAYBACK_STATUS_CHANGED) would need a different fix — either drive AVDTP SUSPEND/START explicitly via the original deferred ELF-graft routes, or accept that those CTs see continuous "streaming silence" during pause.
+**Verification.** Capture btlog around a pause: zero `a2dp_stop` lines, zero `Audio hardware entering standby ... suspend count 0`, peer A2DP `mPlayingA2dpDevice` does not cycle to null. Audio resume clean, CT playhead tracks real audio.
 
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp` — *AVRCP* — SHIPPED
 
@@ -325,21 +302,37 @@ The cheaper alternative — upgrading the reject from AV/C NOT_IMPLEMENTED to AV
 
 **Compliance plan.** Not currently a deviation worth fixing — 512 is the standard L2CAP signaling MTU and most CTs are fine with it. Filed here for completeness; revisit if a future capture shows a CT requesting >512 and degrading on the cap.
 
-### 9.5 GAVDP / AVDTP discovery hygiene — *GAVDP / AVDTP* — NO ACTION
+### 9.5 GAVDP / AVDTP codec advertisement — *GAVDP / AVDTP / A2DP* — INVESTIGATION
 
-**Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. SBC is mandatory; advanced codecs (AAC, aptX, LDAC) are optional.
+**Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. A2DP 1.3 §4.1: SBC Mandatory; AAC / MP3 / ATRAC Optional.
 
-**Current state.** mtkbt rejects non-SBC SEPs in `GavdpAvdtpEventCallback` (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC` log line). This is conservative and spec-acceptable.
+**Current state.** mtkbt rejects non-SBC SEPs in `GavdpAvdtpEventCallback` (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC`). Spec-compliant but not spec-complete.
 
-**Compliance plan.** No action required for AVRCP 1.3 conformance. SBC suffices for §5.3.4 metadata transport (audio codec choice doesn't affect AVRCP wire shape). Listed here so the SBC-only constraint is explicit in the doc.
+**Investigation.** Two open questions: (a) does the MTK chipset have a hardware AAC encoder? (b) is the SBC-only check a runtime flag (small patch) or a missing code path (weeks)? Filed for the per-profile ICS-scoreboard pass.
 
-### 9.6 Remaining workstream order
+### 9.6 AVCTP subscribe-storm mitigation (U1) — *AVCTP* — SHIPPED
 
-§9.2 (AVRCP↔AVDTP coupling) and §9.3 (per-attribute cap) are shipped. §9.1 remains deferred:
+`U1` (`libextavrcp_jni.so:0x74e8` NOPs `UI_SET_EVBIT(EV_REP)`) defangs kernel-side auto-repeat on the AVRCP virtual keyboard, preventing held-key cascades when a subscribe-storming CT drops PASSTHROUGH RELEASEs. Risk-register context in §7. Patch H″ (in `com.innioasis.y1.apk`) handles the framework-side equivalent (`InputDispatcher::synthesizeKeyRepeatLocked` repeats).
 
-- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` to be replaced by a manual AVRCP META builder (so the TG ever sets `packet_type=01`, otherwise re-emit is dead code), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day of binary-experiment cycles for what's a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions to date.
+### 9.7 SDP AVCTP version correction (V2) — *AVCTP* — SHIPPED
 
-When §9.1 is revisited it should ship with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+`V2` (`mtkbt 0x0eba6d`: SDP AVCTP version `0x00 → 0x02`) corrects the served record from advertising AVCTP 1.0 to AVCTP 1.2, the version paired with AVRCP 1.3 per AVRCP 1.3 §6 + ESR07 §2.1 / Erratum 4969. Byte detail in [`PATCHES.md`](PATCHES.md).
+
+### 9.8 AVDTP DELAY_REPORT (sig_id 0x0d) — *AVDTP* — INVESTIGATION
+
+**Spec.** AVDTP 1.3 §8.6.7. Sink reports rendering delay so source can compensate. Optional.
+
+**Current state.** Not advertised by mtkbt; inbound handling unverified. No captured CT emits one. Filed for the ICS-scoreboard pass — small fix if mtkbt already accepts inbound DELAY_REPORTs, larger if it rejects.
+
+### 9.9 Remaining workstream order
+
+§9.2 / §9.3 / §9.6 / §9.7 shipped. Active queue:
+
+- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day for a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions.
+- **§1 Phase F4 PApp Settings**: ~5 days, all-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30. Highest-value remaining AVRCP work.
+- **§9.5 / §9.8 ICS-scoreboard pass**: half-day to acquire A2DP / AVDTP / AVCTP / GAVDP ICS PDFs, then audit Y1 against each. Output drives the AAC + DELAY_REPORT investigations and surfaces any missed Optional rows.
+
+Each ships with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
 ---
 
