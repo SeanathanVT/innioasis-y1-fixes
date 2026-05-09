@@ -313,13 +313,11 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Compliance plan.** Not currently a deviation worth fixing — 512 is the standard L2CAP signaling MTU and most CTs are fine with it. Filed here for completeness; revisit if a future capture shows a CT requesting >512 and degrading on the cap.
 
-### 9.5 GAVDP / AVDTP codec advertisement — *GAVDP / AVDTP / A2DP* — INVESTIGATION
+### 9.5 GAVDP / AVDTP codec advertisement — *GAVDP / AVDTP / A2DP* — RESOLVED (closed by §9.11)
 
-**Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. A2DP 1.3 §4.1: SBC Mandatory; AAC / MP3 / ATRAC Optional.
+**Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. A2DP 1.3 §4.2 Table 4.1: SBC Mandatory; AAC / MP3 / ATRAC Optional.
 
-**Current state.** mtkbt rejects non-SBC SEPs in `GavdpAvdtpEventCallback` (`[AVDTP_EVENT_CAPABILITY]not AVDTP_CODEC_TYPE_SBC`). Spec-compliant but not spec-complete.
-
-**Investigation.** Two open questions: (a) does the MTK chipset have a hardware AAC encoder? (b) is the SBC-only check a runtime flag (small patch) or a missing code path (weeks)? Filed for the per-profile ICS-scoreboard pass.
+**Resolution (2026-05-09 ICS-scoreboard pass).** SBC-only is fully spec-compliant for an A2DP 1.3 Source — every non-SBC codec is Optional. The MTK-chipset AAC-encoder-hardware question and the runtime-flag-vs-missing-code-path question are both moot: no spec obligation to add codec coverage. See §9.11 for the full A2DP 1.3 audit.
 
 ### 9.6 AVCTP subscribe-storm mitigation (U1) — *AVCTP* — SHIPPED
 
@@ -329,19 +327,19 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 `V2` (`mtkbt 0x0eba6d`: SDP AVCTP version `0x00 → 0x02`) corrects the served record from advertising AVCTP 1.0 to AVCTP 1.2, the version paired with AVRCP 1.3 per AVRCP 1.3 §6 + ESR07 §2.1 / Erratum 4969. Byte detail in [`PATCHES.md`](PATCHES.md).
 
-### 9.8 AVDTP DELAY_REPORT (sig_id 0x0d) — *AVDTP* — INVESTIGATION
+### 9.8 AVDTP DELAY_REPORT (sig_id 0x0d) — *AVDTP* — RESOLVED (closed by §9.12)
 
-**Spec.** AVDTP 1.3 §8.6.7. Sink reports rendering delay so source can compensate. Optional.
+**Spec.** AVDTP 1.3 §8.19 Delay Reporting. AVDTP 1.3 ICS Table 14 row 6 = Optional for the Source role.
 
-**Current state.** Not advertised by mtkbt; inbound handling unverified. No captured CT emits one. Filed for the ICS-scoreboard pass — small fix if mtkbt already accepts inbound DELAY_REPORTs, larger if it rejects.
+**Resolution (2026-05-09 ICS-scoreboard pass).** Optional even at AVDTP 1.3 — mtkbt's lack of a 0x0d handler is spec-permissible as long as we don't advertise the Delay Reporting service capability in our SEP capabilities response (we don't). Inbound 0x0d hits the General Reject path (Mandatory per §8.18, present in mtkbt). See §9.12 for the full AVDTP 1.3 audit.
 
 ### 9.9 Remaining workstream order
 
-§9.2 / §9.3 / §9.6 / §9.7 shipped. Active queue:
+§9.2 / §9.3 / §9.5 / §9.6 / §9.7 / §9.8 shipped or resolved-no-action. Active queue:
 
 - **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day for a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions.
 - **§1 Phase F4 PApp Settings**: ~5 days, all-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30. Highest-value remaining AVRCP work.
-- **§9.5 / §9.8 ICS-scoreboard pass**: in progress (§9.10 below); spec PDFs landed at `docs/spec/<PROFILE>/`. Per-profile audits incrementally added.
+- **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done; the lone gap (GAVDP Acceptor Table 5 row 9 GET_ALL_CAPABILITIES, paper-only) is decision-pending per §9.14 user-approval point.
 
 Each ships with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
@@ -402,7 +400,12 @@ GAVDP layer rejects non-SBC SEPs at `GavdpAvdtpEventCallback` per ARCHITECTURE.m
 2. **Advertised A2DP version in BluetoothProfileDescriptorList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeb9f2`, single-byte patch.
 3. Both must move together — bumping one without the other creates an asymmetric advertisement. Critically, **the bumps imply we honor AVDTP 1.3 features** (DELAY_REPORT in particular — A2DP 1.3 §1.4.1.2 explicitly cites it as the new-in-1.3 interop addition). Whether to ship the bumps depends on the AVDTP audit (§9.12 below): if `mtkbt`'s sig-id dispatcher honors 0x0d DELAYREPORT (even just gracefully accepting and discarding inbound DELAY_REPORTs), the bump is honest. If 0x0d hits a hard NOT_IMPLEMENTED reject, the bump reproduces the legacy `--avrcp` 1.4-vs-1.0 mismatch shape and should be deferred.
 
-A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement is what currently keeps modern peers from attempting 1.3-only commands against us. Per §9.12 the 1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional even at AVDTP 1.3, so the 1.0→1.3 bump is honest as long as we don't advertise the corresponding SEP capabilities. **Decision: bump both bytes (0xeb9f2 + 0xeba09) to 0x03 to align advertisement with our actual implementation surface, matching the spec-compliance directive in `feedback_avrcp_spec_compliance` memory.** Pairs with §9.12; ships together as a single new patch (`patch_mtkbt.py` add-ons V3 / V4 — to be added in the §9.14 synthesis pass).
+A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement is what currently keeps modern peers from attempting 1.3-only commands against us. Per §9.12 the AVDTP-1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional at the *AVDTP* layer; **but** §9.13 (GAVDP audit) finds that GAVDP 1.3 ICS Table 5 row 9 raises GET_ALL_CAPABILITIES (AVDTP 10/6) to Mandatory at the Acceptor layer, and A2DP 1.3 §1.2 makes A2DP-1.3 conformance imply GAVDP-1.3 conformance. mtkbt has no 0x0c handler — inbound hits General Reject. **Decision deferred to user.** Two viable paths:
+
+1. **Stay at A2DP/AVDTP 1.0 advertisement** (current state). Spec-permissible — no 1.3 claim → no 1.3 obligation. Modern peers see our 1.0 advertisement and skip 1.3-only commands; this is a *protective* mismatch, not a functional one. Zero shipped change.
+2. **Bump A2DP/AVDTP to 1.3** + accept the paper-only GAVDP-row-9 deviation (sig 0x0c reaches General Reject; well-behaved peers fall back to plain GET_CAPABILITIES which we do honor). Two-byte patch (V3 at `0xeb9f2`, V4 at `0xeba09`); ICS-strict non-conforming on GAVDP row 9; per `feedback_avrcp_spec_compliance` memory rule this requires explicit user approval before shipping.
+
+Implementing a real 0x0c GET_ALL_CAPABILITIES handler (option 3) is technically possible — the existing `GET_CAPABILITIES` response builder could be extended — but is multi-day disassembly work for a feature no captured peer in our test matrix has issued, and would only marginally improve real-world interop beyond what the General Reject fallback already delivers.
 
 ### 9.12 AVDTP 1.3 ICS audit — *AVDTP* — VERIFIED, GAP = ADVERTISED VERSION
 
@@ -447,9 +450,70 @@ Exhaustive `strings`-grep over `bin/mtkbt` for `GET_ALL_CAP|DELAYREPORT|delay.?r
 | AVDTP 1.3 Optional features (Delay Reporting, Reporting / Recovery / Multiplexing services) | not advertised, not implemented — spec-permissible |
 | **Advertised AVDTP version in SDP record** | **`0x0100` (AVDTP 1.0) — gap; spec target `0x0103`** |
 
-**Gap:** the static AVDTP version byte at file offset `0xeba09` is `0x00` instead of `0x03`. Single-byte patch (V3-style: 0x00 → 0x03) brings advertisement into line with our actual implementation surface (which already covers every AVDTP 1.3 Mandatory feature for the Source role — Optional features are spec-permissibly absent). The bump pairs with the matching A2DP version bump per §9.11; ships together to avoid asymmetric-version advertisement.
+**Gap:** the static AVDTP version byte at file offset `0xeba09` is `0x00` instead of `0x03`. Standalone fix would be a single-byte patch (V4-style: 0x00 → 0x03). However, the bump implies A2DP 1.3 conformance (peers consult our AVDTP version per A2DP §3.1), which transitively implies GAVDP 1.3 conformance (per A2DP 1.3 §1.2 profile dependency), which has a strict-conformance gap on sig 0x0c GET_ALL_CAPABILITIES — see §9.13 for the full picture. **Bump decision deferred to §9.11 user-approval point.**
 
-This **resolves the §9.5 / §9.8 open investigations** — the codec-advertisement and DELAY_REPORT questions are now answered by the spec itself (both the hardware-AAC question and the DELAY_REPORT-handler question are moot because both features are Optional at AVDTP 1.3).
+This **partially resolves the §9.5 / §9.8 open investigations** — the codec-advertisement question is closed (SBC-only at A2DP 1.3 is spec-permissible since AAC/MP3/ATRAC are Optional). The DELAY_REPORT question is closed at the AVDTP-1.3-Optional-feature level (we don't advertise it in our SEP capabilities, so the missing handler is not a deviation). The GET_ALL_CAPABILITIES question survives and feeds the §9.13 GAVDP-layer Mandatory-row analysis.
+
+### 9.13 GAVDP 1.3 ICS audit — *GAVDP* — VERIFIED, GAP = SIG 0x0C HANDLER
+
+Anchored against `docs/spec/GAVDP 1.3/GAVDP.ICS.p12.pdf`. Per Tables 2a / 3a, GAVDP 1.0 / 1.2 are deprecated/withdrawn; GAVDP 1.3 is the only currently-Mandatory version. GAVDP isn't separately advertised in any SDP record (UUID 0x1203 hits in mtkbt's static SDP region are part of the HFP / HSP records, not GAVDP); A2DP 1.3 §1.2 makes A2DP-1.3 conformance imply GAVDP-1.3 conformance.
+
+**Acceptor capabilities (Table 3 — our role since peers initiate):**
+
+| Item | Feature | Status | Y1 |
+|---|---|---|---|
+| 1 | Connection Establishment | M | ✓ — peer-initiated AVDTP connection accepted |
+| 2 | Transfer Control – Suspend | O | response handled per `btmtk_a2dp_send_stream_pause_req` (`_handle_stream_suspend_ind`/`_cnf`) |
+| 3 | Transfer Control – Change Parameters | O | RECONFIGURE response present in mtkbt sig table |
+| 4 | Start Streaming | M | ✓ — `_handle_stream_start_ind`/`_cnf` |
+| 5 | Connection Release | M | ✓ — `_handle_stream_close_ind`/`_cnf` |
+| 6 | Signaling Control – Abort | M | ✓ — `_handle_stream_abort_ind`/`_cnf` |
+| 7 | Security Control | O | not implemented; peers don't issue Content Security Control commands in our test matrix |
+| 8 | Delay Reporting | O | not implemented (matches §9.12) |
+
+**Acceptor AVDTP procedures (Table 5):**
+
+| Item | Feature | Status | Y1 |
+|---|---|---|---|
+| 1 | Stream discover response | M | ✓ — DISCOVER (sig 0x01) |
+| 2 | Stream get capabilities response | M | ✓ — GET_CAPABILITIES (sig 0x02) |
+| 3 | Set configuration response | M | ✓ — SET_CONFIGURATION (sig 0x03) |
+| 4 | Open stream response | M | ✓ — OPEN (sig 0x06) |
+| 5 | Start stream response | M | ✓ — START (sig 0x07) |
+| 6 | Close stream response | M | ✓ — CLOSE (sig 0x08) |
+| 7 | General reject message | M | ✓ — §8.18 fallback path |
+| 8 | Abort stream response | M | ✓ — ABORT (sig 0x0a) |
+| **9** | **Stream get all capabilities response** | **M** | **✗ — sig 0x0c hits General Reject; no real handler** |
+
+Item 9 is the gap. AVDTP 1.3 ICS Table 10 row 6 says it's Optional at the AVDTP layer; GAVDP 1.3 ICS Table 5 row 9 raises it to Mandatory at the GAVDP-Acceptor layer with Inter-Layer Dependency `AVDTP 10/6 OR AVDTP 10b/6` (Source row OR Sink row).
+
+**Interop reality vs ICS-strict reading.** A peer that issues sig 0x0c against us receives an AVDTP General Reject per §8.18 (Mandatory, present). Well-behaved peers fall back to plain sig 0x02 GET_CAPABILITIES, which we honor. Across the captured test-matrix sessions, zero peers have issued sig 0x0c — they all use plain GET_CAPABILITIES first, accept our reply, configure the stream, and stream. So the gap is paper-only at the ICS-conformance level, not a functional interop break.
+
+**Verdict.** GAVDP 1.3 conformance is **strict-conformant on every Mandatory row except Acceptor Table 5 row 9** (sig 0x0c GET_ALL_CAPABILITIES response). The gap survives whether or not we bump §9.11 / §9.12 advertised versions — the only difference is whether we *claim* GAVDP 1.3 (by virtue of A2DP 1.3 dependency, which inherits AVDTP 1.3 dependency). At current 1.0 advertisement, we don't claim GAVDP 1.3 conformance; the gap exists but isn't load-bearing.
+
+**Implementation cost for a real 0x0c handler:** disassembly of mtkbt's existing GET_CAPABILITIES (sig 0x02) response builder + extension to emit the Get All Capabilities response shape (basically GET_CAPABILITIES response + Reporting Service / Recovery Service / Multiplexing Service / Robust Header Compression / Delay Reporting service capabilities, all of which we'd advertise as "not supported" in the response body). Probably a 1-2 day patcher add-on; not load-bearing for any captured peer.
+
+### 9.14 Lower-BT-stack gap analysis — synthesis (2026-05-09)
+
+Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
+
+| Profile | Stock advertises | Spec target | M-row gaps | Patch needed | Decision |
+|---|---|---|---|---|---|
+| AVRCP | 1.0 | 1.3 | none | V1 (0xeba58 0x00→0x03) | ✓ shipped |
+| AVCTP | 1.0 (signaling) | 1.2 (paired with AVRCP 1.3) | none | V2 (0xeba6d 0x00→0x02) | ✓ shipped |
+| A2DP | 1.0 | 1.3 (era-correct) | inherits GAVDP gap on sig 0x0c | V3 (0xeb9f2 0x00→0x03) | **deferred — user approval point** |
+| AVDTP | 1.0 | 1.3 (paired with A2DP 1.3) | none at AVDTP layer; sig 0x0c is Optional here | V4 (0xeba09 0x00→0x03) | **deferred — user approval point** |
+| GAVDP | not separately advertised; piggybacks AVDTP version | 1.3 (transitive) | Table 5 row 9 (sig 0x0c GET_ALL_CAPABILITIES response, Mandatory at GAVDP-Acceptor) | implementation patch (~1-2 days) OR accept paper deviation | **deferred — user approval point** |
+
+**Audio-triad bump options summary:**
+
+- **Option A — keep status quo (A2DP/AVDTP advertised at 1.0).** Spec-permissible. No GAVDP 1.3 claim → no GAVDP Table 5 row 9 obligation. Modern peers see 1.0 and skip 1.3-only commands; functional interop unchanged. Zero work.
+- **Option B — bump A2DP/AVDTP to 1.3 (V3 + V4, two-byte patch), accept GAVDP Table 5 row 9 paper deviation.** ICS-strict non-conforming on one row. Functional interop unchanged (peers fall back to GET_CAPABILITIES on General Reject). Per `feedback_avrcp_spec_compliance` memory rule this requires explicit user approval.
+- **Option C — bump A2DP/AVDTP to 1.3 (V3 + V4) AND implement sig 0x0c handler.** Strict-conforming on all rows. ~1-2 days of mtkbt disassembly + a new trampoline-or-byte-patch in `libextavrcp.so` / mtkbt that extends the existing GET_CAPABILITIES response builder. Empirical demand: zero peers in captured matrix have issued sig 0x0c — work is paper-conformance-driven.
+
+Recommendation: **Option A as default (no work needed; nothing breaks).** Option B if the user wants the version advertisement to match what we actually implement at the AVDTP layer; Option C if the user wants strict 1.3 conformance across the board.
+
+The deviation in Option B fits the same shape as the iter19d sentinel-track-id decision (memory `feedback_avrcp_spec_compliance` records as approved-and-documented): a spec-permissible-vs-spec-complete tradeoff where the wire behavior is fine but the ICS proforma would have one row flipped to "no" for a feature no captured peer exercises.
 
 ---
 
