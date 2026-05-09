@@ -241,9 +241,10 @@ BP_b0b50=$(fileoff_to_live 0xb0b50)   # major orchestrator — calls b01b4/b0270
 BP_b15a0=$(fileoff_to_live 0xb15a0)   # 1070-byte fn — likely the AVDTP signal RX dispatcher
                                       # (contains the call to b0b50 + multiple sig handler bls)
 
-# Keep the original parser BP just in case (low cost):
+# Keep the original parser BPs just in case (low cost):
 BP_50b08=$(fileoff_to_live 0x50b08)   # parser entry (case dispatch on input fmt-id)
 BP_50b96=$(fileoff_to_live 0x50b96)   # parser case-1 sig_id store (= AVDTP sig_id if hit)
+BP_50c46=$(fileoff_to_live 0x50c46)   # parser convergence — about to bl validator + return
 
 echo "==> Cleaning up stale gdbserver from any prior run.."
 # toybox lacks pkill/killall — walk /proc and SIGKILL any gdbserver. Idempotent
