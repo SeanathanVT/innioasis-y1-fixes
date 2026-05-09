@@ -284,46 +284,51 @@ set arm force-mode thumb
 
 target remote :${PORT}
 
-# --- AVDTP signal RX dispatcher entry (file 0xb0c30) ---
-# THE function that processes inbound AVDTP signal frames from L2CAP.
-# r0 = channel/stream struct, r1 = AVDTP signal frame buffer.
-# AVDTP header per V13 §8.5:
-#   byte 0 = transaction-label[7:4] | packet-type[3:2] | message-type[1:0]
-#   byte 1 = RFA[7:6] | signal_id[5:0]   <-- this is the wire signal ID
-# So sig_id = [r1+1] & 0x3f.
+# --- fcn.000b0c30 entry — AVDTP-layer state-machine dispatcher ---
+# 6482-byte function with TBH on [r1] (8 states, 0..7). Hypothesised as
+# the AVDTP signal RX path because it contains the bl to AvdtpSigParseConfigCmd
+# at 0xb1012, but first capture (2026-05-09 evening) shows byte0=0x00 +
+# byte1=0x37 — the small struct at r1 is NOT the raw AVDTP wire frame
+# (frame byte 1 in AVDTP V13 §8.5 has sig_id in low 6 bits, max 0x0d, but
+# we saw 0x37). So fcn.000b0c30 sits between L2CAP RX and the per-sig
+# parsers and reads from a higher-level request struct, not the wire.
+# Dump 32 bytes so we can identify which field carries the wire sig_id.
 break *${BP_b0c30}
 commands
 silent
-printf "BP@avdtp-rx:0xb0c30: r0=0x%x r1=0x%x  byte0=0x%02x byte1=0x%02x sig_id=0x%02x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, *(unsigned char*)(\$r1+1), *(unsigned char*)(\$r1+1) & 0x3f, \$lr
-printf "  frame@[r1][0..15]: " ; x/16xb \$r1
+printf "BP@b0c30: r0=0x%x r1=0x%x  state=[r1]=0x%02x [r1+1]=0x%02x [r1+2..3]=0x%04x  LR=0x%x\n", \$r0, \$r1, *(unsigned char*)\$r1, *(unsigned char*)(\$r1+1), *(unsigned short*)(\$r1+2), \$lr
+printf "  struct@[r1][0..31]:\n"
+x/32xb \$r1
 continue
 end
 
-# --- AvdtpSigParseConfigCmd entry (sig 0x03 SET_CONFIGURATION path) ---
-# Confirms the SET_CONFIGURATION RX path is alive + shows the sig parser
-# calling convention. If this fires, we know fcn.000b0c30 dispatched it.
+# --- AvdtpSigParseConfigCmd entry (named function — sig 0x03 SET_CONFIGURATION) ---
+# Confirms SET_CONFIGURATION RX path. Should fire on any peer pair attempt.
+# arg2 (r1) is the parsed signal frame; first byte is signal_id-related.
 break *${BP_afeec}
 commands
 silent
 printf "BP@AvdtpSigParseConfigCmd:0xafeec: r0=0x%x r1=0x%x r2=0x%x r3=0x%x  LR=0x%x\n", \$r0, \$r1, \$r2, \$r3, \$lr
+printf "  arg-r1@[0..15]:\n"
+x/16xb \$r1
 continue
 end
 
 # --- bl AvdtpSigParseConfigCmd site inside fcn.000b0c30 (file 0xb1012) ---
-# Same fire as 0xafeec entry but seen from caller side; r5 = AVDTP frame
-# ptr (preserved from 0xb0c30 entry). Useful for cross-checking the
-# in-dispatcher state when SET_CONFIGURATION dispatch happens.
+# Dispatches sig 0x03 from inside b0c30 state-machine. r5 carries the
+# preserved arg2 from b0c30 entry (the small struct, not wire frame).
 break *${BP_b1012}
 commands
 silent
-printf "BP@b1012 (call AvdtpSigParseConfigCmd from fcn.000b0c30): r4=0x%x r5=0x%x r6=0x%x\n", \$r4, \$r5, \$r6
-printf "  frame@[r5][0..15]: " ; x/16xb \$r5
+printf "BP@b1012 (call AvdtpSigParseConfigCmd from b0c30): r4=0x%x r5=0x%x r6=0x%x\n", \$r4, \$r5, \$r6
+printf "  r5-struct@[0..15]:\n"
+x/16xb \$r5
 continue
 end
 
-# --- fcn.000b0b50 (AVDTP signal-manager helper, called from 0xb18a8 in main dispatcher) ---
-# 214-byte fn. Likely a per-state helper for the AVDTP signaling state
-# machine. r0/r1 args show what state is being processed.
+# --- fcn.000b0b50 (AVDTP helper called from b18a8 in fcn.000b0c30) ---
+# 214-byte fn. r0/r1 args show what's being dispatched. Useful for
+# tracing the state-machine flow inside b0c30.
 break *${BP_b0b50}
 commands
 silent
