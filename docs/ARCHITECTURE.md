@@ -701,6 +701,22 @@ All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the s
 
 All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path. An earlier trampoline shape passed `r1 = transId` and silently hit the reject-shape path (see `INVESTIGATION.md` for the empirical history).
 
+### PlayerApplicationSettings response builders (PDUs 0x11-0x16) and event 0x08 builder
+
+Reverse-engineered calling conventions for the PApp builders linked through `libextavrcp_jni.so`. Trampolines for these PDUs are not yet shipped; see `INVESTIGATION.md` Trace #17 for the disassembly notes.
+
+| PDU | Builder | PLT | Signature |
+|-----|---------|-----|-----------|
+| 0x11 | `…send_list_player_attrs_rsp` | 0x35d0 | `(conn, reject, n_attrs, *attr_id_array)` — payload 14 B, msg_id 524 |
+| 0x12 | `…send_list_player_values_rsp` | 0x35c4 | `(conn, reject, attr_id, n_values, *value_array)` — payload 14 B, msg_id 526. arg5 on stack. |
+| 0x13 | `…send_get_curplayer_value_rsp` | 0x35b8 | `(conn, reject, n_pairs, *attr_id_array, *value_array)` — payload 18 B, msg_id 528. arg5 on stack. |
+| 0x14 | `…send_set_player_value_rsp` | 0x3594 | `(conn, reject_status)` — payload 8 B, msg_id 530. ACK if reject==0, else reject with status. |
+| 0x15 | `…send_get_player_attr_text_rsp` | 0x35ac | `(conn, reject, idx, total, attr_id, charset, length, *str)` — accumulator pattern (parallel to `…send_get_element_attributes_rsp`); emits when idx+1==total. Per-attribute text capped at 79 B. msg_id 532. args5-8 on stack. Static buffer at vaddr 0x5ea4. |
+| 0x16 | `…send_get_player_value_text_value_rsp` | 0x35a0 | `(conn, reject, idx, total, attr_id, value_id, charset, length, *str)` — accumulator pattern. msg_id 534. args5-9 on stack. Static buffer at vaddr 0x5ffe. |
+| event 0x08 | `…send_reg_notievent_player_appsettings_changed_rsp` | 0x345c | `(conn, reject, type, n, *attr_ids, *values)` — payload 40 B, msg_id 544. type: 0=INTERIM, 1=CHANGED. n is capped at 4 internally. args5-6 on stack. event_id 0x08 baked at offset 13. |
+
+For all six PDU builders + the event builder: arg2 (reject) follows the same shape as `reg_notievent_*_rsp` — 0 = success path with full payload, !=0 = reject status with truncated payload. transId is auto-sourced from `conn[17]` in every builder.
+
 ---
 
 ## Patch summary

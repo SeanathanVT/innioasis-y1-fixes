@@ -1820,6 +1820,60 @@ Therefore, when a peer sends `GET_ALL_CAPABILITIES_REQ` (sig_id = 0x0c), the req
 
 **Anchor for any future GET_ALL_CAPABILITIES_REQ injection test:** patch a peer or test harness to issue sig 0x0c on the AVDTP signaling channel, capture the response, verify `byte1 = 0x0c` and the Service-Capabilities TLV list matches what stock issues for GET_CAPABILITIES.
 
+### Trace #17 (2026-05-10) — PlayerApplicationSettings response builders disassembled
+
+Goal: map calling conventions for the six PDU response builders + event 0x08 builder needed by Phase F4 (PApp Settings: ICS Table 7 rows 12-17 + 30). All seven builders are present in `libextavrcp.so` and PLT-linked from `libextavrcp_jni.so`, so the disassembly is purely compiler-RE — no missing-symbol gaps.
+
+Final calling conventions (also tabulated in `ARCHITECTURE.md`):
+
+**PDU 0x11 — `btmtk_avrcp_send_list_player_attrs_rsp`** (file 0x1e24, 80 B): `(conn, reject, n_attrs, *attr_ids)`. arg1=r0=conn, arg2=r1=reject_flag, arg3=r2=count of attribute IDs, arg4=r3=pointer to byte array. Stack buffer 14 B; emits `msg_id=0x20c=524`. Reject path: stores `1` at sp+7 and reject byte at sp+8.
+
+**PDU 0x12 — `btmtk_avrcp_send_list_player_values_rsp`** (file 0x1e74, 92 B): `(conn, reject, attr_id, n_values, *values)`. r0/r1 same; r2=attr_id, r3=n_values, arg5 (sp+0x28 in callee frame) = pointer to value array. msg_id=0x20e=526.
+
+**PDU 0x13 — `btmtk_avrcp_send_get_curplayer_value_rsp`** (file 0x1ed0, 94 B): `(conn, reject, n_pairs, *attr_ids, *values)`. r0/r1 same; r2=n_pairs, r3=attr_id_array, arg5 (sp+0x30) = value_array. Loop writes attr_ids at sp+12+i and values at sp+16+i. Wire format on AVRCP layer is interleaved (attr,val pairs) — `AVRCP_SendMessage` handles the IPC→wire repacking. Stack buffer 18 B; msg_id=0x210=528.
+
+**PDU 0x14 — `btmtk_avrcp_send_set_player_value_rsp`** (file 0x1f2e, 40 B): `(conn, reject_status)`. Smallest builder; `reject_status==0` emits an ACK, otherwise emits a reject with that status code. msg_id=0x212=530, 8 B payload.
+
+**PDU 0x15 — `btmtk_avrcp_send_get_player_attr_text_rsp`** (file 0x1f58, 228 B): `(conn, reject, idx, total, attr_id, charset, length, *str)`. Accumulator pattern parallel to `…send_get_element_attributes_rsp` from the existing T4: caller invokes once per attribute (idx=0..total-1) and the function emits `AVRCP_SendMessage` only when `idx+1==total AND total!=0` (or on reject). Internal static buffer at vaddr `0x5ea4` (`g_avrcp_playerapp_attr_rsp`); per-attribute string slot is 80 B (cap `0x4f`=79 B usable). Args5-8 on caller's stack at offsets 0,4,8,12. msg_id=0x214=532.
+
+**PDU 0x16 — `btmtk_avrcp_send_get_player_value_text_value_rsp`** (file 0x203c, 252 B): `(conn, reject, idx, total, attr_id, value_id, charset, length, *str)`. Same accumulator shape as 0x15 but with both attr_id and value_id since each value gets its own text. Internal buffer at vaddr `0x5ffe` (`g_avrcp_playerapp_value_rsp`). Args5-9 on stack. msg_id=0x216=534.
+
+**Event 0x08 — `btmtk_avrcp_send_reg_notievent_player_appsettings_changed_rsp`** (file 0x2720, 144 B): `(conn, reject, type, n, *attr_ids, *values)`. type: 0=INTERIM, 1=CHANGED. n is internally capped at 4 (max attribute count per AVRCP V13 §5.2). Args5-6 on stack. event_id constant `0x08` baked at sp+13. msg_id=0x220=544 (same msg_id as other notification events; the event_id byte at sp+13 is what differentiates).
+
+**Common shape across all seven builders:**
+- arg1 (r0) is always the conn buffer (= r5+8 in saveRegEventSeqId frame).
+- arg2 (r1) is always reject/changed_flag: 0 = success path (full payload), !=0 = reject (truncated payload, status byte placed in a builder-specific slot).
+- transId is sourced from `conn[17]` and written into the wire frame internally — no caller responsibility.
+- AVRCP_SendMessage(conn, msg_id, sp_buffer, length) closes each builder.
+
+**PLT linkage in `libextavrcp_jni.so` (verified by `r2 -A "ii~+player"`):**
+
+| PDU / event | PLT addr |
+|---|---|
+| 0x11 list_player_attrs | 0x35d0 |
+| 0x12 list_player_values | 0x35c4 |
+| 0x13 get_curplayer_value | 0x35b8 |
+| 0x14 set_player_value | 0x3594 |
+| 0x15 get_player_attr_text | 0x35ac |
+| 0x16 get_player_value_text | 0x35a0 |
+| event 0x08 player_appsettings_changed | 0x345c |
+
+All seven exist as proper PLT entries. None require new dynamic-linker resolutions.
+
+**Implementation implications for F4 (next-iteration anchors):**
+
+1. **Decoder dispatch.** The existing trampoline chain (T1 → T2 → T_charset → T_battery → T_continuation → T6 → T8 → T9 → T4 → fall-through-to-0x65bc) reads the PDU byte at sp+382 and routes by exact match. Adding F4 means six new PDU comparisons (0x11..0x16). Cleanest insertion is a single new T-trampoline that hosts all six dispatchers internally — call it T_papp (or T10 for naming continuity). It chains in *before* T4's fall-through, so unknown-to-F4 PDUs flow into the existing 0x20 GetElementAttributes handler.
+
+2. **Inbound parameter parsing.** AVRCP body for PDUs 0x11-0x16 starts at sp+388 (after the 6-byte AV/C BT-SIG header at sp+378-383 and 2-byte param_length at sp+384-385). PDU 0x12 needs 1-byte attr_id; PDU 0x13 needs 1-byte n + n attr_ids; PDU 0x14 needs 1-byte n + n×{attr_id, value_id}; PDU 0x15 needs 1-byte n + n attr_ids; PDU 0x16 needs 1-byte attr_id + 1-byte n + n value_ids.
+
+3. **State storage.** Y1MediaBridge already has the file-based contract for track metadata (`/data/data/com.y1.mediabridge/files/y1-track-info`, world-readable). Mirror this with `y1-papp-state` containing the current Repeat (id=2) and Shuffle (id=3) values. Y1MediaBridge writes when AndroidMediaController state changes; T_papp reads when responding to 0x13. Set commands (PDU 0x14) get applied by writing a `y1-papp-set` request file that Y1MediaBridge picks up via FileObserver and applies to the Android session via `MediaController.transportControls.setRepeatMode/setShuffleMode`.
+
+4. **Event 0x08 emission.** Existing T2/T8/T9 register-notification trampolines remember the registering peer's transId in BSS. Add an analogous slot for event 0x08 transId (already-allocated globals: `tc_transId` for event 0x02, `pb_transId` for event 0x01, `pos_transId` for event 0x05; add `pas_transId`). Y1MediaBridge's onStateChange triggers re-firing T_papp's CHANGED-emit path when Repeat/Shuffle move.
+
+5. **Padding budget.** Current `_trampolines.py` uses 1652 B of LOAD #1 padding (0xac54..0xb2c8); 2368 B remain. F4's T_papp is estimated at 400-600 B (six PDU dispatchers + one event re-emit path). Comfortable fit.
+
+6. **Strict scope alignment.** Per AVRCP V13 §5.2.1 Player Application Settings, supporting any one PApp attribute makes ICS C.14 fire and rows 12-17 + 30 become Mandatory. Anchoring on Repeat (attr_id=2) + Shuffle (attr_id=3) maps cleanly to AndroidMediaController's repeat/shuffle modes (Y1's KitKat-era stack supports both via `setRepeatMode` / `setShuffleMode`). These are the two universally-implemented PApp attributes on real CT/TG implementations and represent the strictest spec-conformance posture without adding device-specific equalizer/scan plumbing that doesn't exist on Y1.
+
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
