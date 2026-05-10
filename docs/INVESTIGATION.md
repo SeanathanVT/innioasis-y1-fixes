@@ -1581,6 +1581,76 @@ Per AVDTP V13 §8.5, sig_id lives in **byte 1 (low 6 bits)** of the signal frame
 
 V5 design TBD — depends on next capture's data on how sig 0x0c is currently rejected (or if it is at all) inside fcn.000b0c30.
 
+### Trace #14 (2026-05-10) — L2CAP PSM 0x19 callback registration located in mtkbt
+
+Hunt: locate where mtkbt registers its inbound L2CAP callback for PSM 0x19 (AVDTP signaling/media), to anchor the RX chain that ultimately drives the dispatcher at 0xaa72c.
+
+**Method.** AVCTP has the log string `[AVCTP] register psm 0x%x status:%d` at 0xdbea0; AVDTP doesn't have an equivalent log line, so the AVCTP register call site was used as the fingerprint. radare2 `axt @ 0xdbea0` resolves to a PC-relative ADD at 0x6d2de inside an init function. The instruction immediately preceding is `bl fcn.0007c78c` at 0x6d2c8 — that's BlueAngel's `L2CAP_RegisterPsm`. Confirmed by inspecting `fcn.0007c78c`: it logs `Protocol->inLinkMode:%d` / `Protocol->outLinkMode:%d`, validates MTU between 0x12 and 0xfff9, and walks a 20-slot global registration table looking for an empty slot.
+
+**15 callers of `fcn.0007c78c`** (all distinct profiles registering different PSMs). The AVDTP candidate is `fcn.000ae9bc` — sits in the AVDTP code region (0xae9bc in mtkbt), single-caller (`bl` at 0xab8a8 inside a larger init sequence). Disassembly confirms PSM 0x19:
+
+```
+0x000ae9bc      push.w {r4..fp, lr}
+0x000ae9c2      bl fcn.000b54ec                 ; alloc / lookup PsmCtx
+0x000ae9ca      bl fcn.000afb34                 ; init AVDTP local state
+0x000ae9d0      movw r0, #0x69b                  ; MTU = 1691  (struct[+0x30])
+0x000ae9d6      movs r3, #0x30                   ; channel mode flags (struct[+0x32])
+0x000ae9d8      mov.w sb, #0x19                  ; PSM = 0x19  (struct[+0x2c])
+0x000ae9dc      add r4, pc; ldr r4, [r4]         ; r4 = &PsmCtx (PIE-relocated, [0xaea84]→0xf9c38)
+0x000ae9e0      add r1, pc; ldr r1, [r1]         ; r1 = &CallbackTable (PIE-relocated, [0xaea88]→0xf9c3c)
+0x000ae9e4      strh r0, [r4, #0x30]             ; PsmCtx.MTU = 0x69b
+0x000ae9e6      str  r1, [r4, #0x28]             ; PsmCtx.callback_struct = r1
+0x000ae9e8      add.w r0, r4, #0x28              ; r0 = &PsmCtx[0x28] (= L2CAP register arg)
+0x000ae9ec      strh.w sb, [r4, #0x2c]           ; PsmCtx.PSM = 0x19
+0x000ae9f0      strh r3, [r4, #0x32]             ; PsmCtx.flags = 0x30
+0x000ae9f6      strb.w r7, [r4, #0x36]           ; outLinkMode = 1
+0x000ae9fa      strb.w r7, [r4, #0x35]           ; inLinkMode  = 1
+0x000aea06      bl fcn.0007c78c                  ; L2CAP_RegisterPsm(&PsmCtx[0x28])
+0x000aea0a      mov r5, r0                        ; r5 = register status (0 = OK)
+0x000aea0e      bne 0x000aea7c                   ; on error → return r8
+0x000aea10..7a                                   ; success: 4-iteration SEP-init loop, stride 0x18
+```
+
+**L2CAP register-arg layout** (relative to r0 passed into `fcn.0007c78c`):
+
+| Offset | Field           | Init value | Notes |
+|--------|-----------------|------------|-------|
+| +0x00  | callback table ptr | PIE-relocated | data_ind / conn_ind / config_ind / disc_ind |
+| +0x04  | PSM             | 0x0019     | matches `ldrh r3, [r0, 4]` in L2CAP_RegisterPsm |
+| +0x06  | (zero)          | 0          | |
+| +0x08  | MTU             | 0x069b (1691) | matches `ldrh r3, [r0, 8]` validation |
+| +0x0a  | flags           | 0x0030     | |
+| +0x0d  | inLinkMode      | 1          | matches `ldrb r1, [r4, 0xd]` log line |
+| +0x0e  | outLinkMode     | 1          | matches `ldrb r1, [r4, 0xe]` log line |
+
+**Caller context** (0xab8a8 in some larger AvdtpInit-like entry, hosted inside r2's mis-spanning fcn.0000d98c):
+
+```
+0x000ab884      bl fcn.0004ca90                 ; memset some ctx region
+0x000ab88a      add.w r0, r4, #0x1ac
+0x000ab88e      str r3, [r4, #4]                ; flag = 1
+0x000ab890      strb r3, [r4, #1]               ; flag = 1
+0x000ab892      strb r5, [r4]                    ; type = arg
+0x000ab894      bl fcn.0006ce5c                 ; init list / queue ×3 at +0x1ac, +0x1b4, +0x1bc
+0x000ab8a8      bl fcn.000ae9bc                 ; ← AVDTP L2CAP register
+0x000ab8ac      mov r0, r5; pop {r4, r5, r6, pc}
+```
+
+**Implications.**
+
+1. **Single registration, single PSM** (0x19) — AVDTP signaling and media share PSM 0x19 per AVDTP V13 §6 (multiplexed via L2CAP CIDs at runtime). No separate "media-channel" register exists.
+2. **MTU advertised: 1691** (0x69b). AVDTP V13 §6.4.1 mandates ≥ 672 for signaling; 1691 is consistent with BasePoint default. Sufficient for AVDTP 1.3 GET_ALL_CAPABILITIES_RSP (worst case ~50 B per Service Capability × N caps, well under 1691).
+3. **Mode flags 0x30 + inLinkMode/outLinkMode = 1** — Basic L2CAP mode (no ERTM/streaming-mode), consistent with stock A2DP 1.0 era. ERTM is optional per AVDTP V13 §A.2 ICS row M.4 — not advertised here.
+4. The callback table at PIE-resolved address 0xf9c3c contains AVDTP signaling layer's connect/disconnect/data-indication entry points. The data-indication path is what eventually feeds `fcn.000b0c30` (the stream signaling state machine) and the per-signal handlers (0xaa924 sig 0x02, 0xab4de sig 0x0c stub, etc.) — closing the upstream side of the RX chain Trace #13c established the downstream side of.
+
+**Anchors for future work** (this register call is **not patched** today; documented for completeness in case a future deviation requires altering MTU, channel mode, or the callback set):
+
+- AVDTP register fcn: file offset **0xae9bc** (one caller at 0xab8a8)
+- L2CAP_RegisterPsm: file offset **0x7c78c** (15 callers covering all profiles)
+- AVCTP register caller: 0x6d2c8 (PSM 0x17, MTU 0x69b same advertised cap, inside fcn.0000f79c-region init)
+- PIE-relocated PsmCtx ptr: GOT-style entry at 0xf9c38 → resolved via R_ARM_RELATIVE
+- PIE-relocated callback-table ptr: GOT-style entry at 0xf9c3c → R_ARM_RELATIVE
+
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
