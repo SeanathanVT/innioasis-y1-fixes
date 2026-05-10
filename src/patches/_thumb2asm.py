@@ -149,6 +149,20 @@ class Asm:
     def bne(self, label: str) -> None: self.bcond(1, label)
     def blt(self, label: str) -> None: self.bcond(11, label)
     def bge(self, label: str) -> None: self.bcond(10, label)
+    def bgt(self, label: str) -> None: self.bcond(12, label)
+    def ble(self, label: str) -> None: self.bcond(13, label)
+
+    def _bcond_w(self, cond_skip: int, label: str) -> None:
+        """Wide-range conditional via inverted-short + b.w. 6 bytes total."""
+        skip = f"_bcw_{len(self.fixups)}_{len(self.buf)}"
+        self.bcond(cond_skip, skip)
+        self.b_w(label)
+        self.label(skip)
+
+    # Wide-range conditional branches. cond_skip = inverted condition for the
+    # short-form skip. Range: ±1 MB (the underlying b.w T4).
+    def beq_w(self, label: str) -> None: self._bcond_w(1, label)   # NE skips
+    def bne_w(self, label: str) -> None: self._bcond_w(0, label)   # EQ skips
 
     # ------------------------------------------------------------------ T3/T4 (32-bit)
 

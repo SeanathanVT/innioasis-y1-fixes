@@ -307,7 +307,9 @@ MODE_0666 = 0o666
 
 # Linux ARM EABI syscall numbers.
 NR_read = 3
+NR_lseek = 19
 NR_clock_gettime = 263
+SEEK_SET = 0
 
 # Linux clock IDs. CLOCK_BOOTTIME mirrors Android's SystemClock.elapsedRealtime
 # (monotonic, includes time spent in suspend) — same source we use on the
@@ -568,22 +570,17 @@ def _emit_extended_t2(a: Asm) -> None:
 
     a.label("ext2_track_changed")
     # ---- allocate small frame: stack scratch for state-file write ----
-    # sp+0..7  : will hold file's track_id (read below; persisted to state[0..7]
-    #            so T4's next compare sees no change unless Y1MediaBridge moves
-    #            the track_id again)
-    # sp+8     : transId (set below)
-    # sp+9..15 : padding (zeroed below)
+    # sp+0..7  : track_id (read from y1-track-info)
+    # sp+8     : transId (caller-supplied)
+    # sp+9..15 : unused (we lseek+write only bytes 0..8 — see below)
     a.subw(13, 13, T2_FRAME)                  # sub.w sp, sp, #16
 
-    # Default track_id = 0×8 (in case file read fails — keeps state file in a
-    # well-defined "no synced track" state rather than 0xFF×8 which would later
-    # cause T4 to spuriously detect "changed" against a real-id file).
+    # Default sp+0..7 to zero (defensive — track-info read might fail).
     a.movs_imm8(0, 0)
     a.str_sp_imm(0, T2_OFF_TID + 0)
     a.str_sp_imm(0, T2_OFF_TID + 4)
 
-    # Open + read 8 B + close from y1-track-info. On failure, leave the
-    # default 0×8 in place.
+    # Open + read 8 B from y1-track-info into sp+0..7.
     a.adr_w(0, "path_track_info")
     a.movs_imm8(1, O_RDONLY)
     a.movs_imm8(2, 0)
@@ -593,7 +590,7 @@ def _emit_extended_t2(a: Asm) -> None:
     a.mov_lo_lo(4, 0)
 
     a.mov_lo_lo(0, 4)
-    a.add_sp_imm(1, T2_OFF_TID)               # r1 = track_id buf
+    a.add_sp_imm(1, T2_OFF_TID)               # r1 = sp+0 (track_id slot)
     a.movs_imm8(2, 8)
     a.movs_imm8(7, NR_read)
     a.svc(0)
@@ -603,29 +600,29 @@ def _emit_extended_t2(a: Asm) -> None:
 
     a.label("ext2_after_track_read")
 
-    # ---- save state file: [track_id (8) || transId (1) || pad (7)] ----
-    # Zero out bytes 8..15 (transId slot + padding) first, then strb transId.
-    a.movs_imm8(0, 0)
-    a.str_sp_imm(0, T2_OFF_TRANSID + 0)
-    a.str_sp_imm(0, T2_OFF_TRANSID + 4)
-    a.ldrb_w(0, 13, T2_TRANSID_CALLER_OFF)    # r0 = caller's transId
+    # ---- store caller's transId at sp+8 ----
+    a.ldrb_w(0, 13, T2_TRANSID_CALLER_OFF)
     a.strb_w(0, 13, T2_OFF_TRANSID)
 
-    # open(path_state, O_WRONLY|O_TRUNC, 0)
-    # No O_CREAT — Y1MediaBridge pre-creates the state file at startup. If the
-    # open fails, skip the write rather than risk creating a wrongly-permed
-    # file as the BT-process uid (which Y1MediaBridge couldn't then re-chmod).
+    # open(path_state, O_WRONLY, 0) — no O_TRUNC, no O_CREAT. Y1MediaBridge
+    # pre-creates the file. We open without truncating because we only
+    # write OUR 9 bytes (track_id 0..7 + transId at 8); T9's bytes 9..12 must
+    # stay intact. With O_TRUNC we'd zero them and cause spurious CHANGED
+    # frames on the next T9 fire.
     a.adr_w(0, "path_state")
-    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movw(1, O_WRONLY)
     a.movs_imm8(2, 0)
     a.blx_imm(PLT_open)
     a.cmp_imm8(0, 0)
     a.blt("ext2_after_state_write")
     a.mov_lo_lo(4, 0)
 
+    # write 9 B from sp+0..8 (track_id + transId). No lseek needed since
+    # the fd's offset starts at 0 after open; we write at the head of the
+    # file and stop after 9 bytes. T9's bytes 9..12 are untouched.
     a.mov_lo_lo(0, 4)
-    a.add_sp_imm(1, T2_OFF_TID)               # source = the 16 B we just built
-    a.movs_imm8(2, 16)
+    a.add_sp_imm(1, T2_OFF_TID)               # source = sp+0
+    a.movs_imm8(2, 9)                         # 9 bytes (0..8 inclusive)
     a.blx_imm(PLT_write)
 
     a.mov_lo_lo(0, 4)
@@ -841,11 +838,14 @@ def _emit_t5(a: Asm) -> None:
     a.ldr_sp_imm(0, T5_OFF_FILE_TID + 4)
     a.str_sp_imm(0, T5_OFF_STATE + 4)
 
-    # ---- write 16-byte state buf back to y1-trampoline-state ----
-    # O_WRONLY|O_TRUNC, no O_CREAT — Y1MediaBridge.prepareTrackInfoDir()
-    # creates the file at startup with the right permissions.
+    # ---- write only T5's bytes (0..7 track_id + 8 transId = 9 B) ----
+    # No O_TRUNC: T9 owns bytes 9..12 (last_play / last_battery / last_repeat
+    # / last_shuffle). Truncating would clobber T9's edge-tracking state and
+    # cause spurious CHANGED emits on the next play_state edge. Without
+    # O_TRUNC, the existing 16 B file shape is preserved and we overwrite
+    # only the leading 9 bytes.
     a.adr_w(0, "path_state")
-    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movw(1, O_WRONLY)
     a.movs_imm8(2, 0)
     a.blx_imm(PLT_open)
     a.cmp_imm8(0, 0)
@@ -854,7 +854,7 @@ def _emit_t5(a: Asm) -> None:
 
     a.mov_lo_lo(0, 5)
     a.add_sp_imm(1, T5_OFF_STATE)             # r1 = state buf
-    a.movs_imm8(2, 16)
+    a.movs_imm8(2, 9)                         # 9 bytes: track_id (8) + transId (1)
     a.blx_imm(PLT_write)
 
     a.mov_lo_lo(0, 5)
@@ -1163,7 +1163,7 @@ def _emit_t_papp(a: Asm) -> None:
     a.cmp_imm8(0, 0x14)
     a.beq("papp_set")
     a.cmp_imm8(0, 0x15)
-    a.beq("papp_attr_text")
+    a.beq_w("papp_attr_text")
     # The only remaining PDU in the dispatch range is 0x16; fall through.
 
     # ---- 0x16 GetPlayerApplicationSettingValueText ----
@@ -1173,36 +1173,73 @@ def _emit_t_papp(a: Asm) -> None:
     #
     # Param layout: sp+386 = attr_id (1 B), sp+387 = n (1 B),
     # sp+388..387+n = value_ids.
+    #
+    # Switch on (attr_id, first value_id) and emit the matching label.
+    # We only handle the FIRST requested value (single-emit, idx=0/total=1)
+    # — adequate for the CTs in our test matrix; multi-emit AttrText is
+    # the spec-compliant extension and could be added if a future CT
+    # requires it. Unsupported (attr_id, value_id) pairs jump to
+    # papp_done with no emission (AVRCP layer sees no response, peer
+    # times out / falls back).
     a.label("papp_value_text")
-    # We don't fully parse the inbound value_id list — emit "Off" for any
-    # value under attr=Repeat or attr=Shuffle. Permissive CTs render *some*
-    # text; strict CTs needing per-value text are out of scope.
     a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
-    # Only emit if attr_id is one we support (2 or 3); else skip.
+    a.ldrb_w(7, 13, PAPP_PARAM_OFF + 2)   # r7 = first requested value_id
+
     a.cmp_imm8(6, PAPP_ATTR_REPEAT)
-    a.beq("papp_vt_emit_off")
+    a.beq("papp_vt_repeat")
     a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
-    a.beq("papp_vt_emit_off")
-    # Unsupported attr → no emission. AVRCP layer sees no response, peer
-    # times out / falls back.
+    a.beq("papp_vt_shuffle")
     a.b_w("papp_done")
 
+    a.label("papp_vt_repeat")
+    # Repeat values: 0x01 OFF, 0x02 SINGLE, 0x03 ALL.
+    a.cmp_imm8(7, 0x01)
+    a.beq("papp_vt_emit_off")
+    a.cmp_imm8(7, 0x02)
+    a.beq("papp_vt_emit_single")
+    a.cmp_imm8(7, 0x03)
+    a.beq("papp_vt_emit_all")
+    a.b_w("papp_done")
+
+    a.label("papp_vt_shuffle")
+    # Shuffle values: 0x01 OFF, 0x02 ALL_TRACK.
+    a.cmp_imm8(7, 0x01)
+    a.beq("papp_vt_emit_off")
+    a.cmp_imm8(7, 0x02)
+    a.beq("papp_vt_emit_all")
+    a.b_w("papp_done")
+
+    # Each emit block builds the 5 stack args + 4 reg args and tail-jumps
+    # to papp_done. Common shape:
+    #   r0 = conn, r1 = 0 (success), r2 = idx 0, r3 = total 1
+    #   sp[0] = attr_id (r6), sp[4] = value_id (r7), sp[8] = charset 0x6A,
+    #   sp[12] = length, sp[16] = &str
     a.label("papp_vt_emit_off")
-    # Single-emit "Off": idx=0, total=1 (so the function emits immediately).
-    # value_id we emit text for: read first requested value byte.
-    a.ldrb_w(7, 13, PAPP_PARAM_OFF + 2)   # r7 = first value_id from inbound
-    # Build args:
-    #   r0=conn, r1=0 (success), r2=idx=0, r3=total=1
-    #   sp[0]=attr_id, sp[4]=value_id, sp[8]=charset 0x6a, sp[12]=length=3,
-    #   sp[16]=&"Off"
+    a.movs_imm8(2, 3)                     # "Off" length
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
+    a.adr_w(2, "papp_text_off")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 16)
+    a.b_w("papp_vt_emit_common")
+
+    a.label("papp_vt_emit_single")
+    a.movs_imm8(2, 12)                    # "Single Track" length
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
+    a.adr_w(2, "papp_text_single")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 16)
+    a.b_w("papp_vt_emit_common")
+
+    a.label("papp_vt_emit_all")
+    a.movs_imm8(2, 10)                    # "All Tracks" length
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
+    a.adr_w(2, "papp_text_all")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 16)
+    # fall through
+
+    a.label("papp_vt_emit_common")
     a.str_sp_imm(6, PAPP_OFF_ARGS + 0)    # sp[0] = attr_id
     a.str_sp_imm(7, PAPP_OFF_ARGS + 4)    # sp[4] = value_id
     a.movs_imm8(2, 0x6A)
     a.str_sp_imm(2, PAPP_OFF_ARGS + 8)    # sp[8] = charset UTF-8
-    a.movs_imm8(2, 3)                     # length of "Off"
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)   # sp[12] = length
-    a.adr_w(2, "papp_text_off")
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 16)   # sp[16] = &"Off"
     a.add_imm_t3(0, 5, 8)                 # r0 = conn
     a.movs_imm8(1, 0)                     # r1 = success
     a.movs_imm8(2, 0)                     # r2 = idx 0
@@ -1222,9 +1259,14 @@ def _emit_t_papp(a: Asm) -> None:
 
     # ---- 0x12 ListPlayerApplicationSettingValues ----
     # Inbound: 1 byte attr_id at sp+386. Switch on attr_id:
-    #   2 → [1,2,3,4] (Repeat values per V13 §5.2.4 Tbl 5.20)
-    #   3 → [1,2,3]   (Shuffle values per Tbl 5.21)
+    #   2 → [1,2,3]   (Repeat: OFF / SINGLE / ALL — Y1 has no GROUP)
+    #   3 → [1,2]     (Shuffle: OFF / ALL_TRACK — Y1 has no GROUP)
     #   else → reject
+    # Honest advertisement: only the values Y1 can actually honor. Stock
+    # advertised the full Tbl 5.20 / 5.21 sets including GROUP, so a CT
+    # could Set 0x04 (Repeat GROUP) or 0x03 (Shuffle GROUP); T_papp 0x14
+    # ACKed success but Y1MediaBridge's enum mapper rejected → CT-side
+    # state diverged from Y1-side state.
     a.label("papp_list_values")
     a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
     a.cmp_imm8(6, PAPP_ATTR_REPEAT)
@@ -1244,21 +1286,21 @@ def _emit_t_papp(a: Asm) -> None:
 
     a.label("papp_lv_repeat")
     a.adr_w(0, "papp_repeat_values")
-    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2,3,4]
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2,3]
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)                     # success
     a.movs_imm8(2, PAPP_ATTR_REPEAT)
-    a.movs_imm8(3, 4)                     # n_values
+    a.movs_imm8(3, 3)                     # n_values (OFF / SINGLE / ALL)
     a.blx_imm(PLT_list_player_values_rsp)
     a.b_w("papp_done")
 
     a.label("papp_lv_shuffle")
     a.adr_w(0, "papp_shuffle_values")
-    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2,3]
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2]
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
     a.movs_imm8(2, PAPP_ATTR_SHUFFLE)
-    a.movs_imm8(3, 3)
+    a.movs_imm8(3, 2)                     # n_values (OFF / ALL_TRACK)
     a.blx_imm(PLT_list_player_values_rsp)
     a.b_w("papp_done")
 
@@ -1293,13 +1335,40 @@ def _emit_t_papp(a: Asm) -> None:
     # that supports a subset of attributes acknowledge any Set whose
     # listed attributes it can honor.
     a.label("papp_set")
+    # Validate (attr_id, value) against the values we ACTUALLY advertise via
+    # 0x12 ListValues. AVRCP V13 §6.15.2 defines status 0x05 INVALID_PARAMETER
+    # for "the parameter is invalid" — appropriate when the CT sets a value
+    # outside the supported set.
+    #   attr_id 0x02 (Repeat): valid values 0x01..0x03 (OFF / SINGLE / ALL)
+    #   attr_id 0x03 (Shuffle): valid values 0x01..0x02 (OFF / ALL_TRACK)
+    # Any other attr_id is unsupported.
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 1)         # r6 = attr_id (caller's sp+387)
+    a.ldrb_w(7, 13, PAPP_PARAM_OFF + 2)         # r7 = value   (caller's sp+388)
+
+    # attr_id == Repeat → check value in [1..3]
+    a.cmp_imm8(6, PAPP_ATTR_REPEAT)
+    a.bne("papp_set_check_shuffle")
+    a.cmp_imm8(7, 1)
+    a.blt("papp_set_reject")
+    a.cmp_imm8(7, 3)
+    a.bgt("papp_set_reject")
+    a.b_w("papp_set_validated")
+
+    a.label("papp_set_check_shuffle")
+    a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
+    a.bne("papp_set_reject")
+    a.cmp_imm8(7, 1)
+    a.blt("papp_set_reject")
+    a.cmp_imm8(7, 2)
+    a.bgt("papp_set_reject")
+
+    a.label("papp_set_validated")
+
     # Pack [attr_id, value] into the outgoing-args region (sp+0..1) as
     # the 2-byte write payload. set_player_value_rsp later in this arm
     # doesn't consume any stack args, so sp+0..1 is free scratch.
-    a.ldrb_w(0, 13, PAPP_PARAM_OFF + 1)         # r0 = attr_id (caller's sp+387)
-    a.strb_w(0, 13, PAPP_OFF_ARGS + 0)
-    a.ldrb_w(0, 13, PAPP_PARAM_OFF + 2)         # r0 = value   (caller's sp+388)
-    a.strb_w(0, 13, PAPP_OFF_ARGS + 1)
+    a.strb_w(6, 13, PAPP_OFF_ARGS + 0)
+    a.strb_w(7, 13, PAPP_OFF_ARGS + 1)
 
     # open(path_papp_set, O_WRONLY|O_TRUNC, 0) — Y1MediaBridge pre-creates
     # the file at startup; if it's somehow gone, skip the write but still
@@ -1324,10 +1393,20 @@ def _emit_t_papp(a: Asm) -> None:
 
     a.label("papp_set_skip_write")
 
-    # ACK the peer regardless of write success. set_player_value_rsp(conn, 0)
-    # emits the spec-correct success reply per AVRCP V13 §5.2.4 / §6.15.2.
+    # ACK the peer with success. set_player_value_rsp(conn, 0) emits the
+    # spec-correct success reply per AVRCP V13 §5.2.4 / §6.15.2.
     a.add_imm_t3(0, 5, 8)                        # r0 = conn
     a.movs_imm8(1, 0)                            # r1 = 0 (success ACK)
+    a.blx_imm(PLT_set_player_value_rsp)
+    a.b_w("papp_done")
+
+    a.label("papp_set_reject")
+    # Reject path: emit set_player_value_rsp(conn, 0x05 INVALID_PARAMETER).
+    # Per V13 §6.15.2 Tbl 6.2 status 0x05 = "The parameter is invalid".
+    # The peer's UI typically falls back to its previous value, keeping
+    # CT-side and Y1-side state in sync.
+    a.add_imm_t3(0, 5, 8)                        # r0 = conn
+    a.movs_imm8(1, 5)                            # r1 = 0x05 INVALID_PARAMETER
     a.blx_imm(PLT_set_player_value_rsp)
     a.b_w("papp_done")
 
@@ -1802,21 +1881,33 @@ def _emit_t9(a: Asm) -> None:
 
     a.label("t9_after_papp_check")
 
-    # ---- write state buf back only if any_change ----
+    # ---- write only T9's bytes (state[9..12] = 4 B) if any edge fired ----
+    # No O_TRUNC and lseek to offset 9 so we leave T5's bytes 0..8
+    # (track_id + transId) intact. Eliminates the read-modify-write race
+    # that the previous full-16-B write had with concurrent T5 firings.
     a.cmp_imm8(5, 0)
     a.beq("t9_after_state_write")
 
     a.adr_w(0, "path_state")
-    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movw(1, O_WRONLY)
     a.movs_imm8(2, 0)
     a.blx_imm(PLT_open)
     a.cmp_imm8(0, 0)
     a.blt("t9_after_state_write")             # open failed → skip write, still proceed
     a.mov_lo_lo(5, 0)                         # r5 = fd
 
+    # lseek(fd, 9, SEEK_SET) — position at start of T9's owned region.
     a.mov_lo_lo(0, 5)
-    a.add_sp_imm(1, T9_OFF_STATE)             # r1 = state_buf
-    a.movs_imm8(2, 16)
+    a.movs_imm8(1, 9)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    # write(fd, &state[9], 4) — 4 bytes: last_play / last_battery /
+    # last_repeat / last_shuffle.
+    a.mov_lo_lo(0, 5)
+    a.addw(1, 13, T9_STATE_LAST_PS_OFF)       # r1 = sp + state[9] offset
+    a.movs_imm8(2, 4)
     a.blx_imm(PLT_write)
 
     a.mov_lo_lo(0, 5)
@@ -1957,10 +2048,15 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.raw(bytes([PAPP_ATTR_REPEAT, PAPP_ATTR_SHUFFLE]))
     a.align(4)
     a.label("papp_repeat_values")
-    a.raw(bytes([0x01, 0x02, 0x03, 0x04]))   # OFF, SINGLE, ALL, GROUP (V13 Tbl 5.20)
+    # Y1's musicRepeatMode int enum has 3 values (0=OFF, 1=ONE, 2=ALL) — no
+    # GROUP. Spec V13 Tbl 5.20 also defines 0x04 GROUP but we'd be lying to
+    # advertise it (T_papp 0x14 would ACK a Set-to-GROUP that Y1 can't honor).
+    a.raw(bytes([0x01, 0x02, 0x03]))         # OFF, SINGLE, ALL
     a.align(4)
     a.label("papp_shuffle_values")
-    a.raw(bytes([0x01, 0x02, 0x03]))         # OFF, ALL, GROUP (V13 Tbl 5.21)
+    # Y1's musicIsShuffle is a boolean (false/true). Spec V13 Tbl 5.21 also
+    # defines 0x03 GROUP, omitted here for the same honesty reason.
+    a.raw(bytes([0x01, 0x02]))               # OFF, ALL_TRACK
     a.align(4)
     a.label("papp_current_values")
     # Fallback OFF/OFF used only by T_papp 0x13 GetCurrent (rarely invoked
@@ -1979,6 +2075,12 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.align(4)
     a.label("papp_text_off")
     a.raw(b"Off")                             # 3 B
+    a.align(4)
+    a.label("papp_text_single")
+    a.raw(b"Single Track")                    # 12 B
+    a.align(4)
+    a.label("papp_text_all")
+    a.raw(b"All Tracks")                      # 10 B
     a.align(4)
 
     blob = a.resolve()
