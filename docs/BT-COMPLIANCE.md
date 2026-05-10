@@ -293,6 +293,8 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Verification.** Capture btlog around a pause: zero `[A2DP] a2dp_stop. is_streaming:1` lines, peer A2DP sink doesn't cycle, audio resumes clean.
 
+**Sibling-path investigation (close_l → a2dp_cleanup) — NOT FIRING in observed captures.** `libaudio.a2dp.default.so` has one other teardown PLT call: `bl sym.imp.a2dp_cleanup` at file `0x8a00` inside `A2dpAudioStreamOut::close_l` (`0x89cc`). `close_l` is reached from `close()` (`0x8a4c`) and `setBluetoothEnabled(false)` (`0x8b58`). r2 verified — these are the only call sites. AH1 doesn't cover this path. Audit of `/work/logs/dual-tv-iter*/logcat.txt` (May 6-7 era, before the AVRCP-tag log filter was added; covers many real pause/resume cycles) found **zero** `a2dp_cleanup` / `close_l` / `closeOutputStream` lines — AudioFlinger does not call `close()` during normal pause cycles, only on policy / focus / device-routing transitions. The single `[A2DP] a2dp_stop. is_streaming:1` teardown shape AH1 already covers is the only one observed. No additional patch added; if a future capture surfaces `close_l` firing during a pause, that would warrant a sibling byte-flip at file `0x89e0` (`beq 0x8a0c` EQ → AL, mirroring the AH1 shape inside `close_l`).
+
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp` — *AVRCP* — SHIPPED
 
 **Spec.** AVRCP 1.3 §5.3.4 places no per-attribute byte cap. TG fragments via §5.5 if the total response exceeds AVCTP MTU.

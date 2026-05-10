@@ -727,7 +727,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=32 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=33 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1257,20 +1257,31 @@ public class MediaBridgeService extends Service {
             char stateChar = line.charAt(pos);
             // Y1 BaseActivity emits state-code chars after `播放状态切换 `
             // ("playback state switch"). Observed mapping:
+            //   '0' → IDLE / NOT_PLAYING — folded to STOPPED (verified once
+            //         in 2026-05-07 TV capture; semantically equivalent to
+            //         not-playing and a fresh edge needs the wire to reflect
+            //         no-audio so the CT freezes its position extrapolator)
             //   '1' → PLAYING (audio rolling)
             //   '3' → PAUSED  (audio held; can resume)
             //   '5' → STOPPED (FF/RW cascade terminated, end-of-stream, etc.)
             // AVRCP 1.3 §5.4.1 Tbl 5.26 PlayStatus enum:
             //   0=STOPPED, 1=PLAYING, 2=PAUSED, 3=FWD_SEEK, 4=REV_SEEK,
-            //   0xFF=ERROR. We currently map only the three states Y1
-            //   emits; FWD_SEEK / REV_SEEK could be added if Y1 is
-            //   observed emitting a hold-key state code, but the test
-            //   matrix has not surfaced one yet.
+            //   0xFF=ERROR.
+            // Any other state code → log warn (so the next capture surfaces
+            // the unknown code) and freeze on the existing mPlayStatus
+            // rather than guessing — silently dropping is the failure mode
+            // that produces playhead drift via wire/Y1-state divergence.
             final byte avrcpStatus;
-            if      (stateChar == '1') avrcpStatus = 1;   // PLAYING
-            else if (stateChar == '3') avrcpStatus = 2;   // PAUSED
-            else if (stateChar == '5') avrcpStatus = 0;   // STOPPED
-            else                       return;
+            switch (stateChar) {
+                case '0': avrcpStatus = 0; break;  // IDLE → STOPPED (safe fold)
+                case '1': avrcpStatus = 1; break;  // PLAYING
+                case '3': avrcpStatus = 2; break;  // PAUSED
+                case '5': avrcpStatus = 0; break;  // STOPPED
+                default:
+                    Log.w(TAG, "Unknown play-state code '" + stateChar
+                            + "' in line: " + line);
+                    return;
+            }
             mMainHandler.post(new Runnable() {
                 @Override public void run() { onStateDetected(avrcpStatus); }
             });
