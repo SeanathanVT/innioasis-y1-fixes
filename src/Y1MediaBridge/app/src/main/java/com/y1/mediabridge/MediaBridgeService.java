@@ -737,7 +737,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=36 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=37 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1220,14 +1220,25 @@ public class MediaBridgeService extends Service {
             // the latest observed value via onStateDetected's dedupe.
             processLogcat(new String[]{ "logcat", "-v", "tag", "-d" });
             Log.d(TAG, "Logcat history processed");
-            // Live tail: -T 1 starts from line 1 of NEW messages, NOT the
-            // ring buffer head. Without -T, `logcat` re-dumps the entire
-            // ring buffer before tailing — duplicating the history pass we
-            // just did and re-firing every state edge through onStateDetected
-            // (dedupe catches it but it's wasted work, and on pipe restart
-            // we'd repeat the buffer-replay each retry).
+            // Live tail: bare `logcat -v tag` blocks forever, dumping any
+            // existing ring-buffer content first then continuing as new
+            // entries arrive. The buffer-replay is wasted work but harmless
+            // — onTrackDetected dedupes by path and onStateDetected dedupes
+            // by AVRCP enum, so re-firing the same edges no-ops cleanly.
+            //
+            // DO NOT add `-T <count>`: that flag was added in Android 5.0+
+            // logcat. Android 4.2.2 (Y1) has only `-t <count>` (print N
+            // recent lines and EXIT), and its arg parser treats `-T 1` as
+            // `-t 1` (case-fold) or as an unknown filter spec — either way
+            // the spawned logcat exits after one line. The result is a
+            // pipe-close-restart loop that fires every ~1 s and silently
+            // misses every music-app track-change log line that lands
+            // during the gap. Empirically: 78 pipe-close events in a
+            // single Bolt/Kia capture, zero `Track change:` events,
+            // y1-track-info stays empty, every CT GetElementAttributes
+            // returns strlen:0.
             while (mRunning) {
-                processLogcat(new String[]{ "logcat", "-v", "tag", "-T", "1" });
+                processLogcat(new String[]{ "logcat", "-v", "tag" });
                 if (mRunning) {
                     Log.w(TAG, "Logcat pipe closed, restarting in 1s");
                     try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
