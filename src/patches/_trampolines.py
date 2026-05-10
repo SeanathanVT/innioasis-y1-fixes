@@ -256,11 +256,6 @@ PAPP_ATTR_SHUFFLE     = 0x03
 PAPP_REPEAT_OFF       = 0x01
 PAPP_SHUFFLE_OFF      = 0x01
 
-# AVRCP 1.3 §6.15.2 Reject status codes for PApp Set/Get rejects:
-#   0x05 INVALID_PARAMETER, 0x06 INTERNAL_ERROR, 0x09 INVALID_PLAYER_ID, …
-# Iter1 Set returns 0x06 INTERNAL_ERROR (we accept the PDU but cannot
-# persist — iter2 will replace this with real state binding).
-PAPP_REJECT_INTERNAL_ERROR = 0x06
 
 # AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned-value
 # defaults.
@@ -1247,13 +1242,55 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("papp_done")
 
     # ---- 0x14 SetPlayerApplicationSettingValue ----
-    # Iter1: explicit reject (status 0x06 INTERNAL_ERROR per AVRCP 1.3
-    # §6.15.2). Spec-conformant: peer learns we accepted the PDU but
-    # cannot apply the change. Iter2 will accept Set and propagate to
-    # Y1MediaBridge.
+    # Iter3: parse first (attr_id, value) pair from inbound param body
+    # at caller's sp+387/+388 (= our sp+0x19b/+0x19c after the PAPP_FRAME
+    # shift), write the 2 bytes to /data/data/com.y1.mediabridge/files/
+    # y1-papp-set, ACK the peer with success. Y1MediaBridge picks up the
+    # file write via FileObserver and forwards the change to the music
+    # app's setMusicRepeatMode / setMusicIsShuffle via broadcast.
+    #
+    # Multi-pair Sets (n > 1, byte at sp+0x19a) are out of scope: the
+    # 2026-05-09 Bolt postflash gdb-capture (`/work/logs/papp-gdb.log`,
+    # docs/INVESTIGATION.md Trace #18) showed every real CT Set is
+    # n=1, so iter3 applies only the first pair. AVRCP V13 §5.2.4 lets
+    # a TG that supports a subset of attributes acknowledge any Set
+    # whose listed attributes it can honor.
     a.label("papp_set")
-    a.add_imm_t3(0, 5, 8)
-    a.movs_imm8(1, PAPP_REJECT_INTERNAL_ERROR)
+    # Pack [attr_id, value] into the outgoing-args region (sp+0..1) as
+    # the 2-byte write payload. set_player_value_rsp later in this arm
+    # doesn't consume any stack args, so sp+0..1 is free scratch.
+    a.ldrb_w(0, 13, PAPP_PARAM_OFF + 1)         # r0 = attr_id (caller's sp+387)
+    a.strb_w(0, 13, PAPP_OFF_ARGS + 0)
+    a.ldrb_w(0, 13, PAPP_PARAM_OFF + 2)         # r0 = value   (caller's sp+388)
+    a.strb_w(0, 13, PAPP_OFF_ARGS + 1)
+
+    # open(path_papp_set, O_WRONLY|O_TRUNC, 0) — Y1MediaBridge pre-creates
+    # the file at startup; if it's somehow gone, skip the write but still
+    # ACK (the peer's UI shouldn't get stuck because of a transient
+    # bridge-side outage). No O_CREAT — same rationale as the y1-track-info
+    # / y1-trampoline-state writes elsewhere in this module.
+    a.adr_w(0, "path_papp_set")
+    a.movw(1, O_WRONLY | O_TRUNC)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("papp_set_skip_write")
+    a.mov_lo_lo(4, 0)                            # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, PAPP_OFF_ARGS)               # r1 = &scratch[0]
+    a.movs_imm8(2, 2)                            # 2 bytes: attr_id + value
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+    a.label("papp_set_skip_write")
+
+    # ACK the peer regardless of write success. set_player_value_rsp(conn, 0)
+    # emits the spec-correct success reply per AVRCP V13 §5.2.4 / §6.15.2.
+    a.add_imm_t3(0, 5, 8)                        # r0 = conn
+    a.movs_imm8(1, 0)                            # r1 = 0 (success ACK)
     a.blx_imm(PLT_set_player_value_rsp)
     a.b_w("papp_done")
 
@@ -1807,6 +1844,9 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.align(4)
     a.label("path_state")
     a.asciiz("/data/data/com.y1.mediabridge/files/y1-trampoline-state")
+    a.align(4)
+    a.label("path_papp_set")
+    a.asciiz("/data/data/com.y1.mediabridge/files/y1-papp-set")
     a.align(4)
 
     # 0xFF×8 sentinel passed as the track_id pointer to
