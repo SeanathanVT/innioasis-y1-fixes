@@ -182,7 +182,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "a2d41f924e07abff4a18afb87989b04c"
+OUTPUT_MD5        = "64cfe3adb2fe4580da54806370e160a8"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include
@@ -210,9 +210,8 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 #   0x06 BATT_STATUS_CHANGED           (T8 INTERIM from y1-track-info[794] + T9 CHANGED on bucket edge)
 #   0x07 SYSTEM_STATUS_CHANGED         (T8 INTERIM only, canned POWERED_ON — intentional;
 #                                         the canned value IS the real value while trampolines run)
-# Per the spec-compliance rule, advertise only what we actually implement.
-# 0x08 PLAYER_APPLICATION_SETTING_CHANGED stays unadvertised because
-# PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08) is deferred.
+#   0x08 PLAYER_APPLICATION_SETTING_CHANGED  (T8 INTERIM with iter1 hardcoded
+#                                              [(Repeat=OFF), (Shuffle=OFF)])
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -220,11 +219,11 @@ T1_TRAMPOLINE = bytes([
     0x04, 0xA3,                               # adr r3, 0x7324
     0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
     0x00, 0x21,                               # movs r1, #0
-    0x07, 0x22,                               # movs r2, #7   (events count = 7)
+    0x08, 0x22,                               # movs r2, #8   (events count = 8)
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00,  # advertised events 0x01..0x07
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # advertised events 0x01..0x08
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40

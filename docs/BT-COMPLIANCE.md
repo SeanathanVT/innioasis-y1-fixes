@@ -40,9 +40,9 @@ The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's Bl
 
 **Lower BT profile stack (adjacent).** A2DP, AVDTP, AVCTP, GAVDP fixes are filed in §9. Goal: spec-completeness where tractable on this hardware (every Optional row we can implement, not just observed-deviation fixes). Each entry in §9 has motivation, scope (or defer-with-rationale), and a verification path. Currently shipped: §9.2 (A2DP HAL coupling), §9.3 (AVRCP attribute cap), §9.6 (U1 AVCTP subscribe-storm mitigation), §9.7 (V2 SDP AVCTP version correction).
 
-**Closed:** every Mandatory row of ICS Table 7, plus every Optional row except 12-17 + 30 (PlayerApplicationSettings).
+**Closed:** every Mandatory row of ICS Table 7, plus every Optional row.
 
-**Deferred — PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08, ICS Table 7 rows 12-17 + 30, all Optional).** Condition C.14 demands all-or-none for 0x11-0x14, so partial shipping is non-conformant; going to "all" is the threshold. The implementation requires (a) Y1 APK smali patches that inject `sendBroadcast` calls into static-ish methods (`SharedPreferencesUtils.setMusicIsShuffle` / `setMusicRepeatMode`) where there is no Context handle, requiring `getApp()`-injection chains; (b) Y1MediaBridge cross-package SharedPreferences plumbing for cold-boot reads; (c) at minimum 4 sub-trampolines for 0x11-0x14 plus 0x15/0x16 text-label trampolines and event 0x08 proactive emission for full ICS coverage, where the PLT calling conventions for `list_player_attrs_rsp`, `list_player_values_rsp`, `get_curplayer_value_rsp`, `set_player_value_rsp`, `get_player_attr_text_rsp`, `get_player_value_text_value_rsp` are not yet documented and would each require disassembly + cross-reference work; (d) a SetPlayerAppSettingValue (PDU 0x14) write path that actually mutates Y1's SharedPreferences from a different process; (e) a new cardinality NOP in MtkBt.odex for the event-0x08 sswitch arm if proactive CHANGED is in scope. Total effort ≈ 5 days for Optional-only rows. Schema bytes 795-799 of `y1-track-info` are reserved for the eventual `shuffle_flag` / `repeat_mode` fields. Revisitable when hardware-test bandwidth opens up.
+**PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08, ICS Table 7 rows 12-17 + 30).** Shipped via `T_papp` in `_trampolines.py` and the event 0x08 INTERIM dispatch in T8. Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3), both currently OFF (value=1), settings cannot be changed". `SetPlayerApplicationSettingValue` (PDU 0x14) returns reject status `0x06 INTERNAL_ERROR` per AVRCP 1.3 §6.15.2 — spec-conformant: peer learns the PDU was understood but the change could not be applied. Future iteration will replace the hardcoded read responses + reject Set path with Y1MediaBridge state binding (file-based contract mirroring `y1-track-info`) so Repeat/Shuffle round-trip to the Android media session.
 
 ---
 
@@ -63,8 +63,8 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | 9 | Receiving PASS THROUGH cat 3 | §4.1.3 | C.1: not required | not claimed | — |
 | 10 | Receiving PASS THROUGH cat 4 | §4.1.3 | C.1: not required | not claimed | — |
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
-| 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | not shipped (none) | spec-compliant; PlayerApplicationSettings ships all (deferred — see §1) |
-| 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | not shipped | PlayerApplicationSettings (deferred) |
+| 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | ✓ T_papp (Repeat + Shuffle, OFF/OFF; Set rejects `0x06 INTERNAL_ERROR` — see §1) | — |
+| 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | ✓ T_papp (UTF-8 "Repeat" / "Shuffle" / "Off") | — |
 | 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
 | **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime, single packed frame) | — |
@@ -77,12 +77,12 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM + T9 CHANGED at 1 s cadence while playing (Y1MediaBridge tick fires `playstatechanged`; T9 live-extrapolates position via `clock_gettime(CLOCK_BOOTTIME)`) | — |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned IS the real value while trampolines run — see footnote†) | — |
-| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | not shipped | PlayerApplicationSettings (deferred) |
+| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | ✓ T8 INTERIM with iter1 hardcoded `[(Repeat=OFF), (Shuffle=OFF)]` | — |
 | 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
 
-**Mandatory rows: all hit.** Optional rows fully shipped: 18, 19, 25, 26, 27, 28, 29, 31, 32, 66. Optional rows still pending: 12-17, 30 (PlayerApplicationSettings).
+**Mandatory rows: all hit. Optional rows: all hit.** ICS Table 7 (Target Features) is fully covered.
 
 † **Event 0x07 SYSTEM_STATUS_CHANGED — INTERIM-only is intentional.** While trampolines execute, the system is by definition POWER_ON; UNPLUGGED is for accessory / dock contexts that don't apply to the Y1; POWER_OFF is unobservable from inside a process that can no longer emit responses. The canned `0x00 POWER_ON` value IS the real value, so there is no edge to fire CHANGED on.
 
@@ -117,7 +117,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; Y1MediaBridge tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | intentionally INTERIM-only (see §2 footnote) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | not advertised | PlayerApplicationSettings (deferred) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T1 advertises | ✓ T8 INTERIM (iter1 hardcoded; CHANGED is a no-op until iter2 introduces real Repeat / Shuffle state) |
 
 ---
 
@@ -146,7 +146,7 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 | 0x31 event 0x06 | reg_notievent_battery_status_changed_rsp | `0x3354` | `0x25f0` |
 | 0x31 event 0x07 | reg_notievent_system_status_changed_rsp | `0x3348` | `0x2658` |
 | (default reject for unknown PDU including 0x40/0x41) | pass_through_rsp | `0x3624` | n/a (in libextavrcp.so too — reached via UNKNOW_INDICATION fall-through) |
-| **PlayerApplicationSettings (deferred — not yet wired)** ||||
+| **PlayerApplicationSettings (T_papp + T8 event 0x08)** ||||
 | 0x11 | list_player_attrs_rsp | `0x35d0` | `0x1e24` |
 | 0x12 | list_player_values_rsp | `0x35c4` | `0x1e74` |
 | 0x13 | get_curplayer_value_rsp | `0x35b8` | `0x1ed0` |
@@ -155,11 +155,11 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 | 0x16 | get_player_value_text_value_rsp | `0x35a0` | `0x203c` |
 | 0x31 event 0x08 | reg_notievent_player_appsettings_changed_rsp | `0x345c` | `0x2720` |
 
-**No new PLT discovery needed.** The stubs are already linked. Argument-convention discovery is still required for any builder we haven't called yet (the seven PlayerApplicationSettings entries above). Recipe per function: see "Adding a new PDU handler" in [`ARCHITECTURE.md`](ARCHITECTURE.md). Document the resulting C signature in `ARCHITECTURE.md` §"Reverse-engineered semantics" before writing the trampoline.
+**No new PLT discovery needed.** All builders linked at stock and exercised by the trampoline chain. Calling-convention reference: [`ARCHITECTURE.md`](ARCHITECTURE.md) PApp builder table.
 
 ### Code-cave budget
 
-LOAD #1 padding currently used: `0xac54..0xb2c8` (1652 B). Free space past `0xb2c8` to LOAD #2 at `0xbc08`: **~2368 bytes** (4020 B padding total). PlayerApplicationSettings would need ~400 B for the six new sub-trampolines plus `T_papp_changed`; that fits with significant headroom.
+LOAD #1 padding currently used: `0xac54..0xb448` (2036 B). Free space past `0xb448` to LOAD #2 at `0xbc08`: **~1984 bytes** (4020 B padding total).
 
 If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick to the LOAD #2 padding region by bumping LOAD #2's `p_filesz`/`p_memsz`.
 
@@ -180,7 +180,7 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — fed by `LogcatMonitor` mapping Y1's BaseActivity state codes `'1'`/`'3'`/`'5'`) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
 | 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
-| 795..799 | reserved | 5 | — | (PlayerApplicationSettings shuffle_flag / repeat_mode reservation) |
+| 795..799 | reserved | 5 | — | (future PlayerApplicationSettings state binding when iter2 lands) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
@@ -336,7 +336,7 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 §9.2 / §9.3 / §9.5 / §9.6 / §9.7 / §9.8 shipped or resolved-no-action. Active queue:
 
 - **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER.
-- **PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08)** — deferred. All-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30.
+- **PlayerApplicationSettings iter2 — Y1MediaBridge state binding.** Iter1 ships hardcoded "Repeat OFF + Shuffle OFF, Set rejects with INTERNAL_ERROR". Iter2 replaces this with file-based state contract mirroring `y1-track-info`: Y1MediaBridge writes current Repeat / Shuffle from `MediaController.transportControls.getRepeatMode/getShuffleMode`; `T_papp` reads it for 0x13; `T_papp` writes set-request file for 0x14 which Y1MediaBridge picks up via `FileObserver` and applies to the Android session; T9-style edge-detect emits event 0x08 CHANGED.
 - **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done. GAVDP Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES) closed by V5 — a 2-byte TBH jump-table alias routing sig 0x0c through the sig 0x02 handler.
 
 ### 9.10 AVCTP 1.2 ICS audit — *AVCTP* — VERIFIED

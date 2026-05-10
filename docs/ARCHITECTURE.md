@@ -534,7 +534,7 @@ Between LOAD #1's end at file `0xac54` and LOAD #2's start at file `0xbc08`, the
 
 The patcher does this with three PATCHES entries:
 
-1. Write the trampoline blob at file 0xac54. **Current size: 1652 bytes (extended_T2 + T4 + T5 + T_charset + T_battery + T_continuation + T6 + T8 + T9 + path strings + sentinel data); ~2368 bytes still free in the 4020-byte padding region.** U1 is a separate 4-byte NOP elsewhere in the binary that doesn't grow the blob.
+1. Write the trampoline blob at file 0xac54. **Current size: 2036 bytes (extended_T2 + T4 + T5 + T_charset + T_battery + T_continuation + T6 + T_papp + T8 + T9 + path strings + sentinel + PApp data tables); ~1984 bytes still free in the 4020-byte padding region.** U1 is a separate 4-byte NOP elsewhere in the binary that doesn't grow the blob.
 2. Update LOAD #1 program-header `p_filesz` at file 0x64: `0xac54 → 0xb2c8` (current).
 3. Update LOAD #1 program-header `p_memsz` at file 0x68: `0xac54 → 0xb2c8`.
 
@@ -644,7 +644,7 @@ void btmtk_avrcp_send_get_capabilities_rsp(
 );
 ```
 
-T1 advertises 7 events `[0x01..0x07]`, paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects don't fire for any advertised event. Per the spec-compliance rule we advertise only what we actually implement; event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) is unadvertised because PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08) is deferred.
+T1 advertises 8 events `[0x01..0x08]`, paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects don't fire for any advertised event. Per the spec-compliance rule we advertise only what we actually implement; event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) is paired with T_papp + T8's iter1 INTERIM emit.
 
 ### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, used by T6)
 
@@ -732,7 +732,7 @@ For all six PDU builders + the event builder: arg2 (reject) follows the same sha
 | R1 | jni 0x6538 (4 B) | `bne.n 0x65bc; movs r5, #9` → `bl.w 0x7308` (redirect to T1) |
 | T1 | jni 0x7308 (40 B) | Overwrites unused `testparmnum`. PDU 0x10 → calls `get_capabilities_rsp` via PLT 0x35dc, advertising the seven events 0x01..0x07 (PLAYBACK_STATUS / TRACK_CHANGED / TRACK_REACHED_END / TRACK_REACHED_START / PLAYBACK_POS / BATT_STATUS / SYSTEM_STATUS). |
 | T2 stub | jni 0x72d0 (8 B) | Overwrites `classInitNative`. 4-byte `return 0` stub at 0x72d0 + 4-byte `b.w extended_T2` at 0x72d4 |
-| extended_T2 + T4 + T5 + T_charset + T_battery + T_continuation + T6 + T8 + T9 | jni 0xac54 (1652 B) | New LOAD #1 extension, dynamically assembled by `_trampolines.py`. Per-trampoline behavior + entry conditions: see [`PATCHES.md`](PATCHES.md) `## patch_libextavrcp_jni.py` (one `###` subsection per trampoline). |
+| extended_T2 + T4 + T5 + T_charset + T_battery + T_continuation + T6 + T_papp + T8 + T9 | jni 0xac54 (2036 B) | New LOAD #1 extension, dynamically assembled by `_trampolines.py`. Per-trampoline behavior + entry conditions: see [`PATCHES.md`](PATCHES.md) `## patch_libextavrcp_jni.py` (one `###` subsection per trampoline). |
 | Track-change native stub | jni 0x3bc0 (4 B) | First instruction of `notificationTrackChangedNative` rewritten to `b.w T5`. The Java side (after the MtkBt.odex sswitch_1a3 cardinality NOP) calls this native on every Y1MediaBridge track-change broadcast; T5 emits CHANGED on the AVRCP wire asynchronously to any inbound query. The remaining 196 B of the original native body are unreachable. |
 | Play-status native stub | jni 0x3c88 (4 B) | First instruction of `notificationPlayStatusChangedNative` rewritten to `b.w T9`. Paired with the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe so every Y1MediaBridge `playstatechanged` broadcast lands in T9. |
 | LOAD#1 filesz | jni 0x64 | `0xac54 → 0xb2c8` (1652 B blob). |
@@ -773,7 +773,7 @@ Y1MediaBridge's `prepareTrackInfoDir()` is what ensures the BT process can reach
 | `classInitNative` | 0x72d0 | 48 bytes | T2 stub (8 bytes used; remaining 40 zero-filled, unreachable) |
 | `notificationTrackChangedNative` | 0x3bc0 | 200 bytes | T5 entry stub (4 bytes `b.w T5` used; remaining 196 unreachable) |
 | `notificationPlayStatusChangedNative` | 0x3c88 | 200 bytes | T9 entry stub (4 bytes `b.w T9` used; remaining unreachable) |
-| LOAD #1 padding | 0xac54..0xbc07 | 4020 bytes | trampoline blob (1652 B), ~2368 free |
+| LOAD #1 padding | 0xac54..0xbc07 | 4020 bytes | trampoline blob (2036 B), ~1984 free |
 | `getPlayerId` | 0x7300 | 4 bytes | (preserved, returns 0 — not touched) |
 | `getMaxPlayerNum` | 0x7304 | 4 bytes | (preserved, returns 20 — not touched) |
 
@@ -816,7 +816,7 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
    - Buffer reset condition (when does it `memset` the internal buffer?)
    - Send trigger condition (which args make it call `AVRCP_SendMessage`?)
    - Where transId comes from (usually `conn[17]`, not an arg)
-3. **Allocate cave space** in the LOAD #1 padding region (currently ~2368 bytes free past 0xb2c8 — the trampoline blob is 1652 B; the padding region is 4020 B total, ending at LOAD #2's start at 0xbc08).
+3. **Allocate cave space** in the LOAD #1 padding region (currently ~1984 bytes free past 0xb448 — the trampoline blob is 2036 B; the padding region is 4020 B total, ending at LOAD #2's start at 0xbc08).
 4. **Wire it into the chain**: change the previous trampoline's "unknown" branch (the `b.w` to `0x65bc` or to the next trampoline) to point at your new entry.
 5. **End with**:
    - `b.w 0x712a` for the success path (lands on stack-canary check + epilogue).
@@ -847,7 +847,7 @@ Touching any of these requires (a) tracing what depends on it, (b) confirming th
 
 ## See also
 
-- [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred).
+- [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (every Mandatory + every Optional row).
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture work and dead-end paths.
 - `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1 / T1 / T2 / T4. Header comments and PATCHES list are the source of truth for byte-level details.

@@ -82,7 +82,7 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 7-element `EventsSupported` array `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover (event `0x08 PLAYER_APPLICATION_SETTING_CHANGED` is unadvertised because PlayerApplicationSettings is deferred).
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover. Current count is 8: events `0x01..0x08` covering PLAYBACK_STATUS, TRACK_CHANGED, TRACK_REACHED_END / START, PLAYBACK_POS, BATT_STATUS, SYSTEM_STATUS, and PLAYER_APPLICATION_SETTING_CHANGED.
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -161,6 +161,25 @@ Branched from T4's pre-check on PDU 0x30. Reads `y1-track-info[776..795]` (4 BE 
 
 ICS Table 7 row 21: GetPlayStatus is **mandatory** for any TG that ships GetElementAttributes Response (per ICS condition C.2). T6 closes that mandatory row.
 
+### T_papp — PlayerApplicationSettings (PDUs 0x11..0x16)
+
+Branched from T4's pre-check when the inbound PDU byte is in `[0x11..0x16]`. Per AVRCP 1.3 ICS Table 7 condition C.14, supporting any single PApp PDU makes the whole 7-row group (PDUs 0x11..0x16 + event 0x08) Mandatory — they ship together.
+
+Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3), both currently OFF (value=1), settings cannot be changed". Six PDU dispatchers internal to T_papp + a paired event 0x08 INTERIM case in T8. Future iteration replaces the hardcoded read responses + reject-Set path with Y1MediaBridge state binding.
+
+| PDU | Builder PLT | Behavior |
+|---|---|---|
+| 0x11 ListPlayerApplicationSettingAttributes | `0x35d0` | Returns `[Repeat=2, Shuffle=3]`, n=2 |
+| 0x12 ListPlayerApplicationSettingValues | `0x35c4` | Switches on inbound `attr_id`: Repeat → `[1,2,3,4]`, Shuffle → `[1,2,3]`, else reject |
+| 0x13 GetCurrentPlayerApplicationSettingValue | `0x35b8` | Returns `[(Repeat, OFF), (Shuffle, OFF)]` (iter1 hardcoded) |
+| 0x14 SetPlayerApplicationSettingValue | `0x3594` | Reject status `0x06 INTERNAL_ERROR` per AVRCP 1.3 §6.15.2 — peer learns the PDU was understood but the change could not be applied |
+| 0x15 GetPlayerApplicationSettingAttributeText | `0x35ac` | Accumulator: emit "Repeat" (idx=0) then "Shuffle" (idx=1, total=2 → SendMessage) |
+| 0x16 GetPlayerApplicationSettingValueText | `0x35a0` | Iter1 emits "Off" for the first inbound value_id when attr_id is 2 or 3; unsupported attr_ids fall through with no response (peer times out / falls back) |
+
+Per-builder calling-convention reference: [`ARCHITECTURE.md`](ARCHITECTURE.md) PApp builder table.
+
+ICS Table 7 rows 12-15 (C.14 Mandatory if any), 16-17 (Optional), and 30 (event 0x08, Optional) — all closed by T_papp + the T8 event 0x08 INTERIM case.
+
 ### T8 — RegisterNotification dispatcher for events ≠ 0x02
 
 In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. Reads `y1-track-info` for events that need payloads (0x01 / 0x05), then dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT entry:
@@ -173,6 +192,7 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | `0x345c` | n=2 + `[(Repeat, OFF), (Shuffle, OFF)]` (iter1 hardcoded; pairs with T_papp 0x13 response) |
 
 All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
 

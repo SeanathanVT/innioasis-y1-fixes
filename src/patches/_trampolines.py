@@ -65,6 +65,15 @@ PLT_reg_notievent_reached_start_rsp   = 0x336c
 PLT_reg_notievent_pos_changed_rsp     = 0x3360
 PLT_reg_notievent_battery_status_rsp  = 0x3354
 PLT_reg_notievent_system_status_rsp   = 0x3348
+PLT_reg_notievent_player_appsettings_rsp = 0x345c
+
+# PlayerApplicationSettings PDUs 0x11-0x16 (T_papp).
+PLT_list_player_attrs_rsp        = 0x35d0
+PLT_list_player_values_rsp       = 0x35c4
+PLT_get_curplayer_value_rsp      = 0x35b8
+PLT_set_player_value_rsp         = 0x3594
+PLT_get_player_attr_text_rsp     = 0x35ac
+PLT_get_player_value_text_rsp    = 0x35a0
 
 # Function-internal landmarks in saveRegEventSeqId.
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
@@ -218,6 +227,41 @@ T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end 
                                               #       metachanged broadcast that
                                               #       lands here).
 
+# T_papp (PApp Settings PDUs 0x11-0x16) frame:
+#   sp+0..23  : outgoing args region (24 B; max-of-needs is 5 stack args =
+#               20 B for get_player_value_text_rsp, rounded to 24 for alignment)
+# Caller's inbound AVRCP param body sits at sp+386+ (= entry-relative;
+# post-SUB-SP offset is +PAPP_FRAME).
+PAPP_FRAME            = 24
+PAPP_OFF_ARGS         = 0
+PAPP_PARAM_OFF_ENTRY  = 386                # caller-relative; first byte of param body
+                                            # (PDU=sp+382, pkt_type=sp+383,
+                                            # param_length BE=sp+384..385)
+PAPP_PARAM_OFF        = PAPP_PARAM_OFF_ENTRY + PAPP_FRAME
+
+# AVRCP 1.3 §5.2 PlayerApplicationSettings:
+#   §5.2.1 attribute IDs (Tbl 5.18):
+#     0x01 Equalizer ON/OFF
+#     0x02 Repeat Mode Status
+#     0x03 Shuffle ON/OFF
+#     0x04 Scan ON/OFF
+#   §5.2.4 Repeat-mode values (Tbl 5.20):
+#     0x01 OFF, 0x02 SINGLE TRACK, 0x03 ALL TRACK, 0x04 GROUP
+#   §5.2.4 Shuffle values (Tbl 5.21):
+#     0x01 OFF, 0x02 ALL TRACK, 0x03 GROUP
+# We expose Repeat (id=2) + Shuffle (id=3) — the universal pair (Equalizer
+# and Scan are out of scope on Y1 hardware).
+PAPP_ATTR_REPEAT      = 0x02
+PAPP_ATTR_SHUFFLE     = 0x03
+PAPP_REPEAT_OFF       = 0x01
+PAPP_SHUFFLE_OFF      = 0x01
+
+# AVRCP 1.3 §6.15.2 Reject status codes for PApp Set/Get rejects:
+#   0x05 INVALID_PARAMETER, 0x06 INTERNAL_ERROR, 0x09 INVALID_PLAYER_ID, …
+# Iter1 Set returns 0x06 INTERNAL_ERROR (we accept the PDU but cannot
+# persist — iter2 will replace this with real state binding).
+PAPP_REJECT_INTERNAL_ERROR = 0x06
+
 # AVRCP 1.3 §5.4.2 (RegisterNotification, Tables 5.34 + 5.36) canned-value
 # defaults.
 # - BATT_STATUS_CHANGED: real data wired through y1-track-info[794]
@@ -305,6 +349,15 @@ def _emit_t4(a: Asm) -> None:
     a.bne("t4_after_continuation_41")
     a.b_w("T_continuation")
     a.label("t4_after_continuation_41")
+    # PDUs 0x11..0x16 (PlayerApplicationSettings) all route through T_papp.
+    # Per AVRCP 1.3 ICS Table 7 C.14, supporting any one PApp PDU makes all
+    # of 0x11..0x16 + event 0x08 Mandatory — handled together in T_papp.
+    a.cmp_imm8(0, 0x11)
+    a.blt("t4_after_papp")
+    a.cmp_imm8(0, 0x17)                       # >= 0x17: not in our range
+    a.bge("t4_after_papp")
+    a.b_w("T_papp")
+    a.label("t4_after_papp")
     # Anything else: restore lr canary and fall through to original
     # "unknow indication" path (which expects r0 = conn).
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
@@ -1025,6 +1078,228 @@ def _emit_t6(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_t_papp(a: Asm) -> None:
+    """T_papp: PlayerApplicationSettings PDUs 0x11..0x16.
+
+    Branched from T4's pre-check when the inbound PDU byte is in [0x11..0x16].
+    Per AVRCP 1.3 ICS Table 7 C.14, supporting any single PApp PDU makes the
+    full 7-row group (PDUs 0x11..0x16 + event 0x08) Mandatory — they all
+    ship together.
+
+    Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3),
+    both currently OFF (value=1), settings cannot be changed". The Set PDU
+    (0x14) returns reject status 0x06 INTERNAL_ERROR per AVRCP 1.3 §6.15.2,
+    explicitly indicating to the peer that the PDU was understood but could
+    not be applied. Iter2 will replace the hardcoded values + reject path
+    with real Y1MediaBridge state binding (file-based, mirroring the
+    track-info contract) so that Repeat / Shuffle round-trip to the Android
+    media session.
+
+    Inbound AVRCP frame layout (caller's stack, post-T_papp SUB SP shifts
+    by PAPP_FRAME):
+      sp + 382  PDU
+      sp + 383  packet_type
+      sp + 384  param_length BE u16
+      sp + 386  param body (PDU-specific):
+        0x11 ListAttrs        : 0 bytes
+        0x12 ListValues       : 1 byte attr_id
+        0x13 GetCurrent       : 1 byte n + n attr_ids
+        0x14 Set              : 1 byte n + n×{attr_id, value}
+        0x15 AttrText         : 1 byte n + n attr_ids
+        0x16 ValueText        : 1 byte attr_id + 1 byte n + n value_ids
+
+    Builder calling conventions (see ARCHITECTURE.md "PlayerApplicationSettings
+    response builders" + INVESTIGATION.md Trace #17 for the disassembly).
+    """
+    a.label("T_papp")
+
+    # ---- allocate stack frame for outgoing args ----
+    a.subw(13, 13, PAPP_FRAME)
+
+    # ---- dispatch on PDU ----
+    a.ldrb_w(0, 13, T4_PDU_OFF_ENTRY + PAPP_FRAME)   # r0 = PDU
+    a.cmp_imm8(0, 0x11)
+    a.beq("papp_list_attrs")
+    a.cmp_imm8(0, 0x12)
+    a.beq("papp_list_values")
+    a.cmp_imm8(0, 0x13)
+    a.beq("papp_get_current")
+    a.cmp_imm8(0, 0x14)
+    a.beq("papp_set")
+    a.cmp_imm8(0, 0x15)
+    a.beq("papp_attr_text")
+    # The only remaining PDU in the dispatch range is 0x16; fall through.
+
+    # ---- 0x16 GetPlayerApplicationSettingValueText ----
+    # btmtk_avrcp_send_get_player_value_text_value_rsp(
+    #     conn, reject, idx, total, attr_id, value_id, charset, length, *str)
+    # Accumulator: emits AVRCP_SendMessage on (idx+1==total). For iter1 we
+    # parse the inbound (attr_id + n + value_ids) list and emit text for
+    # each value_id we recognise under the requested attr_id.
+    #
+    # Param layout: sp+386 = attr_id (1 B), sp+387 = n (1 B),
+    # sp+388..387+n = value_ids.
+    a.label("papp_value_text")
+    # For iter1 we don't fully parse — just emit "Off" for any value
+    # under attr=Repeat or attr=Shuffle. This keeps T_papp small while
+    # still giving permissive CTs *some* renderable text. Iter2 will
+    # walk the inbound list properly.
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
+    # Only emit if attr_id is one we support (2 or 3); else jump to skip.
+    a.cmp_imm8(6, PAPP_ATTR_REPEAT)
+    a.beq("papp_vt_emit_off")
+    a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
+    a.beq("papp_vt_emit_off")
+    # Unsupported attr → no emission. AVRCP layer sees no response, peer
+    # times out / falls back. This is iter1's known limitation; iter2 emits
+    # a proper reject.
+    a.b_w("papp_done")
+
+    a.label("papp_vt_emit_off")
+    # Single-emit "Off": idx=0, total=1 (so the function emits immediately).
+    # value_id we emit text for: read first requested value byte.
+    a.ldrb_w(7, 13, PAPP_PARAM_OFF + 2)   # r7 = first value_id from inbound
+    # Build args:
+    #   r0=conn, r1=0 (success), r2=idx=0, r3=total=1
+    #   sp[0]=attr_id, sp[4]=value_id, sp[8]=charset 0x6a, sp[12]=length=3,
+    #   sp[16]=&"Off"
+    a.str_sp_imm(6, PAPP_OFF_ARGS + 0)    # sp[0] = attr_id
+    a.str_sp_imm(7, PAPP_OFF_ARGS + 4)    # sp[4] = value_id
+    a.movs_imm8(2, 0x6A)
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 8)    # sp[8] = charset UTF-8
+    a.movs_imm8(2, 3)                     # length of "Off"
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)   # sp[12] = length
+    a.adr_w(2, "papp_text_off")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 16)   # sp[16] = &"Off"
+    a.add_imm_t3(0, 5, 8)                 # r0 = conn
+    a.movs_imm8(1, 0)                     # r1 = success
+    a.movs_imm8(2, 0)                     # r2 = idx 0
+    a.movs_imm8(3, 1)                     # r3 = total 1
+    a.blx_imm(PLT_get_player_value_text_rsp)
+    a.b_w("papp_done")
+
+    # ---- 0x11 ListPlayerApplicationSettingAttributes ----
+    # Returns: [Repeat=0x02, Shuffle=0x03], n=2.
+    a.label("papp_list_attrs")
+    a.add_imm_t3(0, 5, 8)                 # r0 = conn
+    a.movs_imm8(1, 0)                     # r1 = success
+    a.movs_imm8(2, 2)                     # r2 = n_attrs
+    a.adr_w(3, "papp_attr_ids")           # r3 = &[2, 3]
+    a.blx_imm(PLT_list_player_attrs_rsp)
+    a.b_w("papp_done")
+
+    # ---- 0x12 ListPlayerApplicationSettingValues ----
+    # Inbound: 1 byte attr_id at sp+386. Switch on attr_id:
+    #   2 → [1,2,3,4] (Repeat values per V13 §5.2.4 Tbl 5.20)
+    #   3 → [1,2,3]   (Shuffle values per Tbl 5.21)
+    #   else → reject
+    a.label("papp_list_values")
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
+    a.cmp_imm8(6, PAPP_ATTR_REPEAT)
+    a.beq("papp_lv_repeat")
+    a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
+    a.beq("papp_lv_shuffle")
+    # Unsupported attr_id → reject. arg5 still has to be passed (function
+    # loads from stack regardless), so set sp[0] = 0.
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 1)                     # r1 != 0 → reject path
+    a.movs_imm8(2, 0)
+    a.movs_imm8(3, 0)
+    a.blx_imm(PLT_list_player_values_rsp)
+    a.b_w("papp_done")
+
+    a.label("papp_lv_repeat")
+    a.adr_w(0, "papp_repeat_values")
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2,3,4]
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)                     # success
+    a.movs_imm8(2, PAPP_ATTR_REPEAT)
+    a.movs_imm8(3, 4)                     # n_values
+    a.blx_imm(PLT_list_player_values_rsp)
+    a.b_w("papp_done")
+
+    a.label("papp_lv_shuffle")
+    a.adr_w(0, "papp_shuffle_values")
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1,2,3]
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, PAPP_ATTR_SHUFFLE)
+    a.movs_imm8(3, 3)
+    a.blx_imm(PLT_list_player_values_rsp)
+    a.b_w("papp_done")
+
+    # ---- 0x13 GetCurrentPlayerApplicationSettingValue ----
+    # Inbound: n + n attr_ids. Iter1: ignore the request, always return
+    # both supported attrs with their current (hardcoded) values
+    # [(2, OFF=1), (3, OFF=1)]. Spec-permissive peers accept this; strict
+    # peers that asked for a subset get extra info, which is not a wire
+    # error per V13 §5.2.5.
+    a.label("papp_get_current")
+    a.adr_w(0, "papp_current_values")
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1, 1]
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, 2)                     # n_pairs
+    a.adr_w(3, "papp_attr_ids")           # &[2, 3]
+    a.blx_imm(PLT_get_curplayer_value_rsp)
+    a.b_w("papp_done")
+
+    # ---- 0x14 SetPlayerApplicationSettingValue ----
+    # Iter1: explicit reject (status 0x06 INTERNAL_ERROR per AVRCP 1.3
+    # §6.15.2). Spec-conformant: peer learns we accepted the PDU but
+    # cannot apply the change. Iter2 will accept Set and propagate to
+    # Y1MediaBridge.
+    a.label("papp_set")
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, PAPP_REJECT_INTERNAL_ERROR)
+    a.blx_imm(PLT_set_player_value_rsp)
+    a.b_w("papp_done")
+
+    # ---- 0x15 GetPlayerApplicationSettingAttributeText ----
+    # Iter1: emit text for both supported attrs (Repeat, Shuffle) regardless
+    # of the requested subset. Same permissive-superset rationale as
+    # GetCurrent. Two emits via the accumulator pattern.
+    # btmtk_avrcp_send_get_player_attr_text_rsp(
+    #     conn, reject, idx, total, attr_id, charset, length, *str)
+    a.label("papp_attr_text")
+    # First emit: idx=0, total=2, attr_id=2, "Repeat" (6 B)
+    a.movs_imm8(2, PAPP_ATTR_REPEAT)
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 0)    # sp[0] = attr_id
+    a.movs_imm8(2, 0x6A)
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 4)    # sp[4] = charset UTF-8
+    a.movs_imm8(2, 6)                     # strlen("Repeat")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 8)    # sp[8] = length
+    a.adr_w(2, "papp_text_repeat")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)   # sp[12] = &"Repeat"
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, 0)                     # idx 0
+    a.movs_imm8(3, 2)                     # total 2 (accumulate; no emit yet)
+    a.blx_imm(PLT_get_player_attr_text_rsp)
+
+    # Second emit: idx=1, total=2, attr_id=3, "Shuffle" (7 B) → triggers SendMessage.
+    a.movs_imm8(2, PAPP_ATTR_SHUFFLE)
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 0)
+    a.movs_imm8(2, 0x6A)
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 4)
+    a.movs_imm8(2, 7)                     # strlen("Shuffle")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 8)
+    a.adr_w(2, "papp_text_shuffle")
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, 1)                     # idx 1
+    a.movs_imm8(3, 2)                     # total 2 (idx+1==total → emit)
+    a.blx_imm(PLT_get_player_attr_text_rsp)
+    a.b_w("papp_done")
+
+    a.label("papp_done")
+    a.addw(13, 13, PAPP_FRAME)
+    a.b_w("t4_to_epilogue")
+
+
 def _emit_t8(a: Asm) -> None:
     """T8: RegisterNotification INTERIM dispatch for events other than
     TRACK_CHANGED (0x02, handled by extended_T2).
@@ -1167,7 +1442,7 @@ def _emit_t8(a: Asm) -> None:
 
     a.label("t8_check_7")
     a.cmp_imm8(0, 0x07)
-    a.bne("t8_unknown_event")
+    a.bne("t8_check_8")
     # 0x07 SYSTEM_STATUS_CHANGED
     # reg_notievent_system_status_changed_rsp(conn, 0, REASON_INTERIM, system_status_u8)
     a.movs_imm8(3, SYSTEM_STATUS_POWERED)
@@ -1177,11 +1452,31 @@ def _emit_t8(a: Asm) -> None:
     a.blx_imm(PLT_reg_notievent_system_status_rsp)
     a.b_w("t8_done")
 
+    a.label("t8_check_8")
+    a.cmp_imm8(0, 0x08)
+    a.bne("t8_unknown_event")
+    # 0x08 PLAYER_APPLICATION_SETTING_CHANGED INTERIM.
+    # reg_notievent_player_appsettings_changed_rsp(
+    #     conn, 0, REASON_INTERIM, n, *attr_ids, *values)
+    # Iter1: hardcoded n=2 with [(Repeat, OFF), (Shuffle, OFF)] mirroring
+    # T_papp's GetCurrent response. Iter2 will read live state from
+    # y1-papp-state.
+    # arg5 (sp[0]) = *attr_ids; arg6 (sp[4]) = *values.
+    a.adr_w(0, "papp_attr_ids")
+    a.str_sp_imm(0, 0)                          # sp[0] = &[2, 3]
+    a.adr_w(0, "papp_current_values")
+    a.str_sp_imm(0, 4)                          # sp[4] = &[1, 1]
+    a.add_imm_t3(0, 5, 8)                       # r0 = conn
+    a.movs_imm8(1, 0)                           # success
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(3, 2)                           # n=2
+    a.blx_imm(PLT_reg_notievent_player_appsettings_rsp)
+    a.b_w("t8_done")
+
     a.label("t8_unknown_event")
-    # event_id we don't handle (0x08 PLAYER_APPLICATION_SETTING_CHANGED, etc.)
-    # → spec-correct NOT_IMPLEMENTED reject via the original "unknow
-    # indication" path. Restore stack first so the reject-path's stack-
-    # canary check sees the correct sp.
+    # event_id we don't handle → spec-correct NOT_IMPLEMENTED reject via
+    # the original "unknow indication" path. Restore stack first so the
+    # reject-path's stack-canary check sees the correct sp.
     a.addw(13, 13, T8_FRAME)
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # restore lr canary = SIZE
     a.add_imm_t3(0, 5, 8)                     # restore r0 = conn
@@ -1501,6 +1796,7 @@ def build() -> tuple[bytes, dict[str, int]]:
     _emit_t_battery(a)                        # Inform PDU 0x18
     _emit_t_continuation(a)                   # Continuation PDUs 0x40/0x41
     _emit_t6(a)                               # PDU 0x30 GetPlayStatus
+    _emit_t_papp(a)                           # PApp PDUs 0x11..0x16
     _emit_t8(a)                               # PDU 0x31 RegisterNotification dispatch
     _emit_t9(a)                               # proactive PLAYBACK_STATUS_CHANGED + battery + position
 
@@ -1523,6 +1819,32 @@ def build() -> tuple[bytes, dict[str, int]]:
     # element", which keeps the CT in poll-on-each-event mode.
     a.label("sentinel_ffx8")
     a.raw(b"\xFF" * 8)
+
+    # PApp data tables (PDU 0x11..0x16). All AVRCP 1.3 §5.2 spec values.
+    a.align(4)
+    a.label("papp_attr_ids")
+    a.raw(bytes([PAPP_ATTR_REPEAT, PAPP_ATTR_SHUFFLE]))
+    a.align(4)
+    a.label("papp_repeat_values")
+    a.raw(bytes([0x01, 0x02, 0x03, 0x04]))   # OFF, SINGLE, ALL, GROUP (V13 Tbl 5.20)
+    a.align(4)
+    a.label("papp_shuffle_values")
+    a.raw(bytes([0x01, 0x02, 0x03]))         # OFF, ALL, GROUP (V13 Tbl 5.21)
+    a.align(4)
+    a.label("papp_current_values")
+    a.raw(bytes([PAPP_REPEAT_OFF, PAPP_SHUFFLE_OFF]))   # iter1: hardcoded OFF/OFF
+    a.align(4)
+
+    # PApp UTF-8 attribute / value text strings (charset 0x006A).
+    a.label("papp_text_repeat")
+    a.raw(b"Repeat")                          # 6 B, no null terminator (length passed explicitly)
+    a.align(4)
+    a.label("papp_text_shuffle")
+    a.raw(b"Shuffle")                         # 7 B
+    a.align(4)
+    a.label("papp_text_off")
+    a.raw(b"Off")                             # 3 B
+    a.align(4)
 
     blob = a.resolve()
     addrs = {k: v for k, v in a.labels.items()
