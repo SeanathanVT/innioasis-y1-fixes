@@ -181,35 +181,51 @@ T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (AVRCP §5.
                                             #       Tbl 5.34/5.35 enum: 0=NORMAL,
                                             #       1=WARNING, 2=CRITICAL, 3=EXTERNAL,
                                             #       4=FULL_CHARGE)
+T8_OFF_FILE_REPEAT   = T8_OFF_FILE + 795   # 795 - repeat_avrcp (AVRCP §5.2.4 Tbl 5.20)
+T8_OFF_FILE_SHUFFLE  = T8_OFF_FILE + 796   # 796 - shuffle_avrcp (AVRCP §5.2.4 Tbl 5.21)
 T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 
-# T9 (proactive PLAYBACK_STATUS_CHANGED) frame: 16 B state buf at sp+0..15
-# + 800 B y1-track-info file buf at sp+16..815. The state buf reuses
-# y1-trampoline-state byte [9] as `last_play_status` (T5 consumes [0..7] for
-# last_seen track_id and [8] for tc_transId; [9..15] are otherwise padding).
-# Edge detection: read y1-track-info[792] (playing_flag), compare against
-# state[9], emit CHANGED on inequality, update state[9], write 16 B back.
+# T9 (proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS
+# + PLAYER_APPLICATION_SETTING_CHANGED) frame:
+#   sp+0..7    = outgoing-args region (only reg_notievent_player_appsettings_
+#                changed_rsp uses stack args — its 5th + 6th are at sp[0]/sp[4])
+#   sp+8..23   = state buf (16 B; mirrors y1-trampoline-state schema)
+#   sp+24..823 = y1-track-info file buf (800 B)
+#   sp+824..831 = struct timespec for clock_gettime(CLOCK_BOOTTIME)
+#
+# State byte usage:
+#   [0..7]  last_seen track_id (T5)
+#   [8]     last RegisterNotification transId (T5)
+#   [9]     last_play_status (T9 edge)
+#   [10]    last_battery_status (T9 edge)
+#   [11]    last_repeat_avrcp (T9 papp edge)
+#   [12]    last_shuffle_avrcp (T9 papp edge)
+#   [13..15] padding
 #
 # T5 / T9 race acknowledgment: both read+modify+write the full 16 B state file,
 # so a concurrent T5+T9 firing can lose one of the updates. In practice T5
 # fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
 # broadcasts -- they overlap rarely, and worst case is a single missed
 # CHANGED edge which recovers on the next event.
-T9_FRAME              = 824        # 16 state + 800 file_buf + 8 timespec
-T9_OFF_STATE          = 0
-T9_OFF_FILE           = 16
-T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # 792 - duration_ms (BE u32, T6 reads same)
-T9_OFF_FILE_POS        = T9_OFF_FILE + 780   # 796 - pos_at_state_change_ms (BE u32)
-T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # 800 - state_change_time_sec (BE u32)
-T9_OFF_FILE_PLAYFLAG   = T9_OFF_FILE + 792   # 808 - playing_flag inside file_buf
-T9_OFF_FILE_BATTERY    = T9_OFF_FILE + 794   # 810 - battery_status inside file_buf
-T9_STATE_LAST_PS_OFF   = T9_OFF_STATE + 9    # 9 - last_play_status inside state_buf
-T9_STATE_LAST_BATT_OFF = T9_OFF_STATE + 10   # 10 - last_battery_status inside state_buf
+T9_FRAME              = 832        # 8 args + 16 state + 800 file_buf + 8 timespec
+T9_OFF_ARGS           = 0
+T9_OFF_STATE          = 8
+T9_OFF_FILE           = 24
+T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # duration_ms (BE u32, T6 reads same)
+T9_OFF_FILE_POS        = T9_OFF_FILE + 780   # pos_at_state_change_ms (BE u32)
+T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # state_change_time_sec (BE u32)
+T9_OFF_FILE_PLAYFLAG   = T9_OFF_FILE + 792   # playing_flag inside file_buf
+T9_OFF_FILE_BATTERY    = T9_OFF_FILE + 794   # battery_status inside file_buf
+T9_OFF_FILE_REPEAT     = T9_OFF_FILE + 795   # repeat_avrcp (AVRCP §5.2.4 Tbl 5.20)
+T9_OFF_FILE_SHUFFLE    = T9_OFF_FILE + 796   # shuffle_avrcp (AVRCP §5.2.4 Tbl 5.21)
+T9_STATE_LAST_PS_OFF      = T9_OFF_STATE + 9   # last_play_status
+T9_STATE_LAST_BATT_OFF    = T9_OFF_STATE + 10  # last_battery_status
+T9_STATE_LAST_REPEAT_OFF  = T9_OFF_STATE + 11  # last_repeat_avrcp (papp edge)
+T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
 # T9's position-emit block needs a struct timespec for clock_gettime(CLOCK_BOOTTIME)
 # to live-extrapolate the playback position (same arithmetic T6 does for
-# GetPlayStatus). The 800 B file buffer at sp+16..815 ends at sp+815;
-# place the 8 B timespec immediately after, at sp+816..823.
-T9_OFF_TIMESPEC      = T9_OFF_FILE + 800     # 816 - struct timespec
+# GetPlayStatus). Place the 8 B timespec immediately after the file buf.
+T9_OFF_TIMESPEC      = T9_OFF_FILE + 800     # struct timespec
 T9_OFF_TIMESPEC_SEC  = T9_OFF_TIMESPEC + 0
 T9_OFF_TIMESPEC_NSEC = T9_OFF_TIMESPEC + 4
 
@@ -1128,26 +1144,22 @@ def _emit_t_papp(a: Asm) -> None:
     # ---- 0x16 GetPlayerApplicationSettingValueText ----
     # btmtk_avrcp_send_get_player_value_text_value_rsp(
     #     conn, reject, idx, total, attr_id, value_id, charset, length, *str)
-    # Accumulator: emits AVRCP_SendMessage on (idx+1==total). For iter1 we
-    # parse the inbound (attr_id + n + value_ids) list and emit text for
-    # each value_id we recognise under the requested attr_id.
+    # Accumulator: emits AVRCP_SendMessage on (idx+1==total).
     #
     # Param layout: sp+386 = attr_id (1 B), sp+387 = n (1 B),
     # sp+388..387+n = value_ids.
     a.label("papp_value_text")
-    # For iter1 we don't fully parse — just emit "Off" for any value
-    # under attr=Repeat or attr=Shuffle. This keeps T_papp small while
-    # still giving permissive CTs *some* renderable text. Iter2 will
-    # walk the inbound list properly.
+    # We don't fully parse the inbound value_id list — emit "Off" for any
+    # value under attr=Repeat or attr=Shuffle. Permissive CTs render *some*
+    # text; strict CTs needing per-value text are out of scope.
     a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
-    # Only emit if attr_id is one we support (2 or 3); else jump to skip.
+    # Only emit if attr_id is one we support (2 or 3); else skip.
     a.cmp_imm8(6, PAPP_ATTR_REPEAT)
     a.beq("papp_vt_emit_off")
     a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
     a.beq("papp_vt_emit_off")
     # Unsupported attr → no emission. AVRCP layer sees no response, peer
-    # times out / falls back. This is iter1's known limitation; iter2 emits
-    # a proper reject.
+    # times out / falls back.
     a.b_w("papp_done")
 
     a.label("papp_vt_emit_off")
@@ -1252,9 +1264,9 @@ def _emit_t_papp(a: Asm) -> None:
     # Multi-pair Sets (n > 1, byte at sp+0x19a) are out of scope: the
     # 2026-05-09 Bolt postflash gdb-capture (`/work/logs/papp-gdb.log`,
     # docs/INVESTIGATION.md Trace #18) showed every real CT Set is
-    # n=1, so iter3 applies only the first pair. AVRCP V13 §5.2.4 lets
-    # a TG that supports a subset of attributes acknowledge any Set
-    # whose listed attributes it can honor.
+    # n=1, so we apply only the first pair. AVRCP V13 §5.2.4 lets a TG
+    # that supports a subset of attributes acknowledge any Set whose
+    # listed attributes it can honor.
     a.label("papp_set")
     # Pack [attr_id, value] into the outgoing-args region (sp+0..1) as
     # the 2-byte write payload. set_player_value_rsp later in this arm
@@ -1495,14 +1507,16 @@ def _emit_t8(a: Asm) -> None:
     # 0x08 PLAYER_APPLICATION_SETTING_CHANGED INTERIM.
     # reg_notievent_player_appsettings_changed_rsp(
     #     conn, 0, REASON_INTERIM, n, *attr_ids, *values)
-    # Iter1: hardcoded n=2 with [(Repeat, OFF), (Shuffle, OFF)] mirroring
-    # T_papp's GetCurrent response. Iter2 will read live state from
-    # y1-papp-state.
-    # arg5 (sp[0]) = *attr_ids; arg6 (sp[4]) = *values.
+    # Live values read from y1-track-info[795..796] (Y1MediaBridge writes
+    # both bytes on every musicRepeatMode / musicIsShuffle change via
+    # PappStateBroadcaster's Patch B4 listener). file_buf is already loaded
+    # into sp+0..799 above. Storing the outgoing-args at sp[0]/sp[4]
+    # clobbers file_buf[0..7] (track_id), but track_id isn't read by this
+    # arm and the frame is freed at t8_done.
     a.adr_w(0, "papp_attr_ids")
     a.str_sp_imm(0, 0)                          # sp[0] = &[2, 3]
-    a.adr_w(0, "papp_current_values")
-    a.str_sp_imm(0, 4)                          # sp[4] = &[1, 1]
+    a.addw(0, 13, T8_OFF_FILE_REPEAT)           # r0 = &file[795] (= [r, s])
+    a.str_sp_imm(0, 4)                          # sp[4] = current values
     a.add_imm_t3(0, 5, 8)                       # r0 = conn
     a.movs_imm8(1, 0)                           # success
     a.movs_imm8(2, REASON_INTERIM)
@@ -1722,6 +1736,47 @@ def _emit_t9(a: Asm) -> None:
 
     a.label("t9_after_batt_check")
 
+    # ---- papp settings compare (file[795] / file[796] vs state[11] / state[12]) ----
+    # AVRCP 1.3 §5.4.2 Tbl 5.36 (PLAYER_APPLICATION_SETTING_CHANGED CHANGED).
+    # Y1MediaBridge writes y1-track-info[795] = repeat_avrcp and [796] =
+    # shuffle_avrcp on every SharedPreferences change to musicRepeatMode /
+    # musicIsShuffle and fires `playstatechanged` so T9 picks up the edge
+    # — same trigger pipeline as the play_status / battery checks above.
+    # Spec values: §5.2.4 Tbl 5.20 (Repeat: 0x01 OFF / 0x02 SINGLE / 0x03 ALL
+    # / 0x04 GROUP); Tbl 5.21 (Shuffle: 0x01 OFF / 0x02 ALL / 0x03 GROUP).
+    a.ldrb_w(0, 13, T9_OFF_FILE_REPEAT)       # r0 = current repeat
+    a.ldrb_w(1, 13, T9_STATE_LAST_REPEAT_OFF) # r1 = last repeat
+    a.cmp_w(0, 1)
+    a.bne("t9_papp_emit")
+    a.ldrb_w(0, 13, T9_OFF_FILE_SHUFFLE)
+    a.ldrb_w(1, 13, T9_STATE_LAST_SHUFFLE_OFF)
+    a.cmp_w(0, 1)
+    a.beq("t9_after_papp_check")
+
+    a.label("t9_papp_emit")
+    # ---- emit CHANGED via reg_notievent_player_appsettings_changed_rsp ----
+    # (conn, 0, REASON_CHANGED, n=2, *attr_ids, *values)
+    # *values = &file[795] — file_buf already holds [repeat, shuffle]
+    # contiguously at offsets 795..796.
+    a.adr_w(0, "papp_attr_ids")
+    a.str_sp_imm(0, T9_OFF_ARGS + 0)          # sp[0] = &[2, 3]
+    a.addw(0, 13, T9_OFF_FILE_REPEAT)         # r0 = &file[795] (= [r, s])
+    a.str_sp_imm(0, T9_OFF_ARGS + 4)          # sp[4] = current values
+    a.add_imm_t3(0, 4, 8)                     # r0 = conn (struct + 8)
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.movs_imm8(3, 2)                         # n
+    a.blx_imm(PLT_reg_notievent_player_appsettings_rsp)
+
+    # ---- update state[11] / state[12] in-memory ----
+    a.ldrb_w(0, 13, T9_OFF_FILE_REPEAT)
+    a.strb_w(0, 13, T9_STATE_LAST_REPEAT_OFF)
+    a.ldrb_w(0, 13, T9_OFF_FILE_SHUFFLE)
+    a.strb_w(0, 13, T9_STATE_LAST_SHUFFLE_OFF)
+    a.movs_imm8(5, 1)                         # any_change = 1
+
+    a.label("t9_after_papp_check")
+
     # ---- write state buf back only if any_change ----
     a.cmp_imm8(5, 0)
     a.beq("t9_after_state_write")
@@ -1872,7 +1927,11 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.raw(bytes([0x01, 0x02, 0x03]))         # OFF, ALL, GROUP (V13 Tbl 5.21)
     a.align(4)
     a.label("papp_current_values")
-    a.raw(bytes([PAPP_REPEAT_OFF, PAPP_SHUFFLE_OFF]))   # iter1: hardcoded OFF/OFF
+    # Fallback OFF/OFF used only by T_papp 0x13 GetCurrent (rarely invoked
+    # — Bolt postflash showed zero PDU 0x13 calls; CTs subscribe to event
+    # 0x08 instead). T8 0x08 INTERIM and T9 papp CHANGED both read live
+    # values from y1-track-info[795..796].
+    a.raw(bytes([PAPP_REPEAT_OFF, PAPP_SHUFFLE_OFF]))
     a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).
