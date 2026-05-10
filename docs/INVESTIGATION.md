@@ -1356,7 +1356,16 @@ GM Infotainment 3 head unit. Strict CHANGED-driven CT (doesn't poll metadata; re
 - **2026-05-09 F4-iter1 postflash (`/work/logs/dual-bolt-20260509-2249/`)** — first capture against the V1/V2/V3/V4/V5 SDP shape + the full F4-iter1 trampoline chain (T_papp + T8 event 0x08). **Reframes prior "Bolt is PASSTHROUGH-only" framing as wrong**: the earlier pre-V1/V2 captures simply hadn't advertised AVRCP 1.3, so Bolt never had a reason to issue META commands against us. With the 1.3 advertisement live, Bolt fully exercises the META + PApp surface:
   - Connect → GetCapabilities (msg=522, T1 fired) → PDU 0x17 InformDisplayableCharacterSet (msg=536, T_charset fired) → 5× RegisterNotification → PASSTHROUGH play/forward press/release pairs (clean 1:1) → GetElementAttributes once (msg=540, T4 fired with all 7 attrs in 644 B IPC frame) → continuous RegisterNotification re-subscribes (20 inbound size:13, 72 outbound msg=544 with 52 proactive emits from T5/T9/extended_T2).
   - **PDU 0x14 SetPlayerApplicationSettingValue retry storm.** Starting ~21 s after connect, Bolt issues a size:11 PDU 0x14 every 3 s — 14 retries across the capture, all rejected by iter1's `T_papp` Set arm with `0x06 INTERNAL_ERROR` (msg=530, 8-byte reject frame). This is the **first concrete evidence** that a real CT in our matrix actively wants PApp Set support; iter1's reject path is exactly what's gating Bolt's PApp flow. Iter3 (real Set support) is therefore the high-priority next move; iter2's read pipeline (T_papp 0x13 + state observation) is **lower-priority for Bolt** because Bolt skips ListAttrs (PDU 0x11) and GetCurrent (PDU 0x13) entirely — goes straight to blind Set, suggesting Bolt's behavior is "set Repeat / Shuffle to a known state at connect" rather than "discover what's supported then mirror".
-  - **Unknown to resolve before iter3 implementation:** what attribute_id + value Bolt is trying to set. Logcat surfaces `size:11` (= 8-byte AV/C header + 3-byte body = `n=1 + attr_id + value`), but the 3 body bytes aren't decoded by the existing log surface. Resolution path: gdb-attach `mtkbt` (or `libextavrcp_jni`) at the size:11 dispatch site (`saveRegEventSeqId` body at `0x6452+`), break on the PDU=0x14 path, dump sp+386..388 to read attr_id + value. Alternative: extend `tools/btlog-parse.py` or HCI ACL parsing to decode the `cmd_frame_ind` payload. Knowing the values lets iter3 ship with the verified Y1↔AVRCP enum mapping rather than the inferred mapping in Trace #18.
+  - **2026-05-09 gdb-capture (`/work/logs/papp-gdb.log`)** — `tools/attach-libextavrcp-gdb-papp.sh` attached to the patched library, broke at `papp_set` (file `0xb13c`), and dumped 14 inbound PDU 0x14 frames with the following distribution:
+
+    | attr_id | value | hits | meaning |
+    |---|---|---:|---|
+    | 0x02 Repeat | 0x01 | 2 | OFF |
+    | 0x02 Repeat | 0x02 | 2 | SINGLE TRACK REPEAT |
+    | 0x02 Repeat | 0x03 | 2 | ALL TRACK REPEAT |
+    | 0x03 Shuffle | 0x02 | 8 | ALL TRACK SHUFFLE |
+
+    Every frame is `n=1` (single attr/value pair). Bolt issues each Set ×2 (one on user press + one auto-retry after our reject). User cycled Repeat through all three supported values (OFF/SINGLE/ALL — never the AVRCP 0x04 GROUP value Y1 doesn't model), then pressed Shuffle ON four times. Confirms the Trace #18 enum mapping is correct and complete: AVRCP Repeat `0x01/0x02/0x03` ↔ Y1 `musicRepeatMode` `0/1/2`; AVRCP Shuffle `0x02` ↔ Y1 `musicIsShuffle=true`, `0x01` ↔ `musicIsShuffle=false`. Bolt is spec-conformant — no vendor-specific values, no GROUP variants, no multi-pair Sets. Iter3 can ship with the documented mapping and not have to defensively handle GROUP/oversized-n cases.
   - PASSTHROUGH path healthy: 7 press/release pairs (rawkey 68 PLAY ↔ 196 RELEASE; 75 FORWARD ↔ 203 RELEASE) all delivered. Y1MediaBridge state-tracking shows PLAYING/PAUSED transitions firing in lockstep — discrete-key chain is now correctly handled.
   - Subscribe re-registration cadence: 20 RegisterNotification inbounds across ~2 min (~10 s mean inter-frame) — much lower than the TV's storm shape, consistent with Bolt being a CHANGED-driven CT that re-subscribes on natural intervals rather than on every CHANGED edge.
 
@@ -1902,9 +1911,9 @@ public static final REPEAT_MODE_ONE:I = 0x1
 public static final REPEAT_MODE_ALL:I = 0x2
 ```
 
-AVRCP 1.3 §5.2.4 Tbl 5.20 (Repeat) values: `0x01 OFF / 0x02 SINGLE / 0x03 ALL / 0x04 GROUP`. Mapping (Y1 → AVRCP): `0→1, 1→2, 2→3` (Y1 has no GROUP).
+AVRCP 1.3 §5.2.4 Tbl 5.20 (Repeat) values: `0x01 OFF / 0x02 SINGLE / 0x03 ALL / 0x04 GROUP`. Mapping (Y1 ↔ AVRCP): `0 ↔ 0x01`, `1 ↔ 0x02`, `2 ↔ 0x03` (Y1 has no GROUP). **Verified 2026-05-09 via gdb-capture (`/work/logs/papp-gdb.log`):** Bolt sends `0x01/0x02/0x03` (never `0x04`) — bidirectional mapping is sound for both inbound Set and outbound GetCurrent.
 
-AVRCP §5.2.4 Tbl 5.21 (Shuffle) values: `0x01 OFF / 0x02 ALL / 0x03 GROUP`. Mapping (Y1 → AVRCP): `false→1, true→2`.
+AVRCP §5.2.4 Tbl 5.21 (Shuffle) values: `0x01 OFF / 0x02 ALL / 0x03 GROUP`. Mapping (Y1 ↔ AVRCP): `false ↔ 0x01`, `true ↔ 0x02`. **Verified 2026-05-09**: Bolt sends `0x02` (never `0x03`).
 
 **Cross-app context handle (already available).** `Y1Application$Companion.getAppContext():Context` is reachable from any smali via `Y1Application;->access$getAppContext$cp()Landroid/content/Context;`. This eliminates the "no Context handle in static-ish methods" blocker noted in earlier deferral notes — `setMusicIsShuffle` / `setMusicRepeatMode` can sendBroadcast directly using the app-singleton context.
 
