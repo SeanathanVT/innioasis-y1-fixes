@@ -1874,6 +1874,88 @@ All seven exist as proper PLT entries. None require new dynamic-linker resolutio
 
 6. **Strict scope alignment.** Per AVRCP V13 §5.2.1 Player Application Settings, supporting any one PApp attribute makes ICS C.14 fire and rows 12-17 + 30 become Mandatory. Anchoring on Repeat (attr_id=2) + Shuffle (attr_id=3) maps cleanly to AndroidMediaController's repeat/shuffle modes (Y1's KitKat-era stack supports both via `setRepeatMode` / `setShuffleMode`). These are the two universally-implemented PApp attributes on real CT/TG implementations and represent the strictest spec-conformance posture without adding device-specific equalizer/scan plumbing that doesn't exist on Y1.
 
+### Trace #18 (2026-05-10) — F4 iter2/3/4 staged plan: real Repeat/Shuffle state binding
+
+iter1 ships hardcoded "Repeat OFF + Shuffle OFF, Set rejects with 0x06 INTERNAL_ERROR". The next iterations replace the hardcoded values with real state binding to the Y1 music app's `SharedPreferencesUtils` (where Repeat/Shuffle currently live). This trace captures the staged plan so the work can be sequenced cleanly without compounding unverified changes.
+
+**Music app state surfaces (from `com/innioasis/y1/utils/SharedPreferencesUtils.smali`).**
+
+```
+public final getMusicIsShuffle()Z          // SharedPreferences key "musicIsShuffle"
+public final setMusicIsShuffle(Z)V         // Editor.putBoolean + commit
+public final getMusicRepeatMode()I         // SharedPreferences key "musicRepeatMode"
+public final setMusicRepeatMode(I)V        // Editor.putInt + commit
+```
+
+`PlayerService.smali` defines the integer enum used by `musicRepeatMode`:
+
+```
+public static final REPEAT_MODE_OFF:I = 0x0
+public static final REPEAT_MODE_ONE:I = 0x1
+public static final REPEAT_MODE_ALL:I = 0x2
+```
+
+AVRCP 1.3 §5.2.4 Tbl 5.20 (Repeat) values: `0x01 OFF / 0x02 SINGLE / 0x03 ALL / 0x04 GROUP`. Mapping (Y1 → AVRCP): `0→1, 1→2, 2→3` (Y1 has no GROUP).
+
+AVRCP §5.2.4 Tbl 5.21 (Shuffle) values: `0x01 OFF / 0x02 ALL / 0x03 GROUP`. Mapping (Y1 → AVRCP): `false→1, true→2`.
+
+**Cross-app context handle (already available).** `Y1Application$Companion.getAppContext():Context` is reachable from any smali via `Y1Application;->access$getAppContext$cp()Landroid/content/Context;`. This eliminates the "no Context handle in static-ish methods" blocker noted in earlier deferral notes — `setMusicIsShuffle` / `setMusicRepeatMode` can sendBroadcast directly using the app-singleton context.
+
+**Iter2 (read path).** Make `T_papp 0x13` and `T8 event 0x08 INTERIM` reflect real Y1 Repeat/Shuffle state.
+
+- **B1 / B2 in `patch_y1_apk.py`.** Inject sendBroadcast at the end of `setMusicIsShuffle` and `setMusicRepeatMode`. Action `com.y1.mediabridge.PAPP_STATE_CHANGED`; extras `isShuffle:Z` (B1) and `repeatMode:I` (B2). Pre-condition: `.locals` bumped from 4 → 5 to give us a free local register to save the original `pN` value across the SharedPreferences write (the existing body clobbers `p1` via `sget-object p1, …editor`). Post-condition smali shape:
+  ```
+  .method public final setMusicIsShuffle(Z)V
+      .locals 5
+      move v4, p1                         ; iter2: save original boolean
+      …existing body unchanged…
+      ; iter2 inject — broadcast new value
+      invoke-static {}, Lcom/innioasis/y1/Y1Application;->access$getAppContext$cp()Landroid/content/Context;
+      move-result-object v0
+      if-eqz v0, :iter2_skip
+      new-instance v1, Landroid/content/Intent;
+      const-string v2, "com.y1.mediabridge.PAPP_STATE_CHANGED"
+      invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+      const-string v2, "isShuffle"
+      invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;
+      invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
+      :iter2_skip
+      return-void
+  .end method
+  ```
+  B2 mirrors with `Z → I` and key `"repeatMode"`.
+
+- **Y1MediaBridge.** Add `PappStateReceiver` inner class (BroadcastReceiver) registered for `com.y1.mediabridge.PAPP_STATE_CHANGED`. On receipt: read both extras (default to current cached values when only one is present), translate to AVRCP enum, write 2 bytes (`[avrcp_repeat, avrcp_shuffle]`) to `/data/data/com.y1.mediabridge/files/y1-papp-state` via the same atomic `tmp + rename` pattern as `y1-track-info`. `prepareTrackInfoDir()` creates the file with default `[1, 1]` (OFF, OFF) on first launch so trampolines can read it before any music-app write fires.
+
+- **`T_papp 0x13` (GetCurrent).** Replace the hardcoded `papp_current_values` ADR with: open + read 2 bytes from `y1-papp-state` into stack scratch; if read fails, fall back to the hardcoded `[1, 1]`. Same pattern T4 uses for `y1-track-info`. Frame growth: +8 B for the file-I/O scratch + outgoing arg ptr.
+
+- **`T8 event 0x08 INTERIM`.** Same file-read pattern; emit `n=2 + [(2, repeat_value), (3, shuffle_value)]`.
+
+**Iter3 (write path).** Make `T_papp 0x14` (Set) actually apply changes.
+
+- **`T_papp 0x14` (Set).** Replace the iter1 reject path with: open `/data/data/com.y1.mediabridge/files/y1-papp-set`, write 2 bytes `[attr_id, value]` from the inbound param body (sp+387 / sp+389 — first attr/value pair; multi-pair Sets fall back to first), close, ACK.
+
+- **Y1MediaBridge.** Add `FileObserver` watching `y1-papp-set` for `MODIFY`. On fire: read the 2 bytes, dispatch by AVRCP attr_id (2 → setMusicRepeatMode mapped back from AVRCP enum; 3 → setMusicIsShuffle). Use sendBroadcast to a music-app-side BroadcastReceiver added by:
+
+- **B3 in `patch_y1_apk.py`** (or new dynamic register in `Y1Application.onCreate`): a BroadcastReceiver listening for `com.y1.mediabridge.PAPP_SET_REQUEST` with extras `attr:I` + `value:I`. On receipt, calls back into `SharedPreferencesUtils.setMusicRepeatMode` / `setMusicIsShuffle` with the AVRCP→Y1 inverse mapping. The setters then fire B1/B2 broadcasts which Y1MediaBridge consumes — closing the loop.
+
+- **PlayerService application of the change.** `setMusicRepeatMode` / `setMusicIsShuffle` only update SharedPreferences; the actual playback behavior (does the next track repeat? does the next track shuffle?) is driven by `PlayerService` reading those preferences at the right time. Confirming that PlayerService re-reads on every track-end transition (vs caching at startup) is open work.
+
+**Iter4 (CHANGED).** Make event 0x08 fire CHANGED on real edges.
+
+- **MtkBt cardinality NOP.** `BTAvrcpMusicAdapter.handleKeyMessage` has per-event-id cardinality checks (`if-eqz v5` patterns; same shape as the existing event-0x01 + event-0x02 NOPs) that drop the CHANGED firing if the cardinality field is 0. The event 0x08 sswitch arm needs the same NOP. Locate via grep on the smali / odex disassembly for the dispatch table.
+
+- **Native jump-patch in `libextavrcp_jni.so`.** Add a `notificationPlayerAppSettingsChangedNative` analogue: identify which native method MtkBt calls for event 0x08 (or whether one exists), patch its first instruction to `b.w T_papp_changed`. T_papp_changed reads `y1-papp-state` + emits `reg_notievent_player_appsettings_changed_rsp` with `REASON_CHANGED`.
+
+- **T9-style edge detect.** State byte in `y1-trampoline-state` (currently 16 B with last_play_status / last_battery_status at bytes 9-10) gains last_repeat_value / last_shuffle_value at bytes 11-12. T_papp_changed compares vs file bytes, emits CHANGED on inequality, updates state.
+
+**Sequencing rationale.** Each iter is independently shippable + verifiable:
+- Iter2 changes wire shape only on Get/INTERIM (read path); Set still rejects → iter2 adds zero new failure modes.
+- Iter3 adds Set + write path → can be smoke-tested by issuing a Set from a peer CT and observing the music app's Repeat/Shuffle UI flip.
+- Iter4 closes the CHANGED notification gap → can be smoke-tested by changing Repeat/Shuffle from the Y1 UI and watching for an AVRCP CHANGED frame on the wire.
+
+Each iter is one commit, one OUTPUT_MD5 bump, one Y1MediaBridge versionCode bump.
+
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
