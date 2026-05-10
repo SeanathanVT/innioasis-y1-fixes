@@ -41,7 +41,7 @@ Edits one entry of the AVDTP signal dispatcher's TBH jump table at file `0xaa81e
 
 This is a **structural workaround**, not a real GET_ALL_CAPABILITIES implementation — the response we emit is the sig 0x02 capability list, which per AVDTP V13 §8.8 is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities like DELAY_REPORTING / RECOVERY / MULTIPLEXING / HEADER_COMPRESSION). For an SBC-only Source this matches what we'd advertise anyway. Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 on paper.
 
-Risk: the AVDTP wire-frame TX site that writes the response sig_id byte is not yet localised statically, so V5's wire-correctness is plausible (BlueAngel-style stacks normally preserve request sig_id; payload is a §8.8 subset valid for an SBC-only Source) but not proven. Neither current test peer probes Y1 with sig 0x0c, so the alias path doesn't fire on hardware; worst case (peer rejects with INVALID_RSP) is no worse than stock, which already error-responds to sig 0x0c with BAD_LENGTH. See `INVESTIGATION.md` Trace #13c + #15.
+Wire-correct by decoupling: the response builder is `fcn.000ae418` (calls `L2CAP_SendData` at file `0xae58e`), and byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]` — the per-channel transaction state populated by the request parser at RX time. The dispatcher and per-signal handlers do not write `txn->[0xe]`. So a sig 0x0c request lands in the GET_CAPABILITIES handler post-V5, but the response frame still emits `sig_id=0x0c` matching the request. Payload is a V13 §8.8 subset valid for an SBC-only Source. See `INVESTIGATION.md` Trace #16.
 
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 

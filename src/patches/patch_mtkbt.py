@@ -139,11 +139,13 @@ PATCHES = [
         #   stock:   halfword 0x0660 → target 0xab4de (sig 0x0c stub)
         #   patched: halfword 0x0083 → target 0xaa924 (sig 0x02 handler)
         #
-        # Wire-correctness is plausible but not statically proven — the
-        # AVDTP wire-frame TX site that writes the response sig_id byte
-        # is not yet localised. Worst case (peer rejects) is no worse than
-        # stock's BAD_LENGTH error path. See docs/BT-COMPLIANCE.md §9.13
-        # and docs/INVESTIGATION.md Trace #13c + #15.
+        # Wire-correct by decoupling: the response builder fcn.000ae418
+        # reads the sig_id byte from per-transaction state (txn->[0xe],
+        # populated by the request parser at RX time), not from the
+        # dispatch handler. So the response carries sig_id=0x0c matching
+        # the request, even though dispatch routes through the sig 0x02
+        # handler. See docs/BT-COMPLIANCE.md §9.13 and
+        # docs/INVESTIGATION.md Trace #16.
         "name":   "[V5] sig 0x0c -> sig 0x02 dispatch alias  AVDTP TBH jump table",
         "offset": 0x0aa834,
         "before": bytes([0x60, 0x06]),

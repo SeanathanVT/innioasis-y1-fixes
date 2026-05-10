@@ -1754,6 +1754,72 @@ The pre-call state setup (memcpy into `[channel + 0xc4]` from `[msg.field_at_0x1
 - Check `fcn.00083014` (called by `fcn.0007d624`): looks up channel by CID; the channel struct after offset 0x100 might contain pending-response sig_id state.
 - The TX path is likely fired by AVDTP signaling state machine (`fcn.000b0c30`, Trace #13c) on a state transition when GAVDP returns ACK via fcn.000aeb9c — so dynamic BPs at fcn.000b0c30's exit edges + the L2CAP TX call site after fcn.0007d624's state-change branch would catch it.
 
+### Trace #16 (2026-05-10) — AVDTP signal-frame TX site localised; V5 wire-correctness upgraded to "verified by decoupling"
+
+Goal of this trace: close the verification gap left open at the end of Trace #15 — find the actual wire-frame builder that writes byte 1 (sig_id) of the AVDTP signal response, and prove that V5's redirect of sig 0x0c into the sig 0x02 handler at 0xaa924 produces a wire-correct response (sig_id=0x0c, not sig_id=0x02).
+
+**Method.** Searched for callers of `L2CAP_SendData` (= `fcn.0007d204`, identified via the "L2CAP_SendData state:%d return:%d" log string at `0xe0062`). Three callers fall in the AVDTP/AVCTP region: `fcn.000ae418` (AVDTP), `fcn.000b1c38`, and `fcn.000b31ac` (AVCTP-side). `fcn.000ae418` is the AVDTP signal-frame TX builder.
+
+**fcn.000ae418 entry signature.**
+
+```
+0x000ae418  push {r3,r4,r5,r6,r7,r8,sb,lr}
+0x000ae41c  mov  r4, r0                ; r4 = arg1 (channel/state context)
+0x000ae41e  ldrh.w r0, [r0, #0x60]     ; r0 = halfword at [r4+0x60] (CID)
+0x000ae422  bl   fcn.0007ccb4          ; CID lookup
+```
+
+The function operates on a per-channel context `r4` whose layout includes:
+- `r4 + 0x10`  pointer to per-transaction state struct (call it `txn`)
+- `r4 + 0x1c`  transaction-label byte
+- `r4 + 0x20`  packet body buffer base
+- `r4 + 0x5d / 0x5e / 0x5f`  packet header byte slots
+- `r4 + 0x60`  L2CAP CID
+
+**Wire byte 1 (sig_id) origin.** The single-packet path writes the sig_id byte from the per-transaction state struct, not from anything the dispatch handler at 0xaa924 set:
+
+```
+0x000ae472  ldr  r3, [r4, #0x10]      ; r3 = txn (per-channel transaction state)
+0x000ae474  ldrb r1, [r3, #0xd]       ; r1 = txn->[0xd]  (msg_type / pkt_type latch)
+0x000ae476  cmp  r1, 2                 ; check msg_type == RESPONSE_ACCEPT
+0x000ae478  ittt ne
+0x000ae47a  ldrh r3, [r3, #0xe]       ; r3 = txn->[0xe..0xf] halfword (sig_id at low byte)
+0x000ae47c  add.w sb, r5, #-1
+0x000ae480  strb r3, [r5, #-1]        ; *(r5-1) = low byte of txn->[0xe] → wire byte 1 (sig_id)
+```
+
+So **byte 1 of the response frame on the wire = `txn->[0xe]`**, where `txn = *(r4 + 0x10)`. This is the per-transaction state struct populated by the AVDTP request parser when the request is received; the sig-handler dispatch (the TBH table at 0xaa81e + sig-handlers like the one at 0xaa924) does not touch it.
+
+**Wire byte 0 (header).** Built from `(tlabel << 4) | pkt_type<<2 | msg_type`:
+
+```
+0x000ae492  lsls r2, r6, 4             ; r2 = tlabel << 4
+0x000ae494  ldrb r1, [r4, 0x1c]
+0x000ae496  adds r0, r2, 4             ; +4 = pkt_type=01 (START), msg_type=00 (CMD)  — fragmented-cmd path
+...
+0x000ae510  strb.w r6, [r4, 0x5f]      ; wire byte 0
+```
+
+For the single-packet RSP_ACCEPT path the constant added is the response-msg-type bits (msg_type=10, pkt_type=00 → +2), not 4. Either way, byte 0 is composed from the transaction-label register `r6` (sourced from per-channel context), not from a dispatch-handler-tied constant.
+
+**Frame TX call.** After header + body assembled at `r4+0x20..r4+0x60`:
+
+```
+0x000ae586  ldrh.w r0, [r4, 0x60]     ; r0 = CID
+0x000ae58a  add.w  r1, r4, 0x20        ; r1 = packet base
+0x000ae58e  bl     fcn.0007d204        ; L2CAP_SendData(cid, packet, ...)
+```
+
+**Net for V5 wire-correctness.**
+
+The V5 patch redirects `tbh[11]` (sig 0x0c GET_ALL_CAPABILITIES) to dispatch into the sig 0x02 handler at 0xaa924. The sig_id byte that appears on the wire in the response frame is read from `txn->[0xe]`, populated by the request parser (in the L2CAP RX → state-machine path under fcn.000b0c30, not in the per-signal handler). The handler at 0xaa924 does not write to `txn->[0xe]`; the only byte it stores is to `[r6, 1]` where r6 is the AVDTP module's global state struct (loaded from `.got` slot 0xf9c14), and that store is a state-machine field (value `2`), not a wire-frame field.
+
+Therefore, when a peer sends `GET_ALL_CAPABILITIES_REQ` (sig_id = 0x0c), the request parser stores 0x0c at `txn->[0xe]`, the dispatcher (post-V5) routes through the GET_CAPABILITIES handler at 0xaa924, the handler runs and updates state, and the response builder `fcn.000ae418` reads `txn->[0xe]` = 0x0c and writes 0x0c into the response frame's byte-1 slot. **Peer receives `GET_ALL_CAPABILITIES_RSP_ACCEPT` with sig_id=0x0c — wire-correct.**
+
+**Risk language upgrade.** §9.13 (and the V5 patch comment in `patch_mtkbt.py`) can move from "wire-correctness plausible but not statically proven" to "wire-correct: the response sig_id byte is sourced from per-transaction state populated at request-parse time, decoupled from the dispatch handler." The remaining unverified surface is the response payload — V13 §8.8 mandates that GET_CAPABILITIES_RSP_ACCEPT and GET_ALL_CAPABILITIES_RSP_ACCEPT carry the same Service-Capability TLVs (the latter is a strict superset, but legacy capability servers may answer either with the same Service-Capability set, which is spec-permissible since the additional 1.3 capability categories — DELAY_REPORTING etc. — are all Optional). Since the handler at 0xaa924 emits the GET_CAPABILITIES Service-Capabilities payload, that's spec-conformant for either request.
+
+**Anchor for any future GET_ALL_CAPABILITIES_REQ injection test:** patch a peer or test harness to issue sig 0x0c on the AVDTP signaling channel, capture the response, verify `byte1 = 0x0c` and the Service-Capabilities TLV list matches what stock issues for GET_CAPABILITIES.
+
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
