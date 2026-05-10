@@ -23,8 +23,9 @@ patch_libextavrcp_jni.py at other code-cave addresses):
   T_continuation PDU 0x40 / 0x41 → AV/C NOT_IMPLEMENTED reject
   T6           PDU 0x30 GetPlayStatus, w/ clock_gettime live position
   T8           PDU 0x31 events ≠ 0x02 INTERIM dispatcher
-  T9           proactive PLAYBACK_STATUS / BATT_STATUS / PLAYBACK_POS
-               CHANGED, entered from notificationPlayStatusChangedNative
+  T9           proactive PLAYBACK_STATUS / BATT_STATUS / PLAYBACK_POS /
+               PLAYER_APPLICATION_SETTING CHANGED, entered from
+               notificationPlayStatusChangedNative
 
 Implementation note. read(2) is not in the PLT — we issue the syscall
 directly via SVC #0 with r7=3 (NR_read on Linux ARM EABI). clock_gettime(2)
@@ -1319,10 +1320,8 @@ def _emit_t_papp(a: Asm) -> None:
     #
     # Live values: open y1-track-info, lseek to byte 795, read 2 bytes
     # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region at
-    # sp+8..9, pass sp+8 as the values pointer. On any I/O failure fall
-    # back to the static OFF/OFF table at papp_current_values. Bolt
-    # postflash showed zero PDU 0x13 calls in practice, so this arm is
-    # mostly dead code, but a strict CT could still invoke it.
+    # sp+8..9, pass sp+8 as the values pointer. On I/O failure fall
+    # back to the static OFF/OFF table at papp_current_values.
     a.label("papp_get_current")
 
     # Open y1-track-info
@@ -1378,12 +1377,9 @@ def _emit_t_papp(a: Asm) -> None:
     # file write via FileObserver and forwards the change to the music
     # app's setMusicRepeatMode / setMusicIsShuffle via broadcast.
     #
-    # Multi-pair Sets (n > 1, byte at sp+0x19a) are out of scope: the
-    # 2026-05-09 Bolt postflash gdb-capture (`/work/logs/papp-gdb.log`,
-    # docs/INVESTIGATION.md Trace #18) showed every real CT Set is
-    # n=1, so we apply only the first pair. AVRCP V13 §5.2.4 lets a TG
-    # that supports a subset of attributes acknowledge any Set whose
-    # listed attributes it can honor.
+    # Multi-pair Sets (n > 1) apply only the first pair. AVRCP V13 §5.2.4
+    # lets a TG that supports a subset of attributes acknowledge any Set
+    # whose listed attributes it can honor.
     a.label("papp_set")
     # Validate (attr_id, value) against the values we ACTUALLY advertise via
     # 0x12 ListValues. AVRCP V13 §6.15.2 defines status 0x05 INVALID_PARAMETER
@@ -1466,8 +1462,7 @@ def _emit_t_papp(a: Asm) -> None:
     #     conn, reject, idx, total, attr_id, charset, length, *str)
     #
     # Walk the inbound list, set wantRepeat / wantShuffle flags, then emit
-    # text for each requested attr we recognize. Spec V13 §5.2.5 says emit
-    # only what the CT requested — previously we emitted both regardless.
+    # text only for requested attrs (V13 §5.2.5).
     a.label("papp_attr_text")
     a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = n (count of attr_ids)
     a.cmp_imm8(6, 0)
@@ -2202,10 +2197,9 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.raw(bytes([0x01, 0x02]))               # OFF, ALL_TRACK
     a.align(4)
     a.label("papp_current_values")
-    # Fallback OFF/OFF used only by T_papp 0x13 GetCurrent (rarely invoked
-    # — Bolt postflash showed zero PDU 0x13 calls; CTs subscribe to event
-    # 0x08 instead). T8 0x08 INTERIM and T9 papp CHANGED both read live
-    # values from y1-track-info[795..796].
+    # Fallback OFF/OFF for T_papp 0x13 GetCurrent on file-I/O failure.
+    # T8 0x08 INTERIM + T9 papp CHANGED read live values from
+    # y1-track-info[795..796].
     a.raw(bytes([PAPP_REPEAT_OFF, PAPP_SHUFFLE_OFF]))
     a.align(4)
 

@@ -585,8 +585,7 @@ public class MediaBridgeService extends Service {
     //
     // MtkBt's BTAvrcpMusicAdapter also wraps our binder with
     // IMediaPlaybackService.Stub.asInterface() for the metadata read path.
-    // Earlier hand-derived code tables had a few codes off — corrected here
-    // from the authoritative TRANSACTION_* fields extracted from the DEX.
+    // Codes match the authoritative TRANSACTION_* fields in the DEX.
     // -----------------------------------------------------------------------
 
     private boolean handleMediaPlayback(int code, Parcel data, Parcel reply)
@@ -955,9 +954,7 @@ public class MediaBridgeService extends Service {
      * SharedPreferencesUtils.setMusicRepeatMode / setMusicIsShuffle).
      *
      * Uses CLOSE_WRITE rather than MODIFY so we read the file only after
-     * T_papp's write() + close() sequence has fully landed. AVRCP→Y1 enum
-     * mapping is empirically verified by the 2026-05-09 Bolt postflash
-     * gdb-capture (#107, see docs/INVESTIGATION.md Trace #18).
+     * T_papp's write() + close() sequence has fully landed.
      */
     private void setupPappSetObserver() {
         File dir = getFilesDir();
@@ -1279,12 +1276,9 @@ public class MediaBridgeService extends Service {
             if (pos >= line.length()) return;
             char stateChar = line.charAt(pos);
             // Y1 BaseActivity emits state-code chars after `播放状态切换 `
-            // ("playback state switch"). Observed mapping:
-            //   '0' → IDLE / NOT_PLAYING — folded to STOPPED (1 occurrence
-            //         observed in /work/logs/dual-tv-iter*/ 2026-05-07
-            //         capture; semantically equivalent to not-playing and
-            //         a fresh edge needs the wire to reflect no-audio so
-            //         the CT freezes its position extrapolator)
+            // ("playback state switch"):
+            //   '0' → IDLE / NOT_PLAYING (folded to STOPPED — semantically
+            //         not-playing; CT freezes its position extrapolator)
             //   '1' → PLAYING (audio rolling)
             //   '3' → PAUSED  (audio held; can resume)
             //   '5' → STOPPED (FF/RW cascade terminated, end-of-stream)

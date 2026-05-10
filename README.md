@@ -2,18 +2,18 @@
 
 > Innioasis Y1 firmware patcher & research toolkit (MT6572 / Android 4.2.2)
 
-A patching toolkit for the Innioasis Y1 media player that improves the music-player UI, provides a setuid-root escalator for on-device debugging, ships diagnostic tooling for the AVRCP investigation, and configures pairing-essential Bluetooth bits. Compatibility is defined by the [`KNOWN_FIRMWARES`](#stock-firmware-manifest) manifest in `apply.bash`; add a row to support a new build.
-
 (The project name is a Star Wars deep cut: Koensayr Manufacturing made the Y-Wing starfighter; Y-Wing → Y1.)
 
 ## Overview
 
-- **Music-player UX** — Artist→Album navigation patch on the system music APK (cover art on artist tap instead of a flat song list).
+- **Music-player UX** — Artist→Album navigation on the system music APK (cover art on artist tap).
 - **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
-- **Root** — install a minimal `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
-- **AVRCP 1.3 metadata over Bluetooth** — Title/Artist/Album, current play status (with live position), play-state and track-change edges delivered to peer Bluetooth Controllers (car head units, TVs, smart speakers). Behind the `--avrcp` flag (excluded from `--all` because it requires a Y1MediaBridge gradle build first). See [Status](#status); architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture with `getevent` + `dumpsys input`, post-root probe, gdbserver attach to mtkbt) used to drive the metadata pipeline above. None are invoked by the patch flow — see [Diagnostics](#diagnostics).
+- **Root** — install `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car head unit, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision position, play-state and track-change notifications, battery status, and Repeat / Shuffle (bidirectional). Behind `--avrcp` (excluded from `--all` because it requires a Y1MediaBridge gradle build). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Compliance scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md).
+- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture with `getevent` + `dumpsys input`, post-root probe, gdbserver attach to mtkbt). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
+
+Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.
 
 ## Layout
 
@@ -81,24 +81,9 @@ Background and the failed alternatives these tools replace (`persist.bt.virtuals
 
 ## Status
 
-`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play / pause / skip from car / headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work.
+`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play / pause / skip from car / headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. `--bluetooth` is pairing-essential config only — it does not modify SDP / AVRCP behavior.
 
-**AVRCP 1.3 metadata over Bluetooth is working under `--avrcp`.** Peer Bluetooth Controllers (car head units, TVs, smart speakers) see all seven §5.3.4 element attributes (Title/Artist/Album/TrackNumber/TotalNumberOfTracks/Genre/PlayingTime), current play status with live position, and play-state edges from the Y1 in real time. The SDP record advertises AVRCP **1.3** over AVCTP **1.2**. Implemented PDU set per `docs/spec/AVRCP 1.3/AVRCP_SPEC_V13.pdf` (V13 + ESR07 errata):
-
-| Spec § | PDU | Coverage |
-|---|---|---|
-| §5.1.1 | 0x10 GetCapabilities | full |
-| §5.2.7 | 0x17 InformDisplayableCharacterSet | full |
-| §5.2.8 | 0x18 InformBatteryStatusOfCT | full |
-| §5.3.1 / §5.3.4 | 0x20 GetElementAttributes | all 7 attributes (Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime) in single-frame response |
-| §5.4.1 | 0x30 GetPlayStatus | full, with live position via `clock_gettime(CLOCK_BOOTTIME)` |
-| §5.4.2 | 0x31 RegisterNotification | INTERIM for events 0x01–0x07; CHANGED-on-edge for 0x01 (PLAYBACK_STATUS), 0x02 (TRACK_CHANGED), 0x03 (TRACK_REACHED_END, gated on natural end), 0x04 (TRACK_REACHED_START), 0x05 (PLAYBACK_POS, 1 s cadence while playing), 0x06 (BATT_STATUS, real bucket from `ACTION_BATTERY_CHANGED`) |
-| §5.5 | 0x40 / 0x41 RequestContinuingResponse / Abort | explicit AV/C reject (we never fragment, so a CT shouldn't see these in valid flow) |
-| §4.6.1 | PASS THROUGH (PLAY / PAUSE / STOP / FORWARD / BACKWARD / etc.) | discrete op_id routing per AV/C Panel Subunit Spec |
-
-Compliance scorecard against the AVRCP ICS (Implementation Conformance Statement) Table 7 in [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md) §2 — every mandatory row hits. Architecture, calling conventions, and the ELF-segment-extension technique that hosts the trampoline blob past the original LOAD #1 segment end: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Full investigation history including refuted hypotheses: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
-
-`--bluetooth` covers only pairing-essential config edits — it does not modify SDP / AVRCP behavior; that's all under `--avrcp`.
+`--avrcp` delivers full AVRCP 1.3 metadata + control. Every Mandatory and every Optional row of ICS Table 7 (Target Features) closes. PDU coverage and per-row scorecard live in [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture and the ELF-segment-extension trick that hosts the trampoline blob: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Stock firmware manifest
 

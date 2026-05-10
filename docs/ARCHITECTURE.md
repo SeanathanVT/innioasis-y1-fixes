@@ -172,7 +172,7 @@ peer A2DP sink
 86b8: b    8684                      ; release_wake_lock + mStandby=1 + return r5
 ```
 
-`a2dp_stop` at vaddr `0x86b0` is the **only** HAL-side path that would emit AVDTP SUSPEND on the wire. AudioFlinger calls `standby_l` after a ~3 s silence-timeout when the music app stops writing samples; stock behaviour is to tear down the AVDTP source stream every time, which TV-class peers respond to by closing + reopening their A2DP sink and produce burst-on-resume + playhead drift. `patch_libaudio_a2dp.py` (AH1) flips the conditional `beq 8684` at `0x86a8` to an unconditional `b 8684`, making the call site at `0x86b0` unreachable. Standby still completes (release_wake_lock, mStandby = 1, return 0); the AVDTP stream is left alive across pauses. See [`PATCHES.md`](PATCHES.md) §`patch_libaudio_a2dp.py` for the byte-level reference.
+`a2dp_stop` at vaddr `0x86b0` is the **only** HAL-side path that would emit AVDTP SUSPEND on the wire. AudioFlinger calls `standby_l` after a ~3 s silence-timeout when the music app stops writing samples. `patch_libaudio_a2dp.py` (AH1) flips the conditional `beq 8684` at `0x86a8` to an unconditional `b 8684`, making the call site at `0x86b0` unreachable. Standby still completes (release_wake_lock, mStandby = 1, return 0); the AVDTP stream is left alive across pauses. See [`PATCHES.md`](PATCHES.md) §`patch_libaudio_a2dp.py` for the byte-level reference.
 
 ### Cross-profile coupling gaps relevant to AVRCP 1.3
 
@@ -181,7 +181,7 @@ These are the spec-conformance deviations that affect AVRCP-1.3-class controller
 | # | Coupling gap | What spec says | What Y1 currently does |
 |---|---|---|---|
 | 1 | **AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)** | AVRCP 1.3 §5.5: when a TG response exceeds the CT-buffer / AVCTP-MTU budget, TG sends packet_type=START with the first chunk and waits for CT to send `RequestContinuingResponse` (0x40). TG then sends CONTINUE / END chunks until the response is exhausted. C.2 makes this Mandatory if `GetElementAttributes Response` is supported. | T_continuation explicit-rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED. Spec-acceptable today (TG never fragments since each attribute is capped at 240 B); a strict CT with a small buffer would lose metadata mid-fragment. |
-| 2 | **AVRCP playback state ↔ AVDTP source state** | AVDTP 1.3 §8.13 / §8.15: when AVRCP TG transitions to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down); SUSPEND is reserved for explicit policy changes. | `patch_libaudio_a2dp.py` (AH1) flips `beq 8684` to unconditional `b 8684` at `libaudio.a2dp.default.so:0x86a8`, making the call to `a2dp_stop@plt` inside `standby_l` unreachable. Silence-timeout standby leaves the AVDTP source stream alive; the next `write()` after PLAYING resumes pushes samples into the same session. Resolves the burst-on-resume + playhead-drift symptom on TV-class CTs. (Earlier `setParameters("A2dpSuspended=...")` Java approach reverted in v2.9 — it triggered the SUSPEND it was trying to prevent because the HAL implements `setSuspended(true)` as a synchronous tear-down.) |
+| 2 | **AVRCP playback state ↔ AVDTP source state** | AVDTP 1.3 §8.13 / §8.15: when AVRCP TG transitions to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down); SUSPEND is reserved for explicit policy changes. | `patch_libaudio_a2dp.py` (AH1) flips `beq 8684` to unconditional `b 8684` at `libaudio.a2dp.default.so:0x86a8`, making the call to `a2dp_stop@plt` inside `standby_l` unreachable. Silence-timeout standby leaves the AVDTP source stream alive; the next `write()` after PLAYING resumes pushes samples into the same session. |
 | 3 | **Per-attribute size cap in `…send_get_element_attributes_rsp`** | AVRCP 1.3 §5.3.4 places no per-attribute byte cap; TG fragments via §5.5 if total response doesn't fit. | `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap and emits `[BT][AVRCP][ERR] too large attr_index:%d` then drops the attribute on overflow. Y1MediaBridge `putUtf8Padded` caps each string attribute at 240 B (codepoint-safe) before it lands in `y1-track-info`, well below the OEM 511 limit, so the silent-drop branch never fires for content we ship. |
 | 4 | **AVCTP transaction-label management** | AVCTP 1.2 §6: TG response transaction label must match the inbound COMMAND label (4-bit field at byte 0 high nibble). | mtkbt routes `transId` from `conn[17]` into every response builder, but the response builders (`…send_*_rsp`) are responsible for stamping it into byte 5 of the IPC frame. This appears correct for everything we've shipped — flagged here for completeness, no observed deviation. |
 
@@ -644,7 +644,7 @@ void btmtk_avrcp_send_get_capabilities_rsp(
 );
 ```
 
-T1 advertises 8 events `[0x01..0x08]`, paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects don't fire for any advertised event. Per the spec-compliance rule we advertise only what we actually implement; event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) is paired with T_papp + T8's iter1 INTERIM emit.
+T1 advertises 8 events `[0x01..0x08]`, paired with T8 INTERIM coverage so the NOT_IMPLEMENTED rejects don't fire for any advertised event. Per the spec-compliance rule we advertise only what we actually implement; event 0x08 (PLAYER_APPLICATION_SETTING_CHANGED) is paired with T_papp + T8's INTERIM emit.
 
 ### Calling pattern for `…send_get_playstatus_rsp` (PLT 0x3564, used by T6)
 
@@ -699,7 +699,7 @@ Outbound IPC: `msg_id=544`, frame size 40 B. transId at offset 5; reasonCode at 
 
 All `…reg_notievent_*_rsp` builders in `libextavrcp.so` are templated on the same shape (40-byte buffer, msg=544, conn[17]→transId at sp+9). Each function bakes in its event-specific constant at sp+13 (1=playback, 2=track_changed, 5=pos_changed, ...). The `cbnz` test on r1 is shared: r1==0 = "write event payload", r1!=0 = "write reject flag (sp+10=1) + reject code (sp+11=arg1) and skip event payload".
 
-All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path. An earlier trampoline shape passed `r1 = transId` and silently hit the reject-shape path (see `INVESTIGATION.md` for the empirical history).
+All currently shipped trampolines (extended_T2 / T4 / T5 / T6 / T8 / T9 — anything that calls a `reg_notievent_*_rsp` PLT) pass `r1 = 0` to take the spec-correct event-payload path.
 
 ### PlayerApplicationSettings response builders (PDUs 0x11-0x16) and event 0x08 builder
 

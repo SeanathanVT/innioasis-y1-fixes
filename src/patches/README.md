@@ -54,7 +54,7 @@ The bash's `patch_in_place_bytes` helper detects "already patched" exit-0-withou
 Active patchers (wired into the bash):
 - `patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp_jni.py`, `patch_libaudio_a2dp.py`, `patch_y1_apk.py`
 
-Earlier byte-patch attempts at `/sbin/adbd` (the H1/H2/H3 patches in `patch_adbd.py` / `patch_bootimg.py`, both broke ADB protocol on hardware) were removed in v2.1.0 and superseded by [`../su/`](../su/) (setuid `/system/xbin/su`). The historical analysis is preserved in [`../../CHANGELOG.md`](../../CHANGELOG.md) and [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) §"adbd Root Patches (H1/H2/H3)".
+Root escalation is handled by [`../su/`](../su/) (setuid `/system/xbin/su`).
 
 ## See also
 

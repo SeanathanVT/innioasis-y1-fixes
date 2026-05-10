@@ -3,7 +3,7 @@
 patch_mtkbt_odex.py — Patch stock MtkBt.odex -> MtkBt.odex.patched
 
 Stock binary md5:  11566bc23001e78de64b5db355238175
-Output md5:        fa2e34b178bee4dfae4a142bc5c1b701
+Output md5:        00cc642742044286966cbb7b01135ca7
 
 ODEX structure:
   ODEX header (0x28 bytes): magic "dey\n036\0", dex_offset=0x28, dex_length=0x98490
@@ -153,25 +153,11 @@ PATCHES = [
     },
     {
         "name":   "BTAvrcpMusicAdapter$3.onReceive playstatechanged dedupe NOP",
-        # Stock onReceive dedupes on `mPreviousPlayStatus == getPlayerstatus()`
-        # via `if-eq v3, v2, :cond_50` (where v3 = access$000() = last status,
-        # v2 = current status). The dedupe blocks every `playstatechanged`
-        # broadcast when the boolean play/pause status hasn't changed —
-        # killing three things downstream:
-        #   1. The 1 Hz `mPosTickRunnable` cadence that drives T9's
-        #      PLAYBACK_POS_CHANGED CHANGED frames (status doesn't change
-        #      while playing → no msg=1 → no T9).
-        #   2. iter4's PLAYER_APPLICATION_SETTING_CHANGED CHANGED loop
-        #      (Repeat/Shuffle flips don't change play_status → dedupe →
-        #      T9's papp edge block never fires).
-        #   3. PAUSED → STOPPED transitions (getPlayerstatus collapses
-        #      both to "2 PAUSED" while sMusicId > -1 → dedupe → CT
-        #      keeps showing PAUSED forever).
-        # NOPing the if-eq lets every playstatechanged broadcast post msg=1
-        # and msg=2. T9 fires unconditionally (its own per-edge checks gate
-        # wire emits). T5 fires on msg=2; its internal track_id state-vs-
-        # file-bytes dedupe at sp+0..7 prevents wire spam on non-track-edge
-        # invocations.
+        # NOP `if-eq v3, v2, :cond_50` (mPreviousPlayStatus dedupe) so every
+        # playstatechanged broadcast posts msg=1 + msg=2. T5 / T9 internal
+        # dedupes gate wire emits on actual edges; the broadcast-handler
+        # dedupe was blocking the 1 Hz position tick, the papp CHANGED
+        # loop, and PAUSED → STOPPED transitions.
         "offset": 0x3b310,
         "before": bytes([0x32, 0x23, 0xea, 0xff]),  # if-eq v3, v2, +0xffea
         "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
