@@ -261,8 +261,6 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 
 ## 8. Out of scope (and why)
 
-- **AVRCP TG group navigation (0x7d/0x7e in 1.3-Cat-3)** — falls under PASSTHROUGH which we haven't broken. No changes needed.
-
 Anything outside the AVRCP 1.3 spec proper (V13 + ESR07) is out of scope for this project. See §1 above.
 
 ---
