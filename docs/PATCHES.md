@@ -41,7 +41,7 @@ Edits one entry of the AVDTP signal dispatcher's TBH jump table at file `0xaa81e
 
 This is a **structural workaround**, not a real GET_ALL_CAPABILITIES implementation — the response we emit is the sig 0x02 capability list, which per AVDTP V13 §8.8 is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities like DELAY_REPORTING / RECOVERY / MULTIPLEXING / HEADER_COMPRESSION). For an SBC-only Source this matches what we'd advertise anyway. Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 on paper.
 
-Risk acknowledged: at file `0x0aa9fa` the sig 0x02 handler does `strb r2, [r6, 1]` with `r2=2`. The store target `[r6, 1]` is into mtkbt's AVDTP global state struct (`r6` resolves through a `.got` slot to `.bss`, not the wire frame), and the response path the handler triggers (`fcn.000aeb9c` → `fcn.000afd40` → `fcn.0007d624` L2CAP_ConnectRsp) carries the L2CAP CID and an accept-flag, but no AVDTP signal_id byte. The actual wire-response signal_id is set elsewhere — presumably by AVDTP layer state-machine code that pairs each response to its request per V13 §8.5, in which case our reply preserves sig_id 0x0c — but the wire-frame TX site isn't yet localised statically. So wire-correctness is plausible (BlueAngel norm + payload identity for SBC-only Source per V13 §8.8) but not proven. Neither current test peer probes Y1 with sig 0x0c, so the alias path doesn't fire on current hardware; worst-case behavior (peer rejects with INVALID_RSP if sig_id is wrong) is no worse than stock, which already error-responds to every sig 0x0c with BAD_LENGTH.
+Risk: the AVDTP wire-frame TX site that writes the response sig_id byte is not yet localised statically, so V5's wire-correctness is plausible (BlueAngel-style stacks normally preserve request sig_id; payload is a §8.8 subset valid for an SBC-only Source) but not proven. Neither current test peer probes Y1 with sig 0x0c, so the alias path doesn't fire on hardware; worst case (peer rejects with INVALID_RSP) is no worse than stock, which already error-responds to sig 0x0c with BAD_LENGTH. See `INVESTIGATION.md` Trace #13c + #15.
 
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 
@@ -149,9 +149,9 @@ Same shape as T_charset, calls `battery_status_rsp` via PLT `0x357c`. AVRCP 1.3 
 
 Branched from T4's pre-check on PDU 0x40 or 0x41. Restores `lr` canary + `r0=conn` and tail-jumps to UNKNOW_INDICATION (the catch-all reject path that emits AV/C NOT_IMPLEMENTED via msg=520). Functionally identical to the catch-all fall-through but routed through an explicit dispatch in the pre-check so ICS Table 7 rows 31-32 read "shipped" rather than "fall-through".
 
-AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. `get_element_attributes_rsp` never sets the start-of-fragmentation flag (verified: 2868 PDU 0x20 frames in a single TV capture, 100% `packet_type=0x00`); mtkbt fragments below at the AVCTP layer transparently. Across all 43 captures, zero 0x40 / 0x41 PDUs from any CT in the test matrix. The trampoline body is 6 bytes (one `ldrh.w`, one `add.w`, one `b.w`).
+AVRCP 1.3 §4.7.7 / §5.5: continuation is initiated by the TG setting `Packet Type=01` (start) in a response — the CT only sends 0x40 in reply to a previously-fragmented response. `get_element_attributes_rsp` never sets the start-of-fragmentation flag, so a spec-conforming CT never sends 0x40. The trampoline body is 6 bytes (one `ldrh.w`, one `add.w`, one `b.w`).
 
-§6.15.2 specifies AV/C INVALID_PARAMETER (status 0x05) as the spec-strict response when receiving 0x40 without prior fragmentation; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject for an unsupported PDU and is functionally indistinguishable to the CT (both are reject frames; the CT abandons the continuation flow either way). If a future capture surfaces non-zero 0x40 traffic, upgrade to a stateful continuation handler that re-emits the buffered response.
+§6.15.2 specifies AV/C INVALID_PARAMETER (status 0x05) as the spec-strict response when receiving 0x40 without prior fragmentation; NOT_IMPLEMENTED is a different but spec-acceptable AV/C reject for an unsupported PDU and is functionally indistinguishable to the CT (both are reject frames; the CT abandons the continuation flow either way).
 
 ### T6 — GetPlayStatus (PDU 0x30)
 
@@ -259,13 +259,9 @@ Single-byte cond-flip in `_ZN20android_audio_legacy18A2dpAudioInterface18A2dpAud
 
 **AH1 — `beq 8684 → b 8684`** at file `0x000086ab` (1 byte): `0x0a` → `0xea`. ARM condition-code flip from `EQ` to `AL` (always). Forces standby_l's `if (mIsStreaming != 0) call a2dp_stop` guard to ALWAYS skip the call site. The instructions at 0x86ac-0x86b8 (`ldr r0, [r4,#40]; bl a2dp_stop@plt; mov r5, r0; b 8684`) become unreachable; standby still completes (`release_wake_lock`, `mStandby = 1`, return) but no AVDTP SUSPEND fires on the wire.
 
-**Why this site.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) calls `A2dpAudioStreamOut::standby` → `standby_l`, and standby_l is the *only* HAL-side path that calls `a2dp_stop`. Removing that one call leaves the AVDTP source stream alive while AudioFlinger thinks the HAL is in standby; the next `write()` after PLAYING resumes pushes samples into the same open AVDTP session. TV-class CTs that aggressively close + reopen their A2DP sink on AVDTP SUSPEND no longer cycle, eliminating the burst-on-resume + playhead-drift symptom (capture `/work/logs/dual-tv-20260509-1538` empirically grounded the design).
-
-**Why not the Java-side `setParameters("A2dpSuspended=...")` approach.** Tried first as the §9.2 fix; reverted in v2.9. Empirical capture showed the AOSP A2DP HAL implements `setSuspended(true)` as a *synchronous* tear-down — calls `a2dp_stop` directly inside the setSuspended path, before silence-timeout standby ever fires. The Java approach ended up triggering exactly the SUSPEND it was trying to prevent. The HAL byte patch short-circuits the only standby path that calls a2dp_stop instead, with no Java-side coupling.
+**Why this site.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) calls `A2dpAudioStreamOut::standby` → `standby_l`, the only HAL-side path that calls `a2dp_stop`. NOPing that call leaves the AVDTP source stream alive while AudioFlinger thinks the HAL is in standby; the next `write()` after PLAYING resumes pushes samples into the same open AVDTP session. Per AVDTP 1.3 §8.13 / §8.15: PAUSED leaves the source stream paused-but-up; SUSPEND is reserved for explicit policy changes.
 
 **MD5s:** Stock `0d909a0bcf7972d6e5d69a1704d35d1f` → Output `adbd98afeb5593f1ffe3b90acd0f2536`.
-
-Spec citation: AVDTP 1.3 §8.13 / §8.15 — PAUSED leaves the source stream paused-but-up, SUSPEND is reserved for explicit policy changes.
 
 ---
 
@@ -290,13 +286,7 @@ Smali-level patches to the music app `com.innioasis.y1*.apk` via apktool. Four p
 | `KEYCODE_MEDIA_NEXT` (`0x57` = 87) | PASSTHROUGH 0x4B → Linux `KEY_NEXTSONG` (163) → AVRCP.kl `MEDIA_NEXT` | `nextSong()V` | item 26 — O (optional) |
 | `KEYCODE_MEDIA_PREVIOUS` (`0x58` = 88) | PASSTHROUGH 0x4C → Linux `KEY_PREVIOUSSONG` (165) → AVRCP.kl `MEDIA_PREVIOUS` | `prevSong()V` | item 27 — O (optional) |
 
-Rationale per `PlayerService` method:
-- **`play(Z)V` `bool=true`** — AV/C Panel Subunit Spec PLAY (op_id 0x44): "transition to PLAYING from any state". The boolean controls whether `Static.setPlayValue()` runs after the underlying `IjkMediaPlayer.start()` / `MediaPlayer.start()`. That singleton edge is what propagates the resume to the rest of the app (UI, RemoteControlClient, AudioFocus); without it the player resumes but other components don't see the edge and either fight back to paused or never reflect the change. Kotlin's `play$default(this, dummy, mask=1, null)` (which the music app's own `playOrPause()` resume path uses) overrides the boolean to `1` via the default-args mask, so passing `true` here matches.
-- **`pause(IZ)V` `reason=0x12, flag=true`** — AV/C Panel Subunit Spec PAUSE (op_id 0x46): "transition to PAUSED from any state". The reason byte is a diagnostic identifier PlayerService Timber-logs as `executed pause from %d`; existing reasons in stock span `0xc..0x11`, so `0x12` is a fresh tag for "PlayController discrete PASSTHROUGH PAUSE". The boolean flag virtually always resolves to `true` in stock (every observed callsite goes through Kotlin's `pause$default` helper with a mask byte that defaults p2 to true); we pass `true` explicitly.
-- **`stop()V`** — AV/C Panel Subunit Spec STOP (op_id 0x45): "transition to STOPPED state". `PlayerService.stop()` is `public final stop()V .locals 4` and calls `IjkMediaPlayer.stop() + reset() + MediaPlayer.stop()` — releasing the media position.
-- **`nextSong()V`** — AV/C Panel Subunit Spec FORWARD (op_id 0x4B): discrete next-track command, distinct from FAST_FORWARD (op 0x49). Reached only via Patch H/H′'s propagation path, which bypasses `BasePlayerActivity`'s KeyMap.KEY_RIGHT-arm long-press FF detection that misfires on framework-synthesized repeats.
-- **`prevSong()V`** — AV/C Panel Subunit Spec BACKWARD (op_id 0x4C): discrete prev-track command, distinct from REWIND (op 0x48). Symmetric to NEXT.
-- **`playOrPause()V`** — Y1's existing toggle; correct semantic for the legacy single-physical-key path.
+Each arm calls the corresponding `PlayerService` method per AV/C Panel Subunit Spec semantics. `play(true)` runs `Static.setPlayValue()` after `IjkMediaPlayer.start()` to propagate the resume edge to the rest of the app. `pause(0x12, true)` tags the discrete PASSTHROUGH path (existing stock pause-reason values span `0xc..0x11`). `nextSong()` / `prevSong()` are the discrete-track variants distinct from FAST_FORWARD (0x49) / REWIND (0x48); reached only via Patch H/H′'s propagation path. `playOrPause()` keeps the legacy single-physical-key toggle semantic.
 
 Patched smali (apktool renames the user-defined labels `:cond_play_pause_toggle / :cond_play_strict / :cond_pause_strict / :cond_stop_strict / :cond_next_strict / :cond_prev_strict` to alphanumeric `:cond_X` on reassembly):
 
@@ -322,31 +312,9 @@ Uses scratch registers `v0` (bool / reason) and `v3` (flag) which are dead at th
 
 **Patch H** in `smali/com/innioasis/y1/base/BaseActivity.smali` — propagate unhandled discrete media keys.
 
-`BaseActivity.dispatchKeyEvent(KeyEvent)` is the foreground activity's key entry point for the music app's screens (every Activity in the app extends `BaseActivity`, which extends `AppCompatActivity`). Stock implementation:
+`BaseActivity.dispatchKeyEvent` is the foreground entry point for every music-app Activity (all extend `BaseActivity`). Stock returns `v0=1` (consumed) unconditionally, including for keycodes the activity doesn't handle — so `KEYCODE_MEDIA_PLAY` (126), `MEDIA_PAUSE` (127), `MEDIA_STOP` (86) never reach `PhoneFallbackEventHandler` → `AudioService` → `ACTION_MEDIA_BUTTON` → `PlayControllerReceiver`.
 
-```
-.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
-    .locals 7
-    const/4 v0, 0x1
-    if-nez p1, :cond_0
-    return v0                   # null event → "consumed"
-    :cond_0
-    invoke-virtual {p1}, KeyEvent;->getAction()I
-    move-result v1
-    invoke-virtual {p1}, KeyEvent;->getKeyCode()I
-    move-result v2
-    const/4 v3, 0x3
-    ... [if-eq v2, KEY_LEFT / RIGHT / UP / DOWN / MENU / PLAY / ENTER → ... goto :goto_0] ...
-    :goto_2
-    return v0                   # always returns 1 (TRUE)
-.end method
-```
-
-`v0` is set to `0x1` at method entry and never reassigned — every KeyEvent the activity receives is consumed regardless of whether it acted. For the keycodes `KeyMap` covers (the device's hardware scroll-wheel: KEY_LEFT / RIGHT / UP / DOWN / MENU / PLAY / ENTER) the activity dispatches directly to `PlayerService` (`playOrPause`, `nextSong`, `prevSong`, etc.) and consuming-with-action is the right behaviour. For discrete media keycodes the activity does NOT recognise — `KEYCODE_MEDIA_PLAY` (`0x7e`), `KEYCODE_MEDIA_PAUSE` (`0x7f`), `KEYCODE_MEDIA_STOP` (`0x56`) — control falls through every if-eq check, reaches `:goto_2 / return v0`, and the events are silently swallowed. They never reach `PhoneFallbackEventHandler.handleMediaKeyEvent` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast, so `PlayControllerReceiver` (which has discrete handlers from Patch E) never fires for them.
-
-This is what was empirically blocking AVRCP PASSTHROUGH 0x44 PLAY end-to-end on a strict CT: kernel uinput via `/system/usr/keylayout/AVRCP.kl` correctly maps PASSTHROUGH 0x44 → `KEY_PLAYCD` (200) → `KEYCODE_MEDIA_PLAY` (126), the focused window's `BaseActivity.dispatchKeyEvent` receives it, the activity's `KeyMap` knows nothing about code 126, and the event terminates there.
-
-Patched: insert an early-return block immediately after `move-result v2` gated on `keyCode ∈ {0x7e, 0x7f, 0x56, 0x57, 0x58}`. For any matched keycode, check `KeyEvent.getRepeatCount()`: if `> 0` (framework synthesized repeat — see Patch H″ section below), silently consume by returning TRUE; if `== 0` (genuine first press), return FALSE so the framework continues dispatch via `PhoneFallbackEventHandler` → `AudioManager.dispatchMediaKeyEvent` → `AudioService` → `ACTION_MEDIA_BUTTON` broadcast → `PlayControllerReceiver` discrete arms (Patch E).
+Patched: insert an early-return block after `move-result v2` gated on `keyCode ∈ {0x7e, 0x7f, 0x56, 0x57, 0x58}`. Check `KeyEvent.getRepeatCount()`: if `> 0` (framework-synthesized repeat — see Patch H″), silently consume (return TRUE); if `== 0` (genuine first press), return FALSE so the framework continues dispatch.
 
 ```
 [stock through `move-result v2`]
@@ -384,31 +352,9 @@ const/4 v3, 0x3                 # original next instruction
 
 **Patch H′** in `smali_classes2/com/innioasis/y1/base/BasePlayerActivity.smali` — same propagation, applied to the music-player superclass.
 
-`MusicPlayerActivity` (and any other player-screen activity) extends `BasePlayerActivity`, which overrides `dispatchKeyEvent` itself and never delegates up the chain. Stock implementation:
+`MusicPlayerActivity` and other player-screen activities extend `BasePlayerActivity`, which overrides `dispatchKeyEvent` and `return p1=1` unconditionally — `BaseActivity.dispatchKeyEvent` (Patch H) is unreachable from those screens. `BasePlayerActivity.onKeyUp` matches only `KeyMap` entries (KEY_LEFT=88, KEY_RIGHT=87, KEY_MENU=4, KEY_ENTER=66, KEY_PLAY=85), so discrete media keycodes 126/127/86 fall through and get silently consumed.
 
-```
-.method public dispatchKeyEvent(Landroid/view/KeyEvent;)Z
-    .locals 2
-    invoke-static {p1}, Intrinsics;->checkNotNull(Object;)V
-    invoke-virtual {p1}, KeyEvent;->getAction()I
-    move-result v0
-    if-nez v0, :cond_2
-    [DOWN path: repeatCount==8 + KeyMap match → onKeyLongPress; else → onKeyDown]
-    :cond_2
-    invoke-virtual {p1}, KeyEvent;->getKeyCode()I
-    move-result v0
-    invoke-virtual {p0, v0, p1}, BasePlayerActivity;->onKeyUp(I, KeyEvent;)Z
-    :goto_0
-    const/4 p1, 0x1
-    return p1                       # always TRUE — never delegates to BaseActivity
-.end method
-```
-
-Because this override is in the chain when the player screen is foreground, `BaseActivity.dispatchKeyEvent` (and Patch H) is unreachable. `BasePlayerActivity.onKeyUp` matches keycodes only against `KeyMap` entries — `KEY_LEFT=88` (MEDIA_PREVIOUS), `KEY_RIGHT=87` (MEDIA_NEXT), `KEY_MENU=4` (BACK), `KEY_ENTER=66` (DPAD_CENTER), `KEY_PLAY=85` (MEDIA_PLAY_PAUSE). The discrete media keycodes (126 / 127 / 86) match none, fall through `:cond_8 / :goto_1`, and `return v1=1` silently consumes them.
-
-Empirical confirmation: TV postflash logcat 2026-05-09 shows zero `pause from 18` reasons (Patch E's discrete-pause tag) across an entire AVRCP test session even though Patch H was deployed — every pause traced to internal music-app sources or `playOrPause` toggle, every `play(Z)` traced to `BasePlayerActivity.onKeyUp:195` (the long-press-release-from-FF cleanup path on `KEY_RIGHT`).
-
-Patched: insert the same five-keycode early-return block at the top of `BasePlayerActivity.dispatchKeyEvent`, with the same `repeatCount > 0 → silent consume` filter as Patch H, BEFORE the `Intrinsics.checkNotNull` call (defensive — matches Patch H's null-safe ordering in `BaseActivity`):
+Patched: insert the same five-keycode early-return block at the top of `BasePlayerActivity.dispatchKeyEvent`, with the same `repeatCount > 0 → silent consume` filter as Patch H, before the `Intrinsics.checkNotNull` call (defensive null-safe ordering):
 
 ```
 [method header + .locals 2]
@@ -442,11 +388,7 @@ return v0                       # first press: let the framework continue dispat
 
 **Patch H″** — framework-synthetic-repeat filter, paired with NEXT/PREV keycode propagation. Logically a single change embedded in both Patch H and Patch H′.
 
-The `repeatCount > 0 → silent consume` branch and the addition of `0x57` / `0x58` to the propagated keycode set are both Patch H″. Background:
-
-Android 4.2.2's `InputDispatcher::synthesizeKeyRepeatLocked` synthesizes `KeyEvent` repeats above the kernel's `evdev` layer for any key still in DOWN state without an UP. The kernel's `EV_REP` softrepeat is patched off by U1 (`libextavrcp_jni.so:0x74e8`), but the framework synthesizer is independent of `EV_REP` and keeps generating events with climbing `repeatCount` at ~50 ms intervals (after a ~400 ms initial delay). For AVRCP-derived keycodes that path triggers `BasePlayerActivity.onKeyLongPress` at `repeatCount == 8` → music app enters FF/RW mode. Empirical proof from the 2026-05-09 TV logcat: `getevent` shows ONE `KEY_NEXTSONG DOWN` at boottime 304186.40, no further events for 24 s, then ONE `UP` — yet `WindowManager.interceptKeyTi` shows `keyCode=87 down=true` firing repeatedly with `repeatCount` climbing 2 → 70+ over the same 24 s window. Same pattern for held `KEY_PLAYCD` (`repeatCount` 0 → 30+ at 50 ms).
-
-H″ collapses any held AVRCP keycode to a single one-shot action per genuine press by checking `KeyEvent.getRepeatCount()` after the keycode match: if `> 0`, return TRUE (silent consume — neither propagate nor dispatch to onKeyDown / Up); if `== 0`, propagate normally. Applies to both `BaseActivity` (Patch H location) and `BasePlayerActivity` (Patch H′ location). Closes the "stuck fast-forwarding" symptom on TV CTs that drop PASSTHROUGH RELEASE under subscribe load.
+Android 4.2.2's `InputDispatcher::synthesizeKeyRepeatLocked` synthesizes `KeyEvent` repeats independently of the kernel's `EV_REP` (which U1 patches off in `libextavrcp_jni.so:0x74e8`); for AVRCP-derived keycodes those synthetic repeats trigger `BasePlayerActivity.onKeyLongPress` at `repeatCount == 8` → music app enters FF/RW mode and stays stuck if the CT drops PASSTHROUGH RELEASE under subscribe load. H″ filters them: `getRepeatCount() > 0` → return TRUE (silent consume); `== 0` → propagate normally. Applies in both `BaseActivity` (Patch H) and `BasePlayerActivity` (Patch H′). The addition of `0x57` / `0x58` to the propagated keycode set is also part of H″.
 
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 

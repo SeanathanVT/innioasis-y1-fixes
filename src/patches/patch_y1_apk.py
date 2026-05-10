@@ -884,7 +884,7 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #
 # Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
 # /dev/uinput) maps these to the Linux input event keycodes (verified against
-# /system/usr/keylayout/AVRCP.kl + getevent capture):
+# /system/usr/keylayout/AVRCP.kl):
 #   - 0x44 PLAY  → Linux KEY_PLAYCD (200)  → Android KEYCODE_MEDIA_PLAY (126)
 #   - 0x45 STOP  → Linux KEY_STOPCD (166)  → Android KEYCODE_MEDIA_STOP (86)
 #   - 0x46 PAUSE → Linux KEY_PAUSECD (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
@@ -905,58 +905,30 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       The legacy ACTION_MEDIA_BUTTON broadcast Intent always uses 85, and
 #       toggle is the right semantics for a single physical play/pause key.
 #
-#   - KEYCODE_MEDIA_PLAY (0x7e, 126) — discrete PLAY:
-#       call `play(Z)V` with bool=true. AVRCP 1.3 §4.6.1 / AV/C Panel
-#       Subunit Spec — PLAY (op_id 0x44) transitions to PLAYING from any
-#       state; if already PLAYING, play() is a no-op.
+#   - KEYCODE_MEDIA_PLAY (0x7e, 126) → `play(Z)V` with bool=true.
+#     The boolean runs `Static.setPlayValue(1, ...)` after player start(),
+#     propagating the resume edge to UI / RCC / AudioFocus. play(false)
+#     skips that and other components either fight back to paused or
+#     never reflect the change. Matches Kotlin's `play$default` mask=1
+#     used by the music app's own toggle path.
 #
-#       Why bool=true and not false: the boolean controls whether
-#       `Static.setPlayValue(1, 0/5)` runs after the player's start() call.
-#       Static.setPlayValue is the singleton edge that propagates the play
-#       state to the rest of the music app (UI, RemoteControlClient state,
-#       AudioFocus-related state machine). Calling play(false) starts the
-#       underlying IjkMediaPlayer / MediaPlayer but skips the singleton
-#       update — other components don't see the resume edge and either
-#       fight it back to paused or never reflect the change. The music
-#       app's own toggle path uses Kotlin-generated `play$default(this,
-#       dummy_false, mask=1, null)` which forces the boolean to `1` (true)
-#       via the mask (see `play$default` in PlayerService.smali). We
-#       match that behavior.
+#   - KEYCODE_MEDIA_PAUSE (0x7f, 127) → `pause(IZ)V` with reason=0x12,
+#     flag=true. reason is a diagnostic Timber tag (stock spans 0xc-0x11);
+#     0x12 is a fresh tag for the PASSTHROUGH path. flag=true matches
+#     Kotlin's pause$default behaviour.
 #
-#   - KEYCODE_MEDIA_PAUSE (0x7f, 127) — discrete PAUSE:
-#       call `pause(IZ)V` with reason=0x12, flag=true. The reason byte is a
-#       diagnostic identifier that PlayerService Timber-logs as "executed
-#       pause from %d"; existing reasons in the stock binary span 0xc-0x11
-#       (e.g. 0xc/0xf/0xd/0xe = various internal sources, 0x10/0x11 from
-#       playOrPause's pause-arm). 0x12 is a fresh tag for "PlayController
-#       discrete PASSTHROUGH PAUSE". The boolean flag virtually always
-#       resolves to true in the stock binary (Kotlin pause$default helper's
-#       mask defaults p2=true on every observed callsite); we pass true
-#       explicitly to match.
-#
-#   - KEYCODE_MEDIA_STOP (0x56, 86) — discrete STOP:
-#       call `stop()V` (no args). AV/C Panel Subunit Spec STOP (op_id 0x45)
-#       transitions the player to STOPPED state. PlayerService.stop() is
-#       `public final stop()V .locals 4` and calls IjkMediaPlayer.stop() +
-#       reset() + MediaPlayer.stop() — releasing the media position.
-#       Spec-mandated for any TG advertising PASS THROUGH Cat 1, per the
-#       AVRCP ICS Table 8 item 20 (`docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` §1.5).
+#   - KEYCODE_MEDIA_STOP (0x56, 86) → `stop()V`. PlayerService.stop()
+#     calls IjkMediaPlayer.stop() + reset() + MediaPlayer.stop().
+#     Spec-mandated per AVRCP ICS Table 8 item 20.
 #
 #   - KEYCODE_MEDIA_NEXT (0x57, 87) → `nextSong()V`, AV/C op 0x4B.
 #   - KEYCODE_MEDIA_PREVIOUS (0x58, 88) → `prevSong()V`, AV/C op 0x4C.
-#     Reached via Patch H/H′ propagation; bypasses BasePlayerActivity's
-#     KeyMap.KEY_RIGHT/LEFT long-press FF/RW arms. AVRCP 1.3 §4.6.1
-#     separates NEXT/PREV from FAST_FORWARD/REWIND (op 0x49/0x48).
+#     Reached via Patch H/H′ propagation; AVRCP 1.3 §4.6.1 separates
+#     NEXT/PREV from FAST_FORWARD/REWIND (op 0x49/0x48).
 #
-# Why the per-keycode split: routing all discrete keycodes to playOrPause()
-# (toggle) was empirically wrong for a strict CT. Hardware capture (see
-# `docs/INVESTIGATION.md` "Hardware test history per CT") showed a strict
-# CT issuing 5 discrete PLAY (0x44) presses while Y1 was already PLAYING —
-# toggle would invert the CT's intent on each press, and the CT's UI
-# reported the button as unresponsive. Same logic applies to NEXT/PREV:
-# Patch H/H′ delivers them once per genuine press (synthetic repeats are
-# filtered out before reaching us), so each arm is a single one-shot
-# action with no long-press / FF semantic conflation.
+# Per-keycode split (vs. routing everything to playOrPause toggle)
+# matters for strict CTs that issue discrete PLAY against an already-
+# PLAYING TG — toggle would invert the CT's intent on each press.
 #
 # Stock smali at PlayControllerReceiver.smali:cond_c:
 #   :cond_c

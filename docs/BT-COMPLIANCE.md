@@ -254,7 +254,7 @@ The btlog parser (`tools/btlog-parse.py`) gives us full HCI command/event visibi
 | LOAD #1 extension exhausts page-padding | Very low | ~2368 B free past the current 1652 B blob; budget supports many more trampolines. Fallback: extend LOAD #2 padding. |
 | Trampoline blob shifts every PLT call beyond range | Low (Thumb b.w covers ±16 MB; trampolines and PLT are <0x10000 apart) | Verify `bl.w`/`b.w` reach in `_thumb2asm.py` self-test for each new emit site. |
 | AVRCP version negotiation: F1 patch sets MtkBt-internal version flag but our wire-shape PDU set is 1.3 | Low | F1 only flips the BlueAngel-internal flag to unblock 1.3+ command dispatch through MtkBt's Java layer. SDP record advertises AVRCP 1.3 (V1 patch) / AVCTP 1.2 (V2 patch). Per AVRCP 1.3 §6 (Service Discovery Interoperability Requirements) + ESR07 §2.1 / Erratum 4969, the served version is what CTs key against, and they negotiate a 1.3 dialogue — which is what we implement. |
-| Continuation PDU 0x40/0x41 traffic appears on a future capture (would require stateful re-emit) | Low (zero across 43 captures so far) | T_continuation currently emits NOT_IMPLEMENTED — spec-acceptable. If 0x40 traffic ever shows up, upgrade to a stateful continuation handler that re-emits the buffered response. |
+| Continuation PDU 0x40/0x41 traffic from a CT (would require stateful re-emit) | Low — TG never fragments | T_continuation emits NOT_IMPLEMENTED, which is spec-acceptable. If a CT ever issues 0x40, upgrade to a stateful re-emitter. |
 | AVCTP saturation under a CT subscribe storm drops PASSTHROUGH key-release frames; the music app then interprets the held key as a long-press, calls `startFastForward()`/`startRewind()`, and the lambda thread runs forever | Medium (high-subscribe-rate CT classes have been observed driving this — see [`INVESTIGATION.md`](INVESTIGATION.md) for per-CT empirical context) | **U1**: NOP `UI_SET_EVBIT(EV_REP)` at `libextavrcp_jni.so:0x74e8` so the kernel's `evdev` soft-repeat timer never fires on the AVRCP virtual keyboard. Without auto-repeat, a dropped PASSTHROUGH RELEASE can no longer drive the held-key cascade; the music app sees one event per actual PRESS frame the CT sends. Spec-correct per AVRCP 1.3 §4.6.1 + AV/C Panel Subunit Spec (CT periodic re-send during held button). |
 
 ---
@@ -277,7 +277,7 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Spec.** AVRCP 1.3 §5.5: when a TG response exceeds CT buffer / AVCTP MTU, TG sends `packet_type=01 START`; CT responds with PDU 0x40 (Continuing) or 0x41 (Abort). ICS Table 7 rows 31-32: Mandatory if GetElementAttributes Response is supported (C.2).
 
-**Current state.** `T_continuation` rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the UNKNOW_INDICATION fallback. Counted as ✓ in §2 because the OEM `_send_get_element_attributes_rsp` packs into a 644 B buffer and emits a single non-fragmented frame — TG never sets `packet_type=01`, so a spec-conforming CT never sends 0x40. Zero 0x40 / 0x41 PDUs across 43 captures.
+**Current state.** `T_continuation` rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED via the UNKNOW_INDICATION fallback. Counted as ✓ in §2 because the OEM `_send_get_element_attributes_rsp` packs into a 644 B buffer and emits a single non-fragmented frame — TG never sets `packet_type=01`, so a spec-conforming CT never sends 0x40.
 
 **Why deferred.** A stateful re-emitter is only meaningful after the OEM `_send_get_element_attributes_rsp` is replaced by a manual META builder that fragments at AVRCP layer (i.e., the TG actually sets `packet_type=01`). Until that bypass lands, the re-emitter is dead code. Cheaper INVALID_PARAMETER (status 0x05 per §6.15.2) reject hits a binary-shape barrier: `libextavrcp.so` exposes no META REJECTED builder, and changing the existing `cmd_frame_ind_rsp` arg shape carries regression risk for every unhandled-PDU path with no observable wire-shape benefit (CT can't tell the two reject codes apart).
 
@@ -287,13 +287,11 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Spec.** AVDTP 1.3 §8.13 / §8.15: when AVRCP TG signals PAUSED, the A2DP source should keep the stream paused (NOT torn down); resume without renegotiation on PLAYING. SUSPEND is reserved for explicit policy changes (phone call routing, etc.), not for normal pause / silence handling.
 
-**Pre-fix deviation.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) hit `libaudio.a2dp.default.so::A2dpAudioStreamOut::standby_l` and the function called `a2dp_stop` unconditionally → AVDTP SUSPEND on the wire. Peer CTs (notably TVs) closed/reopened their A2DP sink once per pause-of-≥3 s — producing burst-on-resume audio and playhead drift. Empirical: 8 cycles in a 3-min TV capture (`/work/logs/dual-tv-20260509-1410`).
+**Stock deviation.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) hits `libaudio.a2dp.default.so::A2dpAudioStreamOut::standby_l`, which calls `a2dp_stop` unconditionally → AVDTP SUSPEND on the wire. Peer CTs that aggressively close + reopen their A2DP sink on SUSPEND cycle once per pause-of-≥3 s, producing burst-on-resume audio and playhead drift.
 
-**Current state.** `patch_libaudio_a2dp.py` patches `standby_l` at file offset `0x000086ab` (1 byte: ARM cond `0x0a` EQ → `0xea` AL). The `beq` that conditionally branched past `a2dp_stop` is now an unconditional `b`, so the call site is unreachable. AudioFlinger's silence-timeout still completes the standby (releases the wake lock, sets `mStandby = 1`), but the AVDTP stream is left alive; the next `write()` after PLAYING resumes pushes samples into the same session. See [`PATCHES.md`](PATCHES.md) §`patch_libaudio_a2dp.py` for the byte-level reference.
+**Current state.** `patch_libaudio_a2dp.py` patches `standby_l` at file offset `0x000086ab` (1 byte: ARM cond `0x0a` EQ → `0xea` AL). The `beq` that conditionally branched past `a2dp_stop` is now an unconditional `b`, making the call site unreachable. AudioFlinger's silence-timeout still completes the standby (releases the wake lock, sets `mStandby = 1`), but the AVDTP stream stays alive; the next `write()` after PLAYING resumes pushes samples into the same session.
 
-**Verification.** Capture btlog around a pause: zero `[A2DP] a2dp_stop. is_streaming:1` lines, peer A2DP sink does not cycle, audio resumes clean with no burst, CT playhead tracks real audio.
-
-**Earlier approach (reverted).** First fix attempt drove `audioManager.setParameters("A2dpSuspended=true|false")` from `Y1MediaBridge/MediaBridgeService.java::onStateDetected`. Hardware capture (`/work/logs/dual-tv-20260509-1538`) showed the AOSP A2DP HAL implements `setSuspended(true)` as a *synchronous* tear-down — `setParameters("A2dpSuspended=true")` calls `a2dp_stop` directly before any silence-timeout standby fires, so the Java approach actively triggered the AVDTP SUSPEND it was trying to prevent. Reverted in v2.9; replaced by the HAL byte patch above. The Java path never sees A2dpSuspended now.
+**Verification.** Capture btlog around a pause: zero `[A2DP] a2dp_stop. is_streaming:1` lines, peer A2DP sink doesn't cycle, audio resumes clean.
 
 ### 9.3 Per-attribute 511-byte hard cap in `…send_get_element_attributes_rsp` — *AVRCP* — SHIPPED
 
@@ -311,13 +309,13 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Current state.** mtkbt advertises `AVRCP_MAX_PACKET_LEN:512` regardless of peer capability. Captured logs show `(10+u2MtuPayload) <= 512` enforcement. Most peers agree to 512; some negotiate higher in L2CAP CONFIG but we cap at 512.
 
-**Compliance plan.** Not currently a deviation worth fixing — 512 is the standard L2CAP signaling MTU and most CTs are fine with it. Filed here for completeness; revisit if a future capture shows a CT requesting >512 and degrading on the cap.
+**Compliance plan.** Not a deviation worth fixing — 512 is the standard L2CAP signaling MTU. Filed here for completeness; revisit if a CT ever requests >512 and degrades on the cap.
 
 ### 9.5 GAVDP / AVDTP codec advertisement — *GAVDP / AVDTP / A2DP* — RESOLVED (closed by §9.11)
 
 **Spec.** AVDTP 1.3 §8.6 (DISCOVER): TG should respond with all locally-supported SEPs. A2DP 1.3 §4.2 Table 4.1: SBC Mandatory; AAC / MP3 / ATRAC Optional.
 
-**Resolution (2026-05-09 ICS-scoreboard pass).** SBC-only is fully spec-compliant for an A2DP 1.3 Source — every non-SBC codec is Optional. The MTK-chipset AAC-encoder-hardware question and the runtime-flag-vs-missing-code-path question are both moot: no spec obligation to add codec coverage. See §9.11 for the full A2DP 1.3 audit.
+**Resolution.** SBC-only is fully spec-compliant for an A2DP 1.3 Source — every non-SBC codec is Optional. No spec obligation to add codec coverage. See §9.11 for the A2DP 1.3 audit.
 
 ### 9.6 AVCTP subscribe-storm mitigation (U1) — *AVCTP* — SHIPPED
 
@@ -331,17 +329,15 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 **Spec.** AVDTP 1.3 §8.19 Delay Reporting. AVDTP 1.3 ICS Table 14 row 6 = Optional for the Source role.
 
-**Resolution (2026-05-09 ICS-scoreboard pass).** Optional even at AVDTP 1.3 — mtkbt's lack of a 0x0d handler is spec-permissible as long as we don't advertise the Delay Reporting service capability in our SEP capabilities response (we don't). Inbound 0x0d hits the General Reject path (Mandatory per §8.18, present in mtkbt). See §9.12 for the full AVDTP 1.3 audit.
+**Resolution.** Optional at AVDTP 1.3 — mtkbt's lack of a 0x0d handler is spec-permissible as long as we don't advertise the Delay Reporting service capability in our SEP capabilities response (we don't). Inbound 0x0d hits the General Reject path (Mandatory per §8.18, present in mtkbt). See §9.12 for the AVDTP 1.3 audit.
 
 ### 9.9 Remaining workstream order
 
 §9.2 / §9.3 / §9.5 / §9.6 / §9.7 / §9.8 shipped or resolved-no-action. Active queue:
 
-- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day for a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions.
-- **§1 Phase F4 PApp Settings**: ~5 days, all-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30. Highest-value remaining AVRCP work.
-- **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done. The lone Mandatory gap (GAVDP Acceptor Table 5 row 9 GET_ALL_CAPABILITIES) is closed by V5 — a 2-byte TBH jump-table alias that routes sig 0x0c through the existing sig 0x02 GET_CAPABILITIES handler. Best-effort workaround, not a real handler.
-
-Each ships with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
+- **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER.
+- **PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08)** — deferred. All-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30.
+- **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done. GAVDP Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES) closed by V5 — a 2-byte TBH jump-table alias routing sig 0x0c through the sig 0x02 handler.
 
 ### 9.10 AVCTP 1.2 ICS audit — *AVCTP* — VERIFIED
 
@@ -350,18 +346,18 @@ Anchored against `docs/spec/AVCTP 1.2/AVCTP.ICS.p10.pdf` Table 3 (Target Feature
 | ICS Table 3 row | Capability | Status | Y1 |
 |---|---|---|---|
 | 1 | Message fragmentation | O | ✓ — mtkbt outbound path implements pkt_type 0/1/2/3 (SINGLE/START/CONTINUE/END) per ARCHITECTURE.md §"AVCTP packet types" |
-| **2** | **Transaction label management** | **M** | ✓ — `transId` routed from `conn[17]` into every response builder; stamping into byte 5 of IPC frame is the response-builder's responsibility (cross-ref ARCHITECTURE.md cross-profile coupling table item 4). Empirically wire-confirmed via Trace #12 — Sonos sends real AV/C VENDOR_DEPENDENT GetCapabilities and the trampoline-chain response is accepted |
-| **3** | **Packet type field management** | **M** | ✓ — pkt_type written by the AVCTP-layer fragmentation logic; Trace #12 captures show 100% pkt_type=0x00 SINGLE for the GetElementAttributes 644 B body (no fragmentation triggered) |
+| **2** | **Transaction label management** | **M** | ✓ — `transId` routed from `conn[17]` into every response builder; stamping into byte 5 of IPC frame is the response-builder's responsibility (cross-ref ARCHITECTURE.md cross-profile coupling table item 4) |
+| **3** | **Packet type field management** | **M** | ✓ — pkt_type written by the AVCTP-layer fragmentation logic (SINGLE for the GetElementAttributes 644 B body; fragmentation untriggered at our advertised attribute sizes) |
 | **4** | **Message type field management** | **M** | ✓ — RESPONSE / COMMAND distinction set per AV/C body type; mtkbt's response builders write the correct type bit |
 | **5** | **PID field management** | **M** | ✓ — AVRCP TG PID=0x110E served correctly per the AVRCP record's ProfileDescList; AVCTP layer uses this PID for routing |
-| **6** | **IPID field management** | **M** | ✓ — Invalid Profile Identifier handling delegated to mtkbt's AVCTP layer; no observed deviation across captured sessions |
+| **6** | **IPID field management** | **M** | ✓ — Invalid Profile Identifier handling delegated to mtkbt's AVCTP layer |
 | **7** | **Message information management** | **M** | ✓ — AV/C body parsing + response synthesis lives in the trampoline chain (see ARCHITECTURE.md §"Trampoline chain") |
 | 8-13 | Event registration / connect / disconnect / send variants | O | mtkbt provides the connect / disconnect / send paths used by the JNI bridge; event-registration optional and not separately exposed |
 | 14 | Multiple AVCTP channel establishment | O — Controller-only row | n/a (TG row table doesn't include this) |
 
 **All Mandatory rows covered.** Optional row 1 (fragmentation) shipped for completeness; remaining Optional rows (8-13) are CT/TG event-registration APIs not exercised by our stack.
 
-**Static AVCTP version-byte multiplicity question (resolved).** Three AVCTP version sites in mtkbt's static SDP-record region; V2 patches one. Per the SDP attribute table at vaddr `0xfa700`, only one served AVRCP TG record references AVCTP — the served-record entries (table file offset `0xf97c0..0xf9808`) include attr 0x0004 ProtocolDescriptorList (containing the V2-patched AVCTP version at `0xeba6d`) but NOT attr 0x000d AdditionalProtocolDescriptorList (which is what would carry the Browse-channel AVCTP descriptor at `0xeba25`). The unpatched site `0xeba37` falls inside a separate template record that is not selected at runtime. sdptool ground truth (Trace #12, post-V1+V2 flash) shows the served record advertises AVCTP `0x0102` — only one version on the wire. Conclusion: **V2 patches the only consulted site; the other two are dead bytes.** Verification path if the static-vs-runtime authority assumption breaks in a future build: experimental flash with all three sites patched + sdptool browse → expect identical AVCTP 0x0102 output.
+**Static AVCTP version-byte multiplicity.** Three AVCTP version sites in mtkbt's static SDP-record region; V2 patches the only one consulted at runtime. Per the SDP attribute table at vaddr `0xfa700`, only one served AVRCP TG record references AVCTP — the served-record entries (file offset `0xf97c0..0xf9808`) include attr 0x0004 ProtocolDescriptorList (containing the V2-patched site at `0xeba6d`) but not attr 0x000d AdditionalProtocolDescriptorList. The unpatched sites `0xeba25` and `0xeba37` are dead bytes in unselected template records.
 
 ### 9.11 A2DP 1.3 ICS audit — *A2DP* — SHIPPED (PARTIAL — see §9.5 / §9.8)
 
@@ -398,11 +394,11 @@ GAVDP layer rejects non-SBC SEPs at `GavdpAvdtpEventCallback` per ARCHITECTURE.m
 
 1. **Advertised AVDTP version in A2DP record's ProtoDescList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeba09`, single-byte patch.
 2. **Advertised A2DP version in BluetoothProfileDescriptorList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeb9f2`, single-byte patch.
-3. Both must move together — bumping one without the other creates an asymmetric advertisement. Critically, **the bumps imply we honor AVDTP 1.3 features** (DELAY_REPORT in particular — A2DP 1.3 §1.4.1.2 explicitly cites it as the new-in-1.3 interop addition). Whether to ship the bumps depends on the AVDTP audit (§9.12 below): if `mtkbt`'s sig-id dispatcher honors 0x0d DELAYREPORT (even just gracefully accepting and discarding inbound DELAY_REPORTs), the bump is honest. If 0x0d hits a hard NOT_IMPLEMENTED reject, the bump reproduces the legacy `--avrcp` 1.4-vs-1.0 mismatch shape and should be deferred.
+3. Both must move together — asymmetric advertisement is invalid. The bumps imply AVDTP 1.3 feature support (DELAY_REPORT per A2DP 1.3 §1.4.1.2; GET_ALL_CAPABILITIES per GAVDP 1.3 Table 5 row 9 once A2DP 1.3 §1.2 inherits it).
 
-A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement was what previously kept modern peers from attempting 1.3-only commands against us. Per §9.12 the AVDTP-1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional at the *AVDTP* layer; per §9.13 GAVDP 1.3 ICS Table 5 row 9 raises GET_ALL_CAPABILITIES (AVDTP 10/6) to Mandatory at the Acceptor layer, and A2DP 1.3 §1.2 makes A2DP-1.3 conformance imply GAVDP-1.3 conformance.
+A2DP §3.1: peers consult advertised AVDTP version before GAVDP_ConnectionEstablishment. Per §9.12 AVDTP-1.3 features are Optional at the AVDTP layer; per §9.13 GAVDP 1.3 raises GET_ALL_CAPABILITIES to Mandatory at the Acceptor layer.
 
-The shipped solution is V3 + V4 + V5: bump A2DP and AVDTP advertisement to 1.3, plus a 2-byte TBH jump-table alias that redirects sig 0x0c dispatch through the existing sig 0x02 GET_CAPABILITIES handler. V5 is a best-effort workaround — there's no GET_ALL_CAPABILITIES-specific code path in `mtkbt`; we relabel the sig 0x02 response, which per AVDTP V13 §8.8 is a wire-compatible subset of the sig 0x0c response (no extended Service Capabilities, matching what our SBC-only Source advertises anyway). Implementing a real 0x0c handler is multi-day disassembly work and would only marginally improve real-world interop — captured peers in the test matrix don't probe Y1 with sig 0x0c at all.
+Shipped: V3 + V4 + V5. V3/V4 bump A2DP/AVDTP advertisement to 1.3. V5 is a 2-byte TBH jump-table alias routing sig 0x0c through the sig 0x02 GET_CAPABILITIES handler — per AVDTP V13 §8.8, the sig 0x02 response is a wire-compatible subset of the sig 0x0c response, sufficient for an SBC-only Source.
 
 ### 9.12 AVDTP 1.3 ICS audit — *AVDTP* — VERIFIED, GAP = ADVERTISED VERSION
 
@@ -412,7 +408,7 @@ Anchored against `docs/spec/AVDTP 1.3/AVDTP.ICS.p14.pdf`. Per Table 14a (Version
 
 | Item | Capability | Status | Y1 |
 |---|---|---|---|
-| 1 | **Basic transport service support** | **M** | ✓ — A2DP audio streams over AVDTP through `libmtka2dp.so` ↔ mtkbt internal A2DP source state machine ↔ AVDTP MEDIA on the wire (cid 0x40 in captures) |
+| 1 | **Basic transport service support** | **M** | ✓ — A2DP audio streams over AVDTP through `libmtka2dp.so` ↔ mtkbt internal A2DP source state machine ↔ AVDTP MEDIA on the wire |
 | 2 | Reporting service support | O | not advertised in SEP capabilities, no handler |
 | 3 | Recovery service support | O | not advertised, no handler |
 | 4 | Multiplexing service support | O | not advertised, no handler |
@@ -486,13 +482,13 @@ Anchored against `docs/spec/GAVDP 1.3/GAVDP.ICS.p12.pdf`. Per Tables 2a / 3a, GA
 
 Item 9 is the gap. AVDTP 1.3 ICS Table 10 row 6 says it's Optional at the AVDTP layer; GAVDP 1.3 ICS Table 5 row 9 raises it to Mandatory at the GAVDP-Acceptor layer with Inter-Layer Dependency `AVDTP 10/6 OR AVDTP 10b/6` (Source row OR Sink row).
 
-**Interop reality vs ICS-strict reading.** A peer that issues sig 0x0c against us receives an AVDTP General Reject per §8.18 (Mandatory, present). Well-behaved peers fall back to plain sig 0x02 GET_CAPABILITIES, which we honor. Across the captured test-matrix sessions, zero peers have issued sig 0x0c — they all use plain GET_CAPABILITIES first, accept our reply, configure the stream, and stream. So the gap is paper-only at the ICS-conformance level, not a functional interop break.
+**Interop reality vs ICS-strict reading.** Stock without V5: a peer that issues sig 0x0c receives an AVDTP General Reject per §8.18 (Mandatory, present). Well-behaved peers fall back to plain sig 0x02 GET_CAPABILITIES, which we honor. The ICS gap is paper-only at the conformance level, not a functional interop break.
 
 **Verdict.** GAVDP 1.3 conformance is **strict-conformant on every Mandatory row except Acceptor Table 5 row 9** (sig 0x0c GET_ALL_CAPABILITIES response). The gap survives whether or not we bump §9.11 / §9.12 advertised versions — the only difference is whether we *claim* GAVDP 1.3 (by virtue of A2DP 1.3 dependency, which inherits AVDTP 1.3 dependency). At current 1.0 advertisement, we don't claim GAVDP 1.3 conformance; the gap exists but isn't load-bearing.
 
-**Implementation cost for a real 0x0c handler:** disassembly of mtkbt's existing GET_CAPABILITIES (sig 0x02) response builder + extension to emit the Get All Capabilities response shape (basically GET_CAPABILITIES response + Reporting Service / Recovery Service / Multiplexing Service / Robust Header Compression / Delay Reporting service capabilities, all of which we'd advertise as "not supported" in the response body). Probably a 1-2 day patcher add-on; not load-bearing for any captured peer.
+**Implementation cost for a real 0x0c handler:** disassembly of mtkbt's existing GET_CAPABILITIES (sig 0x02) response builder + extension to emit the Get All Capabilities response shape (GET_CAPABILITIES response + Reporting Service / Recovery Service / Multiplexing Service / Robust Header Compression / Delay Reporting service capabilities, all advertised as "not supported"). Not currently in scope.
 
-### 9.14 Lower-BT-stack gap analysis — synthesis (2026-05-09)
+### 9.14 Lower-BT-stack gap analysis — synthesis
 
 Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 
@@ -506,7 +502,7 @@ Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 
 **Status: Option C shipped — V3 + V4 + V5 landed together.** V3 + V4 bump A2DP/AVDTP advertisement to 1.3; V5 is the structural workaround for sig 0x0c — it aliases the dispatcher's TBH jump-table entry from the BAD_LENGTH stub at `0xab4de` to the existing GET_CAPABILITIES handler at `0xaa924`. Per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities), which is exactly what our SBC-only Source advertises anyway.
 
-**V5 is a workaround, not a real handler.** The response we emit is the sig 0x02 capability list relabelled — there's no GET_ALL_CAPABILITIES-specific code path in `mtkbt`. The store at file `0x0aa9fa` (`strb r2, [r6, 1]` with `r2=2`) writes into the AVDTP module's global state struct (`r6` is loaded from a `.got` slot whose R_ARM_RELATIVE addend points at link-time `.bss`), not into the wire response frame. The path the handler triggers (`fcn.000aeb9c` → `fcn.000afd40` → `fcn.0007d624`) is BlueAngel's L2CAP_ConnectRsp accept/reject — it carries the L2CAP CID and an accept-flag but no AVDTP signal_id byte. The actual wire-response signal_id is set elsewhere (presumably by AVDTP layer state-machine code that pairs each response to its request per V13 §8.5). The wire-frame TX site is not yet localised statically, so V5's wire-correctness is **plausible but not proven**: BlueAngel-style stacks normally preserve request sig_id when emitting the response, but we haven't verified our binary does. Neither current test peer probes Y1 with sig 0x0c so the alias path is unexercised on hardware; worst-case behaviour (peer rejects with INVALID_RSP if sig_id is wrong) is no worse than stock, which already error-responds to every sig 0x0c with BAD_LENGTH. See `INVESTIGATION.md` Trace #13c (dispatcher disassembly) and Trace #15 (response-builder calling convention) for the analysis behind this risk profile.
+**V5 is a workaround, not a real handler.** Wire-correctness is plausible but not statically proven: the AVDTP wire-frame TX site that writes the response sig_id byte is not localised, so we can't verify the response carries sig_id 0x0c (matching the request) rather than sig_id 0x02 (matching our handler). No current test peer probes Y1 with sig 0x0c, so the alias path is unexercised on hardware; worst case (peer rejects with INVALID_RSP) is no worse than stock, which already error-responds to sig 0x0c with BAD_LENGTH. See `INVESTIGATION.md` Trace #13c + #15 for the disassembly + calling-convention analysis.
 
 `patch_mtkbt.py` `OUTPUT_MD5` reflects V1+V2+V3+V4+V5+S1+P1.
 

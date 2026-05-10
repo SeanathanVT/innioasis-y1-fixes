@@ -18,12 +18,10 @@ changes (phone call routing, etc.). TV-class CTs that aggressively close
 audio + playhead drift.
 
 Why a HAL byte patch and not a Java-side `setParameters("A2dpSuspended=...")`
-hook: empirically (capture `/work/logs/dual-tv-20260509-1538`) the AOSP
-A2DP HAL implements `setSuspended(true)` as a *synchronous* stream tear-
-down — it calls `a2dp_stop` directly inside `setSuspended`, before any
-silence-timeout standby ever fires. So the previous Java approach actively
-triggered the very SUSPEND it was trying to prevent. The HAL byte patch
-short-circuits the only standby path that calls a2dp_stop instead.
+hook: the AOSP A2DP HAL implements `setSuspended(true)` as a synchronous
+stream tear-down — it calls `a2dp_stop` directly inside `setSuspended`,
+which would trigger the SUSPEND we're trying to prevent. The HAL byte
+patch short-circuits the only standby path that calls a2dp_stop instead.
 
 Disassembled standby_l (annotated with the patch site):
 
@@ -59,10 +57,7 @@ Patch: at file offset 0x000086ab change byte 0x0a (ARM cond `EQ`) to 0xea
 (ARM cond `AL` = always). The `beq 8684` becomes an unconditional `b 8684`,
 so the a2dp_stop branch (instructions at 0x86ac-0x86b8) is never taken.
 
-Pairs with: nothing — self-contained single-byte HAL fix. The
-`Y1MediaBridge/MediaBridgeService.java::onStateDetected` path no longer
-calls `setParameters("A2dpSuspended=...")` (reverted in v2.9 / versionCode
-29 — see CHANGELOG + BT-COMPLIANCE.md §9.2).
+Pairs with: nothing — self-contained single-byte HAL fix.
 
 Usage:
     python3 patch_libaudio_a2dp.py libaudio.a2dp.default.so

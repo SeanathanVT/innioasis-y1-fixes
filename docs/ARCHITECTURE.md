@@ -62,7 +62,7 @@ mtkbt internal version tag: `[AVRCP] AVRCP V10 compiled` — built against AVRCP
 
 ### AVCTP — transport for AVRCP
 
-L2CAP PSM 0x17 (signaling channel). Browse PSM 0x1B exists in mtkbt code paths but no captured CT in the test matrix has ever opened a Browse channel — Browse-related strings (`[AVRCP][BWS] No av/c parse`, `[AVRCP][BWS] Receive browse-packet`) are dead code from a later AVRCP version that was never claimed in our SDP record (V1 patch advertises 1.3, not 1.4+).
+L2CAP PSM 0x17 (signaling channel). Browse PSM 0x1B exists in mtkbt code paths but is dead code — Browse-related strings (`[AVRCP][BWS] No av/c parse`, `[AVRCP][BWS] Receive browse-packet`) are from a later AVRCP version that we don't claim in our SDP record (V1 patch advertises 1.3, not 1.4+).
 
 **MTU bookkeeping**:
 
@@ -139,7 +139,7 @@ libmtka2dp.so (linked into the BT process)
    ↓ MSG_ID_BT_A2DP_STREAM_DATA_*
 mtkbt internal A2DP source state machine
    ↓ packetizes as RTP-over-AVDTP MEDIA
-peer A2DP sink (cid 0x40 in our captures)
+peer A2DP sink
 ```
 
 **A2DP source state machine** (function names from `libmtkbtextadpa2dp.so` exports — these are the IPC entry points mtkbt uses):
@@ -180,7 +180,7 @@ These are the spec-conformance deviations that affect AVRCP-1.3-class controller
 
 | # | Coupling gap | What spec says | What Y1 currently does |
 |---|---|---|---|
-| 1 | **AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)** | AVRCP 1.3 §5.5: when a TG response exceeds the CT-buffer / AVCTP-MTU budget, TG sends packet_type=START with the first chunk and waits for CT to send `RequestContinuingResponse` (0x40). TG then sends CONTINUE / END chunks until the response is exhausted. C.2 makes this Mandatory if `GetElementAttributes Response` is supported. | T_continuation explicit-rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED. Currently spec-acceptable because no captured CT has driven 0x40 traffic yet — but a strict CT with a small buffer will hit this and lose metadata mid-fragment. |
+| 1 | **AVRCP META CONTINUING_RESPONSE (PDUs 0x40 / 0x41)** | AVRCP 1.3 §5.5: when a TG response exceeds the CT-buffer / AVCTP-MTU budget, TG sends packet_type=START with the first chunk and waits for CT to send `RequestContinuingResponse` (0x40). TG then sends CONTINUE / END chunks until the response is exhausted. C.2 makes this Mandatory if `GetElementAttributes Response` is supported. | T_continuation explicit-rejects 0x40 / 0x41 with AV/C NOT_IMPLEMENTED. Spec-acceptable today (TG never fragments since each attribute is capped at 240 B); a strict CT with a small buffer would lose metadata mid-fragment. |
 | 2 | **AVRCP playback state ↔ AVDTP source state** | AVDTP 1.3 §8.13 / §8.15: when AVRCP TG transitions to PAUSED, the A2DP source should keep the AVDTP stream paused (NOT torn down); SUSPEND is reserved for explicit policy changes. | `patch_libaudio_a2dp.py` (AH1) flips `beq 8684` to unconditional `b 8684` at `libaudio.a2dp.default.so:0x86a8`, making the call to `a2dp_stop@plt` inside `standby_l` unreachable. Silence-timeout standby leaves the AVDTP source stream alive; the next `write()` after PLAYING resumes pushes samples into the same session. Resolves the burst-on-resume + playhead-drift symptom on TV-class CTs. (Earlier `setParameters("A2dpSuspended=...")` Java approach reverted in v2.9 — it triggered the SUSPEND it was trying to prevent because the HAL implements `setSuspended(true)` as a synchronous tear-down.) |
 | 3 | **Per-attribute size cap in `…send_get_element_attributes_rsp`** | AVRCP 1.3 §5.3.4 places no per-attribute byte cap; TG fragments via §5.5 if total response doesn't fit. | `libextavrcp.so:0x2188` enforces a 511-byte per-attribute hard cap and emits `[BT][AVRCP][ERR] too large attr_index:%d` then drops the attribute on overflow. Y1MediaBridge `putUtf8Padded` caps each string attribute at 240 B (codepoint-safe) before it lands in `y1-track-info`, well below the OEM 511 limit, so the silent-drop branch never fires for content we ship. |
 | 4 | **AVCTP transaction-label management** | AVCTP 1.2 §6: TG response transaction label must match the inbound COMMAND label (4-bit field at byte 0 high nibble). | mtkbt routes `transId` from `conn[17]` into every response builder, but the response builders (`…send_*_rsp`) are responsible for stamping it into byte 5 of the IPC frame. This appears correct for everything we've shipped — flagged here for completeness, no observed deviation. |
@@ -252,7 +252,7 @@ public void onCreate() {
 }
 ```
 
-**This is fail-shut: if any step throws, subsequent steps don't run.** The 2026-05-09 metadata regression is currently the leading-hypothesis case of this happening — see [`INVESTIGATION.md`](INVESTIGATION.md) and [`DATA-PATH-AUDIT-2026-05-09.md`](DATA-PATH-AUDIT-2026-05-09.md) §4.4.
+**Fail-shut: if any step throws, subsequent steps don't run.** Avoid changing this path without verifying the dependent metadata pipeline still works.
 
 | Step | Purpose | Failure consequence |
 |---|---|---|
@@ -457,7 +457,7 @@ Independent of the trampoline-driven outbound metadata path. CT-driven transport
    plays / pauses / stops on the Y1.
 ```
 
-**Empirical status (2026-05-09).** Steps 1-5 are verified working from `getevent.txt` captures across the test matrix — kernel-side delivery is correct and `BaseActivity.dispatchKeyEvent` confirms via the Y1Patch debug log that it sees the keycode. **The chain between step 6 and step 8 is not currently traced** — `PlayerService.play(Z) entry` log does not fire on AVRCP-driven 0x44 PLAY events for at least three peer CTs in the test matrix. The framework-side instrumentation that should sit at `AudioService.dispatchMediaKeyEvent` to settle this either was reverted or never landed in the active build. Open investigation; see [`INVESTIGATION.md`](INVESTIGATION.md) for per-CT empirical state and [`DATA-PATH-AUDIT-2026-05-09.md`](DATA-PATH-AUDIT-2026-05-09.md) §5 for the recommended next capture.
+Steps 1-5 are verified end-to-end via `getevent` + Y1Patch debug-log instrumentation in `BaseActivity.dispatchKeyEvent`. Steps 6-8 (framework-side `AudioService.dispatchMediaKeyEvent` → `PlayControllerReceiver`) are not currently traced; see [`INVESTIGATION.md`](INVESTIGATION.md) for per-CT empirical state.
 
 ---
 
@@ -812,7 +812,7 @@ When adding a new T-trampoline (e.g., GetPlayStatus PDU 0x30):
 
 ## Cross-component state dependencies
 
-Every state read or write that crosses process boundaries. The 2026-05-08 attempted MediaButton-receiver fix fell through a gap in this enumeration; future changes should consult this table before touching anything that interacts with these surfaces.
+Every state read or write that crosses process boundaries. Consult this table before touching any of these surfaces — every entry is a potential regression source.
 
 | State | Owner | Read by | Set by | Reset by | Notes |
 |---|---|---|---|---|---|
@@ -825,7 +825,7 @@ Every state read or write that crosses process boundaries. The 2026-05-08 attemp
 | `mMediaButtonReceiver` slot (AudioManager) | Android system service | AudioService for ACTION_MEDIA_BUTTON dispatch routing | `MediaBridgeService.setupRemoteControlClient` (registers PlaySongReceiver) | `MediaBridgeService.onDestroy` | **Not consulted by MtkBt** for service discovery — verified via dex string scan. Used by Android only for choosing whether to fire the registered receiver's PendingIntent vs. fall back to ordered broadcast for ACTION_MEDIA_BUTTON. |
 | `RemoteControlClient` registration | Y1MediaBridge | Lock-screen / system-UI; AudioService | `MediaBridgeService.setupRemoteControlClient` after the MediaButton register | `onDestroy` | The PendingIntent's component must be in the same package as the registered MediaButton receiver, or AudioService's RCC subsystem may silently reject. |
 
-**Lesson from 2026-05-08:** every entry in this table is a potential surface for a regression. Touching any of these requires (a) tracing what depends on it, (b) confirming the change won't break the dependent path, (c) capturing on-device evidence post-flash. The `mMediaButtonReceiver` row is the entry that bit us — its Notes column now records the verified fact that MtkBt does NOT consult that slot for service discovery, refuting the hypothesis that drove the 2026-05-08 fix attempt. See [`DATA-PATH-AUDIT-2026-05-09.md`](DATA-PATH-AUDIT-2026-05-09.md) §4 for the full verification record.
+Touching any of these requires (a) tracing what depends on it, (b) confirming the change won't break the dependent path, (c) capturing on-device evidence post-flash.
 
 ---
 
@@ -834,5 +834,4 @@ Every state read or write that crosses process boundaries. The 2026-05-08 attemp
 - [`BT-COMPLIANCE.md`](BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (PlayerApplicationSettings is the only Optional area still deferred).
 - [`PATCHES.md`](PATCHES.md) — per-patch byte-level reference.
 - [`INVESTIGATION.md`](INVESTIGATION.md) — chronological investigation history including the gdbserver capture work and dead-end paths.
-- [`DATA-PATH-AUDIT-2026-05-09.md`](DATA-PATH-AUDIT-2026-05-09.md) — verification record for every claim in this doc, plus open empirical questions.
 - `src/patches/patch_libextavrcp_jni.py` — the patcher containing R1 / T1 / T2 / T4. Header comments and PATCHES list are the source of truth for byte-level details.

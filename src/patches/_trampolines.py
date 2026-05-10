@@ -811,7 +811,7 @@ def _emit_t_charset(a: Asm) -> None:
     actually honor the CT's charset preference, just that we ack the
     declaration).
 
-    Response builder layout (libextavrcp.so:0x2138 — disassembly 2026-05-06):
+    Response builder layout (libextavrcp.so:0x2138):
       void btmtk_avrcp_send_inform_charsetset_rsp(
           void* conn,         // r0
           uint8_t reject,     // r1 = 0 for success
@@ -850,38 +850,24 @@ def _emit_t_continuation(a: Asm) -> None:
     0x41 AbortContinuingResponse explicit reject.
 
     Per AVRCP 1.3 §4.7.7 / §5.5 + ICS Table 7 rows 31-32 (M C.2: M IF
-    GetElementAttributes Response). Continuation flow is initiated by the
-    TG setting `Packet Type=01` (start) in a response — the CT only sends
-    0x40 in reply to a previously-fragmented response. Two empirical
-    findings establish the current state:
-
-      1. Across 2868 PDU 0x20 frames in a single TV capture, 100% carry
-         packet_type=0x00 (single non-fragmented AVRCP packet). Even with
-         the 7-attr T4 expansion, worst-case packed responses (~1100 B
-         with maxed Title / Artist / Album / Genre slots) ship as a single
-         AVRCP packet — mtkbt fragments below at the AVCTP layer
-         transparently.
-      2. Across all 43 captures in the test matrix, zero 0x40/0x41 PDUs
-         have been observed against thousands of GetElementAttributes /
-         RegisterNotification PDUs.
+    GetElementAttributes Response). Continuation is initiated by TG
+    setting `Packet Type=01` (start) in a response — the CT only sends
+    0x40 in reply to a previously-fragmented response. T4 ships responses
+    as a single non-fragmented AVRCP packet (mtkbt fragments below at
+    the AVCTP layer transparently), so a spec-conforming CT never sends
+    0x40 against us.
 
     Reject shape: AVRCP 1.3 §6.15.2 specifies AV/C `INVALID PARAMETER`
     (status 0x05) as the spec-correct response when receiving 0x40
     without having previously sent packet_type=01. The pre-existing
-    UNKNOW_INDICATION path (reached as the catch-all fall-through for
-    any unhandled PDU) emits AV/C `NOT_IMPLEMENTED` (msg=520) instead —
-    a different but spec-acceptable reject for an unsupported PDU. We
-    route 0x40/0x41 through this same path: explicit code-path closes
-    the ICS scorecard row 31-32 partial-implementation gap, and the
-    NOT_IMPLEMENTED wire shape is functionally indistinguishable from
-    INVALID_PARAMETER from the CT's perspective (both are AV/C reject
-    frames; the CT abandons the continuation flow either way).
+    UNKNOW_INDICATION path emits AV/C `NOT_IMPLEMENTED` (msg=520) — a
+    different but spec-acceptable reject for an unsupported PDU,
+    functionally indistinguishable to the CT (both are reject frames;
+    the CT abandons continuation either way).
 
     Branched from T4's pre-check when PDU == 0x40 or 0x41. Restores the
     same lr canary + r0=conn entry state UNKNOW_INDICATION expects, then
-    tail-jumps. Functionally identical to the catch-all fall-through but
-    routed through an explicit code path so the scorecard row reads
-    "shipped".
+    tail-jumps.
     """
     a.label("T_continuation")
     # Restore lr canary + r0 to match UNKNOW_INDICATION's expected entry state.
@@ -898,7 +884,7 @@ def _emit_t6(a: Asm) -> None:
     spec-conformant `GetPlayStatus` response per AVRCP 1.3 §5.4.1
     (Tables 5.25/5.26).
 
-    Response builder layout (libextavrcp.so:0x2354 — disassembly 2026-05-06):
+    Response builder layout (libextavrcp.so:0x2354):
       btmtk_avrcp_send_get_playstatus_rsp(
           void* conn,             // r0 = r5+8
           uint8_t reject_code,    // r1 = 0 for success

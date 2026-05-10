@@ -13,10 +13,8 @@ commands and (2) route those commands into the JNI's msg 519 emit path so
 the libextavrcp_jni.so trampoline chain (patch_libextavrcp_jni.py) can
 synthesise the AVRCP 1.3 responses.
 
-This targets the empirically-working AVRCP 1.3 reference SDP shape (per
-known-working AVRCP 1.3 reference data + sdptool A / B captures recorded in
-docs/INVESTIGATION.md) plus the one structural attribute that even the
-reference record has and Y1 lacks at every patch level: a 0x0100 ServiceName.
+Targets a spec-conformant AVRCP 1.3 SDP record shape: the standard set of
+attributes plus a 0x0100 ServiceName attribute that stock mtkbt lacks.
 
 V1 — AVRCP 1.0 -> 1.3 (served AVRCP TG ProfileDescList LSB)
 V2 — AVCTP 1.0 -> 1.2 (served AVRCP TG ProtocolDescList AVCTP version LSB)
@@ -141,19 +139,11 @@ PATCHES = [
         #   stock:   halfword 0x0660 → target 0xab4de (sig 0x0c stub)
         #   patched: halfword 0x0083 → target 0xaa924 (sig 0x02 handler)
         #
-        # Unverified risk: at file 0x0aa9fa the sig 0x02 handler does
-        # `strb r2, [r6, 1]` with r2=2. If [r6+1] is the response wire sig_id
-        # field, our response will declare itself a sig 0x02 reply, mismatching
-        # the sig 0x0c request and risking a strict-peer reject. Sibling
-        # handlers (sig 5 writes 5, sig 0x0c stub writes 6) suggest [r6+1] is
-        # an internal state code, not the wire sig_id, but no current test peer
-        # (TV, Bolt) probes with sig 0x0c so this is unverified empirically.
-        # Worst case — peer rejects with INVALID_RSP — is no worse than stock,
-        # which already error-responds to every sig 0x0c with BAD_LENGTH.
-        #
-        # Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES_RSP)
-        # on paper. See docs/BT-COMPLIANCE.md §9.13 / docs/INVESTIGATION.md
-        # Trace #13c for the full dispatcher disassembly.
+        # Wire-correctness is plausible but not statically proven — the
+        # AVDTP wire-frame TX site that writes the response sig_id byte
+        # is not yet localised. Worst case (peer rejects) is no worse than
+        # stock's BAD_LENGTH error path. See docs/BT-COMPLIANCE.md §9.13
+        # and docs/INVESTIGATION.md Trace #13c + #15.
         "name":   "[V5] sig 0x0c -> sig 0x02 dispatch alias  AVDTP TBH jump table",
         "offset": 0x0aa834,
         "before": bytes([0x60, 0x06]),
