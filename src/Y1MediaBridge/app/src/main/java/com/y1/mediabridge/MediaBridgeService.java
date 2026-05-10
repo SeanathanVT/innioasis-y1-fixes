@@ -727,7 +727,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=34 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=35 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1207,11 +1207,19 @@ public class MediaBridgeService extends Service {
         public void run() {
             Log.d(TAG, "Logcat monitor thread started");
             // History pass first so we resync if the player was already
-            // playing when we started. Then switch to live tail.
+            // playing when we started. -d dumps the full ring buffer once
+            // and exits; we walk it via processLogLine, mPlayStatus reaches
+            // the latest observed value via onStateDetected's dedupe.
             processLogcat(new String[]{ "logcat", "-v", "tag", "-d" });
             Log.d(TAG, "Logcat history processed");
+            // Live tail: -T 1 starts from line 1 of NEW messages, NOT the
+            // ring buffer head. Without -T, `logcat` re-dumps the entire
+            // ring buffer before tailing — duplicating the history pass we
+            // just did and re-firing every state edge through onStateDetected
+            // (dedupe catches it but it's wasted work, and on pipe restart
+            // we'd repeat the buffer-replay each retry).
             while (mRunning) {
-                processLogcat(new String[]{ "logcat", "-v", "tag" });
+                processLogcat(new String[]{ "logcat", "-v", "tag", "-T", "1" });
                 if (mRunning) {
                     Log.w(TAG, "Logcat pipe closed, restarting in 1s");
                     try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
@@ -1272,13 +1280,14 @@ public class MediaBridgeService extends Service {
             char stateChar = line.charAt(pos);
             // Y1 BaseActivity emits state-code chars after `播放状态切换 `
             // ("playback state switch"). Observed mapping:
-            //   '0' → IDLE / NOT_PLAYING — folded to STOPPED (verified once
-            //         in 2026-05-07 TV capture; semantically equivalent to
-            //         not-playing and a fresh edge needs the wire to reflect
-            //         no-audio so the CT freezes its position extrapolator)
+            //   '0' → IDLE / NOT_PLAYING — folded to STOPPED (1 occurrence
+            //         observed in /work/logs/dual-tv-iter*/ 2026-05-07
+            //         capture; semantically equivalent to not-playing and
+            //         a fresh edge needs the wire to reflect no-audio so
+            //         the CT freezes its position extrapolator)
             //   '1' → PLAYING (audio rolling)
             //   '3' → PAUSED  (audio held; can resume)
-            //   '5' → STOPPED (FF/RW cascade terminated, end-of-stream, etc.)
+            //   '5' → STOPPED (FF/RW cascade terminated, end-of-stream)
             // AVRCP 1.3 §5.4.1 Tbl 5.26 PlayStatus enum:
             //   0=STOPPED, 1=PLAYING, 2=PAUSED, 3=FWD_SEEK, 4=REV_SEEK,
             //   0xFF=ERROR.
@@ -1400,21 +1409,21 @@ public class MediaBridgeService extends Service {
         // event 0x03 CHANGED frame alongside the standard 0x02 + 0x04.
         //
         // Heuristic: previous track's extrapolated position was within
-        // [-1s..+2s] of its duration at the moment the new track was
-        // detected. The 1s lower bound covers tracks where the player
-        // overshoots duration slightly before signalling end-of-track;
-        // the 2s upper bound covers normal LogcatMonitor staleness
-        // (state-change anchor can be a few hundred ms behind real-time
-        // playback). Tighter bounds risk false negatives on slow logcat
-        // pipes; looser bounds risk false positives on aggressive
-        // skip-near-end. Skip when there's no previous track (cold start)
-        // or no known duration (couldn't read tags) — both leave the
-        // flag at its default `false`.
+        // 2 s of its duration at the moment the new track was detected.
+        // The 2s upper bound covers LogcatMonitor staleness (state-change
+        // anchor can be a few hundred ms behind real-time playback);
+        // tighter risks false negatives on slow logcat pipes, looser
+        // risks false positives on aggressive skip-near-end. Lower bound
+        // is 0 because computePosition() caps the live-extrapolated
+        // position at mCurrentDuration (line 720), so prevPos > duration
+        // is unreachable through this path. Skip when there's no previous
+        // track (cold start) or no known duration (couldn't read tags) —
+        // both leave the flag at its default `false`.
         boolean previousNaturalEnd = false;
         if (mCurrentPath != null && mCurrentDuration > 0) {
             long prevPos = computePosition();
             long delta = mCurrentDuration - prevPos;
-            previousNaturalEnd = (delta >= -1000L && delta <= 2000L);
+            previousNaturalEnd = (delta >= 0L && delta <= 2000L);
         }
         Log.d(TAG, "Track change: " + path
                 + " prevNaturalEnd=" + previousNaturalEnd);
@@ -1667,8 +1676,8 @@ public class MediaBridgeService extends Service {
             // to AVRCP 1.3 §5.4.1 Table 5.26 PlayStatus enum. mPlayStatus is
             // maintained in lockstep with mIsPlaying by onStateDetected,
             // which receives the three-valued AVRCP enum byte from
-            // LogcatMonitor (which now recognizes Y1's state-code '5' =
-            // STOPPED in addition to '1' PLAYING and '3' PAUSED).
+            // LogcatMonitor (which maps state codes '0'/'1'/'3'/'5' →
+            // STOPPED/PLAYING/PAUSED/STOPPED).
             buf[PLAY_STATUS_OFFSET] = mPlayStatus;
             // Natural-end flag for the AVRCP T5 trampoline's TRACK_REACHED_END
             // gate. mPreviousTrackNaturalEnd is set in onTrackDetected by
@@ -1764,13 +1773,22 @@ public class MediaBridgeService extends Service {
 
     private void sendMusicBroadcast(String action) {
         Intent i = new Intent(action);
-        i.putExtra("id",       mCurrentAudioId);
-        i.putExtra("artist",   safeString(mCurrentArtist));
-        i.putExtra("album",    safeString(mCurrentAlbum));
-        i.putExtra("track",    safeString(mCurrentTitle));
-        i.putExtra("playing",  mIsPlaying);
-        i.putExtra("duration", mCurrentDuration);
-        i.putExtra("position", computePosition());
+        i.putExtra("id",        mCurrentAudioId);
+        i.putExtra("artist",    safeString(mCurrentArtist));
+        i.putExtra("album",     safeString(mCurrentAlbum));
+        i.putExtra("track",     safeString(mCurrentTitle));
+        // MtkBt's BTAvrcpMusicAdapter$3.onReceive computes
+        //   sMusicPlaying = playing OR playstate
+        // and uses sMusicPlaying for its dedupe + getPlayerstatus dispatch.
+        // We send both extras with the same value for symmetry — without
+        // `playstate`, MtkBt defaults the missing extra to false and
+        // the OR collapses to just `playing`. Functionally fine but the
+        // explicit pair leaves no room for surprise on alternate firmwares
+        // that honor `playstate` over `playing`.
+        i.putExtra("playing",   mIsPlaying);
+        i.putExtra("playstate", mIsPlaying);
+        i.putExtra("duration",  mCurrentDuration);
+        i.putExtra("position",  computePosition());
         sendBroadcast(i);
     }
 
