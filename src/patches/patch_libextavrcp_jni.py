@@ -113,7 +113,7 @@ T_battery — InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via
 
 T6 — GetPlayStatus (PDU 0x30) → get_playstatus_rsp via PLT 0x3564. Reads
      y1-track-info[776..795] (duration_ms / pos_at_state_change_ms /
-     state_change_time_sec / playing_flag, all big-endian on disk),
+     state_change_time_ms / playing_flag, all big-endian on disk),
      byte-swaps the u32s to host order via Thumb-2 REV. When playing,
      calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` to extrapolate live
      position from the saved freeze-point.
@@ -182,7 +182,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "f10ecd14cd6f1ab0c2072f207e3050c4"
+OUTPUT_MD5        = "016f3d0670a4246c4a47c3c9d868d1d0"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include

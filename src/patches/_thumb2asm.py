@@ -122,6 +122,12 @@ class Asm:
         _check(0 <= rdm <= 7 and 0 <= rn <= 7, "muls_lo_lo bad regs")
         self._hw(0x4340 | (rn << 3) | rdm)
 
+    def lsrs_imm5(self, rd: int, rm: int, imm5: int) -> None:
+        # LSR (immediate) T1: 00001 imm5 Rm[2..0] Rd[2..0]
+        # imm5=0 encodes shift=32; imm5=1..31 = shift amount (low regs only).
+        _check(0 <= rd <= 7 and 0 <= rm <= 7 and 0 <= imm5 <= 31, "lsrs_imm5 bad")
+        self._hw(0x0800 | (imm5 << 6) | (rm << 3) | rd)
+
     def bcond(self, cond: int, label: str) -> None:
         # T1: 1101 cond imm8 (range ±256 bytes from PC)
         _check(0 <= cond <= 14, "bcond cond")  # cond=14 unconditional reserved -> 15 = SVC
@@ -211,6 +217,25 @@ class Asm:
         imm8 = imm16 & 0xFF
         self._hw(0xF240 | (i << 10) | imm4)
         self._hw((imm3 << 12) | (rd << 8) | imm8)
+
+    def movt(self, rd: int, imm16: int) -> None:
+        # MOVT T1: 1111 0 i 101100 imm4 / 0 imm3 Rd imm8 — set upper halfword.
+        _check(0 <= rd <= 14 and 0 <= imm16 <= 0xFFFF, "movt bad")
+        i = (imm16 >> 11) & 1
+        imm4 = (imm16 >> 12) & 0xF
+        imm3 = (imm16 >> 8) & 0x7
+        imm8 = imm16 & 0xFF
+        self._hw(0xF2C0 | (i << 10) | imm4)
+        self._hw((imm3 << 12) | (rd << 8) | imm8)
+
+    def umull(self, rdlo: int, rdhi: int, rn: int, rm: int) -> None:
+        # UMULL T1: 1111 1011 1010 Rn / RdLo RdHi 0000 Rm
+        # RdHi:RdLo = (u32)Rn * (u32)Rm. RdLo != RdHi.
+        _check(0 <= rdlo <= 12 and 0 <= rdhi <= 12 and 0 <= rn <= 12 and 0 <= rm <= 12,
+               "umull bad regs")
+        _check(rdlo != rdhi, "umull RdLo == RdHi")
+        self._hw(0xFBA0 | rn)
+        self._hw((rdlo << 12) | (rdhi << 8) | rm)
 
     def mvn_imm(self, rd: int, imm: int) -> None:
         # MVN (immediate) T1: 1111 0 i 0 0011 1 1111 / 0 imm3 Rd imm8

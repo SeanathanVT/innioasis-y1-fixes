@@ -100,8 +100,10 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      520..775  Album
 #                      776..779  duration_ms                BE u32 (T6)
 #                      780..783  pos_at_state_change_ms     BE u32 (T6, T8 event 0x05)
-#                      784..787  state_change_time_sec      BE u32 (T6 / T9 live-position
-#                                                                    extrapolation)
+#                      784..787  state_change_time_ms       BE u32 (CLOCK_BOOTTIME
+#                                                                    ms-since-boot, full ms
+#                                                                    precision; T6 / T9
+#                                                                    live-position extrapolation)
 #                      788..791  pad
 #                      792       playing_flag               u8 (AVRCP §5.4.1 Tbl 5.26 enum;
 #                                                                T6, T8 event 0x01, T9)
@@ -145,8 +147,9 @@ T2_EVENT_ID_OFF_ENTRY = 386               # before SUB SP
 # four BE u32 fields:
 #   776..779: duration_ms          BE u32
 #   780..783: pos_at_state_change  BE u32
-#   784..787: state_change_time    BE u32 (sec since boot; reserved for future
-#                                          live-extrapolation, currently unused)
+#   784..787: state_change_time_ms BE u32 (ms since CLOCK_BOOTTIME boot — paired with
+#                                          clock_gettime in T6/T9 for ms-precise
+#                                          live-position extrapolation)
 #   792:      playing_flag         u8 (0=STOPPED, 1=PLAYING, 2=PAUSED — direct
 #                                      mapping to AVRCP 1.3 §5.4.1 Table 5.26
 #                                      `PlayStatus` field allowed-values enum)
@@ -155,7 +158,7 @@ T6_OFF_ARGS        = 0
 T6_OFF_FILE        = 16
 T6_OFF_FILE_DURATION   = T6_OFF_FILE + 776   # 792 - duration_ms
 T6_OFF_FILE_POS        = T6_OFF_FILE + 780   # 796 - position_at_state_change
-T6_OFF_FILE_STATE_TIME = T6_OFF_FILE + 784   # 800 - state_change_time_sec u32 BE
+T6_OFF_FILE_STATE_TIME = T6_OFF_FILE + 784   # 800 - state_change_time_ms u32 BE
 T6_OFF_FILE_PLAYFLAG   = T6_OFF_FILE + 792   # 808 - playing_flag
 
 # Stash struct timespec in unused outgoing-args slack so we can call
@@ -213,7 +216,7 @@ T9_OFF_STATE          = 8
 T9_OFF_FILE           = 24
 T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # duration_ms (BE u32, T6 reads same)
 T9_OFF_FILE_POS        = T9_OFF_FILE + 780   # pos_at_state_change_ms (BE u32)
-T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # state_change_time_sec (BE u32)
+T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # state_change_time_ms (BE u32)
 T9_OFF_FILE_PLAYFLAG   = T9_OFF_FILE + 792   # playing_flag inside file_buf
 T9_OFF_FILE_BATTERY    = T9_OFF_FILE + 794   # battery_status inside file_buf
 T9_OFF_FILE_REPEAT     = T9_OFF_FILE + 795   # repeat_avrcp (AVRCP §5.2.4 Tbl 5.20)
@@ -967,17 +970,25 @@ def _emit_t6(a: Asm) -> None:
 
     Live position extrapolation: when playing_flag == 1 (PLAYING), T6
     calls clock_gettime(CLOCK_BOOTTIME, &timespec) and computes
-    `live_pos = saved_pos + (now_sec - state_change_sec) * 1000`. When
-    stopped / paused the position field stays at the saved freeze point.
+    `live_pos = saved_pos_ms + (now_ms - state_change_ms)`. now_ms =
+    tv_sec * 1000 + tv_nsec / 1e6, computed in-trampoline. When stopped
+    / paused the position field stays at the saved freeze point.
     CLOCK_BOOTTIME parity with Y1MediaBridge's SystemClock.elapsedRealtime
-    is what makes this arithmetic correct.
+    is what makes this arithmetic correct, and full ms precision on both
+    endpoints means the wire position is bit-exact, no ±1 s lurch on
+    state edges.
+
+    tv_nsec / 1_000_000 is computed via magic-multiply: the high half of
+    (tv_nsec * 0x431BDE83) right-shifted 18 yields floor(tv_nsec / 1e6)
+    bit-exact for tv_nsec in [0, 1e9). Standard GCC reciprocal — see
+    Hacker's Delight ch.10 for the derivation.
 
     The y1-track-info schema fields T6 reads (Y1MediaBridge writes these
     as big-endian; T6 byte-swaps to host-LE via REV before passing to the
     response builder, which expects register-native order):
       file[776..779]: duration_ms u32 BE
       file[780..783]: position_at_state_change_ms u32 BE
-      file[784..787]: state_change_time_sec u32 BE
+      file[784..787]: state_change_time_ms u32 BE
       file[792]:      playing_flag u8 (0=stopped / 1=playing / 2=paused;
                                        maps directly to AVRCP play_status)
     """
@@ -1023,7 +1034,8 @@ def _emit_t6(a: Asm) -> None:
 
     # Live position extrapolation.
     # If playing_flag == 1 (PLAYING):
-    #   live_pos = saved_pos + (now_sec - state_change_sec) * 1000
+    #   live_pos = saved_pos_ms + (now_ms - state_change_ms)
+    #   now_ms   = tv_sec * 1000 + tv_nsec / 1e6
     # Else (STOPPED / PAUSED):
     #   live_pos = saved_pos  (the position field IS the freeze point for
     #                          paused / stopped, which is what CTs expect)
@@ -1038,11 +1050,9 @@ def _emit_t6(a: Asm) -> None:
 
     # ---- clock_gettime(CLOCK_BOOTTIME, &timespec) ----
     # Default the timespec to zero so a syscall failure (extremely unlikely
-    # — clock_gettime can't really fail with valid args) gives us a sane
-    # fallback (delta_sec computed against now_sec=0 will yield a negative
-    # number which when multiplied by 1000 produces a position behind
-    # state_change_sec — still bounded, just useless. Polling CTs would just see
-    # the same value on each poll and stop animating).
+    # — clock_gettime can't really fail with valid args) yields a bounded
+    # fallback: now_ms collapses to 0, delta_ms wraps to (-state_change_ms)
+    # mod 2^32, position lurches once. Better than uninit garbage.
     a.movs_imm8(0, 0)
     a.str_sp_imm(0, T6_OFF_TIMESPEC_SEC)
     a.str_sp_imm(0, T6_OFF_TIMESPEC_NSEC)
@@ -1052,15 +1062,30 @@ def _emit_t6(a: Asm) -> None:
     a.movw(7, NR_clock_gettime)               # r7 = 263
     a.svc(0)
 
-    # ---- delta_sec = now_sec - state_change_sec ----
-    a.ldr_sp_imm(0, T6_OFF_FILE_STATE_TIME)   # r0 = state_change_sec (BE)
-    a.rev_lo_lo(0, 0)                         # → host order
-    a.ldr_sp_imm(1, T6_OFF_TIMESPEC_SEC)      # r1 = now_sec
-    a.subs_lo_lo(2, 1, 0)                     # r2 = now_sec - state_change_sec
+    # ---- now_ms = tv_sec * 1000 + tv_nsec / 1_000_000 ----
+    # tv_nsec/1e6 via magic-multiply: result = (tv_nsec * 0x431BDE83) >> 50,
+    # equivalent to taking the high half of the 64-bit product then >>18.
+    # 0x431BDE83 is GCC's standard reciprocal for unsigned div-by-1e6 on
+    # a u32 input bounded by 1e9 (tv_nsec < 1_000_000_000). Verified
+    # bit-exact for the full input range — see trampoline header comment.
+    a.ldr_sp_imm(2, T6_OFF_TIMESPEC_SEC)      # r2 = tv_sec
+    a.movw(0, 1000)
+    a.muls_lo_lo(2, 0)                        # r2 = tv_sec * 1000
+    a.ldr_sp_imm(0, T6_OFF_TIMESPEC_NSEC)     # r0 = tv_nsec
+    a.movw(1, 0xDE83)
+    a.movt(1, 0x431B)                         # r1 = 0x431BDE83 (magic)
+    a.umull(4, 3, 0, 1)                       # r3:r4 = tv_nsec * magic; r3 = high half
+    a.lsrs_imm5(3, 3, 18)                     # r3 = high >> 18 = tv_nsec / 1e6
+    a.adds_lo_lo(2, 2, 3)                     # r2 = now_ms (= tv_sec*1000 + tv_nsec/1e6)
 
-    # ---- delta_ms = delta_sec * 1000 ----
-    a.movw(0, 1000)                           # r0 = 1000
-    a.muls_lo_lo(2, 0)                        # r2 = r2 * r0 (= delta_ms)
+    # ---- delta_ms = now_ms - state_change_ms ----
+    # state_change_time field at file[784..787] is now u32 ms-since-boot
+    # (was sec-since-boot). u32 modular subtraction; correct under wrap
+    # provided both endpoints are in the same domain. u32 ms wraps after
+    # ~49.7 days uptime, well past any Y1 reboot cycle.
+    a.ldr_sp_imm(0, T6_OFF_FILE_STATE_TIME)   # r0 = state_change_ms (BE)
+    a.rev_lo_lo(0, 0)                         # → host order
+    a.subs_lo_lo(2, 2, 0)                     # r2 = delta_ms
 
     # ---- live_pos = saved_pos + delta_ms ----
     a.ldr_sp_imm(3, T6_OFF_FILE_POS)          # r3 = saved_pos (BE)
@@ -1833,19 +1858,30 @@ def _emit_t9(a: Asm) -> None:
     a.movw(7, NR_clock_gettime)
     a.svc(0)
 
-    # ---- live_pos = saved_pos + (now_sec - state_change_sec) * 1000 ----
-    # Same arithmetic T6 does for GetPlayStatus. Y1MediaBridge writes
-    # state_change_time_sec from `SystemClock.elapsedRealtime() / 1000` —
-    # CLOCK_BOOTTIME parity with what we read here, which makes the
-    # subtraction yield the wall-clock seconds elapsed since the last
-    # play / pause edge.
-    a.ldr_sp_imm(0, T9_OFF_FILE_STATE_TIME)   # r0 = state_change_sec (BE)
-    a.rev_lo_lo(0, 0)                         # → host order
-    a.ldr_sp_imm(1, T9_OFF_TIMESPEC_SEC)      # r1 = now_sec
-    a.subs_lo_lo(2, 1, 0)                     # r2 = now_sec - state_change_sec
+    # ---- now_ms = tv_sec * 1000 + tv_nsec / 1_000_000 ----
+    # Same arithmetic T6 does for GetPlayStatus, including the magic-multiply
+    # for tv_nsec/1e6. Y1MediaBridge writes state_change_time_ms directly
+    # from SystemClock.elapsedRealtime() with no /1000 truncation, so both
+    # endpoints carry full ms precision. CLOCK_BOOTTIME parity with the
+    # bridge's elapsedRealtime makes the subtraction exact.
+    a.ldr_sp_imm(2, T9_OFF_TIMESPEC_SEC)      # r2 = tv_sec
     a.movw(0, 1000)
-    a.muls_lo_lo(2, 0)                        # r2 = delta_ms
+    a.muls_lo_lo(2, 0)                        # r2 = tv_sec * 1000
+    a.ldr_sp_imm(0, T9_OFF_TIMESPEC_NSEC)     # r0 = tv_nsec
+    a.movw(1, 0xDE83)
+    a.movt(1, 0x431B)                         # r1 = 0x431BDE83 (magic)
+    a.umull(5, 3, 0, 1)                       # r3:r5 = tv_nsec * magic; r3 = high half
+    a.lsrs_imm5(3, 3, 18)                     # r3 = high >> 18 = tv_nsec / 1e6
+    a.adds_lo_lo(2, 2, 3)                     # r2 = now_ms
 
+    # ---- delta_ms = now_ms - state_change_ms ----
+    # u32 modular subtraction; correct under wrap (u32 ms wraps at ~49.7
+    # days uptime, well past Y1 reboot cadence).
+    a.ldr_sp_imm(0, T9_OFF_FILE_STATE_TIME)   # r0 = state_change_ms (BE)
+    a.rev_lo_lo(0, 0)                         # → host order
+    a.subs_lo_lo(2, 2, 0)                     # r2 = delta_ms
+
+    # ---- live_pos = saved_pos + delta_ms ----
     a.ldr_sp_imm(3, T9_OFF_FILE_POS)          # r3 = saved_pos (BE)
     a.rev_lo_lo(3, 3)                         # → host order
     a.adds_lo_lo(3, 3, 2)                     # r3 = live_pos
