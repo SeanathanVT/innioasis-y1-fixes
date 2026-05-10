@@ -172,7 +172,7 @@ Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3), both curren
 | 0x11 ListPlayerApplicationSettingAttributes | `0x35d0` | Returns `[Repeat=2, Shuffle=3]`, n=2 |
 | 0x12 ListPlayerApplicationSettingValues | `0x35c4` | Switches on inbound `attr_id`: Repeat → `[1,2,3,4]`, Shuffle → `[1,2,3]`, else reject |
 | 0x13 GetCurrentPlayerApplicationSettingValue | `0x35b8` | Returns `[(Repeat, OFF), (Shuffle, OFF)]` (iter1 hardcoded) |
-| 0x14 SetPlayerApplicationSettingValue | `0x3594` | Reject status `0x06 INTERNAL_ERROR` per AVRCP 1.3 §6.15.2 — peer learns the PDU was understood but the change could not be applied |
+| 0x14 SetPlayerApplicationSettingValue | `0x3594` | Reads inbound `(attr_id, value)` pair from caller's sp+387/+388, writes 2 bytes to `/data/data/com.y1.mediabridge/files/y1-papp-set` (atomic O_WRONLY|O_TRUNC), ACKs the peer. Y1MediaBridge's `FileObserver` consumes the CLOSE_WRITE, translates AVRCP→Y1 enum, and broadcasts to the music app where Patch B3's `PappSetReceiver` applies via `SharedPreferencesUtils.setMusicRepeatMode/setMusicIsShuffle`. Multi-pair Sets (n>1) only the first pair is applied. |
 | 0x15 GetPlayerApplicationSettingAttributeText | `0x35ac` | Accumulator: emit "Repeat" (idx=0) then "Shuffle" (idx=1, total=2 → SendMessage) |
 | 0x16 GetPlayerApplicationSettingValueText | `0x35a0` | Iter1 emits "Off" for the first inbound value_id when attr_id is 2 or 3; unsupported attr_ids fall through with no response (peer times out / falls back) |
 
@@ -409,6 +409,17 @@ return v0                       # first press: let the framework continue dispat
 **Patch H″** — framework-synthetic-repeat filter, paired with NEXT/PREV keycode propagation. Logically a single change embedded in both Patch H and Patch H′.
 
 Android 4.2.2's `InputDispatcher::synthesizeKeyRepeatLocked` synthesizes `KeyEvent` repeats independently of the kernel's `EV_REP` (which U1 patches off in `libextavrcp_jni.so:0x74e8`); for AVRCP-derived keycodes those synthetic repeats trigger `BasePlayerActivity.onKeyLongPress` at `repeatCount == 8` → music app enters FF/RW mode and stays stuck if the CT drops PASSTHROUGH RELEASE under subscribe load. H″ filters them: `getRepeatCount() > 0` → return TRUE (silent consume); `== 0` → propagate normally. Applies in both `BaseActivity` (Patch H) and `BasePlayerActivity` (Patch H′). The addition of `0x57` / `0x58` to the propagated keycode set is also part of H″.
+
+**Patch B3** — `com.koensayr.PappSetReceiver` for AVRCP-driven Repeat / Shuffle Sets.
+
+Adds a new BroadcastReceiver class to the music app and registers it dynamically from `Y1Application.onCreate`. Listens for two actions emitted by `Y1MediaBridge`'s FileObserver on `y1-papp-set` after T_papp's PDU 0x14 arm:
+
+| Action | Extra | Calls |
+|---|---|---|
+| `com.y1.mediabridge.SET_REPEAT_MODE` | `value:I` (Y1 enum 0/1/2 = OFF/ONE/ALL) | `SharedPreferencesUtils.setMusicRepeatMode(I)` |
+| `com.y1.mediabridge.SET_IS_SHUFFLE` | `value:Z` | `SharedPreferencesUtils.setMusicIsShuffle(Z)` |
+
+Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so PlayerService re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. Closes the iter3 round-trip from peer-CT PDU 0x14 → Y1's actual Repeat / Shuffle state.
 
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 
