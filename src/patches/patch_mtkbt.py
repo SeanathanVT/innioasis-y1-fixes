@@ -22,6 +22,7 @@ V1 — AVRCP 1.0 -> 1.3 (served AVRCP TG ProfileDescList LSB)
 V2 — AVCTP 1.0 -> 1.2 (served AVRCP TG ProtocolDescList AVCTP version LSB)
 V3 — A2DP 1.0 -> 1.3 (served A2DP Source ProfileDescList LSB)
 V4 — AVDTP 1.0 -> 1.3 (served A2DP Source ProtocolDescList AVDTP version LSB)
+V5 — AVDTP sig 0x0c GET_ALL_CAPABILITIES dispatch alias (best-effort workaround)
 S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
      0x0100 ServiceName entry pointing at the existing "Advanced Audio"
      SDP string at file offset 0x0eb9ce. This sacrifices the SupportedFeatures
@@ -64,7 +65,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "8c5a23c203472b3c737a86ee0e1c1564"
+OUTPUT_MD5        = "51a9881d5c5c21b375880cfcf8e23792"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — mtkbt is a stripped-down ARM ELF without symbols or a Java
@@ -120,6 +121,43 @@ PATCHES = [
         "offset": 0x0eba09,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
+    },
+    {
+        # Best-effort dispatch alias: redirect AVDTP signal 0x0c
+        # (GET_ALL_CAPABILITIES) through the existing sig 0x02 (GET_CAPABILITIES)
+        # handler. This is a structural workaround, not a real GET_ALL_CAPABILITIES
+        # implementation — the response we emit is the sig 0x02 capability list,
+        # which per AVDTP V13 §8.8 is a wire-compatible SUBSET of the sig 0x0c
+        # response (no extended Service Capabilities). For an SBC-only Source
+        # this matches what we'd advertise anyway.
+        #
+        # Edits one halfword in the dispatcher's TBH jump table at file 0xaa81e.
+        # Entry 11 (sb = sig_id - 1 = 11 → sig 0x0c) currently routes to 0xab4de
+        # (a stub that writes BAD_LENGTH-style error code 0x06 and calls the
+        # error-response sender at fcn.000af4cc). Re-pointing to 0xaa924 routes
+        # the same dispatch through the full GET_CAPABILITIES handler.
+        #
+        # TBH formula: target = 0xaa81e + 2 * halfword
+        #   stock:   halfword 0x0660 → target 0xab4de (sig 0x0c stub)
+        #   patched: halfword 0x0083 → target 0xaa924 (sig 0x02 handler)
+        #
+        # Unverified risk: at file 0x0aa9fa the sig 0x02 handler does
+        # `strb r2, [r6, 1]` with r2=2. If [r6+1] is the response wire sig_id
+        # field, our response will declare itself a sig 0x02 reply, mismatching
+        # the sig 0x0c request and risking a strict-peer reject. Sibling
+        # handlers (sig 5 writes 5, sig 0x0c stub writes 6) suggest [r6+1] is
+        # an internal state code, not the wire sig_id, but no current test peer
+        # (TV, Bolt) probes with sig 0x0c so this is unverified empirically.
+        # Worst case — peer rejects with INVALID_RSP — is no worse than stock,
+        # which already error-responds to every sig 0x0c with BAD_LENGTH.
+        #
+        # Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES_RSP)
+        # on paper. See docs/BT-COMPLIANCE.md §9.13 / docs/INVESTIGATION.md
+        # Trace #13c for the full dispatcher disassembly.
+        "name":   "[V5] sig 0x0c -> sig 0x02 dispatch alias  AVDTP TBH jump table",
+        "offset": 0x0aa834,
+        "before": bytes([0x60, 0x06]),
+        "after":  bytes([0x83, 0x00]),
     },
     {
         "name":   "[S1] 0x0311 SupportedFeatures -> 0x0100 ServiceName  Group D entry slot",

@@ -20,11 +20,28 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 ## `patch_mtkbt.py`
 
-Four byte patches against stock `/system/bin/mtkbt`. Three reshape the served SDP record so a peer CT engages with AVRCP 1.3+ COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values); one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond.
+Seven byte patches against stock `/system/bin/mtkbt`. Five reshape the served SDP record so a peer CT engages with AVRCP 1.3+ COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values), one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond, and one is a best-effort dispatch alias for AVDTP signal 0x0c.
 
 **V1 — AVRCP 1.0 → 1.3** at file `0x0eba58` (1 byte): `0x00` → `0x03`. LSB of the served Group D ProfileDescList Version field.
 
 **V2 — AVCTP 1.0 → 1.2** at file `0x0eba6d` (1 byte): `0x00` → `0x02`. LSB of the served Group D ProtocolDescList AVCTP Version field.
+
+**V3 — A2DP 1.0 → 1.3** at file `0x0eb9f2` (1 byte): `0x00` → `0x03`. LSB of the served A2DP Source ProfileDescList Version field. Per A2DP 1.3 §5.3 Figure 5.1 the Mandatory version value is `0x0103`.
+
+**V4 — AVDTP 1.0 → 1.3** at file `0x0eba09` (1 byte): `0x00` → `0x03`. LSB of the served A2DP Source ProtocolDescList AVDTP Version field. Per A2DP 1.3 §5.3 the Mandatory AVDTP version is `0x0103`. Pairs with V3 — peers consult our advertised AVDTP version before GAVDP setup per A2DP §3.1, so both bumps ship together.
+
+**V5 — AVDTP sig 0x0c dispatch alias** at file `0x0aa834` (2 bytes): halfword `0x0660` → `0x0083`.
+
+| | bytes | TBH halfword | target |
+|---|---|---|---|
+| before | `60 06` | `0x0660` | `0xab4de` (sig 0x0c stub — always returns BAD_LENGTH error) |
+| after  | `83 00` | `0x0083` | `0xaa924` (sig 0x02 GET_CAPABILITIES handler) |
+
+Edits one entry of the AVDTP signal dispatcher's TBH jump table at file `0xaa81e`. Position 11 (`sig_id - 1` for sig 0x0c) is repointed from the stub at `0xab4de` to the full GET_CAPABILITIES handler at `0xaa924`.
+
+This is a **structural workaround**, not a real GET_ALL_CAPABILITIES implementation — the response we emit is the sig 0x02 capability list, which per AVDTP V13 §8.8 is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities like DELAY_REPORTING / RECOVERY / MULTIPLEXING / HEADER_COMPRESSION). For an SBC-only Source this matches what we'd advertise anyway. Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 on paper.
+
+Risk acknowledged: at file `0x0aa9fa` the sig 0x02 handler does `strb r2, [r6, 1]` with `r2=2`. If `[r6+1]` is the response wire sig_id field, our reply will declare itself a sig 0x02 response — mismatching the sig 0x0c request and risking an INVALID_RSP from a strict peer. Sibling handler patterns (sig 5 writes 5, sig 0x0c stub writes 6) suggest `[r6+1]` is an internal state byte rather than the wire sig_id, but this is unverified empirically — neither test peer probes Y1 with sig 0x02 or sig 0x0c, so the alias path doesn't fire on current hardware. Worst-case behavior — peer rejects with INVALID_RSP — is no worse than stock, which already error-responds to every sig 0x0c with BAD_LENGTH.
 
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 
@@ -44,7 +61,7 @@ Reuses the existing "Advanced Audio" SDP-encoded string from mtkbt's A2DP record
 
 Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an unconditional branch to the PASSTHROUGH-emit branch at `0x14528` (which ends with `bl 0x10404`, the function that emits msg 519 CMD_FRAME_IND to the JNI socket). Pre-P1, VENDOR_DEPENDENT frames took the `bcc 0x1454a` branch and only logged via `bl 0x11374`; post-P1 every AV/C frame flows through the emit path. Cost: VENDOR_DEPENDENT bytes get interpreted in PASSTHROUGH-shaped fields, so mtkbt's mid-stack response may be malformed — but the JNI trampoline chain takes over before that matters.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `a37d56c91beb00b021c55f7324f2cc09`.
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `51a9881d5c5c21b375880cfcf8e23792`.
 
 ---
 

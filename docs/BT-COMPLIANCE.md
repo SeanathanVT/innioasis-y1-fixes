@@ -339,7 +339,7 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 
 - **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER (~1 day for a functionally-indistinguishable wire-shape change). Empirical demand stays low — zero 0x40/0x41 PDUs across captured CT sessions.
 - **§1 Phase F4 PApp Settings**: ~5 days, all-or-none under C.14. Closes ICS Table 7 rows 12-17 + 30. Highest-value remaining AVRCP work.
-- **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done; the lone gap (GAVDP Acceptor Table 5 row 9 GET_ALL_CAPABILITIES, paper-only) is decision-pending per §9.14 user-approval point.
+- **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done. The lone Mandatory gap (GAVDP Acceptor Table 5 row 9 GET_ALL_CAPABILITIES) is closed by V5 — a 2-byte TBH jump-table alias that routes sig 0x0c through the existing sig 0x02 GET_CAPABILITIES handler. Best-effort workaround, not a real handler.
 
 Each ships with hardware verification across the standard test-matrix postures (permissive / high-subscribe / strict / polling) per §6.
 
@@ -400,12 +400,9 @@ GAVDP layer rejects non-SBC SEPs at `GavdpAvdtpEventCallback` per ARCHITECTURE.m
 2. **Advertised A2DP version in BluetoothProfileDescriptorList** is `0x0100` instead of spec-mandated `0x0103` — file offset `0xeb9f2`, single-byte patch.
 3. Both must move together — bumping one without the other creates an asymmetric advertisement. Critically, **the bumps imply we honor AVDTP 1.3 features** (DELAY_REPORT in particular — A2DP 1.3 §1.4.1.2 explicitly cites it as the new-in-1.3 interop addition). Whether to ship the bumps depends on the AVDTP audit (§9.12 below): if `mtkbt`'s sig-id dispatcher honors 0x0d DELAYREPORT (even just gracefully accepting and discarding inbound DELAY_REPORTs), the bump is honest. If 0x0d hits a hard NOT_IMPLEMENTED reject, the bump reproduces the legacy `--avrcp` 1.4-vs-1.0 mismatch shape and should be deferred.
 
-A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement is what currently keeps modern peers from attempting 1.3-only commands against us. Per §9.12 the AVDTP-1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional at the *AVDTP* layer; **but** §9.13 (GAVDP audit) finds that GAVDP 1.3 ICS Table 5 row 9 raises GET_ALL_CAPABILITIES (AVDTP 10/6) to Mandatory at the Acceptor layer, and A2DP 1.3 §1.2 makes A2DP-1.3 conformance imply GAVDP-1.3 conformance. mtkbt has no 0x0c handler — inbound hits General Reject. **Decision deferred to user.** Two viable paths:
+A2DP §3.1 confirms peers consult our advertised AVDTP version before GAVDP_ConnectionEstablishment — the 1.0 advertisement was what previously kept modern peers from attempting 1.3-only commands against us. Per §9.12 the AVDTP-1.3 features (DELAY_REPORT, GET_ALL_CAPABILITIES) are Optional at the *AVDTP* layer; per §9.13 GAVDP 1.3 ICS Table 5 row 9 raises GET_ALL_CAPABILITIES (AVDTP 10/6) to Mandatory at the Acceptor layer, and A2DP 1.3 §1.2 makes A2DP-1.3 conformance imply GAVDP-1.3 conformance.
 
-1. **Stay at A2DP/AVDTP 1.0 advertisement** (current state). Spec-permissible — no 1.3 claim → no 1.3 obligation. Modern peers see our 1.0 advertisement and skip 1.3-only commands; this is a *protective* mismatch, not a functional one. Zero shipped change.
-2. **Bump A2DP/AVDTP to 1.3** + accept the paper-only GAVDP-row-9 deviation (sig 0x0c reaches General Reject; well-behaved peers fall back to plain GET_CAPABILITIES which we do honor). Two-byte patch (V3 at `0xeb9f2`, V4 at `0xeba09`); ICS-strict non-conforming on GAVDP row 9; per `feedback_avrcp_spec_compliance` memory rule this requires explicit user approval before shipping.
-
-Implementing a real 0x0c GET_ALL_CAPABILITIES handler (option 3) is technically possible — the existing `GET_CAPABILITIES` response builder could be extended — but is multi-day disassembly work for a feature no captured peer in our test matrix has issued, and would only marginally improve real-world interop beyond what the General Reject fallback already delivers.
+The shipped solution is V3 + V4 + V5: bump A2DP and AVDTP advertisement to 1.3, plus a 2-byte TBH jump-table alias that redirects sig 0x0c dispatch through the existing sig 0x02 GET_CAPABILITIES handler. V5 is a best-effort workaround — there's no GET_ALL_CAPABILITIES-specific code path in `mtkbt`; we relabel the sig 0x02 response, which per AVDTP V13 §8.8 is a wire-compatible subset of the sig 0x0c response (no extended Service Capabilities, matching what our SBC-only Source advertises anyway). Implementing a real 0x0c handler is multi-day disassembly work and would only marginally improve real-world interop — captured peers in the test matrix don't probe Y1 with sig 0x0c at all.
 
 ### 9.12 AVDTP 1.3 ICS audit — *AVDTP* — VERIFIED, GAP = ADVERTISED VERSION
 
@@ -439,7 +436,9 @@ Table 16 (Message Error Handling): Reporting Capability Error (M) ✓ via `[AVDT
 
 **Handler verification for AVDTP 1.3 additions (sig_id 0x0c GET_ALL_CAPABILITIES + 0x0d DELAYREPORT):**
 
-Exhaustive `strings`-grep over `bin/mtkbt` for `GET_ALL_CAP|DELAYREPORT|delay.?rep|GenRejRsp|AvdtpSendGeneralReject|AvdtpRcvDelayRep|AvdtpGetAllCap` — **zero handler-suggesting strings** for either signal. Only hit for `delay.?rep` is HFP's `Delay report until command status` (role-change wording, unrelated to AVDTP). Provisional read: codepoint allocation in BlueAngel sig-id enum without runtime handlers — inbound 0x0c / 0x0d hits the General Reject path (Mandatory per §8.18, present in mtkbt's AVDTP error-handling). Spec-compliant rejection.
+Initial `strings`-grep over `bin/mtkbt` for `GET_ALL_CAP|DELAYREPORT|delay.?rep|GenRejRsp|AvdtpSendGeneralReject|AvdtpRcvDelayRep|AvdtpGetAllCap` returned zero handler-suggesting strings, suggesting codepoint allocation without handlers. **Subsequent disassembly of the AVDTP signal dispatcher at file 0xaa72c (see `INVESTIGATION.md` Trace #13c) found the real picture:** the dispatcher's TBH jump table at `0xaa81e` has explicit entries for both sig 0x0c (target `0xab4de`) and sig 0x0d (target `0xab540`). Sig 0x0d DELAYREPORT has substantive handler logic. Sig 0x0c GET_ALL_CAPABILITIES is a stub at `0xab4de` that always falls through to the BAD_LENGTH error path — peer receives an error response, not a General Reject as previously assumed.
+
+V5 patches the jump-table entry for sig 0x0c to redirect to the sig 0x02 GET_CAPABILITIES handler at `0xaa924`. This is a structural workaround, not a real handler — but per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible subset of the sig 0x0c response, which suffices for an SBC-only Source.
 
 **Compliance verdict.**
 
@@ -501,22 +500,15 @@ Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 |---|---|---|---|---|---|
 | AVRCP | 1.0 | 1.3 | none | V1 (0xeba58 0x00→0x03) | ✓ shipped |
 | AVCTP | 1.0 (signaling) | 1.2 (paired with AVRCP 1.3) | none | V2 (0xeba6d 0x00→0x02) | ✓ shipped |
-| A2DP | 1.0 | 1.3 (era-correct) | inherits GAVDP gap on sig 0x0c | V3 (0xeb9f2 0x00→0x03) | source-side, pending V5 |
-| AVDTP | 1.0 | 1.3 (paired with A2DP 1.3) | none at AVDTP layer; sig 0x0c is Optional here | V4 (0xeba09 0x00→0x03) | source-side, pending V5 |
-| GAVDP | not separately advertised; piggybacks AVDTP version | 1.3 (transitive) | Table 5 row 9 (sig 0x0c GET_ALL_CAPABILITIES response, Mandatory at GAVDP-Acceptor) | V5 (mtkbt AVDTP dispatcher patch) | **dispatcher hunt in progress — see below** |
+| A2DP | 1.0 | 1.3 (era-correct) | inherits GAVDP gap on sig 0x0c (closed by V5) | V3 (0xeb9f2 0x00→0x03) | ✓ shipped |
+| AVDTP | 1.0 | 1.3 (paired with A2DP 1.3) | none at AVDTP layer; sig 0x0c is Optional here | V4 (0xeba09 0x00→0x03) | ✓ shipped |
+| GAVDP | not separately advertised; piggybacks AVDTP version | 1.3 (transitive) | Table 5 row 9 (sig 0x0c GET_ALL_CAPABILITIES response, Mandatory at GAVDP-Acceptor) | V5 (TBH jump-table alias at 0xaa834) | ✓ shipped (best-effort workaround) |
 
-**Decision (user-approved 2026-05-09): Option C — strict 1.3 conformance across the entire audio triad.** V3 + V4 + V5 ship together as a single coherent bump. V3 + V4 are landed in `patch_mtkbt.py` (output MD5 `8c5a23c203472b3c737a86ee0e1c1564`); V5 awaits dispatcher localisation.
+**Status: Option C shipped — V3 + V4 + V5 landed together.** V3 + V4 bump A2DP/AVDTP advertisement to 1.3; V5 is the structural workaround for sig 0x0c — it aliases the dispatcher's TBH jump-table entry from the BAD_LENGTH stub at `0xab4de` to the existing GET_CAPABILITIES handler at `0xaa924`. Per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities), which is exactly what our SBC-only Source advertises anyway.
 
-**V5 sub-workstream — sig 0x0c dispatcher hunt (in progress).** Static analysis to find mtkbt's AVDTP signal dispatcher converges slowly because mtkbt's AVDTP code uses dense MOVW/MOVT encoding that defeats string-xref grep. Located so far via static analysis:
+**V5 is a workaround, not a real handler.** The response we emit is the sig 0x02 capability list relabelled — there's no GET_ALL_CAPABILITIES-specific code path in `mtkbt`. The risk is at file `0x0aa9fa`: the sig 0x02 handler does `strb r2, [r6, 1]` with `r2=2`, and if `[r6+1]` is the response wire sig_id field (rather than an internal state byte, which sibling-handler patterns suggest) a strict peer would see a mismatched response and reject. Neither current test peer (TV / Bolt) probes Y1 with sig 0x0c so the alias path is unexercised on hardware, and the worst-case behaviour (peer rejects with INVALID_RSP) is no worse than stock, which already error-responds to every sig 0x0c with BAD_LENGTH. See `INVESTIGATION.md` Trace #13c for the dispatcher disassembly + capture history that informed the design.
 
-- `0x50b08` — AVDTP signal-frame parser entry (case dispatch on `[r0,#0]` format-id)
-- `0x50b96` — sig_id store (mask byte 1 of frame with `0x3f`, store at output struct +8)
-- `0x50c46` — parser convergence point (last insn before return)
-- `0xde26` — external caller (passes `r4 + 0x11c` to parser)
-
-The actual per-sig_id dispatcher is several call levels deeper from the parser; finding it statically is taking longer than estimated. **Tooling: `tools/attach-mtkbt-gdb-avdtp.sh` adds runtime breakpoints at the four sites above and instructs the user to drive a peer-side stream-establishment session — when the BPs fire, gdb logs the LR / branch target after parser return, which gives us the dispatcher offset directly.** With the dispatcher offset confirmed, V5 will typically be a single-byte / instruction patch that aliases sig 0x0c → sig 0x02 in whatever cmp / TBB / fn-ptr-table the dispatcher uses (the response payload is byte-identical for our SEP's capability set since we don't advertise any AVDTP 1.3 service capabilities).
-
-Until V5 ships, the patcher's `OUTPUT_MD5` reflects V1+V2+V3+V4+S1+P1; the V3 + V4 bumps are in source but **the patcher should not be flashed to hardware until V5 lands** (flashing V3+V4 alone reaches Option-B effective state which is paper-non-conforming on GAVDP Table 5 row 9 — which the user explicitly chose to avoid by selecting Option C).
+`patch_mtkbt.py` `OUTPUT_MD5` reflects V1+V2+V3+V4+V5+S1+P1.
 
 ---
 

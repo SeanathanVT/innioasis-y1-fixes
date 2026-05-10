@@ -6,7 +6,7 @@ Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the
 
 | Patcher | Target | Wired by |
 |---|---|---|
-| **`patch_mtkbt.py`** | `mtkbt` (Bluetooth daemon) — SDP shape (V1/V2/S1) + force-PASSTHROUGH-emit op_code dispatch (P1) | `--avrcp` |
+| **`patch_mtkbt.py`** | `mtkbt` (Bluetooth daemon) — SDP shape (V1/V2/V3/V4/S1) + force-PASSTHROUGH-emit op_code dispatch (P1) + best-effort AVDTP sig 0x0c → sig 0x02 dispatch alias (V5) | `--avrcp` |
 | **`patch_libextavrcp_jni.py`** | `libextavrcp_jni.so` — R1 redirect, T1/T2-stub trampolines, the dynamically-assembled trampoline blob in LOAD #1 padding (extended_T2/T4/T5/T_charset/T_battery/T_continuation/T6/T8/T9), U1 kernel-auto-repeat NOP, and the LOAD #1 program-header extension. Blob built by `_trampolines.py` using the Thumb-2 assembler in `_thumb2asm.py`. | `--avrcp` |
 | **`patch_mtkbt_odex.py`** | `MtkBt.odex` — F1 (`getPreferVersion()` flag), F2 (`disable()` reset of `sPlayServiceInterface`), and two cardinality NOPs that wake `notificationTrackChangedNative` / `notificationPlayStatusChangedNative` on every Y1MediaBridge broadcast. Recomputes DEX adler32. | `--avrcp` |
 | **`patch_y1_apk.py`** | `com.innioasis.y1*.apk` — smali patches A/B/C (Artist→Album navigation), Patch E (discrete PASSTHROUGH PLAY/PAUSE/STOP routing in `PlayControllerReceiver`), Patch H (`BaseActivity.dispatchKeyEvent` propagates unhandled media keys past the foreground activity). Uses androguard + apktool. | `--music-apk` (A/B/C/H), `--avrcp` (E) |

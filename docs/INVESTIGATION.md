@@ -10,7 +10,7 @@ Current shipped patches by binary:
 
 | Binary | Patches |
 |---|---|
-| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte), V2 (AVCTP 1.0→1.2 SDP byte), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame) |
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame) |
 | `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard) |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
