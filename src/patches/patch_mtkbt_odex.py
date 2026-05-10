@@ -107,7 +107,7 @@ import zlib
 from pathlib import Path
 
 STOCK_MD5         = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5        = "fa2e34b178bee4dfae4a142bc5c1b701"
+OUTPUT_MD5        = "00cc642742044286966cbb7b01135ca7"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — currently we only patch DEX bytecode in-place via byte
@@ -149,6 +149,31 @@ PATCHES = [
         # libextavrcp_jni.so hook at 0x3c88.
         "offset": 0x3c4fe,
         "before": bytes([0x38, 0x05, 0xf3, 0xff]),  # if-eqz v5, +-13 (-> :cond_184)
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
+    },
+    {
+        "name":   "BTAvrcpMusicAdapter$3.onReceive playstatechanged dedupe NOP",
+        # Stock onReceive dedupes on `mPreviousPlayStatus == getPlayerstatus()`
+        # via `if-eq v3, v2, :cond_50` (where v3 = access$000() = last status,
+        # v2 = current status). The dedupe blocks every `playstatechanged`
+        # broadcast when the boolean play/pause status hasn't changed —
+        # killing three things downstream:
+        #   1. The 1 Hz `mPosTickRunnable` cadence that drives T9's
+        #      PLAYBACK_POS_CHANGED CHANGED frames (status doesn't change
+        #      while playing → no msg=1 → no T9).
+        #   2. iter4's PLAYER_APPLICATION_SETTING_CHANGED CHANGED loop
+        #      (Repeat/Shuffle flips don't change play_status → dedupe →
+        #      T9's papp edge block never fires).
+        #   3. PAUSED → STOPPED transitions (getPlayerstatus collapses
+        #      both to "2 PAUSED" while sMusicId > -1 → dedupe → CT
+        #      keeps showing PAUSED forever).
+        # NOPing the if-eq lets every playstatechanged broadcast post msg=1
+        # and msg=2. T9 fires unconditionally (its own per-edge checks gate
+        # wire emits). T5 fires on msg=2; its internal track_id state-vs-
+        # file-bytes dedupe at sp+0..7 prevents wire spam on non-track-edge
+        # invocations.
+        "offset": 0x3b310,
+        "before": bytes([0x32, 0x23, 0xea, 0xff]),  # if-eq v3, v2, +0xffea
         "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
     },
     {
