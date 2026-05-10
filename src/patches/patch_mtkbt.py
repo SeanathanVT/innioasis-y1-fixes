@@ -63,7 +63,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "04daa66a4694d5b2602ab740ed2511aa"
+OUTPUT_MD5        = "5d65088540898231d5f235ac270ad5e1"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — mtkbt is a stripped-down ARM ELF without symbols or a Java
@@ -173,6 +173,32 @@ PATCHES = [
         "before": entry(0x0311, 0x0003, 0x000eba59),
         # patched: attr=0x0100, len=0x11, ptr=0x0eb9ce (-> SDP TEXT_STR_8 "Advanced Audio\\0")
         "after":  entry(0x0100, 0x0011, 0x000eb9ce),
+    },
+    {
+        # V6 routes the SDP record builder to a different served record whose
+        # entry slot at vaddr 0xfa794 advertises attr 0x000d
+        # AdditionalProtocolDescriptorList (Browse PSM 0x001b) — an AVRCP 1.4
+        # feature, not part of strict AVRCP 1.3 §3 SDP record shape. V7 swaps
+        # this slot for a 0x0100 ServiceName entry (analogous to S1 for the
+        # other table) reusing the same "Advanced Audio" string. Net wire:
+        # drops Browse advertisement, restores ServiceName presence.
+        "name":   "[V7] 0x000d Browse PSM -> 0x0100 ServiceName  AVRCP 1.3 record entry slot",
+        "offset": 0x0f9798,
+        # stock entry: attr=0x000d, len=0x14, ptr=0x0eba12 (-> AdditionalProtocolDescList Browse PSM 0x1b)
+        "before": entry(0x000d, 0x0014, 0x000eba12),
+        # patched: attr=0x0100, len=0x11, ptr=0x0eb9ce (-> SDP TEXT_STR_8 "Advanced Audio\\0")
+        "after":  entry(0x0100, 0x0011, 0x000eb9ce),
+    },
+    {
+        # SupportedFeatures byte stream LSB. V6's served record uses the byte
+        # stream at 0xeba4c (`09 00 21`) — bit 5 set is GroupNavigation, an
+        # AVRCP 1.4 capability. AVRCP 1.3 §6.5 Table 6.10: bits 4-15 are
+        # Reserved (must be 0). V8 clears bit 5 so the advertised mask is
+        # 0x0001 (Category 1: Player/Recorder only), matching strict 1.3.
+        "name":   "[V8] SupportedFeatures 0x0021 -> 0x0001  clear AVRCP 1.4 GroupNavigation bit",
+        "offset": 0x0eba4e,
+        "before": bytes([0x21]),
+        "after":  bytes([0x01]),
     },
     {
         # `cmp r3, #0x30` at 0x144e8 → `b.n 0x14528` (unconditional). Bypasses

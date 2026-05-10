@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AVRCP 1.4 attr 0x000d Browse PSM advertisement, clear AVRCP 1.4 GroupNavigation feature bit, ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every Y1MediaBridge broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -18,7 +18,9 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 ## `patch_mtkbt.py`
 
-Seven byte patches against stock `/system/bin/mtkbt`. Five reshape the served SDP record so a peer CT engages with AVRCP 1.3+ COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values), one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond, and one is a best-effort dispatch alias for AVDTP signal 0x0c.
+Ten byte patches against stock `/system/bin/mtkbt`. Eight reshape the served SDP record so a peer CT engages with AVRCP 1.3 COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values), one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond, and one is a best-effort dispatch alias for AVDTP signal 0x0c.
+
+The mtkbt daemon ships two physical AVRCP TG SDP record templates in `.data.rel.ro`. The internal `activeVersion` field selects which is served on the wire: stock = 10 (legacy 1.0 record), V6 → 14 (AVRCP 1.3 record). V1/V2/S1 patch the legacy record (kept for the fall-through path); V7/V8 patch the AVRCP 1.3 record (where V6 routes the daemon by default) so it conforms to strict AVRCP 1.3 §3 SDP record shape — no Browse PSM advertisement, no 1.4-class feature bits.
 
 **V1 — AVRCP 1.0 → 1.3** at file `0x0eba58` (1 byte): `0x00` → `0x03`. LSB of the served Group D ProfileDescList Version field.
 
@@ -41,6 +43,33 @@ This is a **structural workaround**, not a real GET_ALL_CAPABILITIES implementat
 
 Wire-correct by decoupling: the response builder is `fcn.000ae418` (calls `L2CAP_SendData` at file `0xae58e`), and byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]` — the per-channel transaction state populated by the request parser at RX time. The dispatcher and per-signal handlers do not write `txn->[0xe]`. So a sig 0x0c request lands in the GET_CAPABILITIES handler post-V5, but the response frame still emits `sig_id=0x0c` matching the request. Payload is a V13 §8.8 subset valid for an SBC-only Source. See `INVESTIGATION.md` Trace #16.
 
+**V6 — internal `activeVersion` 10 → 14** at file `0x10dca` (2 bytes):
+
+| | bytes | mnemonic |
+|---|---|---|
+| before | `0a 23` | `movs r3, #0xa` |
+| after  | `0e 23` | `movs r3, #0xe` |
+
+The stock activation handler at `fcn.00010d00` hardcodes the activeVersion field stored to the avrcp_state struct's `+0xb86` offset. The downstream SDP record builder at `fcn.00038ab8` reads this byte and dispatches: `v != 0xd && v != 0xe` → legacy AVRCP 1.0 served record (logs `AVRCP sdp 1.0 target role`); `v == 0xd || v == 0xe` → AVRCP 1.3 served record (logs `AVRCP sdp 1.3 target role`). V6 changes the immediate from 10 to 14 so the daemon takes the latter branch by default, aligning the served record with the version F1 surfaces to the Java layer.
+
+**V7 — `0x000d AdditionalProtocolDescList` → `0x0100 ServiceName`** at file `0x0f9798` (12 bytes):
+
+| | bytes | shape |
+|---|---|---|
+| before | `0d 00 14 00 12 ba 0e 00 00 00 00 00` | attr=`0x000d`, len=`0x14`, ptr=`0x0eba12` (→ AdditionalProtocolDescList: L2CAP / PSM `0x001b` Browse + AVCTP) |
+| after  | `00 01 11 00 ce b9 0e 00 00 00 00 00` | attr=`0x0100`, len=`0x11`, ptr=`0x0eb9ce` (→ `25 0f "Advanced Audio\0"`) |
+
+The stock AVRCP 1.3 served record advertises attribute `0x000d AdditionalProtocolDescriptorList` carrying the AVRCP Browse PSM `0x001b`. Browse is an AVRCP 1.4 feature — the AVRCP 1.3 §3 SDP record shape contains no AdditionalProtocolDescriptorList. V7 swaps this entry slot for a `0x0100 ServiceName` entry pointing at the same "Advanced Audio" string S1 reuses for the legacy record. Net wire effect: drops the 1.4 Browse advertisement, restores ServiceName presence so the served record matches strict AVRCP 1.3 §3 shape.
+
+**V8 — `SupportedFeatures` 0x0021 → 0x0001** at file `0x0eba4e` (1 byte):
+
+| | byte | bits set |
+|---|---|---|
+| before | `21` | bit 0 (Category 1: Player/Recorder) + bit 5 (AVRCP 1.4 GroupNavigation) |
+| after  | `01` | bit 0 only |
+
+LSB of the AVRCP 1.3 served record's SupportedFeatures `uint16` (byte stream `09 00 21` → `09 00 01` at `0x0eba4c`). AVRCP 1.3 §6.5 Table 6.10 reserves bits 4-15 (must be 0); bit 5 is GroupNavigation, an AVRCP 1.4 capability. V8 clears bit 5 so the advertised mask is strictly AVRCP 1.3-conformant.
+
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 
 | | bytes | shape |
@@ -48,7 +77,7 @@ Wire-correct by decoupling: the response builder is `fcn.000ae418` (calls `L2CAP
 | before | `11 03 03 00 59 ba 0e 00 00 00 00 00` | attr=`0x0311`, len=3, ptr=`0x0eba59` (→ `uint16 0x0001`) |
 | after  | `00 01 11 00 ce b9 0e 00 00 00 00 00` | attr=`0x0100`, len=`0x11`, ptr=`0x0eb9ce` (→ `25 0f "Advanced Audio\0"`) |
 
-Reuses the existing "Advanced Audio" SDP-encoded string from mtkbt's A2DP record. Cost: the served record loses the `0x0311 SupportedFeatures` attribute. CTs in our test matrix engage with the record without it.
+Patches the same entry-slot swap on the legacy AVRCP 1.0 served record (the fall-through served when `activeVersion != 0xd && != 0xe`). Reuses the existing "Advanced Audio" SDP-encoded string from mtkbt's A2DP record. Cost: the legacy served record loses the `0x0311 SupportedFeatures` attribute. CTs in our test matrix engage with the record without it.
 
 **P1 — force PASSTHROUGH-emit branch** at file `0x144e8` (2 bytes):
 
@@ -59,7 +88,7 @@ Reuses the existing "Advanced Audio" SDP-encoded string from mtkbt's A2DP record
 
 Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an unconditional branch to the PASSTHROUGH-emit branch at `0x14528` (which ends with `bl 0x10404`, the function that emits msg 519 CMD_FRAME_IND to the JNI socket). Every AV/C frame flows through the emit path. Cost: VENDOR_DEPENDENT bytes get interpreted in PASSTHROUGH-shaped fields, so mtkbt's mid-stack response may be malformed — but the JNI trampoline chain takes over before that matters.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `51a9881d5c5c21b375880cfcf8e23792`.
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `5d65088540898231d5f235ac270ad5e1`.
 
 ---
 
