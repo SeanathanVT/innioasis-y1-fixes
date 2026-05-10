@@ -173,6 +173,17 @@ public class MediaBridgeService extends Service {
     private static final String PREFIX_ALBUM      = "刷新一次专辑图 ";
     private static final String PREFIX_STATE      = "播放状态切换";
 
+    // Stock MtkBt logs `[BT][AVRCP] notifyProfileState: N` from
+    // BluetoothAvrcpService whenever the AVRCP TG profile state transitions.
+    // Vendor-numbered (NOT BluetoothProfile.STATE_*): 10=ENABLING, 11=CONNECTED,
+    // 13=DISCONNECTED. Watching for state 11 lets us push a metadata + PApp
+    // refresh through the trampoline chain at the moment a peer CT links up,
+    // so the CT's connect-time GetCapabilities / GetElementAttributes /
+    // RegisterNotification queries land on populated y1-track-info bytes.
+    private static final String TAG_EXT_AVRCP        = "EXT_AVRCP";
+    private static final String PREFIX_PROFILE_STATE = "notifyProfileState: ";
+    private static final int    AVRCP_STATE_CONNECTED = 11;
+
     // -----------------------------------------------------------------------
     // Current track state. volatile because the Binder thread reads, the
     // main thread (and the logcat monitor via mMainHandler) writes.
@@ -726,7 +737,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=35 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=36 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -1267,6 +1278,22 @@ public class MediaBridgeService extends Service {
             return;
         }
 
+        if (line.contains(TAG_EXT_AVRCP)) {
+            int idx = line.indexOf(PREFIX_PROFILE_STATE);
+            if (idx < 0) return;
+            int pos = idx + PREFIX_PROFILE_STATE.length();
+            int end = pos;
+            while (end < line.length() && Character.isDigit(line.charAt(end))) end++;
+            if (end == pos) return;
+            final int state;
+            try { state = Integer.parseInt(line.substring(pos, end)); }
+            catch (NumberFormatException e) { return; }
+            mMainHandler.post(new Runnable() {
+                @Override public void run() { onAvrcpProfileStateChanged(state); }
+            });
+            return;
+        }
+
         if (line.contains(TAG_BASE_ACTIVITY)) {
             int idx = line.indexOf(PREFIX_STATE);
             if (idx < 0) return;
@@ -1345,6 +1372,55 @@ public class MediaBridgeService extends Service {
         } else {
             cancelPosTick();
         }
+    }
+
+    /**
+     * Vendor-MtkBt AVRCP TG profile state edge from logcat scraping.
+     * State 11 = peer CT just connected; this is the only state we act on.
+     *
+     * Without this hook, a CT that links up between Y1MediaBridge cold-start
+     * and the user's first interaction with the music app sees a zero-filled
+     * y1-track-info file: T4 (GetElementAttributes) emits a 7-attr response
+     * with every string `strlen:0`; T8 (RegisterNotification INTERIM for
+     * events 0x01 / 0x05 / 0x06 / 0x08) hands back stale or default values.
+     * Worse, the CT typically asks for metadata exactly once at connect-time
+     * and only re-queries on a TRACK_CHANGED CHANGED edge — but T5 won't fire
+     * a CHANGED until the music app actually loads a new track, and the
+     * music app may not have produced a `metachanged` log line yet.
+     *
+     * On state-11 we (1) re-broadcast `metachanged` so the music app's
+     * existing logging path republishes its current track via the
+     * BasePlayerActivity log line LogcatMonitor scrapes, (2) call
+     * writeTrackInfoFile() so y1-track-info[792..796] is up-to-date for
+     * T8 INTERIM, and (3) fire `playstatechanged` to wake T9 — if there's
+     * any edge against y1-trampoline-state, T9 emits the proactive CHANGED.
+     */
+    private void onAvrcpProfileStateChanged(int state) {
+        Log.d(TAG, "AVRCP profile state: " + state);
+        if (state != AVRCP_STATE_CONNECTED) return;
+        // (1) Republish track metadata path — the music app's
+        //     BasePlayerActivity logging is what populates mCurrentPath /
+        //     Title / Artist / Album. metachanged is a standard Android
+        //     music-stack broadcast; the patched music app's
+        //     PappStateBroadcaster (Patch B4) already listens for the
+        //     mirror-direction state events. If the music app is not
+        //     currently in the foreground / not running, this is a no-op
+        //     and the trampoline emits whatever defaults we have.
+        sendMusicBroadcast("com.android.music.metachanged");
+        // (2) Refresh the source-of-truth file for the trampoline chain.
+        //     If we already observed the music app via LogcatMonitor in
+        //     this session, mCurrentTitle / Artist / Album hold real values
+        //     and writeTrackInfoFile() rewrites them onto disk where T4 reads.
+        writeTrackInfoFile();
+        // (3) Drive a synthetic playstatechanged so the patched
+        //     notificationPlayStatusChangedNative wakes T9. T9 compares
+        //     y1-track-info[792..796] against y1-trampoline-state[8..11]
+        //     and emits CHANGED on edge — for a fresh peer the previous
+        //     state may be sentinel-zero, producing a clean edge for
+        //     PLAYBACK_STATUS_CHANGED (event 0x01) and
+        //     PLAYER_APPLICATION_SETTING_CHANGED (event 0x08). Either
+        //     way the CT's INTERIM-then-CHANGED contract is honored.
+        sendMusicBroadcast("com.android.music.playstatechanged");
     }
 
     /**
