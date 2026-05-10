@@ -3,7 +3,7 @@
 patch_mtkbt.py — SDP / VENDOR_DEPENDENT routing patches against stock mtkbt.
 
 Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: a37d56c91beb00b021c55f7324f2cc09
+Output md5: 51a9881d5c5c21b375880cfcf8e23792
 
 Four byte-level patches against the SERVED AVRCP TG record (Group D, the
 record that actually lands on the wire after mtkbt's last-wins merge) plus

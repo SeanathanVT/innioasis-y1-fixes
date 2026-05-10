@@ -176,9 +176,10 @@ T6_OFF_TIMESPEC_NSEC = T6_OFF_TIMESPEC + 4   # 12 - tv_nsec u32 (we don't use it
 # need stack args (all 4 ARM args fit in r0 / r1 / r2 / r3), so no outgoing args
 # region is reserved. Caller's event_id slot is at sp+T8_EVENT_ID_OFF
 # after our SUB SP.
-T8_FRAME           = 800
+T8_FRAME           = 808                   # 800 file_buf + 8 timespec
 T8_OFF_FILE        = 0
 T8_OFF_FILE_POS      = T8_OFF_FILE + 780   # 780 - pos_at_state_change_ms
+T8_OFF_FILE_STATE_TIME = T8_OFF_FILE + 784 # 784 - state_change_time_ms (BE u32)
 T8_OFF_FILE_PLAYFLAG = T8_OFF_FILE + 792   # 792 - playing_flag (= AVRCP play_status)
 T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (AVRCP §5.4.2
                                             #       Tbl 5.34/5.35 enum: 0=NORMAL,
@@ -186,6 +187,12 @@ T8_OFF_FILE_BATTERY  = T8_OFF_FILE + 794   # 794 - battery_status u8 (AVRCP §5.
                                             #       4=FULL_CHARGE)
 T8_OFF_FILE_REPEAT   = T8_OFF_FILE + 795   # 795 - repeat_avrcp (AVRCP §5.2.4 Tbl 5.20)
 T8_OFF_FILE_SHUFFLE  = T8_OFF_FILE + 796   # 796 - shuffle_avrcp (AVRCP §5.2.4 Tbl 5.21)
+# Timespec for clock_gettime(CLOCK_BOOTTIME) — used by event 0x05 INTERIM to
+# live-extrapolate position so a fresh CT subscribe doesn't see stale
+# pos_at_state_change_ms. Same magic-multiply nsec-to-ms math T6/T9 use.
+T8_OFF_TIMESPEC      = T8_OFF_FILE + 800   # 800 - struct timespec
+T8_OFF_TIMESPEC_SEC  = T8_OFF_TIMESPEC + 0
+T8_OFF_TIMESPEC_NSEC = T8_OFF_TIMESPEC + 4
 T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 
 # T9 (proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS
@@ -1161,7 +1168,7 @@ def _emit_t_papp(a: Asm) -> None:
     a.cmp_imm8(0, 0x13)
     a.beq("papp_get_current")
     a.cmp_imm8(0, 0x14)
-    a.beq("papp_set")
+    a.beq_w("papp_set")
     a.cmp_imm8(0, 0x15)
     a.beq_w("papp_attr_text")
     # The only remaining PDU in the dispatch range is 0x16; fall through.
@@ -1305,14 +1312,57 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("papp_done")
 
     # ---- 0x13 GetCurrentPlayerApplicationSettingValue ----
-    # Inbound: n + n attr_ids. Iter1: ignore the request, always return
-    # both supported attrs with their current (hardcoded) values
-    # [(2, OFF=1), (3, OFF=1)]. Spec-permissive peers accept this; strict
-    # peers that asked for a subset get extra info, which is not a wire
-    # error per V13 §5.2.5.
+    # Inbound: n + n attr_ids. We ignore the request and always return both
+    # supported attrs with their current values — spec-permissive peers
+    # accept this; strict peers that asked for a subset get extra info,
+    # which is not a wire error per V13 §5.2.5.
+    #
+    # Live values: open y1-track-info, lseek to byte 795, read 2 bytes
+    # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region at
+    # sp+8..9, pass sp+8 as the values pointer. On any I/O failure fall
+    # back to the static OFF/OFF table at papp_current_values. Bolt
+    # postflash showed zero PDU 0x13 calls in practice, so this arm is
+    # mostly dead code, but a strict CT could still invoke it.
     a.label("papp_get_current")
+
+    # Open y1-track-info
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("papp_gc_static_fallback")
+    a.mov_lo_lo(4, 0)                     # r4 = fd
+
+    # lseek(fd, 795, SEEK_SET)
+    a.mov_lo_lo(0, 4)
+    a.movw(1, 795)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    # read(fd, sp+8, 2) — sp+8 is in the outgoing-args region (we pass
+    # sp+0 as the values pointer; sp+8..9 is unused by the response
+    # builder's stack args, so it's safe scratch).
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, PAPP_OFF_ARGS + 8)
+    a.movs_imm8(2, 2)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+    # Pass sp+8 as the live values pointer
+    a.add_sp_imm(0, PAPP_OFF_ARGS + 8)
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)
+    a.b_w("papp_gc_emit")
+
+    a.label("papp_gc_static_fallback")
     a.adr_w(0, "papp_current_values")
-    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)    # sp[0] = &[1, 1]
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)
+
+    a.label("papp_gc_emit")
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
     a.movs_imm8(2, 2)                     # n_pairs
@@ -1411,28 +1461,78 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("papp_done")
 
     # ---- 0x15 GetPlayerApplicationSettingAttributeText ----
-    # Iter1: emit text for both supported attrs (Repeat, Shuffle) regardless
-    # of the requested subset. Same permissive-superset rationale as
-    # GetCurrent. Two emits via the accumulator pattern.
+    # Inbound: 1 byte n + n attr_ids at sp+386..386+n.
     # btmtk_avrcp_send_get_player_attr_text_rsp(
     #     conn, reject, idx, total, attr_id, charset, length, *str)
+    #
+    # Walk the inbound list, set wantRepeat / wantShuffle flags, then emit
+    # text for each requested attr we recognize. Spec V13 §5.2.5 says emit
+    # only what the CT requested — previously we emitted both regardless.
     a.label("papp_attr_text")
-    # First emit: idx=0, total=2, attr_id=2, "Repeat" (6 B)
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = n (count of attr_ids)
+    a.cmp_imm8(6, 0)
+    a.beq_w("papp_done")                  # n=0: nothing to emit
+
+    # Walk attr_ids[0..n-1] and accumulate flags in r4 (wantRepeat) / r5
+    # (wantShuffle). Loop variable in r3.
+    a.movs_imm8(4, 0)                     # r4 = wantRepeat = 0
+    a.movs_imm8(5, 0)                     # r5 = wantShuffle = 0
+    a.movs_imm8(3, 0)                     # r3 = i = 0
+    # Base pointer to attr_ids[0] = sp + PAPP_PARAM_OFF + 1. addw supports
+    # 12-bit immediates (PAPP_PARAM_OFF+1 = 411 fits).
+    a.addw(2, 13, PAPP_PARAM_OFF + 1)     # r2 = &attr_ids[0]
+
+    a.label("papp_at_loop")
+    a.cmp_w(3, 6)
+    a.bge("papp_at_loop_done")
+    a.ldrb_reg(0, 2, 3)                   # r0 = attr_ids[i]
+    a.cmp_imm8(0, PAPP_ATTR_REPEAT)
+    a.beq("papp_at_set_repeat")
+    a.cmp_imm8(0, PAPP_ATTR_SHUFFLE)
+    a.beq("papp_at_set_shuffle")
+    a.b_w("papp_at_loop_next")
+
+    a.label("papp_at_set_repeat")
+    a.movs_imm8(4, 1)
+    a.b_w("papp_at_loop_next")
+
+    a.label("papp_at_set_shuffle")
+    a.movs_imm8(5, 1)
+
+    a.label("papp_at_loop_next")
+    a.addw(3, 3, 1)                       # i++
+    a.b_w("papp_at_loop")
+
+    a.label("papp_at_loop_done")
+    # total = wantRepeat + wantShuffle in r0
+    a.adds_lo_lo(0, 4, 5)
+    a.cmp_imm8(0, 0)
+    a.beq_w("papp_done")                  # neither requested → no emit
+
+    # Save total in r6 (which we no longer need for n — done iterating)
+    a.mov_lo_lo(6, 0)
+
+    # If wantRepeat: emit (idx=0, total=r6, attr_id=2, "Repeat", 6 B)
+    a.cmp_imm8(4, 0)
+    a.beq("papp_at_skip_repeat")
     a.movs_imm8(2, PAPP_ATTR_REPEAT)
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 0)    # sp[0] = attr_id
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 0)
     a.movs_imm8(2, 0x6A)
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 4)    # sp[4] = charset UTF-8
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 4)
     a.movs_imm8(2, 6)                     # strlen("Repeat")
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 8)    # sp[8] = length
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 8)
     a.adr_w(2, "papp_text_repeat")
-    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)   # sp[12] = &"Repeat"
+    a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
     a.movs_imm8(2, 0)                     # idx 0
-    a.movs_imm8(3, 2)                     # total 2 (accumulate; no emit yet)
+    a.mov_lo_lo(3, 6)                     # total
     a.blx_imm(PLT_get_player_attr_text_rsp)
 
-    # Second emit: idx=1, total=2, attr_id=3, "Shuffle" (7 B) → triggers SendMessage.
+    a.label("papp_at_skip_repeat")
+    # If wantShuffle: emit (idx = wantRepeat ? 1 : 0, total=r6, attr_id=3, "Shuffle", 7 B)
+    a.cmp_imm8(5, 0)
+    a.beq_w("papp_done")
     a.movs_imm8(2, PAPP_ATTR_SHUFFLE)
     a.str_sp_imm(2, PAPP_OFF_ARGS + 0)
     a.movs_imm8(2, 0x6A)
@@ -1443,8 +1543,8 @@ def _emit_t_papp(a: Asm) -> None:
     a.str_sp_imm(2, PAPP_OFF_ARGS + 12)
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
-    a.movs_imm8(2, 1)                     # idx 1
-    a.movs_imm8(3, 2)                     # total 2 (idx+1==total → emit)
+    a.mov_lo_lo(2, 4)                     # idx = wantRepeat (0 or 1)
+    a.mov_lo_lo(3, 6)                     # total
     a.blx_imm(PLT_get_player_attr_text_rsp)
     a.b_w("papp_done")
 
@@ -1566,10 +1666,53 @@ def _emit_t8(a: Asm) -> None:
     a.label("t8_check_5")
     a.cmp_imm8(0, 0x05)
     a.bne("t8_check_6")
-    # 0x05 PLAYBACK_POS_CHANGED
-    # reg_notievent_pos_changed_rsp(conn, 0, REASON_INTERIM, position_ms_u32)
-    a.ldr_sp_imm(3, T8_OFF_FILE_POS)          # r3 = pos_at_state_change_ms (BE)
+    # 0x05 PLAYBACK_POS_CHANGED — live-extrapolate position when PLAYING
+    # so a fresh CT subscribe sees the actual current position, not the
+    # last state-change anchor. AVRCP 1.3 §5.4.1 Tbl 5.26 SongPosition is
+    # "the current position of the playing in milliseconds elapsed".
+    # When STOPPED/PAUSED the position field IS the freeze point (saved_pos
+    # is the right value).
+    a.ldrb_w(0, 13, T8_OFF_FILE_PLAYFLAG)
+    a.cmp_imm8(0, 1)                          # 1 = PLAYING
+    a.bne("t8_pos_static")
+
+    # ---- live extrapolation ----
+    # Same magic-multiply math T6/T9 use:
+    #   now_ms = tv_sec * 1000 + tv_nsec / 1e6
+    #   live_pos = saved_pos_ms + (now_ms - state_change_ms)
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, T8_OFF_TIMESPEC_SEC)
+    a.str_sp_imm(0, T8_OFF_TIMESPEC_NSEC)
+    a.movs_imm8(0, CLOCK_BOOTTIME)
+    a.add_sp_imm(1, T8_OFF_TIMESPEC)
+    a.movw(7, NR_clock_gettime)
+    a.svc(0)
+
+    a.ldr_sp_imm(2, T8_OFF_TIMESPEC_SEC)      # r2 = tv_sec
+    a.movw(0, 1000)
+    a.muls_lo_lo(2, 0)                        # r2 = tv_sec * 1000
+    a.ldr_sp_imm(0, T8_OFF_TIMESPEC_NSEC)     # r0 = tv_nsec
+    a.movw(1, 0xDE83)
+    a.movt(1, 0x431B)                         # r1 = 0x431BDE83 (magic for /1e6)
+    a.umull(4, 3, 0, 1)                       # r3:r4 = tv_nsec * magic
+    a.lsrs_imm5(3, 3, 18)                     # r3 = tv_nsec / 1e6
+    a.adds_lo_lo(2, 2, 3)                     # r2 = now_ms
+
+    a.ldr_sp_imm(0, T8_OFF_FILE_STATE_TIME)   # r0 = state_change_ms (BE)
+    a.rev_lo_lo(0, 0)                         # → host order
+    a.subs_lo_lo(2, 2, 0)                     # r2 = delta_ms
+
+    a.ldr_sp_imm(3, T8_OFF_FILE_POS)          # r3 = saved_pos (BE)
     a.rev_lo_lo(3, 3)                         # → host order
+    a.adds_lo_lo(3, 3, 2)                     # r3 = live_pos
+    a.b_w("t8_pos_emit")
+
+    a.label("t8_pos_static")
+    a.ldr_sp_imm(3, T8_OFF_FILE_POS)          # r3 = saved_pos (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+
+    a.label("t8_pos_emit")
+    # reg_notievent_pos_changed_rsp(conn, 0, REASON_INTERIM, position_ms_u32)
     a.movs_imm8(2, REASON_INTERIM)
     a.movs_imm8(1, 0)
     a.add_imm_t3(0, 5, 8)

@@ -107,6 +107,12 @@ class Asm:
         _check(0 <= rd <= 7 and 0 <= rm <= 7, "rev_lo_lo bad regs")
         self._hw(0xBA00 | (rm << 3) | rd)
 
+    def ldrb_reg(self, rt: int, rn: int, rm: int) -> None:
+        # LDRB (register) T1: 0101 1100 Rm[2..0] Rn[2..0] Rt[2..0]
+        # Loads Rt = byte at [Rn + Rm], zero-extended. Low regs only.
+        _check(0 <= rt <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7, "ldrb_reg bad regs")
+        self._hw(0x5C00 | (rm << 6) | (rn << 3) | rt)
+
     def adds_lo_lo(self, rd: int, rn: int, rm: int) -> None:
         # ADDS T1 3-reg form: 0001 100 Rm[2..0] Rn[2..0] Rd[2..0]  (low regs only)
         _check(0 <= rd <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7, "adds_lo_lo bad regs")
