@@ -1695,6 +1695,65 @@ inbound L2CAP frame on PSM 0x19
 
 **Empirical close-out left for hardware**. The fnptr stored at AVDTP-state[0x464] is the only remaining gap and it's runtime-populated. Adding two BPs to the existing `tools/attach-mtkbt-gdb-avdtp.sh` — one at `0xafc68` (logging arg0 / arg1[0] / arg1[+4]) and one at the indirect `blx r2` site at 0xb0b46 (logging r2 = the resolved fnptr) — would print the full chain on the next pair attempt. No patch action implied; this is map-completion work.
 
+### Trace #15 (2026-05-10) — GET_CAPABILITIES response builder calling convention; V5 risk re-evaluated
+
+Hunt: characterise the call signature of `fcn.000aeb9c` (the function the sig 0x02 handler at 0xaa924 calls to "send the response") so we can validate whether V5's redirect of sig 0x0c into the same handler produces a wire-correct response or breaks signal-id pairing per V13 §8.5.
+
+**Calling convention.**
+
+```c
+int fcn_000aeb9c(AvdtpChannel *channel, uint8_t ack_flag);
+```
+
+- **r0 (channel)**: pointer to AVDTP signaling channel context. Validated non-null; offset+8 looked up against a global registry via `fcn.0006ccdc`. Returns `0x12` on null, `0xd` on lookup-miss, `0xb` on state error from `fcn.0006d9ac`. Otherwise tail-calls `fcn.000afd40(channel+8, ack_flag)`.
+- **r1 (ack_flag)**: u8. Observed values at the sig 0x02 handler call sites:
+  - `0` at `0xaa948` — error path ("no registered SEP" log, follows the search for a SEP that found none).
+  - `1` at `0xaa9fe` — success path (taken after the handler builds the per-SEP capability payload and stores the request sig_id into the global state).
+
+**Tail chain.**
+
+```
+fcn.000aeb9c (channel, ack_flag)
+  → bl fcn.0006ccdc       [registry lookup]
+  → bl fcn.0006d9ac        [state validate]
+  → b.w fcn.000afd40       [tail call]
+
+fcn.000afd40 (channel, ack_flag)
+  → r0 = *(channel)        [halfword: L2CAP CID]
+  → if (ack_flag == 0) r1 = 0, r2 = 0   [reject path]
+  → else                  r1 = 4, r2 = ack_flag   [accept path]
+  → bl fcn.0007d624
+
+fcn.0007d624 (cid, accept_flag, link_modes)
+  → log "l2cap: Upper accept" (or "Upper reject")
+  → look up channel via fcn.00083014
+  → if channel state != 0xa: dispatch to fcn.000860d8 ("createchannel"), log "l2cap: pass to createchannel status:%d"
+  → else: validate, store config bytes (link_modes[0..0x14]) into channel ctx at offsets 0xd4/0xd8/0xe0/0x104/0x108/0x143
+  → tail-call fcn.0007d500 (L2CAP signal-frame TX dispatch)
+```
+
+**The reframe**: `fcn.0007d624` is BlueAngel's **`L2CAP_ConnectRsp`** — the upper-layer accept/reject for an inbound L2CAP CONNECT_REQ. It is **not** the AVDTP signal-frame TX path. So `fcn.000aeb9c` is the GAVDP-to-AVDTP-layer handshake function: GAVDP says "I accept this signaling channel" (or rejects it), and BlueAngel's AVDTP layer emits the corresponding L2CAP CONNECT_RSP.
+
+The pre-call state setup (memcpy into `[channel + 0xc4]` from `[msg.field_at_0x1c + 0xc0]`, stores at `[channel + 0xa4]` / `[channel + 0xa8]`, write to `[GlobalAvdtpState + 1] = 2`) is **not** wire-frame construction — it's per-channel context setup so that BlueAngel's AVDTP layer can subsequently parse and respond to in-band signal frames.
+
+**Where the actual GET_CAPABILITIES_RSP wire frame is built**: not yet localised. The sig 0x02 handler at 0xaa924 prepares state, then calls fcn.000aeb9c which goes to `L2CAP_ConnectRsp` — but the AVDTP signal-frame response (with sig_id byte 1, msg_type=RSP_ACK in byte 0) must be emitted somewhere else, presumably by AVDTP layer code triggered by a state transition rather than by direct call from the handler. fcn.000afd40 only writes the L2CAP CID and the accept-flag — no AVDTP signal_id byte construction.
+
+**V5 risk re-evaluation** (refines the "best-effort workaround" wording from Trace #13):
+
+1. **The handler at 0xaa924 doesn't write the wire signal_id byte.** It writes `2` to `[GlobalAvdtpState + 1]`, but that's an internal state byte (the `r6` base is the AVDTP module's global state struct loaded from GOT slot 0xf9c14, not the wire frame).
+2. **The L2CAP CONNECT_RSP path doesn't carry an AVDTP signal_id either.** It just accepts/rejects the L2CAP channel.
+3. **Therefore the wire response sig_id is determined elsewhere**, and almost certainly preserves the request's sig_id (since BlueAngel's AVDTP layer parses each request, records the sig_id internally, and pairs the response to it per V13 §8.5).
+4. **V5's redirect of sig 0x0c to the case-2 handler is therefore likely wire-correct**: the handler builds Service-Capabilities payload (the same content valid for both GET_CAPABILITIES_RSP and GET_ALL_CAPABILITIES_RSP per V13 §8.8), and the AVDTP layer's wire-frame TX preserves sig_id=0x0c from the request.
+5. **Empirical risk remains** in the "wire frame builder localisation" gap — without finding the actual TX code that writes byte 1 of the response, we can't prove sig_id is preserved. A peer that exercises sig 0x0c (GET_ALL_CAPABILITIES) is the only definitive test.
+
+**Net for the V5 ship** (committed in `e51da3f`): the risk language can be downgraded one notch — from "best-effort workaround that may break signal-id pairing" to "best-effort alias whose wire-correctness depends on AVDTP layer preserving the request sig_id, which is the architectural norm for BlueAngel-style stacks but not statically verified in our binary." Patch is still safe (sig 0x0c stub at 0xab4de currently does nothing; redirect to 0xaa924 cannot regress that), still empirically untested (no peer probes with sig 0x0c on the current CT matrix), and the only path forward to definitive verification is a peer that fires sig 0x0c.
+
+**Anchors for the wire-frame-builder hunt** (next session, if anyone wants to close the V5 verification gap):
+
+- Search for str / strb instructions writing a halfword/byte where bit pattern matches `(tlabel<<4)|(0<<2)|2` (= AVDTP RSP_ACK byte 0) — these are the wire byte 0 emitters.
+- Check `fcn.00083014` (called by `fcn.0007d624`): looks up channel by CID; the channel struct after offset 0x100 might contain pending-response sig_id state.
+- The TX path is likely fired by AVDTP signaling state machine (`fcn.000b0c30`, Trace #13c) on a state transition when GAVDP returns ACK via fcn.000aeb9c — so dynamic BPs at fcn.000b0c30's exit edges + the L2CAP TX call site after fcn.0007d624's state-change branch would catch it.
+
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
 4. **A2DP / AVDTP version-byte authority** — confirm via experimental flash + sdptool re-capture: bump 0xeb9f2 (A2DP) from 0x00 to 0x03, capture, see if the wire moves. If yes, static byte drives advertisement (same shape as V1 / V2). If no, mtkbt has runtime version logic too and we need to find it.
