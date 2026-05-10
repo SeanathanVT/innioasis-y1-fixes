@@ -18,6 +18,7 @@ import android.media.MediaScannerConnection;
 import android.media.RemoteControlClient;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.FileObserver;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -227,6 +228,13 @@ public class MediaBridgeService extends Service {
     /** BroadcastReceiver registered for Android's sticky `ACTION_BATTERY_CHANGED`.
      *  Held as a field so we can unregister cleanly in onDestroy. */
     private BroadcastReceiver mBatteryReceiver;
+
+    /** Watches `y1-papp-set` for CLOSE_WRITE events fired by T_papp's PDU 0x14
+     *  arm. On fire, reads the 2 bytes (attr_id + AVRCP value) and forwards
+     *  the change to the music app via a broadcast that the apk's B3
+     *  BroadcastReceiver consumes by calling SharedPreferencesUtils
+     *  setMusicRepeatMode / setMusicIsShuffle. */
+    private FileObserver mPappSetObserver;
 
     /** 1-second-recurring tick that fires the `playstatechanged`
      *  broadcast while mIsPlaying. Drives T9's PLAYBACK_POS_CHANGED CHANGED
@@ -703,7 +711,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=15 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=30 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -711,6 +719,7 @@ public class MediaBridgeService extends Service {
         startLogcatMonitor();
         prepareTrackInfoDir();
         registerBatteryReceiver();
+        setupPappSetObserver();
     }
 
     /**
@@ -845,9 +854,115 @@ public class MediaBridgeService extends Service {
             // World rw: BT process (uid bluetooth) must read AND write.
             state.setReadable(true, false);
             state.setWritable(true, false);
+
+            // Create y1-papp-set if missing. Initial sentinel [0xff, 0xff]
+            // is an invalid (attr, value) pair — handlePappSetWrite's
+            // attr-switch returns on default, so any spurious read of the
+            // pre-write file produces no broadcast. T_papp's first PDU 0x14
+            // overwrites with real values.
+            File pappSet = new File(dir, PAPP_SET_FILENAME);
+            if (!pappSet.exists()) {
+                FileOutputStream fos = new FileOutputStream(pappSet);
+                try { fos.write(new byte[]{(byte) 0xff, (byte) 0xff}); }
+                finally { fos.close(); }
+            }
+            pappSet.setReadable(true, false);
+            pappSet.setWritable(true, false);
         } catch (Throwable t) {
             Log.w(TAG, "prepareTrackInfoDir: " + t);
         }
+    }
+
+    /**
+     * Watch y1-papp-set for CLOSE_WRITE events fired by T_papp's PDU 0x14
+     * arm. On fire, read the 2 bytes (attr_id + AVRCP value), translate the
+     * AVRCP enum to the Y1 music app's enum, and broadcast to the music app
+     * (which the apk's B3 BroadcastReceiver applies via
+     * SharedPreferencesUtils.setMusicRepeatMode / setMusicIsShuffle).
+     *
+     * Uses CLOSE_WRITE rather than MODIFY so we read the file only after
+     * T_papp's write() + close() sequence has fully landed. AVRCP→Y1 enum
+     * mapping is empirically verified by the 2026-05-09 Bolt postflash
+     * gdb-capture (#107, see docs/INVESTIGATION.md Trace #18).
+     */
+    private void setupPappSetObserver() {
+        File dir = getFilesDir();
+        if (dir == null) return;
+        final File pappSet = new File(dir, PAPP_SET_FILENAME);
+        mPappSetObserver = new FileObserver(pappSet.getPath(), FileObserver.CLOSE_WRITE) {
+            @Override
+            public void onEvent(int event, String path) {
+                handlePappSetWrite(pappSet);
+            }
+        };
+        mPappSetObserver.startWatching();
+        Log.d(TAG, "PApp set observer watching " + pappSet.getPath());
+    }
+
+    /**
+     * Read 2 bytes from y1-papp-set, translate AVRCP→Y1 enum, broadcast to
+     * the music app. Wrapped in catch(Throwable) — any failure mode (file
+     * gone, partial read, bogus value) is silently dropped so a misbehaving
+     * peer can never destabilise the bridge service.
+     */
+    private void handlePappSetWrite(File pappSet) {
+        int attr;
+        int avrcpValue;
+        try {
+            FileInputStream fis = new FileInputStream(pappSet);
+            try {
+                byte[] buf = new byte[PAPP_SET_LEN];
+                int n = fis.read(buf);
+                if (n < PAPP_SET_LEN) return;
+                attr = buf[0] & 0xff;
+                avrcpValue = buf[1] & 0xff;
+            } finally { fis.close(); }
+        } catch (Throwable t) {
+            Log.w(TAG, "handlePappSetWrite read: " + t);
+            return;
+        }
+
+        Intent intent;
+        switch (attr) {
+        case 0x02: { // Repeat — AVRCP §5.2.4 Tbl 5.20 → Y1 musicRepeatMode int
+            int y1RepeatMode;
+            switch (avrcpValue) {
+                case 0x01: y1RepeatMode = 0; break;  // OFF    → Y1 0 (REPEAT_MODE_OFF)
+                case 0x02: y1RepeatMode = 1; break;  // SINGLE → Y1 1 (REPEAT_MODE_ONE)
+                case 0x03: y1RepeatMode = 2; break;  // ALL    → Y1 2 (REPEAT_MODE_ALL)
+                default:
+                    Log.w(TAG, "PApp Set unsupported Repeat value 0x"
+                            + Integer.toHexString(avrcpValue));
+                    return;
+            }
+            intent = new Intent(ACTION_SET_REPEAT_MODE);
+            intent.putExtra(EXTRA_VALUE, y1RepeatMode);
+            break;
+        }
+        case 0x03: { // Shuffle — AVRCP §5.2.4 Tbl 5.21 → Y1 musicIsShuffle bool
+            boolean y1IsShuffle;
+            switch (avrcpValue) {
+                case 0x01: y1IsShuffle = false; break;  // OFF
+                case 0x02: y1IsShuffle = true;  break;  // ALL_TRACK_SHUFFLE
+                default:
+                    Log.w(TAG, "PApp Set unsupported Shuffle value 0x"
+                            + Integer.toHexString(avrcpValue));
+                    return;
+            }
+            intent = new Intent(ACTION_SET_IS_SHUFFLE);
+            intent.putExtra(EXTRA_VALUE, y1IsShuffle);
+            break;
+        }
+        default:
+            // Initial 0xff/0xff sentinel falls here on the cold-boot CLOSE_WRITE
+            // (which doesn't actually fire because we created the file before
+            // startWatching, but defensive in case the file is replaced).
+            return;
+        }
+        intent.setPackage(MUSIC_APP_PACKAGE);
+        sendBroadcast(intent);
+        Log.d(TAG, "PApp Set forwarded: attr=0x" + Integer.toHexString(attr)
+                + " avrcpValue=0x" + Integer.toHexString(avrcpValue));
     }
 
     @Override
@@ -900,6 +1015,10 @@ public class MediaBridgeService extends Service {
             try { unregisterReceiver(mBatteryReceiver); }
             catch (IllegalArgumentException ignore) { }
             mBatteryReceiver = null;
+        }
+        if (mPappSetObserver != null) {
+            mPappSetObserver.stopWatching();
+            mPappSetObserver = null;
         }
         cancelPosTick();
         if (mCurrentAlbumArt != null && !mCurrentAlbumArt.isRecycled()) {
@@ -1352,6 +1471,21 @@ public class MediaBridgeService extends Service {
     // intentionally broad.
     private static final String TRACK_INFO_FILENAME = "y1-track-info";
     private static final String TRAMPOLINE_STATE_FILENAME = "y1-trampoline-state";
+
+    /** File T_papp's PDU 0x14 (SetPlayerApplicationSettingValue) writes its
+     *  inbound (attr_id, value) pair to. mPappSetObserver consumes the
+     *  CLOSE_WRITE event and forwards the change to the music app via
+     *  ACTION_SET_REPEAT_MODE / ACTION_SET_IS_SHUFFLE. Layout: 2 bytes
+     *  [AVRCP attr_id, AVRCP value]. AVRCP attr 0x02 = Repeat (Tbl 5.20),
+     *  0x03 = Shuffle (Tbl 5.21). See `docs/INVESTIGATION.md` Trace #18 +
+     *  the 2026-05-09 Bolt postflash gdb-capture (#107) for the verified
+     *  enum mapping. */
+    private static final String PAPP_SET_FILENAME = "y1-papp-set";
+    private static final int PAPP_SET_LEN = 2;
+    private static final String MUSIC_APP_PACKAGE = "com.innioasis.y1";
+    private static final String ACTION_SET_REPEAT_MODE = "com.y1.mediabridge.SET_REPEAT_MODE";
+    private static final String ACTION_SET_IS_SHUFFLE  = "com.y1.mediabridge.SET_IS_SHUFFLE";
+    private static final String EXTRA_VALUE = "value";
     private static final int TRACK_ID_LEN = 8;
     private static final int FIELD_LEN = 256;
     private static final int NUMERIC_STR_LEN = 16;
