@@ -42,7 +42,7 @@ The one carry-out from outside the 1.3 spec proper is `MtkBt.odex` patch F1's Bl
 
 **Closed:** every Mandatory row of ICS Table 7, plus every Optional row.
 
-**PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08, ICS Table 7 rows 12-17 + 30).** Shipped via `T_papp` in `_trampolines.py` and the event 0x08 INTERIM dispatch in T8. iter1 hardcoded "Repeat OFF + Shuffle OFF" for the read paths (List, GetCurrent, AttrText, ValueText) and rejected Set with INTERNAL_ERROR. **iter3 closes the Set loop**: `T_papp 0x14` writes the inbound `(attr_id, value)` pair to `/data/data/com.y1.mediabridge/files/y1-papp-set` and ACKs the peer with success; Y1MediaBridge's `FileObserver` consumes the CLOSE_WRITE, translates AVRCP→Y1 enum (verified mapping in `INVESTIGATION.md` Trace #18 from the 2026-05-09 Bolt gdb-capture), and broadcasts `com.y1.mediabridge.SET_REPEAT_MODE` / `SET_IS_SHUFFLE` to the music app where Patch B3's new `com.koensayr.PappSetReceiver` calls `SharedPreferencesUtils.setMusicRepeatMode/setMusicIsShuffle` — same setters the in-app Settings screen uses, so PlayerService re-reads at next track-end. Read paths still hardcoded; iter4 (proactive CHANGED on real edges) and the read-pipeline state binding remain queued.
+**PlayerApplicationSettings (PDUs 0x11-0x16 + event 0x08, ICS Table 7 rows 12-17 + 30).** Shipped via `T_papp` in `_trampolines.py` and the event 0x08 dispatch in T8 (INTERIM) + T9 (proactive CHANGED). **Set loop (CT→Y1)**: `T_papp 0x14` writes the inbound `(attr_id, value)` pair to `/data/data/com.y1.mediabridge/files/y1-papp-set` and ACKs with success; Y1MediaBridge's `FileObserver` consumes the CLOSE_WRITE, translates AVRCP→Y1 enum (verified mapping in `INVESTIGATION.md` Trace #18 from the 2026-05-09 Bolt gdb-capture), and broadcasts `com.y1.mediabridge.SET_REPEAT_MODE` / `SET_IS_SHUFFLE` to the music app where Patch B3's `com.koensayr.PappSetReceiver` calls `SharedPreferencesUtils.setMusicRepeatMode/setMusicIsShuffle`. **CHANGED loop (Y1→CT)**: Patch B4's `com.koensayr.PappStateBroadcaster` registers as `OnSharedPreferenceChangeListener` against the `"settings"` SharedPreferences and fires `com.y1.mediabridge.PAPP_STATE_DID_CHANGE` whenever `musicRepeatMode` or `musicIsShuffle` flips (covering both AVRCP-driven Sets and Y1-UI toggles uniformly). Y1MediaBridge writes the AVRCP-mapped values to `y1-track-info[795..796]` and fires `playstatechanged` so T9's edge detector picks up the change and emits `reg_notievent_player_appsettings_changed_rsp` (PLT `0x345c`) with REASON_CHANGED. T8 0x08 INTERIM and T9 papp CHANGED both read live `[795..796]` so a fresh CT subscribe sees actual current state.
 
 ---
 
@@ -77,7 +77,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | 27 | Notify EVENT_PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | O | ✓ T8 INTERIM + T9 CHANGED at 1 s cadence while playing (Y1MediaBridge tick fires `playstatechanged`; T9 live-extrapolates position via `clock_gettime(CLOCK_BOOTTIME)`) | — |
 | 28 | Notify EVENT_BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | O | ✓ T8 INTERIM reads y1-track-info[794] (real bucket from `Intent.ACTION_BATTERY_CHANGED`) + T9 CHANGED-on-edge piggybacked on `playstatechanged` broadcast | — |
 | 29 | Notify EVENT_SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | O | ✓ T8 INTERIM with `0x00 POWER_ON` (canned IS the real value while trampolines run — see footnote†) | — |
-| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | ✓ T8 INTERIM with iter1 hardcoded `[(Repeat=OFF), (Shuffle=OFF)]` | — |
+| 30 | Notify EVENT_PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | O | ✓ T8 INTERIM + T9 proactive CHANGED, both reading live `(Repeat, Shuffle)` from `y1-track-info[795..796]` (Patch B4 `PappStateBroadcaster` → Y1MediaBridge → `playstatechanged` → T9 edge detect) | — |
 | 31-32 | Continuation (PDUs 0x40/0x41) | §5.5 | C.2: M IF GetElementAttributes Response | ✓ T_continuation explicit dispatch in T4 pre-check → AV/C NOT_IMPLEMENTED reject via UNKNOW_INDICATION path (msg=520) | — |
 | **65** | Discoverable Mode | §12.1 | **M** | ✓ (mtkbt) | — |
 | 66 | PASSTHROUGH operation supporting Press and Hold | §4.1.3 | O | ✓ (mtkbt + U1 disables kernel auto-repeat on AVRCP uinput) | — |
@@ -117,7 +117,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; Y1MediaBridge tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | intentionally INTERIM-only (see §2 footnote) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T1 advertises | ✓ T8 INTERIM (iter1 hardcoded; CHANGED is a no-op until iter2 introduces real Repeat / Shuffle state) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T1 advertises | ✓ T8 INTERIM reads `y1-track-info[795..796]` + T9 CHANGED-on-edge (papp block, piggybacked on `playstatechanged`; gated on file[795..796] vs state[11..12] edge) |
 
 ---
 
@@ -180,7 +180,9 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — fed by `LogcatMonitor` mapping Y1's BaseActivity state codes `'1'`/`'3'`/`'5'`) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
 | 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
-| 795..799 | reserved | 5 | — | (future PlayerApplicationSettings state binding when iter2 lands) |
+| 795 | repeat_avrcp | 1 | shipped | `mCurrentRepeatAvrcp` (AVRCP §5.2.4 Tbl 5.20 enum; written by `handlePappStateIntent` from Patch B4 broadcaster; T8 0x08 INTERIM + T9 papp CHANGED-on-edge read this byte) |
+| 796 | shuffle_avrcp | 1 | shipped | `mCurrentShuffleAvrcp` (AVRCP §5.2.4 Tbl 5.21 enum; same write/read pipeline as 795) |
+| 797..799 | reserved | 3 | — | available for future PApp attribute additions (Equalizer / Scan if a Y1 release ever surfaces them) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
@@ -190,7 +192,7 @@ Total file size: **1104 B**. Page-aligned write is still single-block. Schema bu
 
 The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16 / u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
 
-`y1-trampoline-state` (16 B, mode 0666) is unchanged; remains the sole writable surface from the BT process side.
+`y1-trampoline-state` (16 B, mode 0666) is the BT-process-writable surface used by T5 / T9 for cross-firing edge state: bytes 0..7 = last_seen track_id (T5), byte 8 = last RegisterNotification transId (T5), byte 9 = last_play_status (T9), byte 10 = last_battery_status (T9), byte 11 = last_repeat_avrcp (T9 papp edge), byte 12 = last_shuffle_avrcp (T9 papp edge), bytes 13..15 = padding.
 
 ---
 
@@ -334,7 +336,7 @@ AVRCP 1.3 sits on top of AVCTP, which rides L2CAP. A2DP rides AVDTP, signalled b
 §9.2 / §9.3 / §9.5 / §9.6 / §9.7 / §9.8 shipped or resolved-no-action. Active queue:
 
 - **§9.1 stateful T_continuation**: needs either (a) the OEM `_send_get_element_attributes_rsp` replaced by a manual AVRCP META builder (so TG ever sets `packet_type=01`), or (b) `cmd_frame_ind_rsp` arg-shape disassembly to upgrade NOT_IMPLEMENTED to INVALID_PARAMETER.
-- **PlayerApplicationSettings iter4 — proactive event 0x08 CHANGED on real edges.** With iter3 landing the Set path, peer-driven Repeat/Shuffle changes now flow through to the music app's `SharedPreferencesUtils`. Iter4 closes the symmetric notification: when Y1's own UI (or PlayerService at track-end) updates Repeat/Shuffle, emit AVRCP event 0x08 PLAYER_APPLICATION_SETTING_CHANGED CHANGED on the wire so a subscribing peer's UI re-syncs. Requires a T9-style proactive trampoline reading `y1-papp-state` against `y1-trampoline-state` to detect edges, plus a MtkBt cardinality NOP for the event 0x08 sswitch arm in `BTAvrcpMusicAdapter.handleKeyMessage` and a native jump-patch in `libextavrcp_jni.so` for the event 0x08 path. Adjacent: read-pipeline state binding for `T_papp 0x13` (real GetCurrent reflecting current state) and event 0x08 INTERIM (currently hardcoded). Full staged plan: `docs/INVESTIGATION.md` Trace #18.
+- **Hardware verify the bidirectional PApp loop on Bolt.** With T9's papp edge block, T8 0x08 INTERIM live-binding, Y1MediaBridge `mPappStateReceiver` + `y1-track-info[795..796]` writes, and the music-app Patch B4 `PappStateBroadcaster` listener all shipping together, the round trip is: Y1-UI Repeat/Shuffle toggle → SharedPreferences write → `PappStateBroadcaster.onSharedPreferenceChanged` → `ACTION_PAPP_STATE_DID_CHANGE` → Y1MediaBridge updates fields + writes file + fires `playstatechanged` → MtkBt `notificationPlayStatusChangedNative` → T9 papp block → `reg_notievent_player_appsettings_changed_rsp` REASON_CHANGED on the wire. logcat checkpoints: `Y1Application` registers `PappStateBroadcaster`; `Y1MediaBridge: handlePappStateIntent` lines on each toggle; CT subscribers of event 0x08 see CHANGED frames following the Y1-UI edge.
 - **§9.10-§9.14 ICS-scoreboard pass**: complete. AVCTP and the audio-triad audits done. GAVDP Acceptor Table 5 row 9 (GET_ALL_CAPABILITIES) closed by V5 — a 2-byte TBH jump-table alias routing sig 0x0c through the sig 0x02 handler.
 
 ### 9.10 AVCTP 1.2 ICS audit — *AVCTP* — VERIFIED

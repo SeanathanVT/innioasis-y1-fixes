@@ -165,13 +165,13 @@ ICS Table 7 row 21: GetPlayStatus is **mandatory** for any TG that ships GetElem
 
 Branched from T4's pre-check when the inbound PDU byte is in `[0x11..0x16]`. Per AVRCP 1.3 ICS Table 7 condition C.14, supporting any single PApp PDU makes the whole 7-row group (PDUs 0x11..0x16 + event 0x08) Mandatory — they ship together.
 
-Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3), both currently OFF (value=1), settings cannot be changed". Six PDU dispatchers internal to T_papp + a paired event 0x08 INTERIM case in T8. Future iteration replaces the hardcoded read responses + reject-Set path with Y1MediaBridge state binding.
+Y1 supports Repeat (id=2) + Shuffle (id=3); other AVRCP §5.2.1 attributes (Equalizer 0x01, Scan 0x04) aren't surfaced by the music app and aren't advertised. Six PDU dispatchers internal to T_papp + a paired event 0x08 INTERIM case in T8. Read responses for the universally subscribed event 0x08 INTERIM (T8) and the proactive CHANGED (T9) bind to live state via `y1-track-info[795..796]`, written by Y1MediaBridge from the music-app-side Patch B4 broadcaster. The List / AttrText / ValueText / GetCurrent paths still return static-schema responses (these reflect the *capabilities* of the player rather than per-edge state, and never need to vary at runtime — except GetCurrent, which retains a hardcoded OFF/OFF fallback because Bolt postflash showed zero PDU 0x13 calls in practice).
 
 | PDU | Builder PLT | Behavior |
 |---|---|---|
 | 0x11 ListPlayerApplicationSettingAttributes | `0x35d0` | Returns `[Repeat=2, Shuffle=3]`, n=2 |
 | 0x12 ListPlayerApplicationSettingValues | `0x35c4` | Switches on inbound `attr_id`: Repeat → `[1,2,3,4]`, Shuffle → `[1,2,3]`, else reject |
-| 0x13 GetCurrentPlayerApplicationSettingValue | `0x35b8` | Returns `[(Repeat, OFF), (Shuffle, OFF)]` (iter1 hardcoded) |
+| 0x13 GetCurrentPlayerApplicationSettingValue | `0x35b8` | Returns `[(Repeat, OFF), (Shuffle, OFF)]` (hardcoded fallback — Bolt postflash showed zero PDU 0x13 calls in practice; CTs subscribe to event 0x08 instead) |
 | 0x14 SetPlayerApplicationSettingValue | `0x3594` | Reads inbound `(attr_id, value)` pair from caller's sp+387/+388, writes 2 bytes to `/data/data/com.y1.mediabridge/files/y1-papp-set` (atomic O_WRONLY|O_TRUNC), ACKs the peer. Y1MediaBridge's `FileObserver` consumes the CLOSE_WRITE, translates AVRCP→Y1 enum, and broadcasts to the music app where Patch B3's `PappSetReceiver` applies via `SharedPreferencesUtils.setMusicRepeatMode/setMusicIsShuffle`. Multi-pair Sets (n>1) only the first pair is applied. |
 | 0x15 GetPlayerApplicationSettingAttributeText | `0x35ac` | Accumulator: emit "Repeat" (idx=0) then "Shuffle" (idx=1, total=2 → SendMessage) |
 | 0x16 GetPlayerApplicationSettingValueText | `0x35a0` | Iter1 emits "Off" for the first inbound value_id when attr_id is 2 or 3; unsupported attr_ids fall through with no response (peer times out / falls back) |
@@ -192,11 +192,11 @@ In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm.
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
 | 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
 | 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | `0x345c` | n=2 + `[(Repeat, OFF), (Shuffle, OFF)]` (iter1 hardcoded; pairs with T_papp 0x13 response) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | `0x345c` | n=2 + `[(Repeat, repeat_avrcp), (Shuffle, shuffle_avrcp)]` from `y1-track-info[795..796]` |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
 
-### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED
+### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED + PLAYER_APPLICATION_SETTING_CHANGED
 
 T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
 
@@ -205,17 +205,19 @@ T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from 
 | before | `2D E9 F3 41` | function prologue |
 | after  | `[b.w T9 emitted by patcher]` | branch to T9 trampoline |
 
-T9 reads `y1-track-info` into its file buffer, then runs three independent edge / cadence checks:
+T9 reads `y1-track-info` into its file buffer, then runs four independent edge / cadence checks:
 
 - **play_status:** compare file[792] vs state[9] (`last_play_status`, previously pad). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Update state[9].
 - **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
-- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. T9's frame is 824 B (16 state + 800 file_buf + 8 timespec at sp+816..823).
+- **papp settings:** compare file[795]/file[796] (repeat_avrcp / shuffle_avrcp) vs state[11]/state[12]. On any inequality, emit `reg_notievent_player_appsettings_changed_rsp` via PLT `0x345c` with `r1=0`, `r2=REASON_CHANGED`, `r3=2`, `sp[0]=&papp_attr_ids` (=`[0x02, 0x03]`), `sp[4]=&file[795]`. Update state[11..12]. The values pointer is just `sp+T9_OFF_FILE_REPEAT` since file_buf already holds `[r, s]` contiguously at 795..796, so no scratch copy is needed.
+- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `live_pos = REV(file[780..783]) + (now_sec - REV(file[784..787])) * 1000` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. T9's frame is 832 B (8 outgoing-args at sp+0..7 for the appsettings call + 16 state + 800 file_buf + 8 timespec).
 
-If play or battery changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, and Table 5.33's CHANGED requirement on event-0x05 subscribers.
+If play, battery, or papp changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every Y1MediaBridge `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, Table 5.33's CHANGED requirement on event-0x05 subscribers, and Table 5.36's CHANGED requirement on event-0x08 subscribers.
 
 Y1MediaBridge fires `playstatechanged` whenever any of the following occurs:
 - actual play state edge
 - battery bucket transition via `mBatteryReceiver` on `Intent.ACTION_BATTERY_CHANGED` (level+plug bucket-mapped to the AVRCP §5.4.2 Tbl 5.35 enum)
+- `musicRepeatMode` / `musicIsShuffle` SharedPreferences change relayed by the music app's Patch B4 `PappStateBroadcaster` via `ACTION_PAPP_STATE_DID_CHANGE` (AVRCP enum mapping applied app-side; service updates `mCurrentRepeatAvrcp`/`mCurrentShuffleAvrcp` and rewrites `y1-track-info[795..796]` before broadcasting).
 - 1 s `mPosTickRunnable` Handler.postDelayed loop while `mIsPlaying` (started on the play edge in `onStateDetected`, cancelled on the pause / stop edge and in `onDestroy`).
 
 Stock MtkBt's battery dispatch chain via `BTAvrcpSystemListener.onBatteryStatusChange` is dead — `BTAvrcpMusicAdapter$2` overrides it with a log-only stub — so reusing `playstatechanged` as the trigger is the cheapest correct alternative, with `BATT_STATUS_NORMAL` retained only as the safe default for a short y1-track-info file (`stack_buf` is memset to zero before the read). The position emit deviates slightly from strict spec (we emit at our 1 s cadence rather than the CT-supplied `playback_interval`); this is a permissible floor since "shall be emitted at this interval" defines a maximum interval, not a minimum cadence — emitting more frequently over-serves rather than under-serves.
@@ -419,7 +421,22 @@ Adds a new BroadcastReceiver class to the music app and registers it dynamically
 | `com.y1.mediabridge.SET_REPEAT_MODE` | `value:I` (Y1 enum 0/1/2 = OFF/ONE/ALL) | `SharedPreferencesUtils.setMusicRepeatMode(I)` |
 | `com.y1.mediabridge.SET_IS_SHUFFLE` | `value:Z` | `SharedPreferencesUtils.setMusicIsShuffle(Z)` |
 
-Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so PlayerService re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. Closes the iter3 round-trip from peer-CT PDU 0x14 → Y1's actual Repeat / Shuffle state.
+Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so PlayerService re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. Closes the CT-Set round-trip from peer-CT PDU 0x14 → Y1's actual Repeat / Shuffle state.
+
+**Patch B4** — `com.koensayr.PappStateBroadcaster` for Y1-side Repeat / Shuffle CHANGED relay.
+
+Adds a second new class to the music app, registered from `Y1Application.onCreate` as an `OnSharedPreferenceChangeListener` against the `"settings"` SharedPreferences (the same prefs file `SharedPreferencesUtils` reads/writes). The listener fires for any write to any key, but B4 filters to two:
+
+| Key | Maps to | AVRCP §5.2.4 |
+|---|---|---|
+| `musicRepeatMode` (int 0/1/2) | AVRCP repeat 0x01/0x02/0x03 (OFF/SINGLE/ALL) | Tbl 5.20 |
+| `musicIsShuffle` (boolean) | AVRCP shuffle 0x01/0x02 (OFF/ALL_TRACK) | Tbl 5.21 |
+
+On match, reads both live values via `SharedPreferencesUtils.INSTANCE.getMusicRepeatMode()` / `getMusicIsShuffle()`, maps to the AVRCP enum bytes, and broadcasts `com.y1.mediabridge.PAPP_STATE_DID_CHANGE` to package `com.y1.mediabridge` with extras `repeat_avrcp:I` and `shuffle_avrcp:I`. The listener covers both update paths uniformly: AVRCP-driven Sets that come in via Patch B3 (because B3 writes via `SharedPreferencesUtils.setMusicRepeatMode/setMusicIsShuffle`, which fires the listener) and Y1-UI toggles in the in-app Settings screen.
+
+`Y1Application.onCreate` calls `sendNow()` once on registration so a fresh music-app start syncs Y1MediaBridge's `mCurrentRepeatAvrcp`/`mCurrentShuffleAvrcp` to actual SharedPreferences state. The broadcaster also stashes itself in a static `sInstance` field so the GC doesn't reclaim it (Android's SharedPreferences holds `OnSharedPreferenceChangeListener` instances by weak reference — without a strong rooting reference the listener stops firing after the next GC cycle).
+
+Y1MediaBridge consumes the broadcast, updates its volatile fields, rewrites `y1-track-info[795..796]`, and fires `playstatechanged` so T9 picks up the edge and emits AVRCP §5.4.2 Tbl 5.36 `PLAYER_APPLICATION_SETTING_CHANGED` CHANGED via PLT `0x345c`. Closes the CHANGED loop from Y1's actual Repeat / Shuffle state → peer CT subscribers of event 0x08.
 
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 
