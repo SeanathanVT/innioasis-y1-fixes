@@ -1313,17 +1313,27 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("papp_done")
 
     # ---- 0x13 GetCurrentPlayerApplicationSettingValue ----
-    # Inbound: n + n attr_ids. We ignore the request and always return both
-    # supported attrs with their current values — spec-permissive peers
-    # accept this; strict peers that asked for a subset get extra info,
-    # which is not a wire error per V13 §5.2.5.
+    # Inbound: 1 byte n + n attr_ids. Per AVRCP V13 §6.12, "The TG returns
+    # the current value(s) of the player application setting(s) requested by
+    # the CT" — strict CTs (e.g. Kia head units) reject a response whose n
+    # field doesn't match the request and close the AVCTP channel. Honor the
+    # spec by branching on the inbound n: n==1 → return only the requested
+    # attr; otherwise fall through to the existing two-attr response (kept
+    # for the n==2 case + permissive CTs that send n==0 to mean "all").
     #
     # Live values: open y1-track-info, lseek to byte 795, read 2 bytes
-    # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region at
-    # sp+8..9, pass sp+8 as the values pointer. On I/O failure fall
-    # back to the static OFF/OFF table at papp_current_values.
+    # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region, pass
+    # the live pointer as the values pointer. On I/O failure fall back to
+    # the static OFF/OFF table at papp_current_values (n==2) or to the
+    # single-byte 0x01 OFF default (n==1).
     a.label("papp_get_current")
 
+    # Honor V13 §6.12 — branch to n==1 handler if inbound n is 1.
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = inbound n (caller's sp+386)
+    a.cmp_imm8(6, 1)
+    a.beq_w("papp_gc_n1")
+
+    # ---- n != 1: existing two-attr path ----
     # Open y1-track-info
     a.adr_w(0, "path_track_info")
     a.movs_imm8(1, O_RDONLY)
@@ -1366,6 +1376,100 @@ def _emit_t_papp(a: Asm) -> None:
     a.movs_imm8(1, 0)
     a.movs_imm8(2, 2)                     # n_pairs
     a.adr_w(3, "papp_attr_ids")           # &[2, 3]
+    a.blx_imm(PLT_get_curplayer_value_rsp)
+    a.b_w("papp_done")
+
+    # ---- n == 1: single-attr response ----
+    # Outgoing-args layout for this path (PAPP_OFF_ARGS == 0). All buffer
+    # base addresses are 4-byte aligned so add_sp_imm can reach them; the
+    # 1-byte payloads live at the start of each 4-byte slot:
+    #   sp+ 0..3  = stack arg slot for values_ptr (= sp+12)
+    #   sp+ 8..11 = attr_ids buffer (sp+8 = requested attr_id byte)
+    #   sp+12..15 = values buffer   (sp+12 = picked value byte)
+    #   sp+16..19 = read scratch    (sp+16 = repeat byte, sp+17 = shuffle byte)
+    a.label("papp_gc_n1")
+
+    # Read inbound attr_id at caller's sp+387; validate as Repeat (0x02) or
+    # Shuffle (0x03). Anything else → reject with V13 §6.15.2 status 0x05
+    # INVALID_PARAMETER.
+    a.ldrb_w(6, 13, PAPP_PARAM_OFF + 1)   # r6 = requested attr_id
+    a.cmp_imm8(6, PAPP_ATTR_REPEAT)
+    a.beq("papp_gc_n1_open")
+    a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
+    a.bne_w("papp_gc_n1_reject")
+
+    a.label("papp_gc_n1_open")
+    # Open y1-track-info
+    a.adr_w(0, "path_track_info")
+    a.movs_imm8(1, O_RDONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("papp_gc_n1_static")
+    a.mov_lo_lo(4, 0)                     # r4 = fd
+
+    # lseek(fd, 795, SEEK_SET)
+    a.mov_lo_lo(0, 4)
+    a.movw(1, 795)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    # read(fd, sp+16, 2) — aligned scratch (sp+16 = repeat, sp+17 = shuffle).
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, PAPP_OFF_ARGS + 16)
+    a.movs_imm8(2, 2)
+    a.movs_imm8(7, NR_read)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+    # Pick the byte matching the requested attr_id: Repeat at +16, Shuffle at +17.
+    a.cmp_imm8(6, PAPP_ATTR_SHUFFLE)
+    a.beq("papp_gc_n1_use_shuffle")
+    a.ldrb_w(7, 13, PAPP_OFF_ARGS + 16)   # r7 = repeat byte
+    a.b_w("papp_gc_n1_emit")
+
+    a.label("papp_gc_n1_use_shuffle")
+    a.ldrb_w(7, 13, PAPP_OFF_ARGS + 17)   # r7 = shuffle byte
+    a.b_w("papp_gc_n1_emit")
+
+    a.label("papp_gc_n1_static")
+    # File I/O failed. PAPP_REPEAT_OFF and PAPP_SHUFFLE_OFF are both 0x01 per
+    # V13 Tbl 5.20 / 5.21, so a single OFF default covers either attr_id.
+    a.movs_imm8(7, PAPP_REPEAT_OFF)
+
+    a.label("papp_gc_n1_emit")
+    # Pack response: attr_ids[0] = r6 at sp+8, values[0] = r7 at sp+12.
+    a.strb_w(6, 13, PAPP_OFF_ARGS + 8)
+    a.strb_w(7, 13, PAPP_OFF_ARGS + 12)
+
+    # Stack arg sp[0] = values_ptr (= sp + PAPP_OFF_ARGS + 12).
+    a.add_sp_imm(0, PAPP_OFF_ARGS + 12)
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)
+
+    # get_curplayer_value_rsp(conn, 0 success, n=1, &attr_ids).
+    a.add_imm_t3(0, 5, 8)                 # r0 = conn
+    a.movs_imm8(1, 0)
+    a.movs_imm8(2, 1)                     # n_pairs = 1
+    a.add_sp_imm(3, PAPP_OFF_ARGS + 8)    # r3 = &attr_ids
+    a.blx_imm(PLT_get_curplayer_value_rsp)
+    a.b_w("papp_done")
+
+    a.label("papp_gc_n1_reject")
+    # V13 §6.15.2 status 0x05 INVALID_PARAMETER. The response builder still
+    # requires the n/ids/values triple; pass n=0 with dummy buffers at the
+    # aligned slots.
+    a.movs_imm8(0, 0)
+    a.strb_w(0, 13, PAPP_OFF_ARGS + 8)
+    a.strb_w(0, 13, PAPP_OFF_ARGS + 12)
+    a.add_sp_imm(0, PAPP_OFF_ARGS + 12)
+    a.str_sp_imm(0, PAPP_OFF_ARGS + 0)
+    a.add_imm_t3(0, 5, 8)
+    a.movs_imm8(1, 5)                     # INVALID_PARAMETER
+    a.movs_imm8(2, 0)                     # n=0
+    a.add_sp_imm(3, PAPP_OFF_ARGS + 8)
     a.blx_imm(PLT_get_curplayer_value_rsp)
     a.b_w("papp_done")
 
