@@ -225,6 +225,22 @@ public class MediaBridgeService extends Service {
      *  broadcast for CHANGED-on-edge dispatch. */
     private volatile byte mCurrentBatteryStatus = 0; // default = NORMAL
 
+    /** AVRCP §5.2.4 Tbl 5.20 Repeat-mode value (0x01 OFF / 0x02 SINGLE /
+     *  0x03 ALL / 0x04 GROUP) and Tbl 5.21 Shuffle value (0x01 OFF / 0x02
+     *  ALL / 0x03 GROUP). The music app's apk-side PappStateBroadcaster
+     *  (Patch B4) registers an OnSharedPreferenceChangeListener and
+     *  broadcasts `com.y1.mediabridge.PAPP_STATE_DID_CHANGE` whenever
+     *  `musicRepeatMode` or `musicIsShuffle` flips — covering both
+     *  AVRCP-driven Sets (via PappSetReceiver) and Y1-UI toggles uniformly.
+     *  Written to y1-track-info[795]/[796] by writeTrackInfoFile and read
+     *  by the AVRCP T9 trampoline for CHANGED-on-edge emission. */
+    private volatile byte mCurrentRepeatAvrcp  = 0x01; // default = OFF
+    private volatile byte mCurrentShuffleAvrcp = 0x01; // default = OFF
+
+    /** Receiver for `com.y1.mediabridge.PAPP_STATE_DID_CHANGE`. Held as a
+     *  field so we can unregister cleanly in onDestroy. */
+    private BroadcastReceiver mPappStateReceiver;
+
     /** BroadcastReceiver registered for Android's sticky `ACTION_BATTERY_CHANGED`.
      *  Held as a field so we can unregister cleanly in onDestroy. */
     private BroadcastReceiver mBatteryReceiver;
@@ -711,7 +727,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=30 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=31 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -720,6 +736,49 @@ public class MediaBridgeService extends Service {
         prepareTrackInfoDir();
         registerBatteryReceiver();
         setupPappSetObserver();
+        registerPappStateReceiver();
+    }
+
+    /**
+     * Register a BroadcastReceiver for ACTION_PAPP_STATE_DID_CHANGE so the
+     * music app's PappStateBroadcaster (Patch B4 — apk-side
+     * OnSharedPreferenceChangeListener) can push the live AVRCP-mapped
+     * Repeat / Shuffle values to us. Updates mCurrentRepeatAvrcp /
+     * mCurrentShuffleAvrcp, rewrites y1-track-info[795..796], and fires
+     * `playstatechanged` so T9 picks up the edge and emits AVRCP 1.3 §5.4.2
+     * Tbl 5.36 PLAYER_APPLICATION_SETTING_CHANGED CHANGED.
+     */
+    private void registerPappStateReceiver() {
+        IntentFilter filter = new IntentFilter(ACTION_PAPP_STATE_DID_CHANGE);
+        mPappStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                handlePappStateIntent(intent);
+            }
+        };
+        registerReceiver(mPappStateReceiver, filter);
+    }
+
+    private void handlePappStateIntent(Intent intent) {
+        if (intent == null) return;
+        // PappStateBroadcaster always sends both extras together. Default to
+        // the AVRCP "OFF" sentinel (0x01) for either one if missing so a
+        // partial intent doesn't poison live state.
+        int rep = intent.getIntExtra(EXTRA_REPEAT_AVRCP,  0x01);
+        int shf = intent.getIntExtra(EXTRA_SHUFFLE_AVRCP, 0x01);
+        // Clamp to spec ranges. AVRCP §5.2.4 Tbl 5.20 (Repeat) = {0x01..0x04};
+        // Tbl 5.21 (Shuffle) = {0x01..0x03}. Out-of-range is folded to OFF.
+        if (rep < 0x01 || rep > 0x04) rep = 0x01;
+        if (shf < 0x01 || shf > 0x03) shf = 0x01;
+        boolean changed = (rep != (mCurrentRepeatAvrcp & 0xFF))
+                       || (shf != (mCurrentShuffleAvrcp & 0xFF));
+        mCurrentRepeatAvrcp  = (byte) rep;
+        mCurrentShuffleAvrcp = (byte) shf;
+        if (!changed) return;
+        // Write y1-track-info FIRST so T9 sees the new bytes before the
+        // playstatechanged broadcast wakes notificationPlayStatusChangedNative.
+        writeTrackInfoFile();
+        sendMusicBroadcast("com.android.music.playstatechanged");
     }
 
     /**
@@ -1019,6 +1078,11 @@ public class MediaBridgeService extends Service {
         if (mPappSetObserver != null) {
             mPappSetObserver.stopWatching();
             mPappSetObserver = null;
+        }
+        if (mPappStateReceiver != null) {
+            try { unregisterReceiver(mPappStateReceiver); }
+            catch (IllegalArgumentException ignore) { }
+            mPappStateReceiver = null;
         }
         cancelPosTick();
         if (mCurrentAlbumArt != null && !mCurrentAlbumArt.isRecycled()) {
@@ -1485,6 +1549,14 @@ public class MediaBridgeService extends Service {
     private static final String MUSIC_APP_PACKAGE = "com.innioasis.y1";
     private static final String ACTION_SET_REPEAT_MODE = "com.y1.mediabridge.SET_REPEAT_MODE";
     private static final String ACTION_SET_IS_SHUFFLE  = "com.y1.mediabridge.SET_IS_SHUFFLE";
+    /** Reverse-direction broadcast: music app's PappStateBroadcaster (Patch
+     *  B4) fires this whenever musicRepeatMode or musicIsShuffle flips
+     *  (covering both AVRCP-driven Sets and Y1-UI toggles). Extras:
+     *    EXTRA_REPEAT_AVRCP  (int, AVRCP §5.2.4 Tbl 5.20: 0x01..0x04)
+     *    EXTRA_SHUFFLE_AVRCP (int, AVRCP §5.2.4 Tbl 5.21: 0x01..0x03) */
+    private static final String ACTION_PAPP_STATE_DID_CHANGE = "com.y1.mediabridge.PAPP_STATE_DID_CHANGE";
+    private static final String EXTRA_REPEAT_AVRCP  = "repeat_avrcp";
+    private static final String EXTRA_SHUFFLE_AVRCP = "shuffle_avrcp";
     private static final String EXTRA_VALUE = "value";
     private static final int TRACK_ID_LEN = 8;
     private static final int FIELD_LEN = 256;
@@ -1506,6 +1578,11 @@ public class MediaBridgeService extends Service {
      *  detection (compares against y1-trampoline-state[10]). 0=NORMAL,
      *  1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE. */
     private static final int BATTERY_STATUS_OFFSET = PLAY_STATUS_OFFSET + 2;      // 794 - battery_status u8
+    /** AVRCP §5.2.4 Tbl 5.20 Repeat-mode (0x01..0x04) at byte 795, Tbl 5.21
+     *  Shuffle (0x01..0x03) at byte 796. T9 reads both for CHANGED-on-edge
+     *  dispatch of event 0x08 PLAYER_APPLICATION_SETTING_CHANGED. */
+    private static final int REPEAT_OFFSET    = PLAY_STATUS_OFFSET + 3;           // 795 - repeat_avrcp u8
+    private static final int SHUFFLE_OFFSET   = PLAY_STATUS_OFFSET + 4;           // 796 - shuffle_avrcp u8
     // GetElementAttributes attrs 4-7. Pre-formatted UTF-8 strings — keeps the
     // T4 trampoline a uniform strlen+memcpy loop and avoids hand-rolled Thumb-2
     // itoa for the numeric fields.
@@ -1570,6 +1647,9 @@ public class MediaBridgeService extends Service {
             // T9 CHANGED-on-edge detection. Updated by mBatteryReceiver on
             // `Intent.ACTION_BATTERY_CHANGED` bucket transitions.
             buf[BATTERY_STATUS_OFFSET] = mCurrentBatteryStatus;
+            // PApp state for T9 PLAYER_APPLICATION_SETTING_CHANGED edge detection.
+            buf[REPEAT_OFFSET]  = mCurrentRepeatAvrcp;
+            buf[SHUFFLE_OFFSET] = mCurrentShuffleAvrcp;
 
             // GetElementAttributes attrs 4-7 (AVRCP 1.3 §5.3.4). Store as
             // pre-formatted UTF-8 strings so T4 ships them with the same
