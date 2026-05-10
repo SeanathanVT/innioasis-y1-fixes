@@ -219,6 +219,7 @@ ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
 REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
 Y1APP_SMALI   = "smali/com/innioasis/y1/Y1Application.smali"
 PAPP_RECEIVER_SMALI = "smali/com/koensayr/PappSetReceiver.smali"
+PAPP_BROADCASTER_SMALI = "smali/com/koensayr/PappStateBroadcaster.smali"
 
 # Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
 ARTIST_INTENT_KEY = "artist_key"
@@ -1463,7 +1464,7 @@ print(
 
 
 # ============================================================
-# Patch B3: PappSetReceiver — apply iter3 Repeat/Shuffle Sets from AVRCP
+# Patch B3: PappSetReceiver — apply CT-driven Repeat/Shuffle Sets from AVRCP
 # ============================================================
 #
 # Adds a new BroadcastReceiver `com.koensayr.PappSetReceiver` to the music
@@ -1619,6 +1620,28 @@ NEW_Y1APP_RETURN = """\
 
     invoke-virtual {p0, v0, v1}, Lcom/innioasis/y1/Y1Application;->registerReceiver(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;)Landroid/content/Intent;
 
+    # Patch B4: register PappStateBroadcaster as OnSharedPreferenceChangeListener
+    # against the "settings" SharedPreferences. On Y1-side toggle of
+    # musicRepeatMode / musicIsShuffle (whether from the in-app Settings UI
+    # or from the AVRCP-driven PappSetReceiver above), the broadcaster fires
+    # ACTION_PAPP_STATE_DID_CHANGE so Y1MediaBridge can rewrite
+    # y1-track-info[795..796] and wake T9 → AVRCP event 0x08 CHANGED.
+    new-instance v0, Lcom/koensayr/PappStateBroadcaster;
+
+    invoke-direct {v0, p0}, Lcom/koensayr/PappStateBroadcaster;-><init>(Landroid/content/Context;)V
+
+    const-string v1, "settings"
+
+    const/4 v2, 0x0
+
+    invoke-virtual {p0, v1, v2}, Lcom/innioasis/y1/Y1Application;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
+
+    move-result-object v1
+
+    invoke-interface {v1, v0}, Landroid/content/SharedPreferences;->registerOnSharedPreferenceChangeListener(Landroid/content/SharedPreferences$OnSharedPreferenceChangeListener;)V
+
+    invoke-virtual {v0}, Lcom/koensayr/PappStateBroadcaster;->sendNow()V
+
     return-void
 .end method"""
 
@@ -1635,6 +1658,187 @@ with open(y1app_path, 'w') as f:
 print("  Patch B3: Y1Application.onCreate registers PappSetReceiver")
 
 
+# ============================================================
+# Patch B4: PappStateBroadcaster — push Y1-side Repeat/Shuffle edges to
+# Y1MediaBridge so T9 can emit AVRCP event 0x08 CHANGED proactively
+# ============================================================
+#
+# OnSharedPreferenceChangeListener fires for any write to the "settings"
+# SharedPreferences — covers both AVRCP-driven Sets (PappSetReceiver from
+# Patch B3) and Y1-UI toggles uniformly. On a key match for
+# "musicRepeatMode" or "musicIsShuffle", reads the live values via
+# SharedPreferencesUtils, maps to AVRCP §5.2.4 enum bytes, and broadcasts
+# ACTION_PAPP_STATE_DID_CHANGE to com.y1.mediabridge with extras
+# repeat_avrcp + shuffle_avrcp.
+#
+# AVRCP §5.2.4 mapping (verified by gdb-capture #107 — see Trace #18):
+#   Repeat:  Y1 musicRepeatMode 0/1/2 → AVRCP 0x01/0x02/0x03 (OFF/SINGLE/ALL)
+#   Shuffle: Y1 musicIsShuffle false/true → AVRCP 0x01/0x02 (OFF/ALL_TRACK)
+#
+# Self-rooted via a static field so the GC doesn't reclaim the listener
+# (SharedPreferences holds OnSharedPreferenceChangeListener via weak ref).
+# Y1Application.onCreate also calls sendNow() once on registration so
+# Y1MediaBridge syncs at music-app startup.
+
+print(f"\nPatch B4: PappStateBroadcaster in music app")
+
+PAPP_BROADCASTER_SMALI_BODY = """\
+.class public Lcom/koensayr/PappStateBroadcaster;
+.super Ljava/lang/Object;
+.implements Landroid/content/SharedPreferences$OnSharedPreferenceChangeListener;
+.source "PappStateBroadcaster.smali"
+
+
+# static fields — strong self-reference so the listener survives GC.
+.field private static sInstance:Lcom/koensayr/PappStateBroadcaster;
+
+
+# instance fields
+.field private final mContext:Landroid/content/Context;
+
+
+# direct methods
+.method public constructor <init>(Landroid/content/Context;)V
+    .locals 0
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    iput-object p1, p0, Lcom/koensayr/PappStateBroadcaster;->mContext:Landroid/content/Context;
+
+    sput-object p0, Lcom/koensayr/PappStateBroadcaster;->sInstance:Lcom/koensayr/PappStateBroadcaster;
+
+    return-void
+.end method
+
+# Y1 musicRepeatMode int (0/1/2) → AVRCP §5.2.4 Tbl 5.20 byte (0x01/0x02/0x03).
+.method private static repeatToAvrcp(I)I
+    .locals 1
+
+    if-nez p0, :cond_one
+
+    const/4 v0, 0x1
+
+    return v0
+
+    :cond_one
+    const/4 v0, 0x1
+
+    if-ne p0, v0, :cond_all
+
+    const/4 v0, 0x2
+
+    return v0
+
+    :cond_all
+    const/4 v0, 0x3
+
+    return v0
+.end method
+
+# Y1 musicIsShuffle boolean → AVRCP §5.2.4 Tbl 5.21 byte
+# (true = ALL_TRACK 0x02, false = OFF 0x01).
+.method private static shuffleToAvrcp(Z)I
+    .locals 1
+
+    if-eqz p0, :cond_off
+
+    const/4 v0, 0x2
+
+    return v0
+
+    :cond_off
+    const/4 v0, 0x1
+
+    return v0
+.end method
+
+# Read live Repeat / Shuffle, map to AVRCP enum, broadcast.
+.method public sendNow()V
+    .locals 5
+
+    sget-object v0, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v0}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->getMusicRepeatMode()I
+
+    move-result v0
+
+    invoke-static {v0}, Lcom/koensayr/PappStateBroadcaster;->repeatToAvrcp(I)I
+
+    move-result v0
+
+    sget-object v1, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v1}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->getMusicIsShuffle()Z
+
+    move-result v1
+
+    invoke-static {v1}, Lcom/koensayr/PappStateBroadcaster;->shuffleToAvrcp(Z)I
+
+    move-result v1
+
+    new-instance v2, Landroid/content/Intent;
+
+    const-string v3, "com.y1.mediabridge.PAPP_STATE_DID_CHANGE"
+
+    invoke-direct {v2, v3}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    const-string v3, "com.y1.mediabridge"
+
+    invoke-virtual {v2, v3}, Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v3, "repeat_avrcp"
+
+    invoke-virtual {v2, v3, v0}, Landroid/content/Intent;->putExtra(Ljava/lang/String;I)Landroid/content/Intent;
+
+    const-string v3, "shuffle_avrcp"
+
+    invoke-virtual {v2, v3, v1}, Landroid/content/Intent;->putExtra(Ljava/lang/String;I)Landroid/content/Intent;
+
+    iget-object v3, p0, Lcom/koensayr/PappStateBroadcaster;->mContext:Landroid/content/Context;
+
+    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
+
+    return-void
+.end method
+
+
+# virtual methods — OnSharedPreferenceChangeListener
+.method public onSharedPreferenceChanged(Landroid/content/SharedPreferences;Ljava/lang/String;)V
+    .locals 2
+
+    if-eqz p2, :end
+
+    const-string v0, "musicRepeatMode"
+
+    invoke-virtual {v0, p2}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v1
+
+    if-nez v1, :send
+
+    const-string v0, "musicIsShuffle"
+
+    invoke-virtual {v0, p2}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v1
+
+    if-eqz v1, :end
+
+    :send
+    invoke-virtual {p0}, Lcom/koensayr/PappStateBroadcaster;->sendNow()V
+
+    :end
+    return-void
+.end method
+"""
+
+papp_broadcaster_path = os.path.join(UNPACKED_DIR, PAPP_BROADCASTER_SMALI)
+os.makedirs(os.path.dirname(papp_broadcaster_path), exist_ok=True)
+with open(papp_broadcaster_path, 'w') as f:
+    f.write(PAPP_BROADCASTER_SMALI_BODY)
+print(f"  Wrote {PAPP_BROADCASTER_SMALI}")
+
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1644,7 +1848,7 @@ PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
     PLAY_CONTROLLER_RECEIVER_SMALI, BASE_ACTIVITY_SMALI,
     BASE_PLAYER_ACTIVITY_SMALI,
-    Y1APP_SMALI, PAPP_RECEIVER_SMALI,
+    Y1APP_SMALI, PAPP_RECEIVER_SMALI, PAPP_BROADCASTER_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
