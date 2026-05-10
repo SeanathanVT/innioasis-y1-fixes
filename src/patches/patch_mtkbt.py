@@ -3,7 +3,7 @@
 patch_mtkbt.py — SDP / VENDOR_DEPENDENT routing patches against stock mtkbt.
 
 Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: 51a9881d5c5c21b375880cfcf8e23792
+Output md5: 04daa66a4694d5b2602ab740ed2511aa
 
 Four byte-level patches against the SERVED AVRCP TG record (Group D, the
 record that actually lands on the wire after mtkbt's last-wins merge) plus
@@ -63,7 +63,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "51a9881d5c5c21b375880cfcf8e23792"
+OUTPUT_MD5        = "04daa66a4694d5b2602ab740ed2511aa"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — mtkbt is a stripped-down ARM ELF without symbols or a Java
@@ -87,6 +87,21 @@ PATCHES = [
         "offset": 0x0eba58,
         "before": bytes([0x00]),
         "after":  bytes([0x03]),
+    },
+    {
+        # mtkbt's internal AVRCP activation handler (`fcn.00010d00`) hardcodes
+        # `movs r3, #0xa` and writes 10 to the avrcp_state struct's activeVersion
+        # field — overriding whatever activate_req's caller supplied (which F1
+        # makes 14 via Java's getPreferVersion). The btlog line
+        #   "AVRCP register activeVersion:10"
+        # surfaces this override; downstream version-gated branches (compiled-
+        # for-1.0 response builders, "sdp 1.0 target role" log, and the
+        # 1.3-class wire-shape selector) all read this byte. Patching the
+        # immediate to 14 aligns the internal activeVersion with F1.
+        "name":   "[V6] AVRCP internal activeVersion 10->14 (override hardcoded in activation handler)",
+        "offset": 0x00010dca,
+        "before": bytes([0x0a, 0x23]),  # movs r3, #0xa
+        "after":  bytes([0x0e, 0x23]),  # movs r3, #0xe
     },
     {
         "name":   "[V2] AVCTP 1.0->1.2 LSB  Group D ProtocolDescList (served)",
