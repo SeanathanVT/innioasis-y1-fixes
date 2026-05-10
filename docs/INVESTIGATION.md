@@ -1596,8 +1596,8 @@ Hunt: locate where mtkbt registers its inbound L2CAP callback for PSM 0x19 (AVDT
 0x000ae9d0      movw r0, #0x69b                  ; MTU = 1691  (struct[+0x30])
 0x000ae9d6      movs r3, #0x30                   ; channel mode flags (struct[+0x32])
 0x000ae9d8      mov.w sb, #0x19                  ; PSM = 0x19  (struct[+0x2c])
-0x000ae9dc      add r4, pc; ldr r4, [r4]         ; r4 = &PsmCtx (PIE-relocated, [0xaea84]→0xf9c38)
-0x000ae9e0      add r1, pc; ldr r1, [r1]         ; r1 = &CallbackTable (PIE-relocated, [0xaea88]→0xf9c3c)
+0x000ae9dc      add r4, pc; ldr r4, [r4]         ; r4 = *(GOT slot 0xf9c38) = AVDTP state struct (R_ARM_RELATIVE → BSS @ link-vaddr 0x1b7d28)
+0x000ae9e0      add r1, pc; ldr r1, [r1]         ; r1 = *(GOT slot 0xf9c3c) = AVDTP L2CAP callback fnptr (R_ARM_RELATIVE → 0xafc69, thumb-bit fnptr to fcn at 0xafc68)
 0x000ae9e4      strh r0, [r4, #0x30]             ; PsmCtx.MTU = 0x69b
 0x000ae9e6      str  r1, [r4, #0x28]             ; PsmCtx.callback_struct = r1
 0x000ae9e8      add.w r0, r4, #0x28              ; r0 = &PsmCtx[0x28] (= L2CAP register arg)
@@ -1648,8 +1648,52 @@ Hunt: locate where mtkbt registers its inbound L2CAP callback for PSM 0x19 (AVDT
 - AVDTP register fcn: file offset **0xae9bc** (one caller at 0xab8a8)
 - L2CAP_RegisterPsm: file offset **0x7c78c** (15 callers covering all profiles)
 - AVCTP register caller: 0x6d2c8 (PSM 0x17, MTU 0x69b same advertised cap, inside fcn.0000f79c-region init)
-- PIE-relocated PsmCtx ptr: GOT-style entry at 0xf9c38 → resolved via R_ARM_RELATIVE
-- PIE-relocated callback-table ptr: GOT-style entry at 0xf9c3c → R_ARM_RELATIVE
+- AVDTP state-struct GOT slot: vaddr **0xf9c38** → R_ARM_RELATIVE addend **0x001b7d28** (link-time vaddr in `.bss`; fcn.000b54ec memsets 0x8fc=2300 bytes there at boot; 16 internal AVDTP module fns reference this slot for state access — confirmed via `axt @ 0xf9c38`)
+- AVDTP L2CAP callback GOT slot: vaddr **0xf9c3c** → R_ARM_RELATIVE addend **0x000afc69** (thumb-bit fnptr to **fcn at 0xafc68** — the inbound-L2CAP-frame handler installed in the BlueAngel global PSM registry)
+
+**The L2CAP callback (fcn at 0xafc68)** — entry point for every inbound AVDTP frame on PSM 0x19. r2 doesn't recognise it as a function (no fcn label) but disasm is clean from 0xafc68 onward with a standard prologue. Signature: `(arg0, arg1)` where `arg1` is an L2CAP event/frame struct (`arg1[0]` = event-type byte, `arg1[+4]` = payload pointer). Body:
+
+```
+0x000afc68      push {r4, r5, r6, lr}
+0x000afc6a      mov r6, r1                       ; arg1 = event/frame struct
+0x000afc6c      ldr r4, [r1, #4]                 ; r4 = arg1[+4] = payload ptr
+0x000afc6e      mov r5, r0                       ; arg0 = channel/conn handle
+0x000afc72      bl fcn.000afb7c                  ; helper (reads AVDTP state via slot 0xf9c38)
+0x000afc76      ldrb r3, [r6]                    ; r3 = event_type byte
+0x000afc78      cbz r0, 0xafca0                  ; helper returned 0 → connection-init path
+0x000afc7a      cmp r3, #1                        ; event_type == 1?
+0x000afc7c      beq 0xafc8c                       ; 1 → config_ind / specific event
+                                                  ; else → fcn.000afbfc (data dispatch)
+0x000afc8c..afc9e                                 ; case-1: fcn.000afbfc(0); store r5 → r4[+0]
+0x000afca0..afcc4                                 ; helper-returned-0 path: alloc via fcn.000afba0 OR recurse via fcn.000afc2c
+0x000afcb8      pop {r4, r5, r6, lr}
+0x000afcbc      b.w fcn.0007d624                 ; tail call back into L2CAP module
+0x000afccc..end                                   ; common success path: bl fcn.00084240 (alloc?), TBH dispatch via slot at [r3 + r0 lsl 2]
+```
+
+**Helper map** (all read AVDTP state via slot 0xf9c38):
+
+- `fcn.000afb7c` (in-degree 1): channel/SEP lookup helper, called once per inbound frame from 0xafc72.
+- `fcn.000afbfc` (in-degree 3): data-handler, fires from 0xafc80 (event_type ≠ 1) and 0xafc8e (event_type == 1). Likely the path that walks per-channel state and dispatches into `fcn.000b0c30` (the AVDTP state machine) — verifiable via gdb breakpoint.
+- `fcn.000afba0` (in-degree 1): allocator, fires from 0xafca4 on connection-init path.
+- `fcn.000afc2c` (in-degree 1): recursive sub-handler, fires from 0xafcc4.
+
+**Indirect dispatch into 0xb0c30 / 0xaa72c**. r2 reports **zero direct callers** for both `fcn.000b0c30` (state-machine dispatcher) and `0xaa72c` (`GavdpAvdtpEventCallback`) — they're invoked exclusively via function pointer fields in the AVDTP state struct (offset 0x464 for the event callback, per the `blx r2` indirect pattern noted earlier in fcn.000b09fc). Those fnptrs are written to the BSS state struct during AVDTP layer init — at link time the struct is zero, so init-time stores set them up. The chain is therefore:
+
+```
+inbound L2CAP frame on PSM 0x19
+  → BlueAngel L2CAP RX (fcn.0007d624 region)
+  → registered PSM-callback dispatch
+  → fcn at 0xafc68              [the AVDTP L2CAP callback, this trace]
+  → fcn.000afbfc / afb7c         [helpers; resolve channel from frame]
+  → channel-specific data-ind    [stored fnptr in per-channel struct, set at config time]
+  → fcn.000b0c30                 [AVDTP signaling state machine, Trace #13c]
+  → per-signal handler            [0xaa924 sig 0x02, 0xab4de sig 0x0c stub, etc.]
+  → AVDTP state struct callback at offset 0x464
+  → 0xaa72c (GavdpAvdtpEventCallback) [GAVDP-layer event dispatch, Trace #13c]
+```
+
+**Empirical close-out left for hardware**. The fnptr stored at AVDTP-state[0x464] is the only remaining gap and it's runtime-populated. Adding two BPs to the existing `tools/attach-mtkbt-gdb-avdtp.sh` — one at `0xafc68` (logging arg0 / arg1[0] / arg1[+4]) and one at the indirect `blx r2` site at 0xb0b46 (logging r2 = the resolved fnptr) — would print the full chain on the next pair attempt. No patch action implied; this is map-completion work.
 
 ## Open questions
 3. **A2DP SupportedFeatures (attribute 0x0311) value** — what feature bits does the served A2DP record advertise today, and what do A2DP 1.2 / 1.3 add? Confirms whether bumping A2DP 1.0 → 1.3 needs a paired feature-mask edit.
