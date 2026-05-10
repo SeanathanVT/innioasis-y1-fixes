@@ -727,7 +727,7 @@ public class MediaBridgeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "MediaBridgeService created versionCode=33 (pid=" + android.os.Process.myPid()
+        Log.d(TAG, "MediaBridgeService created versionCode=34 (pid=" + android.os.Process.myPid()
                 + " uid=" + android.os.Process.myUid() + ")");
 
         mAudioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -898,17 +898,32 @@ public class MediaBridgeService extends Service {
             Log.d(TAG, "prepareTrackInfoDir: setExecutable on " + dir.getPath()
                     + " → " + ok);
 
-            // Create y1-trampoline-state if missing. 16 zero bytes:
-            //   bytes 0..7  = last_seen_track_id (0 forces a CHANGED on first
-            //                 GetElementAttributes, which strict CTs may drop
-            //                 as bogus if transId is also 0 — but real
-            //                 subscriptions update transId before T4 ever fires)
-            //   byte  8     = last RegisterNotification transId
-            //   bytes 9..15 = padding
+            // Create y1-trampoline-state if missing. 16-byte schema (T5 owns
+            // 0..8, T9 owns 9..12, 13..15 = pad):
+            //   bytes 0..7  = last_seen_track_id (T5 — 0 forces CHANGED on
+            //                 the first GetElementAttributes, which strict
+            //                 CTs may drop as bogus if transId is also 0 —
+            //                 real subscriptions update transId before T4
+            //                 ever fires)
+            //   byte  8     = last RegisterNotification transId (T5)
+            //   byte  9     = last_play_status (T9 — defaults 0=STOPPED,
+            //                 matches mPlayStatus initial value)
+            //   byte 10     = last_battery_status (T9 — defaults 0=NORMAL,
+            //                 matches mCurrentBatteryStatus initial value)
+            //   byte 11     = last_repeat_avrcp (T9 papp edge — must default
+            //                 to 0x01 OFF so T9's first fire doesn't see a
+            //                 false edge against file[795]=0x01)
+            //   byte 12     = last_shuffle_avrcp (T9 papp edge — must default
+            //                 to 0x01 OFF so T9's first fire doesn't see a
+            //                 false edge against file[796]=0x01)
+            //   bytes 13..15 = pad (no owner)
             File state = new File(dir, TRAMPOLINE_STATE_FILENAME);
             if (!state.exists()) {
+                byte[] init = new byte[STATE_LEN];
+                init[11] = 0x01;  // last_repeat_avrcp = OFF
+                init[12] = 0x01;  // last_shuffle_avrcp = OFF
                 FileOutputStream fos = new FileOutputStream(state);
-                try { fos.write(new byte[STATE_LEN]); } finally { fos.close(); }
+                try { fos.write(init); } finally { fos.close(); }
             }
             // World rw: BT process (uid bluetooth) must read AND write.
             state.setReadable(true, false);
