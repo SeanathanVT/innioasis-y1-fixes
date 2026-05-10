@@ -217,6 +217,8 @@ DEBUG_LOGGING = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
 ALBUMS_SMALI  = "smali_classes2/com/innioasis/music/AlbumsActivity.smali"
 REPO_SMALI    = "smali/com/innioasis/y1/database/Y1Repository.smali"
+Y1APP_SMALI   = "smali/com/innioasis/y1/Y1Application.smali"
+PAPP_RECEIVER_SMALI = "smali/com/koensayr/PappSetReceiver.smali"
 
 # Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
 ARTIST_INTENT_KEY = "artist_key"
@@ -1460,6 +1462,179 @@ print(
 )
 
 
+# ============================================================
+# Patch B3: PappSetReceiver — apply iter3 Repeat/Shuffle Sets from AVRCP
+# ============================================================
+#
+# Adds a new BroadcastReceiver `com.koensayr.PappSetReceiver` to the music
+# app. The receiver listens for two Y1MediaBridge-emitted intents:
+#
+#   ACTION_SET_REPEAT_MODE  (com.y1.mediabridge.SET_REPEAT_MODE, EXTRA "value":I)
+#   ACTION_SET_IS_SHUFFLE   (com.y1.mediabridge.SET_IS_SHUFFLE,  EXTRA "value":Z)
+#
+# On receipt, it calls `SharedPreferencesUtils.INSTANCE.setMusicRepeatMode(I)`
+# or `setMusicIsShuffle(Z)` — the same setters the in-app Settings screen
+# calls when the Y1 user toggles Repeat / Shuffle. PlayerService re-reads
+# the SharedPreferences at track-end, so the change propagates without a
+# music-app restart.
+#
+# Y1MediaBridge consumes T_papp's PDU 0x14 file write at y1-papp-set,
+# translates AVRCP→Y1 enum, and dispatches the broadcast — closing the
+# loop from a peer CT's PDU 0x14 SetPlayerApplicationSettingValue back to
+# the Y1 music app's Repeat/Shuffle state.
+#
+# Two parts:
+#   1. Write a brand-new smali file (PappSetReceiver.smali) into the
+#      apk's smali tree. apktool re-compiles all smali files when it
+#      reassembles the DEX, so the new class is included automatically.
+#   2. Inject a `registerReceiver(...)` call at the end of
+#      Y1Application.onCreate() so the receiver is live as soon as the
+#      app process is up. We don't need a manifest entry because dynamic
+#      registration covers it.
+#
+# Receiver class lives under `com.koensayr` so the new class name doesn't
+# collide with anything in the existing `com.innioasis.y1.*` namespace.
+
+print(f"\nPatch B3: PappSetReceiver in music app")
+
+PAPP_RECEIVER_SMALI_BODY = """\
+.class public Lcom/koensayr/PappSetReceiver;
+.super Landroid/content/BroadcastReceiver;
+.source "PappSetReceiver.smali"
+
+
+# direct methods
+.method public constructor <init>()V
+    .locals 0
+
+    invoke-direct {p0}, Landroid/content/BroadcastReceiver;-><init>()V
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public onReceive(Landroid/content/Context;Landroid/content/Intent;)V
+    .locals 4
+
+    if-eqz p2, :end
+
+    invoke-virtual {p2}, Landroid/content/Intent;->getAction()Ljava/lang/String;
+
+    move-result-object v0
+
+    if-eqz v0, :end
+
+    const-string v1, "com.y1.mediabridge.SET_REPEAT_MODE"
+
+    invoke-virtual {v0, v1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v1
+
+    if-eqz v1, :try_shuffle
+
+    # Repeat path: SharedPreferencesUtils.setMusicRepeatMode(intent.getIntExtra("value", 0))
+    const-string v1, "value"
+
+    const/4 v2, 0x0
+
+    invoke-virtual {p2, v1, v2}, Landroid/content/Intent;->getIntExtra(Ljava/lang/String;I)I
+
+    move-result v1
+
+    sget-object v2, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v2, v1}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->setMusicRepeatMode(I)V
+
+    goto :end
+
+    :try_shuffle
+    const-string v1, "com.y1.mediabridge.SET_IS_SHUFFLE"
+
+    invoke-virtual {v0, v1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v1
+
+    if-eqz v1, :end
+
+    # Shuffle path: SharedPreferencesUtils.setMusicIsShuffle(intent.getBooleanExtra("value", false))
+    const-string v1, "value"
+
+    const/4 v2, 0x0
+
+    invoke-virtual {p2, v1, v2}, Landroid/content/Intent;->getBooleanExtra(Ljava/lang/String;Z)Z
+
+    move-result v1
+
+    sget-object v2, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v2, v1}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->setMusicIsShuffle(Z)V
+
+    :end
+    return-void
+.end method
+"""
+
+papp_receiver_path = os.path.join(UNPACKED_DIR, PAPP_RECEIVER_SMALI)
+os.makedirs(os.path.dirname(papp_receiver_path), exist_ok=True)
+with open(papp_receiver_path, 'w') as f:
+    f.write(PAPP_RECEIVER_SMALI_BODY)
+print(f"  Wrote {PAPP_RECEIVER_SMALI}")
+
+# -- Inject registerReceiver into Y1Application.onCreate ----------------------
+y1app_path = os.path.join(UNPACKED_DIR, Y1APP_SMALI)
+if not os.path.exists(y1app_path):
+    sys.exit(f"ERROR: Expected smali not found: {y1app_path}")
+
+with open(y1app_path, 'r') as f:
+    y1app_src = f.read()
+
+# We patch the *single* return-void inside `public onCreate()V`. Match the
+# preceding `:cond_3` label so we don't accidentally clobber some other
+# return-void in the file.
+OLD_Y1APP_RETURN = """\
+    :cond_3
+    return-void
+.end method"""
+
+NEW_Y1APP_RETURN = """\
+    :cond_3
+    # Patch B3: register PappSetReceiver for ACTION_SET_REPEAT_MODE +
+    # ACTION_SET_IS_SHUFFLE so AVRCP-driven Sets land in the music app.
+    new-instance v0, Lcom/koensayr/PappSetReceiver;
+
+    invoke-direct {v0}, Lcom/koensayr/PappSetReceiver;-><init>()V
+
+    new-instance v1, Landroid/content/IntentFilter;
+
+    invoke-direct {v1}, Landroid/content/IntentFilter;-><init>()V
+
+    const-string v2, "com.y1.mediabridge.SET_REPEAT_MODE"
+
+    invoke-virtual {v1, v2}, Landroid/content/IntentFilter;->addAction(Ljava/lang/String;)V
+
+    const-string v2, "com.y1.mediabridge.SET_IS_SHUFFLE"
+
+    invoke-virtual {v1, v2}, Landroid/content/IntentFilter;->addAction(Ljava/lang/String;)V
+
+    invoke-virtual {p0, v0, v1}, Lcom/innioasis/y1/Y1Application;->registerReceiver(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;)Landroid/content/Intent;
+
+    return-void
+.end method"""
+
+if OLD_Y1APP_RETURN not in y1app_src:
+    sys.exit(
+        "ERROR: Y1Application.onCreate :cond_3 + return-void not found.\n"
+        f"  File: {y1app_path}\n"
+        "  The smali shape may differ from 3.0.2."
+    )
+
+y1app_src = y1app_src.replace(OLD_Y1APP_RETURN, NEW_Y1APP_RETURN, 1)
+with open(y1app_path, 'w') as f:
+    f.write(y1app_src)
+print("  Patch B3: Y1Application.onCreate registers PappSetReceiver")
+
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1469,6 +1644,7 @@ PATCHED_SMALI_FILES = [
     ARTISTS_SMALI, ALBUMS_SMALI, REPO_SMALI,
     PLAY_CONTROLLER_RECEIVER_SMALI, BASE_ACTIVITY_SMALI,
     BASE_PLAYER_ACTIVITY_SMALI,
+    Y1APP_SMALI, PAPP_RECEIVER_SMALI,
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
