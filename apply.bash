@@ -25,13 +25,12 @@ FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
   --avrcp        AVRCP 1.3 metadata pipeline (1.3 SDP shape + AVCTP 1.2
                  + JNI trampoline chain in libextavrcp_jni.so + proactive
-                 CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex
-                 + Y1MediaBridge.apk metadata bridge). Replaces an earlier
-                 SDP byte-patch approach that regressed stock PASSTHROUGH
-                 without delivering metadata; the trampoline chain bypasses
-                 mtkbt's compiled-1.0 command dispatcher and synthesises
-                 the 1.3 responses inside
-                 the JNI library directly.
+                 CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex).
+                 The trampoline chain bypasses mtkbt's compiled-1.0 command
+                 dispatcher and synthesises the 1.3 responses inside the JNI
+                 library directly. The music app hosts both the y1-track-info
+                 writer and the AvrcpBridgeService Binder MtkBt binds to;
+                 there is no separate bridge APK.
 
                  Components:
                    - patch_mtkbt.py (V1: AVRCP 1.0->1.3 SDP, V2: AVCTP
@@ -46,16 +45,16 @@ FLAGS:
                      F2: disable() resets sPlayServiceInterface; two
                      cardinality NOPs in handleKeyMessage so Java fires
                      notificationTrackChangedNative + notification-
-                     PlayStatusChangedNative on every Y1 broadcast)
+                     PlayStatusChangedNative on every metachanged /
+                     playstatechanged broadcast)
                    - patch_libaudio_a2dp.py (HAL standby_l: skip
                      a2dp_stop unconditionally so silence-timeout leaves
                      the AVDTP source stream alive across pauses)
-                   - Y1MediaBridge.apk install (track_id + Title / Artist /
-                     Album written to /data/data/com.y1.mediabridge/files/)
-
-                 Excluded from --all because it requires a Y1MediaBridge
-                 build step. Build first:
-                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+                   - patch_y1_apk.py B5/B6 (in-music-app TrackInfoWriter +
+                     PlaybackStateBridge + BatteryReceiver + PappSetFile-
+                     Observer + AvrcpBridgeService Binder + manifest splice
+                     adding the com.android.music.MediaPlaybackService
+                     intent-filter at priority 100)
 
                  See docs/ARCHITECTURE.md for the trampoline chain reference.
   --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
@@ -68,9 +67,9 @@ FLAGS:
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
   --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
-                 --avrcp is excluded because it requires building
-                 Y1MediaBridge first (analogous to --root needing
-                 src/su/ built).
+                 --avrcp is left as an opt-in flag because (a) it ships a
+                 lot more byte-level patches than the other flags and (b)
+                 it changes BT-stack behavior in ways some users won't want.
   --debug        Build patches with diagnostic Log.d / __android_log_print
                  calls injected. Surfaces under "adb logcat -s Y1Patch:*"
                  on-device. Reflash required to toggle (this is a build-
@@ -168,8 +167,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      # --avrcp is intentionally excluded — it requires the Y1MediaBridge
-      # gradle build to have run first. Opt in explicitly when ready.
+      # --avrcp is intentionally excluded — it ships a much larger set of
+      # byte-level patches and changes BT-stack behavior in ways some users
+      # may not want. Opt in explicitly.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
       FLAG_MUSIC_APK=true
@@ -235,7 +235,7 @@ fi
 if [[ "$FLAG_DEBUG" == true ]]; then
   export KOENSAYR_DEBUG=1
   echo "[debug] KOENSAYR_DEBUG=1 — patches will include diagnostic logging."
-  echo "        Filter on-device:  adb logcat -s Y1Patch:* MMI_AVRCP:* Y1MediaBridge:*"
+  echo "        Filter on-device:  adb logcat -s Y1Patch:* MMI_AVRCP:*"
 fi
 
 # Separate from FLAG_ANY_SPECIFIED so a future boot.img-only flag stays a one-line gate change.
@@ -602,29 +602,47 @@ if [[ "$FLAG_ROOT" == true ]]; then
   fi
 fi
 
-# Apply AVRCP 1.3 metadata pipeline (SDP shape + JNI trampoline chain +
-# Y1MediaBridge metadata bridge). See docs/ARCHITECTURE.md for the full
-# trampoline chain reference.
+# Apply AVRCP 1.3 metadata pipeline (SDP shape + JNI trampoline chain).
+# The IBTAvrcpMusic + IMediaPlaybackService Binder MtkBt binds to is served by
+# the music app's com.koensayr.y1.avrcp.AvrcpBridgeService (declared via the
+# Patch B6.2 manifest splice in patch_y1_apk.py). See docs/ARCHITECTURE.md.
 if [[ "$FLAG_AVRCP" == true ]]; then
   echo "Applying AVRCP 1.3 metadata pipeline (--avrcp).."
 
-  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
-  if [[ ! -f "$src_y1mb" ]]; then
-    echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
-    exit 1
-  fi
-
-  echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
-    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
-    exit 1
-  fi
+  # Defensive: remove any pre-existing Y1MediaBridge.apk from /system/app/.
+  # Earlier --avrcp runs installed this APK; current Phase 3 build replaces
+  # its responsibilities with in-music-app components, so the bridge must be
+  # absent or PackageManager may resolve com.android.music.MediaPlaybackService
+  # to the (stale) bridge instead of AvrcpBridgeService.
+  for f in "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" \
+           "${PATH_MOUNT}/app/Y1MediaBridge.odex" \
+           "${PATH_MOUNT}/app/Y1MediaBridge"; do
+    if sudo test -e "$f"; then
+      echo "  Removing stale ${f#${PATH_MOUNT}/}"
+      sudo rm -rf "$f"
+    fi
+  done
 
   patch_in_place_bytes "app/MtkBt.odex"               "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"                    "patch_mtkbt.py"             755
   patch_in_place_bytes "lib/libextavrcp_jni.so"       "patch_libextavrcp_jni.py"   644
   patch_in_place_bytes "lib/libaudio.a2dp.default.so" "patch_libaudio_a2dp.py"     644
+
+  cat <<'AVRCP_POST_NOTE'
+
+  -- Post-flash device steps for AVRCP --
+  After the flash completes, on the first boot run:
+
+      adb shell rm -rf /data/data/com.innioasis.y1/code_cache/secondary-dexes/
+      adb shell pm uninstall com.y1.mediabridge 2>/dev/null || true
+      adb reboot
+
+  The first line invalidates the MultiDex cache so AvrcpBridgeService (which
+  lives in classes2.dex) is re-extracted from the new APK. The second line is
+  defensive cleanup for any prior non-system-app install of the old bridge.
+  A fresh `--all` flash reprovisions /data and skips both steps automatically.
+
+AVRCP_POST_NOTE
 fi
 
 # Configure Bluetooth fixes

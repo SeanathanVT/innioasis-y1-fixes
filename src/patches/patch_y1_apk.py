@@ -1882,17 +1882,9 @@ INJECT_ROOT = os.path.join(SCRIPT_DIR, "inject")
 # — a stale cache loads the pre-patch classes2.dex and TrackInfoWriter is
 # nowhere to be found at runtime (NoClassDefFoundError on Y1Application.onCreate).
 #
-# TODO(Phase 3): primary-DEX placement is a Phase-1 expedient. Post-B5 the
-# music app's classes.dex sits at 65330/65536 methods (99.7% of the 64K cap;
-# ~176 slots remaining). Phase 3's AvrcpBridgeService + IBTAvrcpMusic.Stub (38
-# txns) + IMediaPlaybackService.Stub (32 txns) + IBTAvrcpMusicCallback.Proxy
-# is easily 100+ methods and will not fit here. When Phase 3 lands, route the
-# new classes through smali_classes2/ AND add a cache-invalidation step to
-# apply.bash before the apk push (e.g. `adb shell rm -rf
-# /data/data/com.innioasis.y1/code_cache/secondary-dexes/`, NOT pm clear which
-# would wipe musicRepeatMode/musicIsShuffle). Re-measure DEX method counts
-# after the move (snippet in INVESTIGATION.md Trace #20 gotcha #2). See also
-# `docs/INVESTIGATION.md` Trace #20 for the on-device crash that surfaced this.
+# Patch B6 (AvrcpBridgeService + AvrcpBinder) ships to smali_classes2/ because
+# classes.dex is at 99.7% of the 64K method cap after B5. apply.bash invalidates
+# the MultiDex code_cache so Dalvik picks up the new classes2.dex.
 PATCH_B5_INJECT_FILES = [
     ("com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
         "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
@@ -2035,9 +2027,14 @@ print(f"  Patch B5.3: Y1Application.onCreate registers TrackInfoWriter / "
       f"PappSetFileObserver / BatteryReceiver (before B4 sendNow)")
 
 # -- Patch B5.4: extend PappStateBroadcaster.sendNow ---------------------------
-# After the existing PAPP_STATE_DID_CHANGE broadcast we ALSO call
+# After the PAPP_STATE_DID_CHANGE broadcast we (a) call
 # TrackInfoWriter.setPapp(repeat, shuffle) so the music-app's
-# y1-track-info[795..796] bytes reflect the new state immediately.
+# y1-track-info[795..796] bytes reflect the new state immediately and
+# (b) fire `com.android.music.playstatechanged` so MtkBt's
+# BluetoothAvrcpReceiver wakes notificationPlayStatusChangedNative → T9 →
+# AVRCP §5.4.2 Tbl 5.36 PLAYER_APPLICATION_SETTING_CHANGED CHANGED on the
+# wire. The PAPP_STATE_DID_CHANGE broadcast is retained as a no-op for the
+# transition window; it goes to no listener once Y1MediaBridge is uninstalled.
 OLD_PAPP_BCAST_TAIL = (
     "    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
     "\n"
@@ -2050,14 +2047,25 @@ OLD_PAPP_BCAST_TAIL = (
 NEW_PAPP_BCAST_TAIL = (
     "    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
     "\n"
-    "    # Patch B5.4: also push to in-app TrackInfoWriter (Phase 1 parallel writer).\n"
-    "    # Wrapped in try/catch(Throwable) so the hook is observation-only — a bug\n"
-    "    # in TrackInfoWriter cannot propagate into the SharedPreferences listener\n"
-    "    # notification chain or into the cold-boot Y1Application.onCreate sendNow().\n"
+    "    # Patch B5.4: push live values into in-app TrackInfoWriter, then fire\n"
+    "    # `com.android.music.playstatechanged` to wake T9 via MtkBt. Wrapped in\n"
+    "    # try/catch(Throwable) so a writer-side bug cannot propagate into the\n"
+    "    # SharedPreferences listener notification chain or the cold-boot\n"
+    "    # Y1Application.onCreate sendNow().\n"
     "    :try_start_b5_setpapp\n"
     "    sget-object v2, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;\n"
     "\n"
     "    invoke-virtual {v2, v0, v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPapp(II)V\n"
+    "\n"
+    "    new-instance v2, Landroid/content/Intent;\n"
+    "\n"
+    "    const-string v0, \"com.android.music.playstatechanged\"\n"
+    "\n"
+    "    invoke-direct {v2, v0}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V\n"
+    "\n"
+    "    iget-object v0, p0, Lcom/koensayr/PappStateBroadcaster;->mContext:Landroid/content/Context;\n"
+    "\n"
+    "    invoke-virtual {v0, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
     "\n"
     "    :try_end_b5_setpapp\n"
     "    .catch Ljava/lang/Throwable; {:try_start_b5_setpapp .. :try_end_b5_setpapp} :catch_b5_setpapp\n"
@@ -2080,7 +2088,95 @@ if OLD_PAPP_BCAST_TAIL not in papp_bcast_src:
 papp_bcast_src = papp_bcast_src.replace(OLD_PAPP_BCAST_TAIL, NEW_PAPP_BCAST_TAIL, 1)
 with open(papp_broadcaster_path, 'w') as f:
     f.write(papp_bcast_src)
-print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setPapp")
+print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setPapp + playstatechanged")
+
+
+# ============================================================
+# Patch B6: AvrcpBridgeService — replace Y1MediaBridge.MediaBridgeService Binder
+# ============================================================
+#
+# Phase 3 of `docs/PLAN-Y1MEDIABRIDGE-RETIREMENT.md`. Two parts:
+#
+#   B6.1 New smali classes under com/koensayr/y1/avrcp/, routed to
+#        smali_classes2/ (secondary DEX) because classes.dex sits at 99.7% of
+#        the 64K method cap after Patch B5 (~176 slots left, not enough for
+#        the Binder shell). apply.bash invalidates the MultiDex secondary-dex
+#        cache before the apk push so Dalvik 1.6 doesn't reuse a stale
+#        pre-B6 classes2.dex.
+#
+#   B6.2 AndroidManifest.xml splice — add <service> + <intent-filter> with
+#        actions `com.android.music.MediaPlaybackService` (priority 100, wins
+#        PMS resolution over Y1MediaBridge during the transition window) +
+#        `com.android.music.IMediaPlaybackService`. The manifest is binary AXML
+#        (--no-res decode leaves it that way); _axml.py is a minimal Python
+#        AXML editor that appends strings to the pool and splices new
+#        Start/End element chunks before </application>.
+#
+# After B6 + the apply.bash uninstall step lands, MtkBt's
+# `bindService(Intent("com.android.music.MediaPlaybackService"))` resolves to
+# AvrcpBridgeService inside the music app. The C-side trampoline chain in
+# libextavrcp_jni.so continues to read y1-track-info directly for AVRCP wire
+# responses; the Binder exists to satisfy MtkBt's mMusicService != null check
+# and to advertise capabilities for REGISTER_NOTIFICATION subscription.
+
+PATCH_B6_INJECT_FILES = [
+    ("com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
+        "smali_classes2/com/koensayr/y1/avrcp/AvrcpBridgeService.smali"),
+    ("com/koensayr/y1/avrcp/AvrcpBinder.smali",
+        "smali_classes2/com/koensayr/y1/avrcp/AvrcpBinder.smali"),
+]
+
+for src_rel, dst_rel in PATCH_B6_INJECT_FILES:
+    src = os.path.join(INJECT_ROOT, src_rel)
+    dst = os.path.join(UNPACKED_DIR, dst_rel)
+    if not os.path.exists(src):
+        sys.exit(f"ERROR: Patch B6 source missing: {src}")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+    print(f"  Wrote {dst_rel}")
+
+# -- Patch B6.2: AndroidManifest.xml splice -----------------------------------
+import _axml as axml  # noqa: E402
+
+manifest_path = os.path.join(UNPACKED_DIR, "AndroidManifest.xml")
+manifest = axml.read(manifest_path)
+
+# Bail if already patched (re-runs on the same staging dir).
+if 'com.koensayr.y1.avrcp.AvrcpBridgeService' in manifest.strings:
+    print(f"  Patch B6.2: manifest already has AvrcpBridgeService — skipping splice")
+else:
+    ns = axml.android_namespace_idx(manifest)
+    name_idx     = manifest.strings.index('name')
+    exported_idx = manifest.strings.index('exported')
+    priority_idx = manifest.strings.index('priority')
+    new_chunks = [
+        axml.start_element(manifest, 'service', line_no=1, attrs=[
+            axml.attr_string(manifest, ns, name_idx,     'com.koensayr.y1.avrcp.AvrcpBridgeService'),
+            axml.attr_bool  (manifest, ns, exported_idx, True),
+        ]),
+        axml.start_element(manifest, 'intent-filter', line_no=1, attrs=[
+            axml.attr_int   (manifest, ns, priority_idx, 100),
+        ]),
+        axml.start_element(manifest, 'action', line_no=1, attrs=[
+            axml.attr_string(manifest, ns, name_idx, 'com.android.music.MediaPlaybackService'),
+        ]),
+        axml.end_element  (manifest, 'action',        line_no=1),
+        axml.start_element(manifest, 'action', line_no=1, attrs=[
+            axml.attr_string(manifest, ns, name_idx, 'com.android.music.IMediaPlaybackService'),
+        ]),
+        axml.end_element  (manifest, 'action',        line_no=1),
+        axml.end_element  (manifest, 'intent-filter', line_no=1),
+        axml.end_element  (manifest, 'service',       line_no=1),
+    ]
+    def _is_app_end(c):
+        return c.type == axml.RES_XML_END_ELEMENT_TYPE and \
+               axml.chunk_element_name(manifest, c) == 'application'
+    idx = axml.find_chunk_index(manifest, _is_app_end)
+    if idx < 0:
+        sys.exit("ERROR: Patch B6.2 — </application> not found in AndroidManifest.xml")
+    manifest.chunks[idx:idx] = new_chunks
+    axml.write(manifest, manifest_path)
+    print(f"  Patch B6.2: AndroidManifest.xml ← <service>com.koensayr.y1.avrcp.AvrcpBridgeService</>")
 
 
 # -- Per-smali md5 report -----------------------------------------------------
@@ -2099,6 +2195,10 @@ PATCHED_SMALI_FILES = [
     "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali",
     "smali/com/koensayr/y1/battery/BatteryReceiver.smali",
     "smali/com/koensayr/y1/papp/PappSetFileObserver.smali",
+    # Patch B6 — AvrcpBridgeService (Phase 3)
+    "smali_classes2/com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
+    "smali_classes2/com/koensayr/y1/avrcp/AvrcpBinder.smali",
+    "AndroidManifest.xml",
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
@@ -2127,7 +2227,9 @@ print(f"  classes2.dex {os.path.getsize(dex2):,} bytes")
 with open(dex1, 'rb') as f: dex1_bytes = f.read()
 with open(dex2, 'rb') as f: dex2_bytes = f.read()
 
-# -- Build patched APK (replace DEX, keep original META-INF) -----------------
+# -- Build patched APK (replace DEX + manifest, keep original META-INF) -------
+with open(os.path.join(UNPACKED_DIR, "AndroidManifest.xml"), 'rb') as f:
+    patched_manifest_bytes = f.read()
 with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
     with zipfile.ZipFile(OUTPUT_APK, 'w',
                          compression=zipfile.ZIP_DEFLATED,
@@ -2137,6 +2239,8 @@ with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
                 zout.writestr(item, dex1_bytes)
             elif item.filename == 'classes2.dex':
                 zout.writestr(item, dex2_bytes)
+            elif item.filename == 'AndroidManifest.xml':
+                zout.writestr(item, patched_manifest_bytes)
             else:
                 zout.writestr(item, zin.read(item.filename))  # includes META-INF/
 

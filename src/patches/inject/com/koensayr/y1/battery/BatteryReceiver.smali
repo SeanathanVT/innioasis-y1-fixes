@@ -186,5 +186,32 @@
 
     invoke-virtual {v1, v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setBattery(B)V
 
+    # Fire `com.android.music.playstatechanged` so MtkBt's BluetoothAvrcpReceiver
+    # wakes notificationPlayStatusChangedNative → T9, which reads y1-track-info[794]
+    # and emits AVRCP BATT_STATUS_CHANGED CHANGED on the wire when the bucket flips.
+    :try_start
+    new-instance v1, Landroid/content/Intent;
+
+    const-string v2, "com.android.music.playstatechanged"
+
+    invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {p1, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
+    :try_end
+    .catch Ljava/lang/Throwable; {:try_start .. :try_end} :catch
+
+    return-void
+
+    :catch
+    move-exception v1
+
+    const-string v2, "Y1Patch"
+
+    invoke-virtual {v1}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v2, v0}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
     return-void
 .end method

@@ -2126,4 +2126,67 @@ The 42 ms duration delta is expected: Y1MediaBridge re-runs `MediaMetadataRetrie
 
 **Active docs updated for Phase 2 reality.** `ARCHITECTURE.md` "Music app state-writer lifecycle" section now describes the in-process writer chain (TrackInfoWriter + PlaybackStateBridge + BatteryReceiver + PappSetFileObserver + PappStateBroadcaster) replacing the old "Y1MediaBridge lifecycle" walk; cross-component state dependencies table re-anchored to the music app's filesDir; `BT-COMPLIANCE.md` ICS rows + risk table refreshed; `PATCHES.md` B3/B4/B5 narratives reflect Phase 2 owner; `_trampolines.py` and `patch_libextavrcp_jni.py` source comments stripped of stale "Y1MediaBridge writes" framing.
 
-**Phase 2 → Phase 3 verification gate** (per `docs/PLAN-Y1MEDIABRIDGE-RETIREMENT.md` §6): AVRCP CT cold-connect → metadata visible within one polling cycle; T_papp 0x14 Set still round-trips into music-app SharedPreferences via `PappSetFileObserver`; play/pause edges still drive CHANGED notifications. To be verified on hardware after the user reflashes `libextavrcp_jni.so` (new MD5) + the music APK.
+**Phase 2 → Phase 3 verification gate** (per `docs/PLAN-Y1MEDIABRIDGE-RETIREMENT.md` §6): AVRCP CT cold-connect → metadata visible within one polling cycle; T_papp 0x14 Set still round-trips into music-app SharedPreferences via `PappSetFileObserver`; play/pause edges still drive CHANGED notifications. Verified on hardware 2026-05-11 via a Sonos dual-capture (`/work/logs/dual-sonos-20260511-0733/`): 7,272 msg=544 frames (RegisterNotification responses), 227 msg=540 (GetElementAttributes responses with size=644, carrying Title/Artist/Album bytes), 18 msg=520 (PASSTHROUGH ACKs). No FATAL / NoClassDefFoundError. Sonos display tracked correctly per the user's confirmation. Gate passed; Phase 3 unblocked.
+
+## Trace #22 (2026-05-11) — Y1MediaBridge retirement Phase 3: AvrcpBridgeService Binder lands in the music app
+
+Phase 3 retires `Y1MediaBridge.apk` by hosting its `IBTAvrcpMusic` + `IMediaPlaybackService` Binder inside the music app itself. Two new smali classes (`com.koensayr.y1.avrcp.AvrcpBridgeService` + `AvrcpBinder`) implement a minimum-viable Binder; `apply.bash` no longer installs `Y1MediaBridge.apk` and now removes any pre-existing copy from `/system/app/`.
+
+**Recon (already done in Phase 0; reused).** `docs/RECON-MUSIC-APP-HOOKS.md` §7 has the full transaction-code table for both interfaces (38 codes on IBTAvrcpMusic, 32 on IMediaPlaybackService, 8 on IBTAvrcpMusicCallback). Y1MediaBridge's `MediaBridgeService.java::onTransact` ships a working reference implementation for every code; Phase 3 mirrors its dispatch shape but in smali.
+
+**Minimum-viable scope.** ARCHITECTURE.md's existing note on the Binder role — "in the post-patch architecture this Java path is largely unused; the C-side trampolines deliver the real metadata + control on the AVRCP wire" — set the bar low. The Sonos log from Trace #21 confirmed it: `Y1MediaBridge: notifyAvrcpCallbacks code=1 — no callbacks registered` appeared 20× alongside 7,272 T9 wakeups via the broadcast path. MtkBt never actually transacted on the Java callback path; the broadcast wake path drove everything. So `AvrcpBinder.onTransact` implements: code 1 (`registerCallback`) — stash IBinder; code 2 (`unregisterCallback`); code 3 (`regNotificationEvent`) — ACK true (critical: returning false leaves MtkBt's `mRegBit` empty and notifyTrackChanged gets dropped pre-emit); code 5 (`getCapabilities`) — return `[0x01, 0x02]`; codes 6-13 — broadcast media keys to PlayControllerReceiver via DOWN+UP `ACTION_MEDIA_BUTTON`. Every other code: `writeNoException` + return true. Total smali: ~330 lines for AvrcpBinder + ~280 lines for AvrcpBridgeService (Service shell + callback list + media-key sender).
+
+**Descriptor skip.** Same defensive pattern Y1MediaBridge used: skip `strictModePolicy` (int32) + descriptor (string) and dispatch purely by transact code. `enforceInterface` has historically aborted on ROM-variant descriptor mismatches, leaving cardinality at 0. Code path tested cleanly: apktool b's smali compile succeeds (`Smaling smali_classes2 folder into classes2.dex`); androguard's AXMLPrinter re-parses the manifest splice; method count delta is +38 in classes2.dex (52,935 → 52,973, well under the 64K cap; 12,563 slots free).
+
+**Method-count routing.** classes.dex sits at 65,330/65,536 (99.7%, ~176 slots free) after Patch B5. AvrcpBridgeService + AvrcpBinder route to `smali_classes2/com/koensayr/y1/avrcp/` — secondary DEX, where there's 12K+ method headroom. Trade-off: MultiDex 1.0.x on Dalvik 1.6 caches the extracted classes2.dex under `/data/data/com.innioasis.y1/code_cache/secondary-dexes/`, and that cache survives `/system/app/` reflashes (this is the same gotcha that bit Phase 1's first attempt — captured in Trace #20 gotcha #2). Mitigation: `apply.bash` now emits an instruction at the end of `--avrcp` telling the user to `adb shell rm -rf /data/data/com.innioasis.y1/code_cache/secondary-dexes/` before reboot. A clean `apply.bash --all` ROM flash reprovisions userdata, so the cache doesn't exist post-flash — only the incremental `--avrcp` iteration path hits the stale-cache risk.
+
+**AndroidManifest patch (the real engineering decision).** `apktool d --no-res` leaves the manifest as binary AXML; we have no aapt2 binary on the host (`/tmp/bak/prebuilt/linux/aapt2` is 32-bit x86, host is 64-bit; Rocky 10 has no aapt2 package; apktool's bundled aapt2 fails with `cannot execute binary file`). Three paths considered:
+
+1. **Python AXML splicer** — wrote `src/patches/_axml.py` (~250 lines). Reads the binary AXML chunk-by-chunk, exposes `start_element` / `end_element` / `attr_string` / `attr_bool` / `attr_int` builders, and a `write` that re-emits the file with a freshly-serialized string pool. Round-trip on the unmodified manifest is byte-identical (md5 match). Strings get APPENDED to the pool past the resource-mapped prefix (first 31 slots are android.R.attr.* via ResourceMap; new strings at index 172+ have no ResourceMap entry, no conflict).
+2. **Install Android SDK + aapt2** — adds a permanent ~1.5 GB toolchain dep. Wrong direction since Phase 4 was meant to drop the gradle dep anyway.
+3. **Tiny shim APK** — defeats the "retire to a single APK" intent of the plan.
+
+Went with option 1. Manifest splice inserts (just before `</application>`):
+
+```xml
+<service android:name="com.koensayr.y1.avrcp.AvrcpBridgeService" android:exported="true">
+  <intent-filter android:priority="100">
+    <action android:name="com.android.music.MediaPlaybackService"/>
+    <action android:name="com.android.music.IMediaPlaybackService"/>
+  </intent-filter>
+</service>
+```
+
+Verified the splice via androguard's `AXMLPrinter.get_xml()` — independent reader re-emits the exact XML we intended. New manifest is 23,516 bytes (was 22,916; +600 ≈ new chunks (340) + 3 new strings × ~85 bytes each + alignment).
+
+**Output-APK assembly bug surfaced.** The patcher's final zip-rebuild loop swaps only `classes.dex` / `classes2.dex` from staging; manifest comes from the stock APK regardless. Phase 1 + 2 never patched the manifest so the bug was invisible. Fixed in the same commit: also swap `AndroidManifest.xml` from staging.
+
+**Wake-up trigger migration.** Y1MediaBridge previously fired `com.android.music.playstatechanged` on:
+- play/pause edge (stock music app fires it too, so duplicative — OK)
+- battery bucket transition (Y1MediaBridge-only — now music-app responsibility)
+- papp change via `PAPP_STATE_DID_CHANGE` intent bridge (Y1MediaBridge-only — now music-app responsibility)
+- 1 s position tick while playing (stock music-app fires it, no change needed)
+
+After Y1MediaBridge is removed, the music app must emit `playstatechanged` for battery + papp. Phase 3 changes:
+- `BatteryReceiver.onReceive` (smali): after `TrackInfoWriter.setBattery`, fire `Context.sendBroadcast(Intent("com.android.music.playstatechanged"))` wrapped in `try/catch(Throwable)`.
+- `PappStateBroadcaster.sendNow` (Patch B5.4 in `patch_y1_apk.py`): same pattern after `TrackInfoWriter.setPapp`. The existing `com.y1.mediabridge.PAPP_STATE_DID_CHANGE` broadcast is retained as a no-op for the transition window — goes to no listener once Y1MediaBridge is uninstalled.
+
+**apply.bash changes.**
+- Dropped the `assembleDebug` prerequisite and the `Y1MediaBridge.apk` install step.
+- Added defensive removal of `/system/app/Y1MediaBridge.apk` / `Y1MediaBridge.odex` / `Y1MediaBridge/` at mount time (covers users upgrading from a previous --avrcp build).
+- Added a post-flash usage note pointing at the code_cache invalidation `adb shell` command and the `pm uninstall com.y1.mediabridge` defensive cleanup (covers any prior non-system-app installs).
+
+**Patcher smoke test passed.** Full `--clean-staging` run:
+- All B1..B5 patches apply as before.
+- B6.1 copies `AvrcpBridgeService.smali` + `AvrcpBinder.smali` into `smali_classes2/com/koensayr/y1/avrcp/`.
+- B6.2 splices the manifest via `_axml.py`.
+- `apktool b` smaling phase: clean, no errors.
+- DEX method counts: classes.dex 65,330 (unchanged), classes2.dex 52,973 (+38 vs Phase 2 baseline).
+- Output APK contains the spliced manifest (verified via androguard) and both new smali classes.
+
+**Phase 3 → 4 verification gate** (per plan §6): `pm list packages | grep mediabridge` empty post-flash; `ls /system/app/Y1MediaBridge*` returns "No such file or directory"; MtkBt's adapter logs `MMI_AVRCP: PlayService onServiceConnected className:com.koensayr.y1.avrcp.AvrcpBridgeService` (not the old `com.y1.mediabridge`); all three CT scenarios (Bolt/Kia/TV — Sonos deprecated) repeat the Phase 2→3 gate. To be verified on hardware after reflash.
+
+**Known unknowns to watch on first flash.**
+- **Cold-boot Binder bind**: MtkBt's bindService should cold-start the music app's process via Android's standard service-binding flow, which means `Y1Application.onCreate` runs (registering TrackInfoWriter etc.) before MtkBt's `onServiceConnected` callback fires. If this races (e.g. `onServiceConnected` arrives before `Y1Application.onCreate` completes), the `AvrcpBridgeService.onCreate` order may be off. The fix would be to make `AvrcpBridgeService.onCreate` defensively trigger `TrackInfoWriter.init` itself, but Android's lifecycle guarantees Application.onCreate runs before any component's onCreate, so this race shouldn't happen in practice. Monitor for it.
+- **PackageManager resolution priority**: the intent-filter ships at `android:priority="100"`. Y1MediaBridge's intent-filter has no priority (default 0). PMS should resolve to the music app's filter on first install. If both APKs are present (transition window), the music app wins. After Y1MediaBridge is removed, only the music app has a matching filter.
+- **First-flash code_cache staleness**: if the user runs `--avrcp` against an old build (where the music APK didn't have B6 classes in classes2.dex), and the device has cached the old classes2.dex, MultiDex would reuse the cache and AvrcpBridgeService would not load. The post-flash adb instruction covers this; a clean `--all` flash side-steps it.

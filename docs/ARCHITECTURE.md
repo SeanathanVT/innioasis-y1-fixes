@@ -189,28 +189,29 @@ The complete cross-profile dependency table (state files, broadcasts, IBinder fi
 
 ---
 
-## How MtkBt discovers and binds to Y1MediaBridge
+## How MtkBt discovers and binds to the music app
 
 For metadata + state-event delivery to peer CTs, two things must be true at runtime:
 
 1. **The trampoline chain in `libextavrcp_jni.so` can read `y1-track-info` / `y1-trampoline-state` from disk** under `/data/data/com.innioasis.y1/files/`. This depends only on the music app's `TrackInfoWriter` having written those files; it does not depend on any Binder being bound.
-2. **MtkBt's `BTAvrcpMusicAdapter` has a live `IBTAvrcpMusic` Binder reference to `MediaBridgeService`.** This is required because `MtkBt.odex` gates its 1.3-class Java dispatch on `sPlayServiceInterface`, a static byte field that's set when the bind succeeds and reset by F2 on disable. With it false, the Java layer's AVRCP-event-callback paths short-circuit and the AVRCP wire defaults to the compile-time AVRCP 1.0 dispatch.
+2. **MtkBt's `BTAvrcpMusicAdapter` has a live `IBTAvrcpMusic` Binder reference to `AvrcpBridgeService`.** This is required because `MtkBt.odex` gates its 1.3-class Java dispatch on `sPlayServiceInterface`, a static byte field that's set when the bind succeeds and reset by F2 on disable. With it false, the Java layer's AVRCP-event-callback paths short-circuit and the AVRCP wire defaults to the compile-time AVRCP 1.0 dispatch.
 
 ### Bind action and resolution
 
 `BTAvrcpMusicAdapter.checkAndBindPlayService(boolean)` (DEX method idx 1613) calls `Context.bindService(Intent, ServiceConnection, BIND_AUTO_CREATE)`. The Intent's action is the literal string `"com.android.music.MediaPlaybackService"` (verified at MtkBt.dex string-pool offset `0x075d65`). No `setPackage` qualifier, no `setComponent`.
 
-PackageManager resolves via Android's standard intent matching. Y1MediaBridge declares the only matching `<service>` on the device:
+PackageManager resolves via Android's standard intent matching. The music app declares the matching `<service>` via the Patch B6.2 manifest splice:
 
 ```xml
-<service android:name=".MediaBridgeService" android:enabled="true" android:exported="true">
-    <intent-filter>
+<service android:name="com.koensayr.y1.avrcp.AvrcpBridgeService" android:exported="true">
+    <intent-filter android:priority="100">
         <action android:name="com.android.music.MediaPlaybackService" />
+        <action android:name="com.android.music.IMediaPlaybackService" />
     </intent-filter>
 </service>
 ```
 
-The stock Y1 music app (`com.innioasis.y1`) does NOT export any service with that action. So `bindService` unambiguously resolves to `com.y1.mediabridge/.MediaBridgeService`.
+The priority=100 on the intent-filter wins PMS resolution over any other matching `<service>` on the device. `bindService` unambiguously resolves to `com.innioasis.y1/com.koensayr.y1.avrcp.AvrcpBridgeService`.
 
 **No `AudioManager` involvement in service discovery.** A targeted dex scan of MtkBt.dex turned up zero references to `getMediaButtonReceiver`, `registerMediaButtonEventReceiver`, `dispatchMediaKeyEvent`, `getCurrentMediaPlaybackService`, or `getActiveMediaClient`. MtkBt's AudioManager use is exclusively volume control (`setStreamVolume` / `getStreamVolume` / `getStreamMaxVolume`).
 
@@ -233,13 +234,13 @@ Within a single BT-enable cycle, the flag prevents double-init. **F2 patches `Bl
 | Event | What MtkBt does |
 |---|---|
 | BT enable / AVRCP profile activation | `BTAvrcpMusicAdapter.init()` → `checkAndBindPlayService(true)` → `startToBindPlayService()` reads `sPlayServiceInterface`. If false, sets it true and calls `bindService`. |
-| `onServiceConnected` callback | `BTAvrcpMusicAdapter$4.onServiceConnected` (DEX class idx 1583) fires when bind completes. Stores the IBinder in `mMusicService`. Wraps as both `IBTAvrcpMusic.Stub.asInterface(binder)` and `IMediaPlaybackService.Stub.asInterface(binder)` — Y1MediaBridge serves both interfaces from a single Binder, dispatching by interface token in `onTransact`. Invokes `IBTAvrcpMusic.registerCallback(callback)` (transact code 1) so MtkBt is notified asynchronously. |
-| Peer CT subscribes / queries metadata | MtkBt's Java path can transact with the bridge (e.g. `getTrackName` code 13 / 27, `getArtistName` code 16 / 29, `getAudioId` code 24, `isPlaying` code 4). **In the post-patch architecture this Java path is largely unused** — the C-side trampolines read `y1-track-info` directly and respond to PDU 0x20 / 0x30 / 0x31 without transacting with the Java bridge. The Binder is still required for MtkBt's internal `mMusicService != null` checks and for the cardinality-NOP-driven Java callback path that wakes T5 / T9. |
+| `onServiceConnected` callback | `BTAvrcpMusicAdapter$4.onServiceConnected` (DEX class idx 1583) fires when bind completes. Stores the IBinder in `mMusicService`. Wraps as both `IBTAvrcpMusic.Stub.asInterface(binder)` and `IMediaPlaybackService.Stub.asInterface(binder)` — `AvrcpBinder` serves both interfaces from a single Binder, dispatching by interface token in `onTransact`. Invokes `IBTAvrcpMusic.registerCallback(callback)` (transact code 1) so MtkBt is notified asynchronously. |
+| Peer CT subscribes / queries metadata | MtkBt's Java path can transact with `AvrcpBinder` (e.g. `getTrackName` code 13 / 27, `getArtistName` code 16 / 29, `getAudioId` code 24, `isPlaying` code 4). **In the post-patch architecture this Java path is largely unused** — the C-side trampolines read `y1-track-info` directly and respond to PDU 0x20 / 0x30 / 0x31 without transacting with the Java bridge. The Binder is still required for MtkBt's internal `mMusicService != null` checks and for the cardinality-NOP-driven Java callback path that wakes T5 / T9. Uninvoked codes return `writeNoException` + `true` (ack-only). |
 | BT disable | `BluetoothAvrcpService.disable()` runs → unbinds. F2 patches this method to also reset `sPlayServiceInterface = false`. |
 
 ---
 
-## Music app state-writer lifecycle
+## Music app component lifecycle
 
 The music app's `Y1Application.onCreate` registers four in-process components that together produce every byte of `y1-track-info`, `y1-trampoline-state`, and `y1-papp-set` under `/data/data/com.innioasis.y1/files/`:
 
@@ -247,13 +248,18 @@ The music app's `Y1Application.onCreate` registers four in-process components th
 |---|---|
 | `com.koensayr.y1.trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer. Owns the 1104-byte `y1-track-info` schema and the 16-byte `y1-trampoline-state` initial create. `prepareFiles()` chmods both files world-rw / world-readable so the BT process (different uid) can `open()` them. |
 | `com.koensayr.y1.playback.PlaybackStateBridge` | Stateless dispatcher hooked into `Static.setPlayValue` and the `PlayerService` listener lambdas (`onPrepared`, `onCompletion`, `onError`). Maps player state to AVRCP play-status enum and calls into TrackInfoWriter on every edge. |
-| `com.koensayr.y1.battery.BatteryReceiver` | `Intent.ACTION_BATTERY_CHANGED` receiver. Bucket-maps level + plugged-state to the AVRCP §5.4.2 Tbl 5.35 enum (NORMAL / WARNING / CRITICAL / EXTERNAL / FULL_CHARGE) and writes byte 794. |
+| `com.koensayr.y1.battery.BatteryReceiver` | `Intent.ACTION_BATTERY_CHANGED` receiver. Bucket-maps level + plugged-state to the AVRCP §5.4.2 Tbl 5.35 enum (NORMAL / WARNING / CRITICAL / EXTERNAL / FULL_CHARGE) and writes byte 794. Fires `com.android.music.playstatechanged` on bucket transition so T9 emits BATT_STATUS_CHANGED CHANGED. |
 | `com.koensayr.y1.papp.PappSetFileObserver` | `FileObserver(y1-papp-set, CLOSE_WRITE)`. Reads the 2-byte payload (attr_id, value), maps AVRCP enum → Y1 enum, calls `SharedPreferencesUtils.setMusicRepeatMode / setMusicIsShuffle`. Lets a CT's PApp Set round-trip into the music app's settings. |
-| `com.koensayr.y1.papp.PappStateBroadcaster` | `OnSharedPreferenceChangeListener`. On every `musicRepeatMode` / `musicIsShuffle` SharedPreferences change, writes y1-track-info bytes 795..796 and fires `playstatechanged` so T9 emits PApp CHANGED. |
+| `com.koensayr.y1.papp.PappStateBroadcaster` | `OnSharedPreferenceChangeListener`. On every `musicRepeatMode` / `musicIsShuffle` SharedPreferences change, calls `TrackInfoWriter.setPapp` to update y1-track-info bytes 795..796 and fires `com.android.music.playstatechanged` so T9 emits PApp CHANGED. |
+
+In `smali_classes2` (secondary DEX):
+
+| Component | Purpose |
+|---|---|
+| `com.koensayr.y1.avrcp.AvrcpBridgeService` | Exported `Service` declared in AndroidManifest (Patch B6.2 splice) with `android:priority="100"` intent-filters for `com.android.music.MediaPlaybackService` and `com.android.music.IMediaPlaybackService` actions. `onBind` returns an `AvrcpBinder` so MtkBt's `BTAvrcpMusicAdapter.bindService` resolves here. |
+| `com.koensayr.y1.avrcp.AvrcpBinder` | `Binder` implementing the `IBTAvrcpMusic` + `IMediaPlaybackService` transact protocols MtkBt uses. Code 1 (`registerCallback`) stashes MtkBt's IBinder; code 5 (`getCapabilities`) advertises events 0x01 + 0x02 so MtkBt issues REGISTER_NOTIFICATION; codes 6-13 dispatch as media keys to `PlayControllerReceiver`. All other codes ack-only — the C-side trampoline chain delivers the real metadata + control on the AVRCP wire. |
 
 **State-write ordering is load-bearing**: PlaybackStateBridge calls `TrackInfoWriter.flush()` (which writes `y1-track-info` atomically via tmp+rename) BEFORE the music app's `metachanged` / `playstatechanged` broadcast fires. The broadcast wakes T5 / T9 via the cardinality-NOP-patched Java path; if the file write hasn't happened yet, T5 / T9 read stale data. Don't reorder.
-
-Y1MediaBridge.apk is still installed in the current build to serve the `IBTAvrcpMusic` + `IMediaPlaybackService` Binder that MtkBt's `BTAvrcpMusicAdapter.bindService` resolves to (see "How MtkBt discovers and binds to Y1MediaBridge" above), but its file-write side is no longer consulted by the trampolines. The Binder shell will move to the music app in a follow-up phase.
 
 ---
 
@@ -432,10 +438,7 @@ Independent of the trampoline-driven outbound metadata path. CT-driven transport
 7. Either via PendingIntent fire (if a MediaButton receiver is registered with
    AudioManager) or via ordered broadcast (manifest filter, fallback). The music
    app's PlayControllerReceiver declares an ACTION_MEDIA_BUTTON intent-filter at
-   priority MAX_VALUE, so it wins ordered-broadcast dispatch. Y1MediaBridge's
-   PlaySongReceiver also registers via AudioManager.registerMediaButtonEventReceiver
-   so AudioService dispatches via PendingIntent first; PlaySongReceiver then
-   re-broadcasts to PlayControllerReceiver explicitly via setComponent.
+   priority MAX_VALUE, so it wins ordered-broadcast dispatch.
 
 8. PlayControllerReceiver.onReceive runs Patch E's discrete-key dispatch:
        KEYCODE_MEDIA_PLAY_PAUSE (85) → playOrPause() (toggle, legacy MediaButton path)
@@ -834,8 +837,8 @@ Every state read or write that crosses process boundaries. Consult this table be
 | `y1-papp-set` (2 B file) | Music app `TrackInfoWriter.prepareFiles` (initial create) + T_papp 0x14 (write on PApp Set) | Music app `PappSetFileObserver` | T_papp 0x14 writes `[attr_id, value]` on every CT-initiated PApp Set | — | Mode `0666`, world-rw. Path: `/data/data/com.innioasis.y1/files/y1-papp-set`. CT → Y1 side of the Repeat / Shuffle round-trip. |
 | `metachanged` broadcast | Music app `PlayerService` fires; MtkBt's `BluetoothAvrcpReceiver` consumes | `BluetoothAvrcpReceiver` (manifest-declared in MtkBt.apk) | Music app's track-load path sends `com.android.music.metachanged` on track change | n/a | Wakes the chain into `notificationTrackChangedNative` → T5 (proactive TRACK_CHANGED 3-tuple). MtkBt.odex cardinality NOP at file 0x3c530 makes the Java callback fire unconditionally. |
 | `playstatechanged` broadcast | Music app `PlayerService` + `PappStateBroadcaster` fire; MtkBt's `BluetoothAvrcpReceiver` consumes | Same as above | Fires on play/pause/stop edge, on battery bucket transition, on the 1 s position tick while playing, and on every `musicRepeatMode` / `musicIsShuffle` change | n/a | Wakes `notificationPlayStatusChangedNative` → T9. MtkBt.odex cardinality NOP at file 0x3c4fe makes it fire unconditionally on event 0x01. |
-| `mMediaButtonReceiver` slot (AudioManager) | Android system service | AudioService for ACTION_MEDIA_BUTTON dispatch routing | `Y1MediaBridge.MediaBridgeService.setupRemoteControlClient` (registers PlaySongReceiver) | `MediaBridgeService.onDestroy` | **Not consulted by MtkBt** for service discovery — verified via dex string scan. Used by Android only for choosing whether to fire the registered receiver's PendingIntent vs. fall back to ordered broadcast for ACTION_MEDIA_BUTTON. Owner moves to the music app in a follow-up phase. |
-| `RemoteControlClient` registration | `Y1MediaBridge.MediaBridgeService` | Lock-screen / system-UI; AudioService | `MediaBridgeService.setupRemoteControlClient` after the MediaButton register | `onDestroy` | The PendingIntent's component must be in the same package as the registered MediaButton receiver, or AudioService's RCC subsystem may silently reject. Owner moves to the music app in a follow-up phase. |
+| `mMediaButtonReceiver` slot (AudioManager) | Android system service | AudioService for ACTION_MEDIA_BUTTON dispatch routing | Music app's stock receiver registration | App process death | **Not consulted by MtkBt** for service discovery — verified via dex string scan. Used by Android only for choosing whether to fire the registered receiver's PendingIntent vs. fall back to ordered broadcast for ACTION_MEDIA_BUTTON. |
+| `IBTAvrcpMusic` / `IMediaPlaybackService` Binder | Music app `AvrcpBridgeService` (`com.koensayr.y1.avrcp.*` in classes2.dex) | MtkBt `BTAvrcpMusicAdapter` post-bind | Manifest declares the service with priority-100 intent-filter for `com.android.music.MediaPlaybackService`; `bindService` cold-starts the music process. | `onUnbind` (returns true so the framework keeps the service alive for next bind) | C-side trampolines deliver real metadata + control on the AVRCP wire; the Binder exists so `mMusicService != null` checks pass and MtkBt issues REGISTER_NOTIFICATION. Most onTransact codes ack-only. |
 
 Touching any of these requires (a) tracing what depends on it, (b) confirming the change won't break the dependent path, (c) capturing on-device evidence post-flash.
 

@@ -22,12 +22,14 @@ This release lands the **AVRCP 1.3 metadata + control pipeline**: a peer Bluetoo
 - **A2DP / AVDTP audio stream stays alive across pauses.** AudioFlinger's silence-timeout standby no longer tears down the AVDTP source stream, so peer CTs no longer cycle their A2DP sink (eliminates burst-on-resume audio + playhead drift on TV-class CTs).
 - **`Y1MediaBridge` Android service** (`src/Y1MediaBridge/`) — the metadata + state publisher the trampoline chain reads from. Built via Gradle.
 - **In-app `y1-track-info` writer** (`com.koensayr.y1.*` injected classes — Patch B5). The music app hosts the 1104-byte schema producer, hooked at `Static.setPlayValue` for play-state edges and at the IjkMediaPlayer + `android.media.MediaPlayer` listener lambdas for track edges. Captures state changes regardless of UI foreground state.
+- **In-app `AvrcpBridgeService` Binder** (`com.koensayr.y1.avrcp.*` — Patch B6) hosts the `IBTAvrcpMusic` + `IMediaPlaybackService` Binder contracts MtkBt binds to. Replaces the separate `Y1MediaBridge.apk` install; `--avrcp` no longer requires a gradle build. Manifest-patched in via a small Python AXML editor (`src/patches/_axml.py`) so the bind path is declared at priority 100 inside the music APK itself.
 - **`docs/spec/`** drop-spot (gitignored, Bluetooth SIG copyright) for the AVRCP 1.3 V13 + ESR07 + ICS / IXIT PDFs used for citation verification.
 
 ### Changed
 - **GitHub repository renamed `y1-mods` → `koensayr`.** GitHub auto-redirects the old URL; existing clones can update with `git remote set-url origin git@github.com:SeanathanVT/koensayr.git`.
 - **`--avrcp` flag** is now the canonical metadata-pipeline flag. Excluded from `--all` because it requires a Y1MediaBridge gradle build first.
-- **Trampoline file paths cut over to the music app.** `libextavrcp_jni.so` reads `y1-track-info` / `y1-trampoline-state` / `y1-papp-set` from `/data/data/com.innioasis.y1/files/` and the music app's `TrackInfoWriter` is the canonical writer. `Y1MediaBridge.apk` remains installed in this release to serve the `IBTAvrcpMusic` + `IMediaPlaybackService` Binder MtkBt binds to; its file-write side is no longer consulted.
+- **Trampoline file paths cut over to the music app.** `libextavrcp_jni.so` reads `y1-track-info` / `y1-trampoline-state` / `y1-papp-set` from `/data/data/com.innioasis.y1/files/` and the music app's `TrackInfoWriter` is the canonical writer.
+- **`Y1MediaBridge.apk` retired.** `--avrcp` no longer installs it; `apply.bash` removes any pre-existing copy. The music app's `AvrcpBridgeService` declares the `com.android.music.MediaPlaybackService` intent-filter at priority 100, winning MtkBt's `bindService` resolution.
 - **Spec-citation discipline.** All references target AVRCP 1.3 V13 + ESR07 errata; section numbers verified against the spec PDFs in `docs/spec/`.
 
 ### Removed
