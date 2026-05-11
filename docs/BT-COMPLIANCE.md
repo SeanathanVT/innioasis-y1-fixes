@@ -177,7 +177,7 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 780..783 | position_at_state_change_ms (BE u32) | 4 | shipped | `MediaBridgeService.mPositionAtStateChange` |
 | 784..787 | state_change_time_ms (BE u32) | 4 | shipped | `MediaBridgeService.mStateChangeTime` (CLOCK_BOOTTIME ms-since-boot, full ms precision; T6 / T9 live-position extrapolation. tv_nsec/1e6 computed in-trampoline via magic-multiply) |
 | 788..791 | reserved | 4 | — | (pad) |
-| 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — fed by `LogcatMonitor` mapping Y1's BaseActivity state codes `'1'`/`'3'`/`'5'`) |
+| 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — set by `PlaybackStateBridge.onPlayValue` hooking `Static.setPlayValue` newValue 0/1/3/5) |
 | 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
 | 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
 | 795 | repeat_avrcp | 1 | shipped | `mCurrentRepeatAvrcp` (AVRCP §5.2.4 Tbl 5.20 enum; written by `handlePappStateIntent` from Patch B4 broadcaster; T8 0x08 INTERIM + T9 papp CHANGED-on-edge read this byte) |

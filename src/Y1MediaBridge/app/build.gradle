@@ -38,27 +38,17 @@ android {
     }
 
     lint {
-        // Disable lint checks that flag intentional design decisions for this
-        // project — a system-privileged AVRCP metadata bridge for the Innioasis
-        // Y1 (Android 4.2.2). Never published to Google Play; never installed
-        // on a non-system context.
+        // Y1MediaBridge installs as a system app at /system/app/ on the
+        // Innioasis Y1 (Android 4.2.2). Never published to Google Play;
+        // never installed on a non-system context.
         disable += [
-            // Y1MediaBridge installs as a system app and uses MEDIA_CONTENT_CONTROL
-            // intentionally. Lint complains because non-system apps would never
-            // get it granted at runtime — irrelevant here.
-            "ProtectedPermissions",
             // We deliberately target API 17. The "expired" warning refers to
             // Google Play's minimum-target policy, which doesn't apply.
             "ExpiredTargetSdkVersion",
-            // setReadable(true, false) on /data/data/com.y1.mediabridge/files/
-            // y1-track-info is required so the AVRCP T4 trampoline (running in
-            // the Bluetooth process) can read the track-info file. See
-            // docs/ARCHITECTURE.md for why this file exists.
-            "SetWorldReadable",
-            // MediaBridgeService is intentionally exported — MtkBt binds to it
-            // via PlayService onServiceConnected.
+            // MediaBridgeService is intentionally exported — MtkBt binds to
+            // it via the com.android.music.MediaPlaybackService intent-filter.
             "ExportedService",
-            // Y1MediaBridge is a headless service; no launcher icon needed.
+            // Y1MediaBridge is a headless Binder host; no launcher icon needed.
             "MissingApplicationIcon",
         ]
     }

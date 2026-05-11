@@ -2238,3 +2238,73 @@ Phase 1 + 2 worked because **JarVerifier only digest-checks `AndroidManifest.xml
 
 All three Phase 3 v2 paths preserve the constraint discovered in Trace #23: **don't modify `com.innioasis.y1`'s AndroidManifest.xml**.
 
+
+## Trace #24 (2026-05-11) — Phase 3 v2: shrink Y1MediaBridge to a minimal Binder host
+
+Phase 3 v1 (Trace #23) established that we can't retire `Y1MediaBridge.apk` entirely without either (a) the OEM platform key (impossible) or (b) substantial MtkBt.odex smali surgery (deferred). What we CAN do — and what the user asked for as the optimal forward path — is keep all behavioral logic in the music app's process and shrink Y1MediaBridge to nothing but a Binder declaration. The "visibility issues" that drove the original Y1MediaBridge design (logcat scraping, cross-process state observation, foreground/background gaps) are all solved by Phase 1+2's in-music-app components; Y1MediaBridge had been duplicating that work to a dead path since Phase 2 shipped.
+
+### What got deleted from `src/Y1MediaBridge/app/src/main/java/com/y1/mediabridge/MediaBridgeService.java`
+
+Old file: 2152 lines. New file: 130 lines. Deletions:
+
+- **`LogcatMonitor` thread + `processLogLine` + `onStateDetected` + `onTrackDetected` + every state-tracking field** (`mPlayStatus`, `mIsPlaying`, `mCurrentTitle`, `mCurrentArtist`, `mCurrentAlbum`, `mCurrentDuration`, `mPositionAtStateChange`, `mStateChangeTime`, `mPreviousTrackNaturalEnd`, `mCurrentRepeatAvrcp`, `mCurrentShuffleAvrcp`, …). The music app's `PlaybackStateBridge` observes the player engine in-process — no logcat race, no foreground/background gap.
+- **The 1104-byte `y1-track-info` schema + `writeTrackInfoFile` + `putBE64` / `putBE32` / `putUtf8Padded` helpers + `prepareTrackInfoDir`.** `TrackInfoWriter` in the music app is the canonical writer (Phase 1+2).
+- **`setupRemoteControlClient` + `mAudioManager` + `registerMediaButtonEventReceiver`.** The music app's manifest-declared `PlayControllerReceiver` (priority=MAX_INT for `ACTION_MEDIA_BUTTON`) wins ordered-broadcast dispatch directly; AudioService's RCC fallback to ordered broadcast is the active path.
+- **`registerBatteryReceiver` + `handleBatteryIntent` + bucket-mapping helpers.** Music app's `BatteryReceiver` does this and fires `playstatechanged` itself.
+- **`registerPappStateReceiver` + `handlePappStateIntent` + `mPappStateReceiver`.** Music app's `PappStateBroadcaster` calls `TrackInfoWriter.setPapp` directly and fires `playstatechanged` itself.
+- **`setupPappSetObserver` + the bridge's `FileObserver(y1-papp-set)`.** Music app's `PappSetFileObserver` watches the path the trampolines actually write to.
+- **`mPosTickRunnable` + the 1 Hz position-tick `Handler.postDelayed` loop.** Music app's `PlayerService` already emits `playstatechanged` on its own tick.
+- **`notifyAvrcpCallbacks` + `notifyPlaybackStatus` + `notifyTrackChanged` + the `mAvrcpCallbacks` `CopyOnWriteArrayList`.** Per Sonos capture in Trace #21, MtkBt never registered a callback (the binder transact 1 never landed); the broadcast wake path drove every T5 / T9 fire. Dead code.
+- **`mPlayService` + `mPlayConnection` + every `IMediaPlaybackService.Stub.asInterface` consumer.** The bridge didn't need to bind to anything.
+- **`computePosition` + `safeString` + `sendMediaKey` + every other helper.** All deleted.
+
+### What stays in `MediaBridgeService.java` (130 lines)
+
+- Empty `onCreate`.
+- `onBind` returns a private `AvrcpBinder` instance.
+- `onUnbind` returns `true` so the framework's service record persists across MtkBt re-binds.
+- `AvrcpBinder` (~30 LOC inner class): `onTransact` skips `strictModePolicy` + descriptor string (same defensive pattern Y1MediaBridge used to dodge ROM-variant `enforceInterface` failures), dispatches by code. Code 5 (`getCapabilities`) returns `[0x01 PLAYBACK_STATUS_CHANGED, 0x02 TRACK_CHANGED]`. Every other code: `writeNoException` + `return true`.
+
+### `PlaySongReceiver.java` simplification
+
+- **Deleted**: `ACTION_MEDIA_BUTTON` forwarding (music app's PlayControllerReceiver handles directly via ordered broadcast); `MY_PLAY_SONG` handling (was wakeup for the deleted LogcatMonitor); `ABOUT_SHUT_DOWN` handling (was for the deleted shutdown coordination).
+- **Kept**: `BOOT_COMPLETED` → `startService(MediaBridgeService)` so the service is alive when MtkBt's first `bindService` fires (bindService would cold-start it anyway, but this makes the first bind cheaper).
+
+Old `PlaySongReceiver.java`: 106 lines. New: 28 lines.
+
+### `AndroidManifest.xml` cleanup
+
+- **Dropped permissions**: `READ_LOGS` (logcat monitor gone), `MEDIA_CONTENT_CONTROL` (no more MediaController APIs), `MODIFY_AUDIO_SETTINGS` (no more RCC / AudioManager), `BLUETOOTH` (we don't talk BT directly — MtkBt does), `READ_EXTERNAL_STORAGE` + `WRITE_MEDIA_STORAGE` (no file IO outside our own data dir), `WAKE_LOCK` (no background work).
+- **Kept**: `RECEIVE_BOOT_COMPLETED`.
+- **Dropped `<application android:persistent="true">`**: with no background work happening, there's no reason to keep the process resident. MtkBt's `bindService` will cold-start it when needed; the framework keeps the binder bound while there's a client.
+- **Dropped `<receiver>` intent-filters**: removed `MY_PLAY_SONG`, `ABOUT_SHUT_DOWN`, `MEDIA_BUTTON`. Only `BOOT_COMPLETED` left.
+
+Old manifest: 74 lines. New: 43 lines.
+
+### `app/build.gradle` lint config
+
+Removed suppressions for warnings that no longer apply: `ProtectedPermissions` (no `MEDIA_CONTENT_CONTROL`), `SetWorldReadable` (no `setReadable(true, false)`). Kept: `ExpiredTargetSdkVersion`, `ExportedService`, `MissingApplicationIcon`.
+
+### Net result
+
+`Y1MediaBridge/` source goes from 2332 lines to 201 lines across three files. The compiled APK should be ~5–10 KB (was ~80 KB pre-shrink). Build pipeline unchanged: `cd src/Y1MediaBridge && ./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk` → `apply.bash --avrcp` copies to `/system/app/Y1MediaBridge.apk`.
+
+The wire-level behavior is identical to Phase 1+2 (the bridge wasn't load-bearing for AVRCP events post-Phase-2 anyway — it just had a lot of redundant code running). The user-facing improvement is that the bridge is now trivially auditable: ~30 lines of actual logic.
+
+### Visibility-issue audit (the user's framing question)
+
+| Old Y1MediaBridge issue | Resolution in Phase 1+2+3v2 |
+|---|---|
+| `LogcatMonitor` parsing `'1'/'3'/'5'` from log lines | `PlaybackStateBridge` hooks `Static.setPlayValue` + player engine listener lambdas — sees state edges in-process, no log race |
+| Foreground/background gap (logcat scrape missed background edges) | Hooks live in player engine; fire regardless of UI state |
+| `onTrackDetected` natural-end-via-extrapolated-position heuristic | `PlaybackStateBridge.onCompletion` latches real engine EOS |
+| Cross-process Battery + PApp observation via Intent bridges | `BatteryReceiver` + `PappStateBroadcaster` run in-process |
+| `MediaMetadataRetriever` re-extracting tags Y1 already had | Music app reads tags from its `Song` entity directly |
+
+All visibility-critical logic lives in the music app's process. Y1MediaBridge is purely a "JarVerifier bypass" — a self-signed manifest carrier for the intent-filter MtkBt expects.
+
+### Stretch goals (still future work)
+
+- **Drop the gradle dep**: shrink-source is small enough to build with just `javac` + `d8` + a minimal aapt2 substitute (or commit a prebuilt APK). Not addressed here because the user's flash machine already has gradle set up.
+- **Truly retire `Y1MediaBridge.apk`**: requires `MtkBt.odex` smali surgery to component-bind into `com.innioasis.y1/.service.PlayerService` directly (option (c) from Trace #23). `patch_mtkbt_odex.py` would need a smali-reassembly path; currently it only supports same-size byte substitutions.
+
