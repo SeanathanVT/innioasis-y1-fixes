@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
-        android:label="Y1 Media Bridge"
+        android:label="Y1 Bridge"
         android:allowBackup="false">
 
         <!--
@@ -31,7 +31,7 @@
         </service>
 
         <receiver
-            android:name=".PlaySongReceiver"
+            android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>

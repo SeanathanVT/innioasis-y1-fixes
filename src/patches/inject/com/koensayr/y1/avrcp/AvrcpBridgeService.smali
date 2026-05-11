@@ -3,16 +3,17 @@
 .source "AvrcpBridgeService.smali"
 
 
-# Bound AVRCP-music service replacing Y1MediaBridge's MediaBridgeService.
-# The music app's AndroidManifest declares this service with two intent-filter
-# actions:
-#   com.android.music.MediaPlaybackService    (priority 100)
-#   com.android.music.IMediaPlaybackService
-# so MtkBt's BTAvrcpMusicAdapter.bindService resolves here.
+# In-music-app AVRCP service shell. NOT WIRED IN THE CURRENT BUILD — the music
+# app's manifest can't declare the com.android.music.MediaPlaybackService
+# intent-filter (com.innioasis.y1 declares sharedUserId=android.uid.system,
+# constraining its signing key to the OEM platform key we don't have; any
+# AndroidManifest.xml byte change breaks JarVerifier — see Trace #23). MtkBt's
+# bindService resolves to Y1Bridge.apk (com.koensayr.y1.bridge) instead, which
+# is a separate self-signed APK and can freely carry the intent-filter.
 #
-# The trampoline chain in libextavrcp_jni.so reads y1-track-info directly and
-# responds to inbound AVRCP PDUs without transacting with this Binder. The
-# Binder's role here is narrow:
+# Kept here as groundwork for a future architecture where bindService routes
+# directly into the music-app process (e.g. via an MtkBt.odex component-bind
+# patch). On that future path:
 #   1. onBind returns an IBinder so MtkBt's mMusicService becomes non-null.
 #   2. registerCallback (transact code 1) stashes MtkBt's callback IBinder so
 #      we can wake notificationPlayStatusChangedNative / TrackChangedNative.
@@ -281,7 +282,7 @@
 
 # Send a (DOWN, UP) media-key pair to the music app's PlayControllerReceiver.
 # Used by AvrcpBinder.onTransact for transport-control codes (play / pause /
-# stop / next / prev). Matches Y1MediaBridge's sendMediaKey shape exactly so
+# stop / next / prev). Standard DOWN+UP ACTION_MEDIA_BUTTON broadcast so
 # Patch E's discrete dispatch path handles them.
 .method static sendMediaKey(I)V
     .locals 6

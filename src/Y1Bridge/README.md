@@ -1,4 +1,4 @@
-# Y1MediaBridge
+# Y1Bridge
 
 Minimal Binder host for the Innioasis Y1 AVRCP pipeline.
 
@@ -14,7 +14,7 @@ recorded SHA1-Digest. PackageManager rejects the APK at `/system/app/` scan
 with "no certificates at entry AndroidManifest.xml; ignoring!" — see
 [`docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) Trace #23.
 
-Y1MediaBridge is its own package (`com.y1.mediabridge`), signed with the
+Y1Bridge is its own package (`com.koensayr.y1.bridge`), signed with the
 debug keystore. Its manifest is freely editable. It exists solely to
 declare the `<service>` MtkBt's `bindService` resolves to.
 
@@ -29,7 +29,7 @@ declare the `<service>` MtkBt's `bindService` resolves to.
   capability query — the broadcast wake path (cardinality-NOP-patched JNI
   natives + `metachanged`/`playstatechanged` fired by the music app) is what
   drives T5/T9 on the wire.
-- `PlaySongReceiver` listens for `BOOT_COMPLETED` and calls
+- `BootReceiver` listens for `BOOT_COMPLETED` and calls
   `startService(MediaBridgeService)` so the Service is alive when MtkBt
   first binds.
 
@@ -57,14 +57,14 @@ trampoline chain reference.
 ## Build
 
 ```bash
-cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug
 ```
 
-Output: `app/build/outputs/apk/debug/app-debug.apk` (~10 KB). `apply.bash
---avrcp` copies it to `/system/app/Y1MediaBridge.apk` at flash time.
+Output: `app/build/outputs/apk/debug/app-debug.apk` (~5-10 KB). `apply.bash
+--avrcp` copies it to `/system/app/Y1Bridge.apk` at flash time.
 
 Source is tiny — three files total:
 
-- `app/src/main/java/com/y1/mediabridge/MediaBridgeService.java` (~130 lines)
-- `app/src/main/java/com/y1/mediabridge/PlaySongReceiver.java` (~30 lines)
-- `app/src/main/AndroidManifest.xml` (~45 lines)
+- `app/src/main/java/com/koensayr/y1/bridge/MediaBridgeService.java` (~130 lines)
+- `app/src/main/java/com/koensayr/y1/bridge/BootReceiver.java` (~28 lines)
+- `app/src/main/AndroidManifest.xml` (~43 lines)

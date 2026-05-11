@@ -1,4 +1,4 @@
-package com.y1.mediabridge;
+package com.koensayr.y1.bridge;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -14,9 +14,9 @@ import android.util.Log;
  * <p>BindService would cold-start the service on demand anyway; this just
  * makes the first bind cheaper.
  */
-public class PlaySongReceiver extends BroadcastReceiver {
+public class BootReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "Y1MediaBridge";
+    private static final String TAG = "Y1Bridge";
 
     @Override
     public void onReceive(Context context, Intent intent) {

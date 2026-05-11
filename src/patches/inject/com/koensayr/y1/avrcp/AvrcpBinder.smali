@@ -26,7 +26,7 @@
 #     having the Binder ack-only for unmapped codes is enough to keep MtkBt
 #     happy.
 #
-# Descriptor handling: Y1MediaBridge experience shows enforceInterface is
+# Descriptor handling: Y1Bridge experience shows enforceInterface is
 # brittle across ROM variations (descriptor strings drift), so we skip the
 # leading strictModePolicy int32 + descriptor string and dispatch purely by
 # transact code. Codes 1..37 are IBTAvrcpMusic; all others ack-only.
@@ -64,7 +64,7 @@
     :not_iface
     :try_start
     # Skip strictModePolicy (int32) + descriptor (UTF-16 string with int32 char count).
-    # This mirrors Y1MediaBridge's defensive descriptor-skip: enforceInterface
+    # This mirrors Y1Bridge's defensive descriptor-skip: enforceInterface
     # has been observed to mismatch across ROM variations of MtkBt and abort
     # registerCallback (code 1), which leaves cardinality empty forever.
     invoke-virtual {p2}, Landroid/os/Parcel;->readInt()I

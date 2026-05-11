@@ -26,10 +26,10 @@ FLAGS:
   --avrcp        AVRCP 1.3 metadata pipeline (1.3 SDP shape + AVCTP 1.2
                  + JNI trampoline chain in libextavrcp_jni.so + proactive
                  CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex
-                 + Y1MediaBridge.apk Binder declaration). The trampoline
-                 chain bypasses mtkbt's compiled-1.0 command dispatcher and
+                 + Y1Bridge.apk Binder declaration). The trampoline chain
+                 bypasses mtkbt's compiled-1.0 command dispatcher and
                  synthesises the 1.3 responses inside the JNI library
-                 directly. The music app writes y1-track-info; Y1MediaBridge
+                 directly. The music app writes y1-track-info; Y1Bridge
                  stays installed as the Binder host MtkBt's bindService
                  resolves to (the music APK's manifest can't be modified —
                  com.innioasis.y1 declares sharedUserId=android.uid.system,
@@ -56,13 +56,13 @@ FLAGS:
                    - patch_y1_apk.py B5/B6 (in-music-app TrackInfoWriter +
                      PlaybackStateBridge + BatteryReceiver + PappSetFile-
                      Observer; AvrcpBinder smali groundwork for Phase 3 v2)
-                   - Y1MediaBridge.apk install (manifest-declared service
-                     hosting the IBTAvrcpMusic + IMediaPlaybackService
-                     Binder MtkBt's bindService resolves to)
+                   - Y1Bridge.apk install (manifest-declared service hosting
+                     the IBTAvrcpMusic + IMediaPlaybackService Binder MtkBt's
+                     bindService resolves to)
 
-                 Excluded from --all because it requires a Y1MediaBridge
-                 build step. Build first:
-                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
+                 Excluded from --all because it requires a Y1Bridge build
+                 step. Build first:
+                   cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug
 
                  See docs/ARCHITECTURE.md for the trampoline chain reference.
   --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
@@ -75,9 +75,8 @@ FLAGS:
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
   --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
-                 --avrcp is excluded because it requires building
-                 Y1MediaBridge first (analogous to --root needing
-                 src/su/ built).
+                 --avrcp is excluded because it requires building Y1Bridge
+                 first (analogous to --root needing src/su/ built).
   --debug        Build patches with diagnostic Log.d / __android_log_print
                  calls injected. Surfaces under "adb logcat -s Y1Patch:*"
                  on-device. Reflash required to toggle (this is a build-
@@ -175,7 +174,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      # --avrcp is intentionally excluded — it requires the Y1MediaBridge
+      # --avrcp is intentionally excluded — it requires the Y1Bridge
       # gradle build to have run first. Opt in explicitly when ready.
       FLAG_BLUETOOTH=true
       FLAG_ADB=true
@@ -271,7 +270,7 @@ fi
 FILENAME_ROM_ZIP="rom.zip"
 FILENAME_SYSTEM_IMAGE_BASENAME="system.img"
 FILENAME_BUILD_PROP="build.prop"
-FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
+FILENAME_Y1_BRIDGE_APK="Y1Bridge.apk"
 
 # Version-dependent constants (set after stock MD5 validation)
 VERSION_FIRMWARE=""
@@ -610,21 +609,21 @@ if [[ "$FLAG_ROOT" == true ]]; then
 fi
 
 # Apply AVRCP 1.3 metadata pipeline (SDP shape + JNI trampoline chain +
-# Y1MediaBridge metadata bridge). See docs/ARCHITECTURE.md for the full
+# Y1Bridge.apk Binder host). See docs/ARCHITECTURE.md for the full
 # trampoline chain reference.
 if [[ "$FLAG_AVRCP" == true ]]; then
   echo "Applying AVRCP 1.3 metadata pipeline (--avrcp).."
 
-  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
-  if [[ ! -f "$src_y1mb" ]]; then
-    echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
+  src_bridge="${PATH_SCRIPT_DIR}/src/Y1Bridge/app/build/outputs/apk/debug/app-debug.apk"
+  if [[ ! -f "$src_bridge" ]]; then
+    echo "ERROR: ${src_bridge} not found." >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
     exit 1
   fi
 
-  echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
-    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
+  echo "  Installing Y1Bridge.apk from src/Y1Bridge build output.."
+  if ! sudo install -m 644 -o root -g root "$src_bridge" "${PATH_MOUNT}/app/${FILENAME_Y1_BRIDGE_APK}"; then
+    echo "ERROR: failed to install ${src_bridge} → ${PATH_MOUNT}/app/${FILENAME_Y1_BRIDGE_APK}" >&2
     exit 1
   fi
 

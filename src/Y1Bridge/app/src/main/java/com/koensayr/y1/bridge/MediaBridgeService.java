@@ -1,4 +1,4 @@
-package com.y1.mediabridge;
+package com.koensayr.y1.bridge;
 
 import android.app.Service;
 import android.content.Intent;
@@ -60,7 +60,7 @@ import android.util.Log;
  */
 public class MediaBridgeService extends Service {
 
-    private static final String TAG = "Y1MediaBridge";
+    private static final String TAG = "Y1Bridge";
 
     private final IBinder mBinder = new AvrcpBinder();
 
