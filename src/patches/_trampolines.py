@@ -93,7 +93,9 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                                          byte 8     = last RegisterNotification transId,
 #                                          byte 9     = last_play_status (T9 edge),
 #                                          byte 10    = last_battery_status (T9 edge),
-#                                          bytes 11..15 = padding)
+#                                          byte 11    = last_repeat_avrcp (T9 papp edge),
+#                                          byte 12    = last_shuffle_avrcp (T9 papp edge),
+#                                          bytes 13..15 = padding)
 #   sp+32  .. +1135  = file buffer (1104 B; full y1-track-info image)
 #                      0..7      track_id
 #                      8..263    Title  (256 B UTF-8, null-padded)
@@ -112,7 +114,11 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                                                                TRACK_REACHED_END CHANGED)
 #                      794       battery_status             u8 (AVRCP §5.4.2 Tbl 5.35 enum;
 #                                                                T8 event 0x06, T9)
-#                      795..799  pad (PlayerApplicationSettings shuffle_flag / repeat_mode reservation)
+#                      795       repeat_avrcp               u8 (AVRCP §5.2.4 Tbl 5.20 enum;
+#                                                                T_papp 0x13, T8 event 0x08, T9)
+#                      796       shuffle_avrcp              u8 (AVRCP §5.2.4 Tbl 5.21 enum;
+#                                                                T_papp 0x13, T8 event 0x08, T9)
+#                      797..799  pad
 #                      800..815  TrackNumber                UTF-8 ASCII decimal (16 B)
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
@@ -249,8 +255,8 @@ T5_OFF_STATE          = 0
 T5_OFF_FILE           = 16
 T5_OFF_FILE_TID       = T5_OFF_FILE          # 16 - track_id (8 B) at file[0..7]
 T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 809 - previous_track_natural_end u8
-                                              #       at file[793] (set by
-                                              #       Y1MediaBridge before the
+                                              #       at file[793] (set by the
+                                              #       music app before the
                                               #       metachanged broadcast that
                                               #       lands here).
 
@@ -289,9 +295,9 @@ PAPP_SHUFFLE_OFF      = 0x01
 # - BATT_STATUS_CHANGED: real data wired through y1-track-info[794]
 #   (battery_status u8). T8 INTERIM reads byte 794; T9 emits CHANGED-on-edge
 #   when file[794] differs from y1-trampoline-state[10] (last_battery_status).
-#   Y1MediaBridge maps Android `Intent.ACTION_BATTERY_CHANGED` (level +
-#   plugged-state) to the AVRCP enum on every bucket transition and fires
-#   `playstatechanged` so T9 picks up the change. Spec values:
+#   The music app's BatteryReceiver maps Android `Intent.ACTION_BATTERY_CHANGED`
+#   (level + plugged-state) to the AVRCP enum on every bucket transition and
+#   fires `playstatechanged` so T9 picks up the change. Spec values:
 #   0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE.
 #   BATT_STATUS_NORMAL is retained as the default value when y1-track-info
 #   is shorter than 800 B — T8 / T9 memset to zero before the read, so a
@@ -320,8 +326,8 @@ NR_clock_gettime = 263
 SEEK_SET = 0
 
 # Linux clock IDs. CLOCK_BOOTTIME mirrors Android's SystemClock.elapsedRealtime
-# (monotonic, includes time spent in suspend) — same source we use on the
-# Y1MediaBridge side when stamping mStateChangeTime, so subtracting the two
+# (monotonic, includes time spent in suspend) — same source the music app's
+# TrackInfoWriter uses when stamping mStateChangeTime, so subtracting the two
 # yields the wall-clock seconds elapsed since the last play / pause edge.
 CLOCK_BOOTTIME = 7
 
@@ -475,8 +481,9 @@ def _emit_t4(a: Asm) -> None:
     a.str_sp_imm(0, T4_OFF_STATE   + 4)
 
     # Write 16-byte state file. We use O_WRONLY|O_TRUNC (no O_CREAT) — file is
-    # pre-created by Y1MediaBridge.prepareTrackInfoDir(). If it's somehow gone,
-    # we silently skip the write rather than create a wrongly-permissioned file.
+    # pre-created by TrackInfoWriter.prepareFiles() in the music app. If it's
+    # somehow gone, we silently skip the write rather than create a
+    # wrongly-permissioned file.
     a.adr_w(0, "path_state")
     a.movw(1, O_WRONLY | O_TRUNC)
     a.movs_imm8(2, 0)
@@ -612,8 +619,8 @@ def _emit_extended_t2(a: Asm) -> None:
     a.ldrb_w(0, 13, T2_TRANSID_CALLER_OFF)
     a.strb_w(0, 13, T2_OFF_TRANSID)
 
-    # open(path_state, O_WRONLY, 0) — no O_TRUNC, no O_CREAT. Y1MediaBridge
-    # pre-creates the file. We open without truncating because we only
+    # open(path_state, O_WRONLY, 0) — no O_TRUNC, no O_CREAT. The music app's
+    # TrackInfoWriter.prepareFiles() pre-creates it. We open without truncating because we only
     # write OUR 9 bytes (track_id 0..7 + transId at 8); T9's bytes 9..12 must
     # stay intact. With O_TRUNC we'd zero them and cause spurious CHANGED
     # frames on the next T9 fire.
@@ -663,9 +670,9 @@ def _emit_t5(a: Asm) -> None:
     Entered via `b.w T5` from the patched libextavrcp_jni.so::
     notificationTrackChangedNative stub at file offset 0x3bc0. Java's
     handleKeyMessage path (with the cardinality if-eqz NOPed in MtkBt.odex)
-    invokes the native method on every track-change broadcast from
-    Y1MediaBridge — this lands here, asynchronously to any inbound AVRCP
-    command from permissive CTs.
+    invokes the native method on every track-change broadcast from the music
+    app — this lands here, asynchronously to any inbound AVRCP command from
+    permissive CTs.
 
     On entry:
       - r0 = JNIEnv*  (Java native arg 0)
@@ -684,7 +691,7 @@ def _emit_t5(a: Asm) -> None:
          conn buffer at +8).
       2. Read 800 B of y1-track-info into file_buf @ sp+16..815. file[0..7]
          is the current track_id; file[793] is the
-         `previous_track_natural_end` flag set by Y1MediaBridge before the
+         `previous_track_natural_end` flag set by the music app before the
          metachanged broadcast that landed us here.
       3. Read y1-trampoline-state 16 bytes into state_buf @ sp+0..15
          (state[0..7] = last-synced track_id; state[8] = last
@@ -708,11 +715,10 @@ def _emit_t5(a: Asm) -> None:
 
     Closes ICS Table 7 rows 25 (TRACK_REACHED_END) and 26
     (TRACK_REACHED_START) with real-data CHANGED-on-edge alongside T8's
-    INTERIM coverage — both Optional rows. Pairs with the Y1MediaBridge
-    natural_end detection in onTrackDetected(): the bridge compares the
-    previous track's extrapolated position (computePosition()) against
-    mCurrentDuration at the moment of track change and writes file[793]
-    before the metachanged broadcast.
+    INTERIM coverage — both Optional rows. Pairs with the music app's
+    natural-end detection in PlaybackStateBridge.onCompletion(): the music
+    app marks the previous track's completion via TrackInfoWriter and writes
+    file[793] before the metachanged broadcast.
 
     The 16-byte state buf and 800-byte file buf live in T5's own stack
     frame — no shared memory with the reactive T4 trampoline (they read
@@ -736,10 +742,9 @@ def _emit_t5(a: Asm) -> None:
 
     # ---- memset(file_buf, 0, 800) ----
     # Default everything to 0 so a partial read (file shorter than 800 B —
-    # e.g. an old Y1MediaBridge built against a pre-Phase-F1 schema where
-    # file[793] is just a zero pad byte) gives natural_end=0, which means
-    # T5 only emits 0x02 + 0x04 (no spurious 0x03 emission). Same shape
-    # T9 uses for safe defaults.
+    # e.g. an older writer where file[793] is just a zero pad byte) gives
+    # natural_end=0, which means T5 only emits 0x02 + 0x04 (no spurious 0x03
+    # emission). Same shape T9 uses for safe defaults.
     a.add_sp_imm(0, T5_OFF_FILE)              # r0 = sp+16
     a.movs_imm8(1, 0)
     a.movw(2, 800)
@@ -806,7 +811,7 @@ def _emit_t5(a: Asm) -> None:
 
     # ---- emit TRACK_REACHED_END (event 0x03) only if natural ----
     # AVRCP 1.3 §5.4.2 Table 5.31. ICS Table 7 row 25 (Optional). Only fires
-    # when the previous track ended naturally — Y1MediaBridge writes
+    # when the previous track ended naturally — the music app writes
     # file[793] = 1 in that case, 0 on a skip / interrupt.
     a.ldrb_w(0, 13, T5_OFF_FILE_NATURAL_END)  # r0 = previous_track_natural_end
     a.cmp_imm8(0, 0)
@@ -981,7 +986,7 @@ def _emit_t6(a: Asm) -> None:
     `live_pos = saved_pos_ms + (now_ms - state_change_ms)`. now_ms =
     tv_sec * 1000 + tv_nsec / 1e6, computed in-trampoline. When stopped
     / paused the position field stays at the saved freeze point.
-    CLOCK_BOOTTIME parity with Y1MediaBridge's SystemClock.elapsedRealtime
+    CLOCK_BOOTTIME parity with TrackInfoWriter's SystemClock.elapsedRealtime
     is what makes this arithmetic correct, and full ms precision on both
     endpoints means the wire position is bit-exact, no ±1 s lurch on
     state edges.
@@ -991,8 +996,8 @@ def _emit_t6(a: Asm) -> None:
     bit-exact for tv_nsec in [0, 1e9). Standard GCC reciprocal — see
     Hacker's Delight ch.10 for the derivation.
 
-    The y1-track-info schema fields T6 reads (Y1MediaBridge writes these
-    as big-endian; T6 byte-swaps to host-LE via REV before passing to the
+    The y1-track-info schema fields T6 reads (the music app's TrackInfoWriter
+    writes these as big-endian; T6 byte-swaps to host-LE via REV before passing to the
     response builder, which expects register-native order):
       file[776..779]: duration_ms u32 BE
       file[780..783]: position_at_state_change_ms u32 BE
@@ -1007,9 +1012,9 @@ def _emit_t6(a: Asm) -> None:
 
     # ---- memset(file_buf, 0, 800) ----
     # Default everything to 0 so a partial read (file shorter than 800 B,
-    # e.g. an old Y1MediaBridge that hasn't been rebuilt for the current
-    # schema) gives play_status=0 (STOPPED) and duration / position = 0 rather
-    # than uninitialized stack garbage.
+    # e.g. an older writer that hasn't been rebuilt for the current schema)
+    # gives play_status=0 (STOPPED) and duration / position = 0 rather than
+    # uninitialized stack garbage.
     a.add_sp_imm(0, T6_OFF_FILE)              # r0 = sp+16
     a.movs_imm8(1, 0)
     a.movw(2, 800)
@@ -1130,14 +1135,14 @@ def _emit_t_papp(a: Asm) -> None:
     full 7-row group (PDUs 0x11..0x16 + event 0x08) Mandatory — they all
     ship together.
 
-    Iter1 design: hardcoded "Y1 supports Repeat (id=2) + Shuffle (id=3),
-    both currently OFF (value=1), settings cannot be changed". The Set PDU
-    (0x14) returns reject status 0x06 INTERNAL_ERROR per AVRCP 1.3 §6.15.2,
-    explicitly indicating to the peer that the PDU was understood but could
-    not be applied. Iter2 will replace the hardcoded values + reject path
-    with real Y1MediaBridge state binding (file-based, mirroring the
-    track-info contract) so that Repeat / Shuffle round-trip to the Android
-    media session.
+    Y1 supports Repeat (id=2, three values OFF/SINGLE/ALL) + Shuffle (id=3,
+    two values OFF/ALL_TRACK). Live values come from y1-track-info[795..796]
+    written by the music app's PappStateBroadcaster on every
+    musicRepeatMode/musicIsShuffle SharedPreferences edge. Set PDU (0x14)
+    writes 2 bytes (attr_id, value) to y1-papp-set; the music app's
+    PappSetFileObserver picks the write up and applies it via
+    SharedPreferencesUtils so settings round-trip to the Android media
+    session.
 
     Inbound AVRCP frame layout (caller's stack, post-T_papp SUB SP shifts
     by PAPP_FRAME):
@@ -1273,7 +1278,7 @@ def _emit_t_papp(a: Asm) -> None:
     # Honest advertisement: only the values Y1 can actually honor. Stock
     # advertised the full Tbl 5.20 / 5.21 sets including GROUP, so a CT
     # could Set 0x04 (Repeat GROUP) or 0x03 (Shuffle GROUP); T_papp 0x14
-    # ACKed success but Y1MediaBridge's enum mapper rejected → CT-side
+    # ACKed success but the music app's enum mapper rejected → CT-side
     # state diverged from Y1-side state.
     a.label("papp_list_values")
     a.ldrb_w(6, 13, PAPP_PARAM_OFF + 0)   # r6 = attr_id
@@ -1315,11 +1320,11 @@ def _emit_t_papp(a: Asm) -> None:
     # ---- 0x13 GetCurrentPlayerApplicationSettingValue ----
     # Inbound: 1 byte n + n attr_ids. Per AVRCP V13 §6.12, "The TG returns
     # the current value(s) of the player application setting(s) requested by
-    # the CT" — strict CTs (e.g. Kia head units) reject a response whose n
-    # field doesn't match the request and close the AVCTP channel. Honor the
-    # spec by branching on the inbound n: n==1 → return only the requested
-    # attr; otherwise fall through to the existing two-attr response (kept
-    # for the n==2 case + permissive CTs that send n==0 to mean "all").
+    # the CT" — strict CTs reject a response whose n field doesn't match the
+    # request and close the AVCTP channel. Honor the spec by branching on
+    # the inbound n: n==1 → return only the requested attr; otherwise fall
+    # through to the existing two-attr response (kept for the n==2 case +
+    # permissive CTs that send n==0 to mean "all").
     #
     # Live values: open y1-track-info, lseek to byte 795, read 2 bytes
     # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region, pass
@@ -1474,12 +1479,12 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("papp_done")
 
     # ---- 0x14 SetPlayerApplicationSettingValue ----
-    # Iter3: parse first (attr_id, value) pair from inbound param body
-    # at caller's sp+387/+388 (= our sp+0x19b/+0x19c after the PAPP_FRAME
-    # shift), write the 2 bytes to /data/data/com.y1.mediabridge/files/
-    # y1-papp-set, ACK the peer with success. Y1MediaBridge picks up the
-    # file write via FileObserver and forwards the change to the music
-    # app's setMusicRepeatMode / setMusicIsShuffle via broadcast.
+    # Parse first (attr_id, value) pair from inbound param body at caller's
+    # sp+387/+388 (= our sp+0x19b/+0x19c after the PAPP_FRAME shift), write
+    # the 2 bytes to /data/data/com.innioasis.y1/files/y1-papp-set, ACK the
+    # peer with success. The music app's PappSetFileObserver picks up the
+    # file write and forwards the change to setMusicRepeatMode /
+    # setMusicIsShuffle via SharedPreferencesUtils.
     #
     # Multi-pair Sets (n > 1) apply only the first pair. AVRCP V13 §5.2.4
     # lets a TG that supports a subset of attributes acknowledge any Set
@@ -1520,11 +1525,11 @@ def _emit_t_papp(a: Asm) -> None:
     a.strb_w(6, 13, PAPP_OFF_ARGS + 0)
     a.strb_w(7, 13, PAPP_OFF_ARGS + 1)
 
-    # open(path_papp_set, O_WRONLY|O_TRUNC, 0) — Y1MediaBridge pre-creates
-    # the file at startup; if it's somehow gone, skip the write but still
-    # ACK (the peer's UI shouldn't get stuck because of a transient
-    # bridge-side outage). No O_CREAT — same rationale as the y1-track-info
-    # / y1-trampoline-state writes elsewhere in this module.
+    # open(path_papp_set, O_WRONLY|O_TRUNC, 0) — TrackInfoWriter.prepareFiles()
+    # in the music app pre-creates it at process start; if it's somehow gone,
+    # skip the write but still ACK (the peer's UI shouldn't get stuck because
+    # of a transient writer-side outage). No O_CREAT — same rationale as the
+    # y1-track-info / y1-trampoline-state writes elsewhere in this module.
     a.adr_w(0, "path_papp_set")
     a.movw(1, O_WRONLY | O_TRUNC)
     a.movs_imm8(2, 0)
@@ -1699,7 +1704,7 @@ def _emit_t8(a: Asm) -> None:
 
     # ---- memset(file_buf, 0, 800) ----
     # Default everything to 0 so a partial read (file shorter than 800 B
-    # — e.g. an old Y1MediaBridge built against an earlier schema) gives
+    # — e.g. an older writer built against an earlier schema) gives
     # play_status=0 (STOPPED) and position=0 rather than uninit stack
     # garbage.
     a.add_sp_imm(0, T8_OFF_FILE)              # r0 = sp+0
@@ -1823,11 +1828,11 @@ def _emit_t8(a: Asm) -> None:
     a.bne("t8_check_7")
     # 0x06 BATT_STATUS_CHANGED.
     # reg_notievent_battery_status_changed_rsp(conn, 0, REASON_INTERIM, batt_status_u8)
-    # batt_status read from y1-track-info[794], where Y1MediaBridge writes the
-    # AVRCP enum (0=NORMAL, 1=WARNING, 2=CRITICAL, 3=EXTERNAL, 4=FULL_CHARGE)
-    # bucket-mapped from Android `Intent.ACTION_BATTERY_CHANGED`. Stack is
-    # memset to 0 before the read, so a short file gives BATT_STATUS_NORMAL —
-    # benign default.
+    # batt_status read from y1-track-info[794], where the music app's
+    # BatteryReceiver writes the AVRCP enum (0=NORMAL, 1=WARNING, 2=CRITICAL,
+    # 3=EXTERNAL, 4=FULL_CHARGE) bucket-mapped from
+    # Android `Intent.ACTION_BATTERY_CHANGED`. Stack is memset to 0 before the
+    # read, so a short file gives BATT_STATUS_NORMAL — benign default.
     a.ldrb_w(3, 13, T8_OFF_FILE_BATTERY)
     a.movs_imm8(2, REASON_INTERIM)
     a.movs_imm8(1, 0)
@@ -1853,9 +1858,9 @@ def _emit_t8(a: Asm) -> None:
     # 0x08 PLAYER_APPLICATION_SETTING_CHANGED INTERIM.
     # reg_notievent_player_appsettings_changed_rsp(
     #     conn, 0, REASON_INTERIM, n, *attr_ids, *values)
-    # Live values read from y1-track-info[795..796] (Y1MediaBridge writes
-    # both bytes on every musicRepeatMode / musicIsShuffle change via
-    # PappStateBroadcaster's Patch B4 listener). file_buf is already loaded
+    # Live values read from y1-track-info[795..796] (the music app's
+    # PappStateBroadcaster writes both bytes on every musicRepeatMode /
+    # musicIsShuffle SharedPreferences change). file_buf is already loaded
     # into sp+0..799 above. Storing the outgoing-args at sp[0]/sp[4]
     # clobbers file_buf[0..7] (track_id), but track_id isn't read by this
     # arm and the frame is freed at t8_done.
@@ -1893,7 +1898,7 @@ def _emit_t9(a: Asm) -> None:
     handleKeyMessage path -- with the cardinality if-eqz NOPed at
     sswitch_18a (file offset 0x3c4fe in MtkBt.odex; mirrors the
     sswitch_1a3 / TRACK_CHANGED NOP at 0x3c530) -- invokes the native
-    method on every Y1MediaBridge `playstatechanged` broadcast,
+    method on every `playstatechanged` broadcast emitted by the music app,
     asynchronously to any inbound AVRCP RegisterNotification.
 
     Closes the AVRCP 1.3 §5.4.2 spec gap that T8 alone leaves: T8 handles
@@ -1905,7 +1910,7 @@ def _emit_t9(a: Asm) -> None:
     Y1's audio toggles correctly via the PASSTHROUGH path.
 
     Battery and periodic position both piggyback on this same trampoline.
-    Y1MediaBridge fires `playstatechanged` whenever ANY of the following
+    The music app fires `playstatechanged` whenever ANY of the following
     occurs: actual play / pause edge, battery bucket transition, or 1 s
     tick (while playing). T9 unconditionally:
 
@@ -1975,7 +1980,7 @@ def _emit_t9(a: Asm) -> None:
 
     # ---- memset(file_buf, 0, 800) ----
     # Default everything to 0 so a partial read (file shorter than 800 B
-    # — e.g. an old Y1MediaBridge built against an earlier schema) gives
+    # — e.g. an older writer built against an earlier schema) gives
     # play_status=0 (STOPPED) rather than uninit stack garbage.
     a.add_sp_imm(0, T9_OFF_FILE)
     a.movs_imm8(1, 0)
@@ -2059,10 +2064,10 @@ def _emit_t9(a: Asm) -> None:
 
     # ---- battery_status compare (file[794] vs state[10]) ----
     # AVRCP 1.3 §5.4.2 Tbl 5.34 (BATT_STATUS_CHANGED CHANGED) carries a
-    # 1-byte battery_status payload (Tbl 5.35 enum). Y1MediaBridge
-    # bucket-maps Android `Intent.ACTION_BATTERY_CHANGED` (level + plug
-    # state) to the AVRCP enum on every transition and writes file[794]
-    # before firing `playstatechanged`. T9 then picks it up.
+    # 1-byte battery_status payload (Tbl 5.35 enum). The music app's
+    # BatteryReceiver bucket-maps Android `Intent.ACTION_BATTERY_CHANGED`
+    # (level + plug state) to the AVRCP enum on every transition and writes
+    # file[794] before firing `playstatechanged`. T9 then picks it up.
     a.ldrb_w(0, 13, T9_OFF_FILE_BATTERY)      # r0 = current battery_status
     a.ldrb_w(1, 13, T9_STATE_LAST_BATT_OFF)   # r1 = last_battery_status
     a.cmp_w(0, 1)
@@ -2084,10 +2089,11 @@ def _emit_t9(a: Asm) -> None:
 
     # ---- papp settings compare (file[795] / file[796] vs state[11] / state[12]) ----
     # AVRCP 1.3 §5.4.2 Tbl 5.36 (PLAYER_APPLICATION_SETTING_CHANGED CHANGED).
-    # Y1MediaBridge writes y1-track-info[795] = repeat_avrcp and [796] =
-    # shuffle_avrcp on every SharedPreferences change to musicRepeatMode /
-    # musicIsShuffle and fires `playstatechanged` so T9 picks up the edge
-    # — same trigger pipeline as the play_status / battery checks above.
+    # The music app's PappStateBroadcaster writes y1-track-info[795] =
+    # repeat_avrcp and [796] = shuffle_avrcp on every SharedPreferences change
+    # to musicRepeatMode / musicIsShuffle and fires `playstatechanged` so T9
+    # picks up the edge — same trigger pipeline as the play_status / battery
+    # checks above.
     # Spec values: §5.2.4 Tbl 5.20 (Repeat: 0x01 OFF / 0x02 SINGLE / 0x03 ALL
     # / 0x04 GROUP); Tbl 5.21 (Shuffle: 0x01 OFF / 0x02 ALL / 0x03 GROUP).
     a.ldrb_w(0, 13, T9_OFF_FILE_REPEAT)       # r0 = current repeat
@@ -2160,7 +2166,7 @@ def _emit_t9(a: Asm) -> None:
     # ---- emit PLAYBACK_POS_CHANGED CHANGED if playing ----
     # AVRCP 1.3 §5.4.2 Tbl 5.33. ICS Table 7 row 27 (Optional). Emit a
     # live-extrapolated position whenever T9 fires while file[792] == 1
-    # (PLAYING). Y1MediaBridge runs a 1 s tick that fires the
+    # (PLAYING). The music app runs a 1 s tick that fires the
     # `playstatechanged` broadcast — same trigger T9 already uses for the
     # play-status / battery checks above — so this gives the CT roughly 1 Hz
     # CHANGED frames while playing. Strictly the spec says the CT gets to
@@ -2193,10 +2199,10 @@ def _emit_t9(a: Asm) -> None:
 
     # ---- now_ms = tv_sec * 1000 + tv_nsec / 1_000_000 ----
     # Same arithmetic T6 does for GetPlayStatus, including the magic-multiply
-    # for tv_nsec/1e6. Y1MediaBridge writes state_change_time_ms directly
-    # from SystemClock.elapsedRealtime() with no /1000 truncation, so both
-    # endpoints carry full ms precision. CLOCK_BOOTTIME parity with the
-    # bridge's elapsedRealtime makes the subtraction exact.
+    # for tv_nsec/1e6. The music app's TrackInfoWriter writes
+    # state_change_time_ms directly from SystemClock.elapsedRealtime() with no
+    # /1000 truncation, so both endpoints carry full ms precision.
+    # CLOCK_BOOTTIME parity with elapsedRealtime makes the subtraction exact.
     a.ldr_sp_imm(2, T9_OFF_TIMESPEC_SEC)      # r2 = tv_sec
     a.movw(0, 1000)
     a.muls_lo_lo(2, 0)                        # r2 = tv_sec * 1000
@@ -2264,13 +2270,13 @@ def build() -> tuple[bytes, dict[str, int]]:
     # Path strings, 4-byte-aligned for clean ADR offsets.
     a.align(4)
     a.label("path_track_info")
-    a.asciiz("/data/data/com.y1.mediabridge/files/y1-track-info")
+    a.asciiz("/data/data/com.innioasis.y1/files/y1-track-info")
     a.align(4)
     a.label("path_state")
-    a.asciiz("/data/data/com.y1.mediabridge/files/y1-trampoline-state")
+    a.asciiz("/data/data/com.innioasis.y1/files/y1-trampoline-state")
     a.align(4)
     a.label("path_papp_set")
-    a.asciiz("/data/data/com.y1.mediabridge/files/y1-papp-set")
+    a.asciiz("/data/data/com.innioasis.y1/files/y1-papp-set")
     a.align(4)
 
     # 0xFF×8 sentinel passed as the track_id pointer to

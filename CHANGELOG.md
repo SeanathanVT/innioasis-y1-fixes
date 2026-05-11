@@ -20,13 +20,11 @@ This release lands the **AVRCP 1.3 metadata + control pipeline**: a peer Bluetoo
 - **PlayerApplicationSettings** (Repeat / Shuffle) — bidirectional. CT can change either from its own UI and the Y1 reflects the change; Y1-UI changes (in-app Settings or via the music app's existing controls) push to the CT as wire-CHANGED notifications.
 - **Discrete PASSTHROUGH** (PLAY / PAUSE / STOP / NEXT / PREVIOUS) routes to discrete music-app actions instead of the stock toggle behavior, eliminating the "stuck fast-forwarding" symptom on TV-class CTs that drop PASSTHROUGH RELEASE under subscribe load.
 - **A2DP / AVDTP audio stream stays alive across pauses.** AudioFlinger's silence-timeout standby no longer tears down the AVDTP source stream, so peer CTs no longer cycle their A2DP sink (eliminates burst-on-resume audio + playhead drift on TV-class CTs).
-- **`Y1MediaBridge` Android service** (`src/Y1MediaBridge/`) — the metadata + state publisher the trampoline chain reads from. Built via Gradle.
-- **`docs/spec/`** drop-spot (gitignored, Bluetooth SIG copyright) for the AVRCP 1.3 V13 + ESR07 + ICS / IXIT PDFs used for citation verification.
+- **`Y1Bridge` Android service** (`src/Y1Bridge/`, package `com.koensayr.y1.bridge`) — minimal Binder host that satisfies MtkBt's `bindService(com.android.music.MediaPlaybackService)`. Built via Gradle. All AVRCP observation, state production, and broadcast emission live inside the music-app process; the bridge APK only declares the intent-filter that the music APK can't (sharedUserId / platform-key constraint).
 
 ### Changed
 - **GitHub repository renamed `y1-mods` → `koensayr`.** GitHub auto-redirects the old URL; existing clones can update with `git remote set-url origin git@github.com:SeanathanVT/koensayr.git`.
-- **`--avrcp` flag** is now the canonical metadata-pipeline flag. Excluded from `--all` because it requires a Y1MediaBridge gradle build first.
-- **Spec-citation discipline.** All references target AVRCP 1.3 V13 + ESR07 errata; section numbers verified against the spec PDFs in `docs/spec/`.
+- **`--avrcp` flag** is now the canonical metadata-pipeline flag. Excluded from `--all` because it requires a Y1Bridge gradle build first.
 
 ### Removed
 - **Legacy SDP-only byte-patch attempts** that regressed PASSTHROUGH without delivering metadata. Superseded by the trampoline-chain pipeline.
@@ -37,6 +35,7 @@ This release lands the **AVRCP 1.3 metadata + control pipeline**: a peer Bluetoo
 - `src/patches/patch_mtkbt_minimal.py` → `src/patches/patch_mtkbt.py`.
 - `src/patches/patch_libextavrcp_jni_minimal.py` → `src/patches/patch_libextavrcp_jni.py`.
 - `INVESTIGATION.md` → `docs/INVESTIGATION.md`.
+- `src/Y1MediaBridge/` → `src/Y1Bridge/`; Java package `com.y1.mediabridge` → `com.koensayr.y1.bridge`; `Y1MediaBridge.apk` → `Y1Bridge.apk`; `PlaySongReceiver` → `BootReceiver` (reflecting its sole remaining responsibility); log tag `Y1MediaBridge` → `Y1Bridge`.
 
 ## [2.0.0] - 2026-05-04
 ### Added

@@ -37,13 +37,14 @@ P1 — Force fn 0x144bc's op_code dispatch to always take the PASSTHROUGH branch
      (op_code=0x00) takes the bcc → bl 0x11374 path which only logs. The patch
      replaces the first cmp at 0x144e8 with an unconditional b.n 0x14528,
      skipping the op_code check entirely. All inbound AV/C frames now take the
-     emit path; Y1MediaBridge can parse the frame and respond.
+     emit path; the libextavrcp_jni.so trampoline chain parses the frame
+     and responds.
 
      Risk: the bl 0x10404 path may interpret VENDOR_DEPENDENT frame bytes as
      PASSTHROUGH, producing malformed responses. Worst case is mtkbt emits
      a NOT_IMPLEMENTED reply to the peer (which is what currently happens
      anyway). Best case msg 519 fires with the inbound bytes preserved and
-     Y1MediaBridge handles the rest.
+     the JNI trampolines handle the rest.
 
 Pairs with patch_libextavrcp_jni.py (handles the inbound-COMMAND response
 side via the trampoline chain in libextavrcp_jni.so) and patch_mtkbt_odex.py

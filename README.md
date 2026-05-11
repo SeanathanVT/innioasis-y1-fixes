@@ -10,7 +10,7 @@
 - **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
 - **Root** — install `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
-- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car head unit, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision position, play-state and track-change notifications, battery status, and Repeat / Shuffle (bidirectional). Behind `--avrcp` (excluded from `--all` because it requires a Y1MediaBridge gradle build). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Compliance scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md).
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car head unit, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision position, play-state and track-change notifications, battery status, and Repeat / Shuffle (bidirectional). Behind `--avrcp` (excluded from `--all` because it requires a Y1Bridge gradle build). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Compliance scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md).
 - **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture with `getevent` + `dumpsys input`, post-root probe, gdbserver attach to mtkbt). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.
@@ -22,7 +22,7 @@ The bash entry-point at the root dispatches into source trees under `src/`:
 - `apply.bash` — single entry point; flag-driven dispatch into the trees below
 - [`src/patches/`](src/patches/) — byte/smali patchers (`patch_*.py`); see [`src/patches/README.md`](src/patches/README.md) for the per-patcher table and [`docs/PATCHES.md`](docs/PATCHES.md) for byte-level detail
 - [`src/su/`](src/su/) — minimal setuid-root `su` for `--root` (~900-byte direct-syscall ARM-EABI ELF, no libc). Build via `cd src/su && make`
-- [`src/Y1MediaBridge/`](src/Y1MediaBridge/) — Android service app source for `Y1MediaBridge.apk` (consumed by `--avrcp`). Build via `cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug`
+- [`src/Y1Bridge/`](src/Y1Bridge/) — Android service app source for `Y1Bridge.apk` (consumed by `--avrcp`; hosts the Binder declaration MtkBt resolves to). Build via `cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug`
 - [`src/btlog-dump/`](src/btlog-dump/) — `@btlog` abstract-socket reader (diagnostic; same toolchain as `src/su/`). Build via `cd src/btlog-dump && make`
 - `tools/` — setup, diagnostic, and release helpers
 - `staging/` — default `--artifacts-dir`; drop `rom.zip` here
@@ -46,11 +46,11 @@ The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selec
 
 Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
 
-Opting in to `--avrcp` additionally needs the Android SDK + `Y1MediaBridge.apk` build:
+Opting in to `--avrcp` additionally needs the Android SDK + `Y1Bridge.apk` build:
 
 ```bash
 ./tools/install-android-sdk.sh && source tools/android-sdk-env.sh
-( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
+( cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug )
 ```
 
 Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env) if you have those installed elsewhere.
@@ -60,7 +60,7 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | Flag | Effect |
 |---|---|
 | `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
-| `--avrcp` | AVRCP 1.3 metadata pipeline: patches `mtkbt`, `libextavrcp_jni.so`, `MtkBt.odex`, the music app, plus `Y1MediaBridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. Patch ID legend in [`docs/PATCHES.md`](docs/PATCHES.md); architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
+| `--avrcp` | AVRCP 1.3 metadata pipeline: patches `mtkbt`, `libextavrcp_jni.so`, `MtkBt.odex`, the music app, plus `Y1Bridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. Patch ID legend in [`docs/PATCHES.md`](docs/PATCHES.md); architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
 | `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
 | `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
@@ -103,12 +103,12 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
 - `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora / RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian / Ubuntu), `pacman -S android-tools` (Arch).
 - For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
-- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1MediaBridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install instructions in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
+- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1Bridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install instructions in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — version history (Keep a Changelog format)
-- [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1MediaBridge build)
+- [docs/ANDROID-SDK.md](docs/ANDROID-SDK.md) — Android SDK install instructions (only needed for `--avrcp` / Y1Bridge build)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — AVRCP metadata proxy architecture: data-path diagram, trampoline chain, response-builder calling conventions, ELF segment-extension technique, code-cave inventory. Read this first if working on the metadata pipeline.
 - [docs/BT-COMPLIANCE.md](docs/BT-COMPLIANCE.md) — current ICS Table 7 coverage scorecard (every Mandatory + every Optional row)
 - [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — chronological AVRCP investigation history, refuted hypotheses, trace log

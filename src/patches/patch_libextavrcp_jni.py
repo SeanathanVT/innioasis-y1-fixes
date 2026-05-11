@@ -52,7 +52,7 @@ U1 — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf 00 bf)
 
 T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
      bytes): GetCapabilities (PDU 0x10) — answers with the supported-events
-     list (events 0x01..0x07) and falls through (b.w 0x72d4) to the T2 stub
+     list (events 0x01..0x08) and falls through (b.w 0x72d4) to the T2 stub
      for everything else.
 
 T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
@@ -63,8 +63,8 @@ T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
 
 extended_T2 — in LOAD #1 padding area, at vaddr derived from T4 layout.
      Handles RegisterNotification(EVENT_TRACK_CHANGED, PDU 0x31, event 0x02):
-       1. Read first 8 bytes of /data/data/com.y1.mediabridge/files/y1-track-info
-          (the track_id Y1MediaBridge wrote there).
+       1. Read first 8 bytes of /data/data/com.innioasis.y1/files/y1-track-info
+          (the track_id the music app's TrackInfoWriter wrote there).
        2. Write [track_id (8) || transId (1) || pad (7)] to y1-trampoline-state
           (so T4 can later check whether the track has changed).
        3. Reply track_changed_rsp INTERIM with the 0xFF×8 sentinel
@@ -133,8 +133,8 @@ T9 — proactive on Y1 play / battery / position events. Entered via `b.w T9`
          reg_notievent_battery_status_changed_rsp on edge.
        - position: if file[792] == PLAYING, clock_gettime(CLOCK_BOOTTIME)
          + same arithmetic as T6 → live_pos, emit CHANGED via
-         reg_notievent_pos_changed_rsp. Driven at 1 s cadence by
-         Y1MediaBridge's mPosTickRunnable firing `playstatechanged`.
+         reg_notievent_pos_changed_rsp. Driven at 1 s cadence by the music
+         app's position-tick runnable firing `playstatechanged`.
      Single combined state-file write per fire if either play or battery
      edge fired. Position emission never dirties state.
 
@@ -168,7 +168,7 @@ from _thumb2asm import Asm
 # notificationTrackChangedNative lives at vaddr 0x3bc0 in libextavrcp_jni.so.
 # Java's BTAvrcpMusicAdapter.handleKeyMessage (with the cardinality if-eqz
 # NOPed by patch_mtkbt_odex.py's TRACK_CHANGED entry) calls this native on
-# every track-change broadcast from Y1MediaBridge. We replace its entry
+# every track-change broadcast from the music app. We replace its entry
 # instruction with `b.w T5` so it lands in our state-aware trampoline.
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
@@ -176,13 +176,13 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 # TRACK_CHANGED hook above, paired with the cardinality NOP at 0x3c4fe in
 # MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's nested
 # sparse-switch). Replace entry instruction with `b.w T9` so every
-# Y1MediaBridge `playstatechanged` broadcast lands in T9, which fires
+# `playstatechanged` broadcast emitted by the music app lands in T9, which fires
 # PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
 # Closes the AVRCP 1.3 §5.4.2 spec gap that would otherwise be INTERIM-only.
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "5b7f5ae685c4c9299f36b1b3f88d564c"
+OUTPUT_MD5        = "f021e71d12c170f2e135281d37ba8477"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include
@@ -555,7 +555,7 @@ def main() -> None:
     print(f"  adb push {output_path} /system/lib/libextavrcp_jni.so")
     print(f"  adb shell chmod 644 /system/lib/libextavrcp_jni.so")
     print(f"  adb reboot")
-    print(f"  logcat | grep -E 'CMD_FRAME_IND|registerNotificationInd|cardinality|Y1MediaBridge.IBTAvrcpMusic'")
+    print(f"  logcat | grep -E 'CMD_FRAME_IND|registerNotificationInd|cardinality|Y1Patch'")
 
     if output_md5_mismatch and not args.skip_md5:
         print("\nERROR: output MD5 doesn't match expected. Output was written but"

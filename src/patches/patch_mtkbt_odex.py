@@ -52,10 +52,10 @@ ODEX structure:
   notification path always exits early.
 
   This patch NOPs out the if-eqz (4 bytes → 4 zero bytes = two `nop` opcodes).
-  Java now always invokes notificationTrackChangedNative when Y1MediaBridge
-  fires a track-change broadcast. The libextavrcp_jni.so side redirects that
-  native to a state-aware T5 trampoline that emits track_changed_rsp CHANGED
-  via the same PLT entry our T4 uses.
+  Java now always invokes notificationTrackChangedNative when the music app
+  fires a `com.android.music.metachanged` broadcast. The libextavrcp_jni.so
+  side redirects that native to a state-aware T5 trampoline that emits
+  track_changed_rsp CHANGED via the same PLT entry our T4 uses.
 
 --- Patch 2: sPlayServiceInterface reset in BluetoothAvrcpService.disable() ---
 
@@ -144,9 +144,9 @@ PATCHES = [
         # Without this NOP the JNI's notificationPlayStatusChangedNative is
         # never invoked because the Java BitSet of registered events is
         # permanently empty (TG bookkeeping isn't updated by our
-        # trampolines). With the NOP, the native fires on every Y1MediaBridge
-        # `playstatechanged` broadcast and lands in T9 via the
-        # libextavrcp_jni.so hook at 0x3c88.
+        # trampolines). With the NOP, the native fires on every
+        # `com.android.music.playstatechanged` broadcast and lands in T9 via
+        # the libextavrcp_jni.so hook at 0x3c88.
         "offset": 0x3c4fe,
         "before": bytes([0x38, 0x05, 0xf3, 0xff]),  # if-eqz v5, +-13 (-> :cond_184)
         "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
