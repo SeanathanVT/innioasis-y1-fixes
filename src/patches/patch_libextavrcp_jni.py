@@ -52,7 +52,7 @@ U1 — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf 00 bf)
 
 T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
      bytes): GetCapabilities (PDU 0x10) — answers with the supported-events
-     list (events 0x01..0x07) and falls through (b.w 0x72d4) to the T2 stub
+     list (events 0x01..0x08) and falls through (b.w 0x72d4) to the T2 stub
      for everything else.
 
 T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,

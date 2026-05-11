@@ -107,9 +107,9 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 ### T1 — GetCapabilities (PDU 0x10) at `0x7308` (40 bytes)
 
-Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 7-element `EventsSupported` array `[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
+Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 8-element `EventsSupported` array `[0x01..0x08]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events are exactly what we implement — per the spec-compliance directive, advertise only what we cover. Current count is 8: events `0x01..0x08` covering PLAYBACK_STATUS, TRACK_CHANGED, TRACK_REACHED_END / START, PLAYBACK_POS, BATT_STATUS, SYSTEM_STATUS, and PLAYER_APPLICATION_SETTING_CHANGED.
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events match what we implement: `0x01` PLAYBACK_STATUS, `0x02` TRACK_CHANGED, `0x03` TRACK_REACHED_END, `0x04` TRACK_REACHED_START, `0x05` PLAYBACK_POS, `0x06` BATT_STATUS, `0x07` SYSTEM_STATUS, `0x08` PLAYER_APPLICATION_SETTING_CHANGED.
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -448,7 +448,7 @@ BroadcastReceiver class registered dynamically from `Y1Application.onCreate`. Li
 | `com.y1.mediabridge.SET_REPEAT_MODE` | `value:I` (Y1 enum 0/1/2 = OFF/ONE/ALL) | `SharedPreferencesUtils.setMusicRepeatMode(I)` |
 | `com.y1.mediabridge.SET_IS_SHUFFLE` | `value:Z` | `SharedPreferencesUtils.setMusicIsShuffle(Z)` |
 
-Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so `PlayerService` re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. Superseded by B5's `PappSetFileObserver` (which is the live CT-Set consumer); kept in place as a transitional safety net and removed in a follow-up phase.
+Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so `PlayerService` re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. The live CT-Set consumer is B5's `PappSetFileObserver`; B3 stays in tree as a no-op safety net.
 
 **Patch B4** — `com.koensayr.PappStateBroadcaster` for Y1-side Repeat / Shuffle CHANGED relay.
 
@@ -488,14 +488,14 @@ Existing-file edits (smali prepends, no logic replacement):
 
 State sources, all read live from `PlayerService` accessors via `Y1Application.Companion.getPlayerService()`: `getPlayingMusic()`/`getPlayingSong()` for the current `Song` (title via `getSongName()`, plus `getArtist`/`getAlbum`/`getGenre`/`getPath`); `getDuration()`; `getMusicIndex()+1` for TrackNumber; `getMusicList().size()` for TotalNumberOfTracks. Position-at-state-change is captured at the `setPlayValue` edge with `SystemClock.elapsedRealtime()` for the lockstep clock the trampoline `T6` extrapolation expects.
 
-**Patch B6** — AvrcpBinder smali groundwork (Phase 3, partial).
+**Patch B6** — AvrcpBinder smali (unused groundwork).
 
 Two new classes routed to `smali_classes2/` (secondary DEX) because `classes.dex` sits at 99.7% of the 64K method cap after Patch B5:
 
 | Class | Role |
 |---|---|
-| `avrcp.AvrcpBridgeService` | Service shell. Not declared in the manifest in the current build, so unreferenced at runtime. Kept as groundwork for a future Phase 3 v2. |
-| `avrcp.AvrcpBinder` | `Binder` implementing `IBTAvrcpMusic` + `IMediaPlaybackService` onTransact in smali. Skips `strictModePolicy` + descriptor string and dispatches by transact code (descriptor mismatches across ROM variations have historically aborted `registerCallback` on `enforceInterface`). Codes implemented: 1 (`registerCallback`); 2 (`unregisterCallback`); 3 (`regNotificationEvent` — ACK true; returning false leaves MtkBt's `mRegBit` empty and notifyTrackChanged is dropped); 5 (`getCapabilities` — return `[0x01, 0x02]`); 6-13 (transport keys via `sendMediaKey` broadcast). Every other code: `writeNoException` + `return true` (ack-only). Unused in the current build — Y1Bridge.apk hosts the actual Binder MtkBt resolves to. Kept here as groundwork for a future architecture where MtkBt binds directly into the music-app process. |
+| `avrcp.AvrcpBridgeService` | Service shell. Not declared in the music APK manifest, so unreferenced at runtime. |
+| `avrcp.AvrcpBinder` | `Binder` implementing `IBTAvrcpMusic` + `IMediaPlaybackService` onTransact in smali. Skips `strictModePolicy` + descriptor string and dispatches by transact code (descriptor mismatches across ROM variations have historically aborted `registerCallback` on `enforceInterface`). Codes implemented: 1 (`registerCallback`); 2 (`unregisterCallback`); 3 (`regNotificationEvent` — ACK true; returning false leaves MtkBt's `mRegBit` empty and notifyTrackChanged is dropped); 5 (`getCapabilities` — return `[0x01, 0x02]`); 6-13 (transport keys via `sendMediaKey` broadcast). Every other code: `writeNoException` + `return true` (ack-only). Not instantiated — Y1Bridge.apk hosts the live Binder MtkBt resolves to. The smali stays in tree so MtkBt.odex component-bind work doesn't have to recreate it. |
 
 `AndroidManifest.xml` is NOT modified by the patcher. `com.innioasis.y1` declares `sharedUserId="android.uid.system"`, which constrains the package's signing key to the OEM platform key. Any change to AndroidManifest.xml bytes invalidates `META-INF/MANIFEST.MF`'s recorded SHA1-Digest, JarVerifier throws SecurityException, PackageParser logs "no certificates at entry AndroidManifest.xml; ignoring!", and PackageManager drops the package. JarVerifier doesn't digest-check classes.dex / classes2.dex / resources at scan time — that's why DEX-only modifications work. The intent-filter `<service>` MtkBt's `bindService` resolves to lives in Y1Bridge.apk's manifest, which is self-signed and unconstrained by the platform key requirement.
 

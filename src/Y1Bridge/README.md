@@ -24,7 +24,7 @@ declare the `<service>` MtkBt's `bindService` resolves to.
   ack-only for every code except `getCapabilities` (transact 5), which
   returns `[0x01 EVENT_PLAYBACK_STATUS_CHANGED, 0x02 EVENT_TRACK_CHANGED]` so
   MtkBt's adapter actually issues `REGISTER_NOTIFICATION` for those events.
-  Per the Sonos capture in [`docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md)
+  Per the permissive-CT capture in [`docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md)
   Trace #21, MtkBt never transacts on this Binder past the initial
   capability query — the broadcast wake path (cardinality-NOP-patched JNI
   natives + `metachanged`/`playstatechanged` fired by the music app) is what

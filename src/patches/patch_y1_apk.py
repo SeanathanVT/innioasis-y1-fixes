@@ -1479,10 +1479,10 @@ print(
 # the SharedPreferences at track-end, so the change propagates without a
 # music-app restart.
 #
-# Superseded by B5's PappSetFileObserver: T_papp 0x14 in libextavrcp_jni.so
-# writes y1-papp-set in the music-app dir directly, and PappSetFileObserver
-# applies it via SharedPreferencesUtils — no Intent hop. This receiver is
-# kept in place as a transitional safety net and removed in a follow-up phase.
+# The live CT-Set path runs through B5's PappSetFileObserver: T_papp 0x14 in
+# libextavrcp_jni.so writes y1-papp-set in the music-app dir directly, and
+# PappSetFileObserver applies it via SharedPreferencesUtils — no Intent hop.
+# This receiver stays in tree as a no-op safety net.
 #
 # Two parts:
 #   1. Write a brand-new smali file (PappSetReceiver.smali) into the
@@ -1673,12 +1673,11 @@ print("  Patch B3: Y1Application.onCreate registers PappSetReceiver")
 # MtkBt's BluetoothAvrcpReceiver wakes notificationPlayStatusChangedNative
 # → T9 → AVRCP §5.4.2 Tbl 5.36 PLAYER_APPLICATION_SETTING_CHANGED CHANGED.
 #
-# The dead ACTION_PAPP_STATE_DID_CHANGE broadcast (originally consumed by the
-# pre-shrink Y1MediaBridge) is also retained — it goes to no listener now
-# that Y1Bridge.apk is a thin Binder host, but removing it is scope creep
-# the rename PR doesn't need.
+# The ACTION_PAPP_STATE_DID_CHANGE broadcast is retained as a no-op safety
+# net — Y1Bridge.apk does not consume it; the file write to y1-track-info
+# is the live path.
 #
-# AVRCP §5.2.4 mapping (verified by gdb-capture #107 — see Trace #18):
+# AVRCP §5.2.4 mapping (see INVESTIGATION.md Trace #18):
 #   Repeat:  Y1 musicRepeatMode 0/1/2 → AVRCP 0x01/0x02/0x03 (OFF/SINGLE/ALL)
 #   Shuffle: Y1 musicIsShuffle false/true → AVRCP 0x01/0x02 (OFF/ALL_TRACK)
 #
@@ -2097,36 +2096,20 @@ print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setP
 
 
 # ============================================================
-# Patch B6: AvrcpBinder smali drop (Phase 3 — partial)
+# Patch B6: AvrcpBinder smali drop (unused groundwork)
 # ============================================================
 #
-# Originally Phase 3's plan was to host the IBTAvrcpMusic + IMediaPlaybackService
-# Binder MtkBt binds to inside the music app itself, replacing the separate
-# bridge APK entirely. The Binder smali landed (AvrcpBridgeService.smali /
-# AvrcpBinder.smali in smali_classes2/) but the AndroidManifest.xml splice
-# that would have declared the service hit a wall:
+# AvrcpBridgeService.smali + AvrcpBinder.smali land in smali_classes2/ but
+# nothing instantiates them — the music APK's AndroidManifest.xml can't be
+# modified to declare the service because com.innioasis.y1 sets
+# sharedUserId="android.uid.system", constraining the signing key to the OEM
+# platform key; any AndroidManifest.xml byte change fails JarVerifier's
+# META-INF/MANIFEST.MF SHA1-Digest check at /system/app/ scan. Y1Bridge.apk
+# (src/Y1Bridge/, package com.koensayr.y1.bridge, self-signed debug cert)
+# hosts the Binder MtkBt actually resolves to.
 #
-#   com.innioasis.y1 declares android:sharedUserId="android.uid.system", which
-#   constrains the package's signing key to the OEM platform key. We don't have
-#   that key, so any change to AndroidManifest.xml fails JarVerifier's digest
-#   check (META-INF/MANIFEST.MF records SHA1-Digest of AndroidManifest.xml,
-#   we'd have to update it, which invalidates CERT.SF, which requires re-signing
-#   CERT.RSA with the platform key). PackageManager rejects the package at
-#   /system/app/ scan time:
-#
-#       W/PackageParser: java.lang.SecurityException: META-INF/MANIFEST.MF has
-#           invalid digest for AndroidManifest.xml
-#       E/PackageParser: Package com.innioasis.y1 has no certificates ...
-#       W/PackageManager: Failed verifying certificates for package:com.innioasis.y1
-#
-# Captured 2026-05-11 in /work/logs/logcat-20260511-0927.log line 4658.
-#
-# Resolution: keep Y1Bridge.apk (src/Y1Bridge/) as the Binder declaration host
-# — its own package (com.koensayr.y1.bridge) + self-signed debug cert, no
-# platform-key constraint. AvrcpBridgeService / AvrcpBinder smali stay in the
-# music APK as groundwork for a future architecture where MtkBt binds directly
-# into the music-app process (would require MtkBt.odex smali surgery — see
-# docs/INVESTIGATION.md Trace #23).
+# The smali is kept in tree so MtkBt.odex component-bind work (see
+# docs/INVESTIGATION.md Trace #23) doesn't have to recreate it from scratch.
 
 PATCH_B6_INJECT_FILES = [
     ("com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
@@ -2161,7 +2144,7 @@ PATCHED_SMALI_FILES = [
     "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali",
     "smali/com/koensayr/y1/battery/BatteryReceiver.smali",
     "smali/com/koensayr/y1/papp/PappSetFileObserver.smali",
-    # Patch B6 — AvrcpBridgeService (Phase 3)
+    # Patch B6 — AvrcpBridgeService (unused groundwork)
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBinder.smali",
 ]
@@ -2197,9 +2180,9 @@ with open(dex2, 'rb') as f: dex2_bytes = f.read()
 # META-INF/MANIFEST.MF's SHA1-Digest and JarVerifier rejects the package at
 # /system/app/ scan with "no certificates at entry AndroidManifest.xml; ignoring!".
 # Resigning would require the OEM platform key (com.innioasis.y1 declares
-# sharedUserId="android.uid.system"). The Phase 1+2 strategy of "modify only
-# DEX, leave META-INF stale" works because JarVerifier only digest-checks
-# AndroidManifest.xml at scan time (not DEX/resources).
+# sharedUserId="android.uid.system"). Modifying only DEX (leaving META-INF
+# stale) works because JarVerifier only digest-checks AndroidManifest.xml at
+# scan time, not DEX/resources.
 with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
     with zipfile.ZipFile(OUTPUT_APK, 'w',
                          compression=zipfile.ZIP_DEFLATED,

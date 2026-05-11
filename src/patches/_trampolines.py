@@ -93,7 +93,9 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                                          byte 8     = last RegisterNotification transId,
 #                                          byte 9     = last_play_status (T9 edge),
 #                                          byte 10    = last_battery_status (T9 edge),
-#                                          bytes 11..15 = padding)
+#                                          byte 11    = last_repeat_avrcp (T9 papp edge),
+#                                          byte 12    = last_shuffle_avrcp (T9 papp edge),
+#                                          bytes 13..15 = padding)
 #   sp+32  .. +1135  = file buffer (1104 B; full y1-track-info image)
 #                      0..7      track_id
 #                      8..263    Title  (256 B UTF-8, null-padded)
@@ -112,7 +114,11 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                                                                TRACK_REACHED_END CHANGED)
 #                      794       battery_status             u8 (AVRCP §5.4.2 Tbl 5.35 enum;
 #                                                                T8 event 0x06, T9)
-#                      795..799  pad (PlayerApplicationSettings shuffle_flag / repeat_mode reservation)
+#                      795       repeat_avrcp               u8 (AVRCP §5.2.4 Tbl 5.20 enum;
+#                                                                T_papp 0x13, T8 event 0x08, T9)
+#                      796       shuffle_avrcp              u8 (AVRCP §5.2.4 Tbl 5.21 enum;
+#                                                                T_papp 0x13, T8 event 0x08, T9)
+#                      797..799  pad
 #                      800..815  TrackNumber                UTF-8 ASCII decimal (16 B)
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
@@ -1314,11 +1320,11 @@ def _emit_t_papp(a: Asm) -> None:
     # ---- 0x13 GetCurrentPlayerApplicationSettingValue ----
     # Inbound: 1 byte n + n attr_ids. Per AVRCP V13 §6.12, "The TG returns
     # the current value(s) of the player application setting(s) requested by
-    # the CT" — strict CTs (e.g. Kia head units) reject a response whose n
-    # field doesn't match the request and close the AVCTP channel. Honor the
-    # spec by branching on the inbound n: n==1 → return only the requested
-    # attr; otherwise fall through to the existing two-attr response (kept
-    # for the n==2 case + permissive CTs that send n==0 to mean "all").
+    # the CT" — strict CTs reject a response whose n field doesn't match the
+    # request and close the AVCTP channel. Honor the spec by branching on
+    # the inbound n: n==1 → return only the requested attr; otherwise fall
+    # through to the existing two-attr response (kept for the n==2 case +
+    # permissive CTs that send n==0 to mean "all").
     #
     # Live values: open y1-track-info, lseek to byte 795, read 2 bytes
     # ([repeat_avrcp, shuffle_avrcp]) into the outgoing-args region, pass

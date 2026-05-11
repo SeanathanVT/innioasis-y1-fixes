@@ -7,12 +7,8 @@ import android.util.Log;
 
 /**
  * Starts {@link MediaBridgeService} at boot so MtkBt's first
- * {@code bindService(Intent("com.android.music.MediaPlaybackService"))} finds
- * a live Service to bind to without cold-starting the process via
+ * {@code bindService} doesn't have to cold-start the process via
  * {@code BIND_AUTO_CREATE}.
- *
- * <p>BindService would cold-start the service on demand anyway; this just
- * makes the first bind cheaper.
  */
 public class BootReceiver extends BroadcastReceiver {
 
