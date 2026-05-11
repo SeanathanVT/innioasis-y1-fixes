@@ -543,6 +543,16 @@
 
     if-eqz v2, :cond_done
 
+    # Same MediaPlayer-getDuration-during-prepareAsync hazard as flushLocked:
+    # gate on getPlayerIsPrepared so we don't trip the C++ player into Error
+    # state when extrapolating position around a track edge. Skip the cap
+    # if not prepared (live position is just elapsed-since-state-change anyway).
+    invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getPlayerIsPrepared()Z
+
+    move-result v4
+
+    if-eqz v4, :cond_done
+
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getDuration()J
 
     move-result-wide v2
@@ -673,10 +683,25 @@
     move-result-wide v9
 
     :cond_no_song
+    # PlayerService.getDuration() delegates to MediaPlayer.getDuration() for non-IJK
+    # paths, which crashes the C++ MediaPlayer ("Attempt to call getDuration without
+    # a valid mediaplayer" → INVALID_OPERATION → async OnError -38) when called
+    # between setDataSource and OnPrepared. The music app calls Static.setPlayValue
+    # inside its restart sequence BEFORE prepareAsync completes, so flushing here
+    # without a guard would nuke the new MediaPlayer mid-prepare and leave the UI
+    # stuck at 0:00. Gate on getPlayerIsPrepared (a pure iget-boolean, safe in any
+    # state) and write 0 for unknown duration — same sentinel Y1MediaBridge uses.
+    invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getPlayerIsPrepared()Z
+
+    move-result v0
+
+    if-eqz v0, :cond_skip_duration
+
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getDuration()J
 
     move-result-wide v11
 
+    :cond_skip_duration
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getMusicIndex()I
 
     move-result v13
