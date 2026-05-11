@@ -4,14 +4,10 @@
 
 
 # Watches /data/data/com.innioasis.y1/files/y1-papp-set for CLOSE_WRITE.
-# Phase 1 status: PARKED — trampolines still write to com.y1.mediabridge's path,
-# so onEvent never fires. Phase 2 flips the trampoline path string to the
-# music-app's filesDir; this observer then becomes the live consumer of T_papp
-# 0x14 SetPlayerApplicationSettingValue writes.
-#
-# Reads 2 bytes (AVRCP attr_id, AVRCP value), maps to Y1 enum, calls
-# SharedPreferencesUtils.setMusicRepeatMode / setMusicIsShuffle directly
-# (no Intent hop — same process).
+# T_papp 0x14 in libextavrcp_jni.so writes this file on every CT-initiated
+# PApp Set; the observer reads the 2 bytes (AVRCP attr_id, AVRCP value), maps
+# to Y1 enum, and calls SharedPreferencesUtils.setMusicRepeatMode /
+# setMusicIsShuffle directly (no Intent hop — same process).
 
 
 # static fields

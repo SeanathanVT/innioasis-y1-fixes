@@ -7,15 +7,15 @@
 # enum, calls TrackInfoWriter.setBattery (which dedupes on bucket transition
 # and only flushes the file when the bucket actually changes).
 #
-# Mapping (mirrors Y1MediaBridge handleBatteryIntent):
+# Mapping:
 #   STATUS_FULL                    → 4 FULL_CHARGE
 #   PLUGGED (AC | USB | wireless)  → 3 EXTERNAL
 #   level <= 15                    → 2 CRITICAL
 #   level <= 30                    → 1 WARNING
 #   else                           → 0 NORMAL
 #
-# Self-rooted via static field so the receiver isn't GC'd. Phase 1: registered
-# from Y1Application.onCreate. Sticky-broadcast value is processed inline at
+# Self-rooted via static field so the receiver isn't GC'd. Registered from
+# Y1Application.onCreate. Sticky-broadcast value is processed inline at
 # registration time so cold boot has a real bucket before the next CHANGED tick.
 
 

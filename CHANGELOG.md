@@ -21,12 +21,13 @@ This release lands the **AVRCP 1.3 metadata + control pipeline**: a peer Bluetoo
 - **Discrete PASSTHROUGH** (PLAY / PAUSE / STOP / NEXT / PREVIOUS) routes to discrete music-app actions instead of the stock toggle behavior, eliminating the "stuck fast-forwarding" symptom on TV-class CTs that drop PASSTHROUGH RELEASE under subscribe load.
 - **A2DP / AVDTP audio stream stays alive across pauses.** AudioFlinger's silence-timeout standby no longer tears down the AVDTP source stream, so peer CTs no longer cycle their A2DP sink (eliminates burst-on-resume audio + playhead drift on TV-class CTs).
 - **`Y1MediaBridge` Android service** (`src/Y1MediaBridge/`) — the metadata + state publisher the trampoline chain reads from. Built via Gradle.
-- **In-app `y1-track-info` parallel writer** (`com.koensayr.y1.*` injected classes — Patch B5). Music app now hosts its own copy of the 1104-byte schema producer, hooked at `Static.setPlayValue` for play-state edges and at the IjkMediaPlayer + `android.media.MediaPlayer` listener lambdas for track edges. Captures state changes regardless of UI foreground state — closes the gap where the existing `LogcatMonitor` scrape blinds when Now Playing is backgrounded. Trampolines still read `Y1MediaBridge`'s file in this release; the new music-app path can be `md5sum`-compared against the bridge's path on device for parity verification before the trampolines flip.
+- **In-app `y1-track-info` writer** (`com.koensayr.y1.*` injected classes — Patch B5). The music app hosts the 1104-byte schema producer, hooked at `Static.setPlayValue` for play-state edges and at the IjkMediaPlayer + `android.media.MediaPlayer` listener lambdas for track edges. Captures state changes regardless of UI foreground state.
 - **`docs/spec/`** drop-spot (gitignored, Bluetooth SIG copyright) for the AVRCP 1.3 V13 + ESR07 + ICS / IXIT PDFs used for citation verification.
 
 ### Changed
 - **GitHub repository renamed `y1-mods` → `koensayr`.** GitHub auto-redirects the old URL; existing clones can update with `git remote set-url origin git@github.com:SeanathanVT/koensayr.git`.
 - **`--avrcp` flag** is now the canonical metadata-pipeline flag. Excluded from `--all` because it requires a Y1MediaBridge gradle build first.
+- **Trampoline file paths cut over to the music app.** `libextavrcp_jni.so` reads `y1-track-info` / `y1-trampoline-state` / `y1-papp-set` from `/data/data/com.innioasis.y1/files/` and the music app's `TrackInfoWriter` is the canonical writer. `Y1MediaBridge.apk` remains installed in this release to serve the `IBTAvrcpMusic` + `IMediaPlaybackService` Binder MtkBt binds to; its file-write side is no longer consulted.
 - **Spec-citation discipline.** All references target AVRCP 1.3 V13 + ESR07 errata; section numbers verified against the spec PDFs in `docs/spec/`.
 
 ### Removed

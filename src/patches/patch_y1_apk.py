@@ -1468,7 +1468,7 @@ print(
 # ============================================================
 #
 # Adds a new BroadcastReceiver `com.koensayr.PappSetReceiver` to the music
-# app. The receiver listens for two Y1MediaBridge-emitted intents:
+# app. The receiver listens for two intents:
 #
 #   ACTION_SET_REPEAT_MODE  (com.y1.mediabridge.SET_REPEAT_MODE, EXTRA "value":I)
 #   ACTION_SET_IS_SHUFFLE   (com.y1.mediabridge.SET_IS_SHUFFLE,  EXTRA "value":Z)
@@ -1479,10 +1479,10 @@ print(
 # the SharedPreferences at track-end, so the change propagates without a
 # music-app restart.
 #
-# Y1MediaBridge consumes T_papp's PDU 0x14 file write at y1-papp-set,
-# translates AVRCP→Y1 enum, and dispatches the broadcast — closing the
-# loop from a peer CT's PDU 0x14 SetPlayerApplicationSettingValue back to
-# the Y1 music app's Repeat/Shuffle state.
+# Superseded by B5's PappSetFileObserver: T_papp 0x14 in libextavrcp_jni.so
+# writes y1-papp-set in the music-app dir directly, and PappSetFileObserver
+# applies it via SharedPreferencesUtils — no Intent hop. This receiver is
+# kept in place as a transitional safety net and removed in a follow-up phase.
 #
 # Two parts:
 #   1. Write a brand-new smali file (PappSetReceiver.smali) into the
@@ -2035,10 +2035,9 @@ print(f"  Patch B5.3: Y1Application.onCreate registers TrackInfoWriter / "
       f"PappSetFileObserver / BatteryReceiver (before B4 sendNow)")
 
 # -- Patch B5.4: extend PappStateBroadcaster.sendNow ---------------------------
-# After the existing broadcast (which Y1MediaBridge consumes) we ALSO call
-# TrackInfoWriter.setPapp(repeat, shuffle) so the music-app file reflects the
-# new state immediately — no round-trip through Y1MediaBridge needed for the
-# music-app's own y1-track-info[795..796] bytes.
+# After the existing PAPP_STATE_DID_CHANGE broadcast we ALSO call
+# TrackInfoWriter.setPapp(repeat, shuffle) so the music-app's
+# y1-track-info[795..796] bytes reflect the new state immediately.
 OLD_PAPP_BCAST_TAIL = (
     "    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
     "\n"

@@ -32,7 +32,6 @@
 #   newValue 3 → PAUSED  (0x02)
 #   newValue 5 → STOPPED (0x00)
 # Other values (2/4/6/7/8/9 — internal Y1 transitions) are ignored.
-# Mapping mirrors Y1MediaBridge LogcatMonitor processLogLine.
 .method public static onPlayValue(II)V
     .locals 3
 

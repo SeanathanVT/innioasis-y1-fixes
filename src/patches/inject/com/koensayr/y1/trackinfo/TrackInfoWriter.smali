@@ -5,13 +5,9 @@
 
 # Singleton holder + atomic writer for /data/data/com.innioasis.y1/files/y1-track-info.
 #
-# 1104-byte schema (mirrors src/Y1MediaBridge MediaBridgeService writeTrackInfoFile,
-# byte offsets 0..1103). The libextavrcp_jni.so trampolines (T1/T2/extended_T2/T4
-# /T5/T6/T8/T9/T_papp/T_charset/T_battery) read this file directly via open(2)+read(2).
-#
-# Phase 1: parallel writer alongside Y1MediaBridge. Trampolines still read the
-# bridge's path; this writes a music-app copy. Phase 2 flips the trampoline path
-# strings; Phase 3 retires the bridge.
+# 1104-byte schema, byte offsets 0..1103. Read by the libextavrcp_jni.so trampolines
+# (T1/T2/extended_T2/T4/T5/T6/T8/T9/T_papp/T_charset/T_battery) directly via
+# open(2)+read(2).
 #
 # All public mutators are synchronized on INSTANCE. flushLocked() is called inline
 # from the calling thread (Static.setPlayValue runs on main; callbacks are off-main
@@ -148,9 +144,9 @@
 .end method
 
 
-# Make filesDir traversable for the BT process (uid bluetooth) and ensure the
-# state files exist (Phase 1: y1-trampoline-state, y1-papp-set are created here
-# so observers can attach; trampolines normally create them on first read).
+# Make filesDir traversable for the BT process (uid bluetooth) and pre-create
+# the state files (y1-trampoline-state, y1-papp-set) world-rw — trampolines
+# open them without O_CREAT, so they must exist before MtkBt's first probe.
 .method private prepareFilesLocked()V
     .locals 4
 
@@ -251,7 +247,7 @@
 
 
 # Public mutator: AVRCP play-status edge. Captures position/time-at-edge.
-# Returns silently if status unchanged (dedupe — matches Y1MediaBridge onStateDetected).
+# Returns silently if status unchanged (dedupe).
 .method public declared-synchronized setPlayStatus(B)V
     .locals 5
 
@@ -690,7 +686,7 @@
     # inside its restart sequence BEFORE prepareAsync completes, so flushing here
     # without a guard would nuke the new MediaPlayer mid-prepare and leave the UI
     # stuck at 0:00. Gate on getPlayerIsPrepared (a pure iget-boolean, safe in any
-    # state) and write 0 for unknown duration — same sentinel Y1MediaBridge uses.
+    # state) and write 0 for unknown duration.
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getPlayerIsPrepared()Z
 
     move-result v0
@@ -952,8 +948,8 @@
 .end method
 
 
-# Stable u64 from path: ((path.hashCode() & 0xFFFFFFFFL) | 0x100000000L). Matches
-# Y1MediaBridge.syntheticAudioId so audio_id is byte-equivalent across both writers.
+# Stable u64 from path: ((path.hashCode() & 0xFFFFFFFFL) | 0x100000000L). High
+# bit distinguishes the synthetic id from MediaStore _ID values (which are u32).
 .method private static syntheticAudioId(Ljava/lang/String;)J
     .locals 4
 
