@@ -2190,3 +2190,51 @@ After Y1MediaBridge is removed, the music app must emit `playstatechanged` for b
 - **Cold-boot Binder bind**: MtkBt's bindService should cold-start the music app's process via Android's standard service-binding flow, which means `Y1Application.onCreate` runs (registering TrackInfoWriter etc.) before MtkBt's `onServiceConnected` callback fires. If this races (e.g. `onServiceConnected` arrives before `Y1Application.onCreate` completes), the `AvrcpBridgeService.onCreate` order may be off. The fix would be to make `AvrcpBridgeService.onCreate` defensively trigger `TrackInfoWriter.init` itself, but Android's lifecycle guarantees Application.onCreate runs before any component's onCreate, so this race shouldn't happen in practice. Monitor for it.
 - **PackageManager resolution priority**: the intent-filter ships at `android:priority="100"`. Y1MediaBridge's intent-filter has no priority (default 0). PMS should resolve to the music app's filter on first install. If both APKs are present (transition window), the music app wins. After Y1MediaBridge is removed, only the music app has a matching filter.
 - **code_cache staleness**: MultiDex 1.0.x reuses any cached classes2.dex it finds at `/data/data/com.innioasis.y1/code_cache/secondary-dexes/`, regardless of whether the underlying APK changed (observed in Trace #20). `apply.bash` never touches /data, so the cache persists across reflashes — `--all`, `--avrcp`, and any other combination of flags. The mandatory post-flash adb-shell step is the cache-clear; no flag bypasses it.
+
+## Trace #23 (2026-05-11) — Phase 3 v1 stand-down: AndroidManifest.xml splice rejected by JarVerifier
+
+Phase 3 v1 (commit `032f655`) shipped an AndroidManifest.xml splice via the new `src/patches/_axml.py` editor, adding a `<service>` declaration for `com.koensayr.y1.avrcp.AvrcpBridgeService` with a priority-100 intent-filter for `com.android.music.MediaPlaybackService`. The intent: MtkBt's `bindService` would resolve to the music app instead of Y1MediaBridge, retiring `Y1MediaBridge.apk` entirely.
+
+User flashed Phase 3 v1 via mtkclient. Boot hung at the boot animation indefinitely. New logcat capture (`/work/logs/logcat-20260511-0927.log`) shows PackageManager rejecting the patched music APK during `/system/app/` scan:
+
+```
+W/PackageParser(523): java.lang.SecurityException:
+    META-INF/MANIFEST.MF has invalid digest for AndroidManifest.xml
+    in /system/app/com.innioasis.y1_3.0.2.apk
+E/PackageParser(523): Package com.innioasis.y1 has no certificates
+    at entry AndroidManifest.xml; ignoring!
+W/PackageManager(523): Failed verifying certificates for package:com.innioasis.y1
+D/PackageManager(523): scan package: /system/app/com.innioasis.y1_3.0.2.apk,
+    elapsed time = 1831ms
+```
+
+PackageManager dropped `com.innioasis.y1` entirely. With no music app installed, the system's launcher (which lives in `com.innioasis.y1.activity.MainActivity`) couldn't start, BootCompleted never fired, the boot animation looped forever.
+
+**Root cause.** `META-INF/MANIFEST.MF` records a SHA1-Digest for each file in the APK. JarVerifier, called via `JarFile.getCertificates(AndroidManifest.xml)` in `PackageParser.collectCertificates`, reads `AndroidManifest.xml` and SHA1s the bytes; comparison against MANIFEST.MF's recorded digest fails on our modified manifest → throws SecurityException → `getCertificates()` returns null → PackageParser reports "no certificates" → package dropped.
+
+Phase 1 + 2 worked because **JarVerifier only digest-checks `AndroidManifest.xml` during scan**. It does NOT check `classes.dex` / `classes2.dex` / `resources.arsc` at parse time. Empirically: we modified classes.dex (Patch B5) without issue. The moment we modified AndroidManifest.xml, JarVerifier fired.
+
+**Why we can't re-sign.** Updating the SHA1-Digest in MANIFEST.MF would invalidate CERT.SF's per-section SHA1 (which signs the MANIFEST.MF section bytes). Updating CERT.SF invalidates CERT.RSA's signature over CERT.SF. Re-signing CERT.RSA requires the OEM platform private key, because `com.innioasis.y1` declares `android:sharedUserId="android.uid.system"`. Without that key the package would either be rejected entirely (unsigned check) or rejected for not matching the platform-cert prerequisite of `android.uid.system`.
+
+**Why Y1MediaBridge.apk works.** Different package (`com.y1.mediabridge`), self-signed test cert, no `sharedUserId` constraint. /system/app/ doesn't require any specific signing key for arbitrary packages — only `sharedUserId`-claiming packages need a matching cert.
+
+**Phase 3 v1 stand-down.** Reverted in commit `<next>`:
+- `patch_y1_apk.py`: dropped Patch B6.2 (manifest splice). The B6.1 smali drop (AvrcpBridgeService.smali / AvrcpBinder.smali into `smali_classes2/`) is retained as groundwork for Phase 3 v2 — the classes exist but are not declared anywhere, so nothing instantiates them at runtime.
+- `apply.bash`: restored the Y1MediaBridge.apk install step + the gradle-build prerequisite + the post-flash adb-shell note (dropped). Defensive removal of pre-existing Y1MediaBridge.apk removed.
+- `patch_y1_apk.py` zip-rebuild: no longer swaps AndroidManifest.xml (it stays bit-exact stock).
+- Active docs (ARCHITECTURE.md, PATCHES.md, README.md, CHANGELOG.md) re-anchored to "Y1MediaBridge.apk stays as Binder host; music app does file writes + state production."
+
+**Phase 3 net result.** Same on-the-wire behavior as Phase 2 (verified working on Sonos in Trace #21):
+- Music app's `TrackInfoWriter` is the canonical writer for `y1-track-info` / `y1-trampoline-state` / `y1-papp-set` under `/data/data/com.innioasis.y1/files/`.
+- Trampolines in `libextavrcp_jni.so` read from the music app's path (Phase 2's path-string flip).
+- Y1MediaBridge.apk hosts the Binder declaration MtkBt binds to — its file-write side runs but writes a path nothing reads.
+- AvrcpBinder smali classes ship in classes2.dex as groundwork; not load-bearing.
+- `BatteryReceiver` and `PappStateBroadcaster` fire `com.android.music.playstatechanged` for non-play-edge wakeups — useful regardless of who hosts the Binder, since these previously relied on Y1MediaBridge as a broadcast relay.
+
+**Phase 3 v2 design space** (not implemented in this stand-down):
+- **Shrink Y1MediaBridge to a thin Binder forwarder.** Keep its manifest-declared service, replace the bulk of MediaBridgeService.java with: `onBind` does `bindService(new Intent().setComponent(new ComponentName("com.innioasis.y1", "com.innioasis.y1.service.PlayerService")))` and returns the bound IBinder. Music app's PlayerService.onBind is smali-extended to return AvrcpBinder when called with a specific intent marker. This achieves "Y1MediaBridge is trivial" without touching the music APK manifest. Two APKs but the bridge becomes ~50 lines.
+- **Brand-new tiny stub APK.** Build a fresh `Y1AvrcpStub.apk` (own package, own self-signed cert, no platform key needed) whose only job is the intent-filter Service declaration. Replaces Y1MediaBridge.apk; ~5 KB. Build pipeline: minimal source + signapk.jar (no gradle). Same architectural outcome.
+- **Patch MtkBt.odex to bindService via component name.** Change `BTAvrcpMusicAdapter.startToBindPlayService` smali to use `Intent().setClassName("com.innioasis.y1", "com.innioasis.y1.service.PlayerService")` instead of action-only Intent. Component-based bindService doesn't require an intent-filter, so the stock manifest's existing PlayerService declaration would resolve. Smali-extend PlayerService.onBind to return AvrcpBinder. Truly retires Y1MediaBridge with zero new APKs. Most invasive: requires inserting smali instructions into MtkBt.odex's method body (shifts code offsets), which the current patch_mtkbt_odex.py infrastructure doesn't support — would need a smali-reassembly path.
+
+All three Phase 3 v2 paths preserve the constraint discovered in Trace #23: **don't modify `com.innioasis.y1`'s AndroidManifest.xml**.
+

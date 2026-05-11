@@ -2092,32 +2092,35 @@ print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setP
 
 
 # ============================================================
-# Patch B6: AvrcpBridgeService — replace Y1MediaBridge.MediaBridgeService Binder
+# Patch B6: AvrcpBinder smali drop (Phase 3 — partial)
 # ============================================================
 #
-# Phase 3 of `docs/PLAN-Y1MEDIABRIDGE-RETIREMENT.md`. Two parts:
+# Originally Phase 3's plan was to host the IBTAvrcpMusic + IMediaPlaybackService
+# Binder MtkBt binds to inside the music app itself, replacing Y1MediaBridge.apk
+# entirely. The Binder smali landed (AvrcpBridgeService.smali / AvrcpBinder.smali
+# in smali_classes2/) but the AndroidManifest.xml splice that would have declared
+# the service hit a wall:
 #
-#   B6.1 New smali classes under com/koensayr/y1/avrcp/, routed to
-#        smali_classes2/ (secondary DEX) because classes.dex sits at 99.7% of
-#        the 64K method cap after Patch B5 (~176 slots left, not enough for
-#        the Binder shell). apply.bash invalidates the MultiDex secondary-dex
-#        cache before the apk push so Dalvik 1.6 doesn't reuse a stale
-#        pre-B6 classes2.dex.
+#   com.innioasis.y1 declares android:sharedUserId="android.uid.system", which
+#   constrains the package's signing key to the OEM platform key. We don't have
+#   that key, so any change to AndroidManifest.xml fails JarVerifier's digest
+#   check (META-INF/MANIFEST.MF records SHA1-Digest of AndroidManifest.xml,
+#   we'd have to update it, which invalidates CERT.SF, which requires re-signing
+#   CERT.RSA with the platform key). PackageManager rejects the package at
+#   /system/app/ scan time:
 #
-#   B6.2 AndroidManifest.xml splice — add <service> + <intent-filter> with
-#        actions `com.android.music.MediaPlaybackService` (priority 100, wins
-#        PMS resolution over Y1MediaBridge during the transition window) +
-#        `com.android.music.IMediaPlaybackService`. The manifest is binary AXML
-#        (--no-res decode leaves it that way); _axml.py is a minimal Python
-#        AXML editor that appends strings to the pool and splices new
-#        Start/End element chunks before </application>.
+#       W/PackageParser: java.lang.SecurityException: META-INF/MANIFEST.MF has
+#           invalid digest for AndroidManifest.xml
+#       E/PackageParser: Package com.innioasis.y1 has no certificates ...
+#       W/PackageManager: Failed verifying certificates for package:com.innioasis.y1
 #
-# After B6 + the apply.bash uninstall step lands, MtkBt's
-# `bindService(Intent("com.android.music.MediaPlaybackService"))` resolves to
-# AvrcpBridgeService inside the music app. The C-side trampoline chain in
-# libextavrcp_jni.so continues to read y1-track-info directly for AVRCP wire
-# responses; the Binder exists to satisfy MtkBt's mMusicService != null check
-# and to advertise capabilities for REGISTER_NOTIFICATION subscription.
+# Captured 2026-05-11 in /work/logs/logcat-20260511-0927.log line 4658.
+#
+# Resolution: keep Y1MediaBridge.apk as the Binder declaration host (its own
+# package + self-signed cert, no platform-key constraint). AvrcpBridgeService /
+# AvrcpBinder smali stay in the music APK as groundwork for a future Phase 3 v2
+# (shrink Y1MediaBridge to a thin Binder forwarder; the actual transact handling
+# happens in the music app via a smali extension of PlayerService.onBind).
 
 PATCH_B6_INJECT_FILES = [
     ("com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
@@ -2134,49 +2137,6 @@ for src_rel, dst_rel in PATCH_B6_INJECT_FILES:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copyfile(src, dst)
     print(f"  Wrote {dst_rel}")
-
-# -- Patch B6.2: AndroidManifest.xml splice -----------------------------------
-import _axml as axml  # noqa: E402
-
-manifest_path = os.path.join(UNPACKED_DIR, "AndroidManifest.xml")
-manifest = axml.read(manifest_path)
-
-# Bail if already patched (re-runs on the same staging dir).
-if 'com.koensayr.y1.avrcp.AvrcpBridgeService' in manifest.strings:
-    print(f"  Patch B6.2: manifest already has AvrcpBridgeService — skipping splice")
-else:
-    ns = axml.android_namespace_idx(manifest)
-    name_idx     = manifest.strings.index('name')
-    exported_idx = manifest.strings.index('exported')
-    priority_idx = manifest.strings.index('priority')
-    new_chunks = [
-        axml.start_element(manifest, 'service', line_no=1, attrs=[
-            axml.attr_string(manifest, ns, name_idx,     'com.koensayr.y1.avrcp.AvrcpBridgeService'),
-            axml.attr_bool  (manifest, ns, exported_idx, True),
-        ]),
-        axml.start_element(manifest, 'intent-filter', line_no=1, attrs=[
-            axml.attr_int   (manifest, ns, priority_idx, 100),
-        ]),
-        axml.start_element(manifest, 'action', line_no=1, attrs=[
-            axml.attr_string(manifest, ns, name_idx, 'com.android.music.MediaPlaybackService'),
-        ]),
-        axml.end_element  (manifest, 'action',        line_no=1),
-        axml.start_element(manifest, 'action', line_no=1, attrs=[
-            axml.attr_string(manifest, ns, name_idx, 'com.android.music.IMediaPlaybackService'),
-        ]),
-        axml.end_element  (manifest, 'action',        line_no=1),
-        axml.end_element  (manifest, 'intent-filter', line_no=1),
-        axml.end_element  (manifest, 'service',       line_no=1),
-    ]
-    def _is_app_end(c):
-        return c.type == axml.RES_XML_END_ELEMENT_TYPE and \
-               axml.chunk_element_name(manifest, c) == 'application'
-    idx = axml.find_chunk_index(manifest, _is_app_end)
-    if idx < 0:
-        sys.exit("ERROR: Patch B6.2 — </application> not found in AndroidManifest.xml")
-    manifest.chunks[idx:idx] = new_chunks
-    axml.write(manifest, manifest_path)
-    print(f"  Patch B6.2: AndroidManifest.xml ← <service>com.koensayr.y1.avrcp.AvrcpBridgeService</>")
 
 
 # -- Per-smali md5 report -----------------------------------------------------
@@ -2198,7 +2158,6 @@ PATCHED_SMALI_FILES = [
     # Patch B6 — AvrcpBridgeService (Phase 3)
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBinder.smali",
-    "AndroidManifest.xml",
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
@@ -2227,9 +2186,14 @@ print(f"  classes2.dex {os.path.getsize(dex2):,} bytes")
 with open(dex1, 'rb') as f: dex1_bytes = f.read()
 with open(dex2, 'rb') as f: dex2_bytes = f.read()
 
-# -- Build patched APK (replace DEX + manifest, keep original META-INF) -------
-with open(os.path.join(UNPACKED_DIR, "AndroidManifest.xml"), 'rb') as f:
-    patched_manifest_bytes = f.read()
+# -- Build patched APK (replace DEX, keep original META-INF + manifest) -------
+# We do NOT swap AndroidManifest.xml — modifying it would invalidate
+# META-INF/MANIFEST.MF's SHA1-Digest and JarVerifier rejects the package at
+# /system/app/ scan with "no certificates at entry AndroidManifest.xml; ignoring!".
+# Resigning would require the OEM platform key (com.innioasis.y1 declares
+# sharedUserId="android.uid.system"). The Phase 1+2 strategy of "modify only
+# DEX, leave META-INF stale" works because JarVerifier only digest-checks
+# AndroidManifest.xml at scan time (not DEX/resources).
 with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
     with zipfile.ZipFile(OUTPUT_APK, 'w',
                          compression=zipfile.ZIP_DEFLATED,
@@ -2239,8 +2203,6 @@ with zipfile.ZipFile(ORIGINAL_APK, 'r') as zin:
                 zout.writestr(item, dex1_bytes)
             elif item.filename == 'classes2.dex':
                 zout.writestr(item, dex2_bytes)
-            elif item.filename == 'AndroidManifest.xml':
-                zout.writestr(item, patched_manifest_bytes)
             else:
                 zout.writestr(item, zin.read(item.filename))  # includes META-INF/
 
