@@ -465,6 +465,30 @@ On match, reads both live values via `SharedPreferencesUtils.INSTANCE.getMusicRe
 
 Y1MediaBridge consumes the broadcast, updates its volatile fields, rewrites `y1-track-info[795..796]`, and fires `playstatechanged` so T9 picks up the edge and emits AVRCP §5.4.2 Tbl 5.36 `PLAYER_APPLICATION_SETTING_CHANGED` CHANGED via PLT `0x345c`. Closes the CHANGED loop from Y1's actual Repeat / Shuffle state → peer CT subscribers of event 0x08.
 
+**Patch B5** — in-app `y1-track-info` production (`com.koensayr.y1.*` injected classes).
+
+Music app becomes the second writer of the 1104-byte `y1-track-info` schema. Trampolines still read `Y1MediaBridge`'s file; this writes a parallel copy at `/data/data/com.innioasis.y1/files/y1-track-info` so both paths can be `md5sum`-compared on device.
+
+Four new classes under `com/koensayr/y1/` (smali sources at `src/patches/inject/com/koensayr/y1/`, copied into `smali_classes2/` at patcher time):
+
+| Class | Role |
+|---|---|
+| `trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer (tmp + rename, world-readable). Mirrors the byte schema and field semantics of `MediaBridgeService.writeTrackInfoFile` (audio_id at bytes 0..7 via `syntheticAudioId(path) = (path.hashCode() & 0xFFFFFFFFL) | 0x100000000L`; title/artist/album UTF-8 codepoint-safe-truncated to 240 B; duration/position/state-time BE u32; play_status / natural_end / battery / repeat / shuffle bytes at 792..796; track-num / total-tracks / playing-time / genre at 800..1103). |
+| `playback.PlaybackStateBridge` | Stateless static dispatcher. `onPlayValue(II)V` maps the music-app's `Static.setPlayValue` newValue (0/1/3/5) to the AVRCP §5.4.1 Tbl 5.26 byte (STOPPED/PLAYING/PAUSED). `onCompletion()V` latches a natural-end signal; the next `onPrepared()V` consumes it into `mPreviousTrackNaturalEnd` and resets position+time. `onError()V` clears the latch. |
+| `battery.BatteryReceiver` | `Intent.ACTION_BATTERY_CHANGED` consumer. Bucket-maps to AVRCP §5.4.2 Tbl 5.35 (FULL_CHARGE / EXTERNAL / CRITICAL / WARNING / NORMAL) using the same thresholds as `Y1MediaBridge.handleBatteryIntent`. Sticky-broadcast value is processed at registration time so cold boot has a real bucket before the next CHANGED tick. |
+| `papp.PappSetFileObserver` | `FileObserver` on `/data/data/com.innioasis.y1/files/y1-papp-set` (CLOSE_WRITE). Reads the 2-byte (attr_id, value) tuple and calls `SharedPreferencesUtils.setMusicRepeatMode` / `setMusicIsShuffle` directly — same in-process call B3 already uses, no Intent hop. Currently inert because trampolines write to `Y1MediaBridge`'s path; becomes the canonical CT-Set consumer once the trampoline path strings flip. |
+
+Existing-file edits (smali prepends, no logic replacement):
+
+| File | Inject |
+|---|---|
+| `smali_classes2/com/innioasis/y1/utils/Static.smali` | Top of `setPlayValue(II)V` — `invoke-static {p1, p2}, …PlaybackStateBridge;->onPlayValue(II)V`. Single canonical state-edge entry; catches every play/pause/stop/resume regardless of UI foreground state. |
+| `smali/com/innioasis/y1/service/PlayerService.smali` | Top of six listener lambdas. `initPlayer$lambda-{10,11,12}` are the IjkMediaPlayer (Bilibili IJK FFmpeg fork) `OnCompletion` / `OnPrepared` / `OnError` arms; `initPlayer2$lambda-{13,14,15}` are the same for `android.media.MediaPlayer`. Each lambda gets one `invoke-static` to the matching `PlaybackStateBridge` callback. |
+| `smali/com/innioasis/y1/Y1Application.smali` | `onCreate` `:cond_3` block, between B3 and B4. Brings up `TrackInfoWriter.init(Context)` + `PappSetFileObserver.start(Context)` + `BatteryReceiver.register(Context)`. Order matters: must run before B4's `sendNow()` so the cold-boot file write reflects live SharedPreferences Repeat/Shuffle, not the default OFF/OFF. |
+| `smali/com/koensayr/PappStateBroadcaster.smali` (B4 product) | `sendNow()` tail — also calls `TrackInfoWriter.setPapp(repeat, shuffle)` so the music-app file reflects the new state immediately, without a round-trip through Y1MediaBridge. |
+
+State sources, all read live from `PlayerService` accessors via `Y1Application.Companion.getPlayerService()`: `getPlayingMusic()`/`getPlayingSong()` for the current `Song` (title via `getSongName()`, plus `getArtist`/`getAlbum`/`getGenre`/`getPath`); `getDuration()`; `getMusicIndex()+1` for TrackNumber; `getMusicList().size()` for TotalNumberOfTracks. Position-at-state-change is captured at the `setPlayValue` edge with `SystemClock.elapsedRealtime()` for the lockstep clock the trampoline `T6` extrapolation expects.
+
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` preserved.
 
 **Deployment:** `adb root && adb remount && adb push <apk> /system/app/com.innioasis.y1/com.innioasis.y1.apk && adb reboot`. Do **not** use `adb install` — PackageManager rejects re-signed system app APKs.

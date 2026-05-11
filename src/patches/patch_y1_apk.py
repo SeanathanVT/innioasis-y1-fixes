@@ -1839,6 +1839,223 @@ with open(papp_broadcaster_path, 'w') as f:
 print(f"  Wrote {PAPP_BROADCASTER_SMALI}")
 
 
+# ============================================================
+# Patch B5: in-app y1-track-info production (Y1MediaBridge retirement, Phase 1)
+# ============================================================
+#
+# Music app becomes the canonical writer of /data/data/com.innioasis.y1/files/
+# y1-track-info (1104-byte schema mirrors src/Y1MediaBridge MediaBridgeService).
+# Y1MediaBridge.apk keeps writing to its own path in parallel; trampolines still
+# read the bridge's path. Phase 2 flips the trampoline path strings; Phase 3
+# uninstalls the bridge.
+#
+# Components (all under com.koensayr.y1.*, copied from src/patches/inject/):
+#   trackinfo/TrackInfoWriter — singleton holder + atomic file writer
+#   playback/PlaybackStateBridge — static dispatcher: setPlayValue + listener lambdas
+#   battery/BatteryReceiver — ACTION_BATTERY_CHANGED → AVRCP §5.4.2 Tbl 5.35 bucket
+#   papp/PappSetFileObserver — FileObserver on y1-papp-set (parked Phase 1, live Phase 2)
+#
+# Existing-file edits (smali prepends, no logic replacement):
+#   smali_classes2/com/innioasis/y1/utils/Static.smali
+#     setPlayValue(II)V — prepend invoke-static PlaybackStateBridge.onPlayValue
+#       (canonical state-edge entry per docs/RECON-MUSIC-APP-HOOKS.md §2)
+#   smali/com/innioasis/y1/service/PlayerService.smali
+#     six listener lambdas (initPlayer$lambda-{10,11,12} for IJK,
+#       initPlayer2$lambda-{13,14,15} for android.media.MediaPlayer)
+#   smali/com/innioasis/y1/Y1Application.smali
+#     onCreate :cond_3 block — extends the existing B3+B4 registration with
+#       TrackInfoWriter.init / BatteryReceiver.register / PappSetFileObserver.start
+#   smali/com/koensayr/PappStateBroadcaster.smali (B4 product)
+#     sendNow() — also calls TrackInfoWriter.setPapp so the music-app file
+#       reflects Repeat/Shuffle without waiting for the round-trip via Y1MediaBridge.
+
+print(f"\nPatch B5: in-app y1-track-info production (Y1MediaBridge retirement, Phase 1)")
+
+INJECT_ROOT = os.path.join(SCRIPT_DIR, "inject")
+
+# (source-relative-to-inject, dest-relative-to-unpacked) tuples. Source files
+# live under src/patches/inject/com/koensayr/y1/* (real .smali, syntax-checked
+# by apktool's smali assembler at reassembly time). Drop into smali_classes2/
+# so they ride classes2.dex with the rest of com.koensayr.y1.*.
+PATCH_B5_INJECT_FILES = [
+    ("com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
+        "smali_classes2/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
+    ("com/koensayr/y1/playback/PlaybackStateBridge.smali",
+        "smali_classes2/com/koensayr/y1/playback/PlaybackStateBridge.smali"),
+    ("com/koensayr/y1/battery/BatteryReceiver.smali",
+        "smali_classes2/com/koensayr/y1/battery/BatteryReceiver.smali"),
+    ("com/koensayr/y1/papp/PappSetFileObserver.smali",
+        "smali_classes2/com/koensayr/y1/papp/PappSetFileObserver.smali"),
+]
+
+for src_rel, dst_rel in PATCH_B5_INJECT_FILES:
+    src = os.path.join(INJECT_ROOT, src_rel)
+    dst = os.path.join(UNPACKED_DIR, dst_rel)
+    if not os.path.exists(src):
+        sys.exit(f"ERROR: Patch B5 source missing: {src}")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+    print(f"  Wrote {dst_rel}")
+
+# -- Patch B5.1: hook Static.setPlayValue -------------------------------------
+STATIC_SMALI = "smali_classes2/com/innioasis/y1/utils/Static.smali"
+static_path = os.path.join(UNPACKED_DIR, STATIC_SMALI)
+if not os.path.exists(static_path):
+    sys.exit(f"ERROR: Static.smali not found: {static_path}")
+with open(static_path, 'r') as f:
+    static_src = f.read()
+
+OLD_SET_PLAY_VALUE_HEAD = (
+    ".method public final setPlayValue(II)V\n"
+    "    .locals 5\n"
+    "\n"
+    "    .line 49\n"
+    "    sget-object v0, Lcom/innioasis/y1/utils/Static;->mPlayValue:Landroidx/lifecycle/MutableLiveData;\n"
+)
+NEW_SET_PLAY_VALUE_HEAD = (
+    ".method public final setPlayValue(II)V\n"
+    "    .locals 5\n"
+    "\n"
+    "    invoke-static {p1, p2}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onPlayValue(II)V\n"
+    "\n"
+    "    .line 49\n"
+    "    sget-object v0, Lcom/innioasis/y1/utils/Static;->mPlayValue:Landroidx/lifecycle/MutableLiveData;\n"
+)
+if OLD_SET_PLAY_VALUE_HEAD not in static_src:
+    sys.exit("ERROR: Patch B5.1 anchor not found in Static.smali (setPlayValue header).")
+static_src = static_src.replace(OLD_SET_PLAY_VALUE_HEAD, NEW_SET_PLAY_VALUE_HEAD, 1)
+with open(static_path, 'w') as f:
+    f.write(static_src)
+print(f"  Patch B5.1: Static.setPlayValue → PlaybackStateBridge.onPlayValue")
+
+# -- Patch B5.2: hook PlayerService listener lambdas --------------------------
+# Six prepends — three per engine (IJK + MediaPlayer). Each lambda has a stable
+# header pattern (.method ... ; .locals N ; const-string p1, "this$0" ;
+# invoke-static checkNotNullParameter). We anchor on the first three lines to
+# uniquely identify each lambda even though the body varies.
+#
+# Lambda identity (verified via $r8$lambda$* accessor chain — see
+# docs/RECON-MUSIC-APP-HOOKS.md §3):
+#   initPlayer$lambda-10  → IjkMediaPlayer OnCompletionListener
+#   initPlayer$lambda-11  → IjkMediaPlayer OnPreparedListener
+#   initPlayer$lambda-12  → IjkMediaPlayer OnErrorListener
+#   initPlayer2$lambda-13 → MediaPlayer    OnCompletionListener
+#   initPlayer2$lambda-14 → MediaPlayer    OnPreparedListener
+#   initPlayer2$lambda-15 → MediaPlayer    OnErrorListener
+
+PLAYER_SERVICE_SMALI_FOR_B5 = "smali/com/innioasis/y1/service/PlayerService.smali"
+ps_path = os.path.join(UNPACKED_DIR, PLAYER_SERVICE_SMALI_FOR_B5)
+if not os.path.exists(ps_path):
+    sys.exit(f"ERROR: PlayerService.smali not found: {ps_path}")
+with open(ps_path, 'r') as f:
+    ps_src = f.read()
+
+PATCH_B5_LAMBDA_HOOKS = [
+    # (lambda method name, target callback)
+    ("initPlayer$lambda-10",  "onCompletion"),
+    ("initPlayer$lambda-11",  "onPrepared"),
+    ("initPlayer$lambda-12",  "onError"),
+    ("initPlayer2$lambda-13", "onCompletion"),
+    ("initPlayer2$lambda-14", "onPrepared"),
+    ("initPlayer2$lambda-15", "onError"),
+]
+
+for lname, callback in PATCH_B5_LAMBDA_HOOKS:
+    # Locate the method declaration line; insert immediately after .locals.
+    needle_method = f".method private static final {lname}("
+    idx = ps_src.find(needle_method)
+    if idx < 0:
+        sys.exit(f"ERROR: Patch B5.2 anchor not found: {lname}")
+    # Find the .locals line after the method declaration.
+    locals_idx = ps_src.find("\n    .locals ", idx)
+    if locals_idx < 0 or locals_idx > idx + 200:
+        sys.exit(f"ERROR: Patch B5.2 .locals not found near {lname}")
+    line_end = ps_src.find("\n", locals_idx + 1)
+    inject = (
+        f"\n\n    invoke-static {{}}, "
+        f"Lcom/koensayr/y1/playback/PlaybackStateBridge;->{callback}()V"
+    )
+    # Idempotency guard so a re-run doesn't double-prepend.
+    if ps_src[line_end:line_end + len(inject)] == inject:
+        continue
+    ps_src = ps_src[:line_end] + inject + ps_src[line_end:]
+
+with open(ps_path, 'w') as f:
+    f.write(ps_src)
+print(f"  Patch B5.2: PlayerService 6 listener lambdas → PlaybackStateBridge")
+
+# -- Patch B5.3: extend Y1Application.onCreate registration block -------------
+# Insert BEFORE the B4 PappStateBroadcaster registration so TrackInfoWriter is
+# initialised by the time sendNow() runs (sendNow → B5.4 setPapp → flushLocked
+# would no-op if mFilesDir was null). New order:
+#   B3 receiver register → B5 (TrackInfoWriter init + observers) → B4 broadcaster
+with open(y1app_path, 'r') as f:
+    y1app_src = f.read()
+
+OLD_Y1APP_B4_HEAD = (
+    "    # Patch B4: register PappStateBroadcaster as OnSharedPreferenceChangeListener"
+)
+NEW_Y1APP_B4_HEAD = (
+    "    # Patch B5: Y1MediaBridge retirement Phase 1 — in-app y1-track-info\n"
+    "    # production. Init TrackInfoWriter (creates filesDir + watched files),\n"
+    "    # then start observers. Order matters: must run before B4 sendNow so\n"
+    "    # the first file write reflects the live SharedPreferences state.\n"
+    "    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;\n"
+    "\n"
+    "    invoke-virtual {v0, p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->init(Landroid/content/Context;)V\n"
+    "\n"
+    "    invoke-static {p0}, Lcom/koensayr/y1/papp/PappSetFileObserver;->start(Landroid/content/Context;)V\n"
+    "\n"
+    "    invoke-static {p0}, Lcom/koensayr/y1/battery/BatteryReceiver;->register(Landroid/content/Context;)V\n"
+    "\n"
+    "    # Patch B4: register PappStateBroadcaster as OnSharedPreferenceChangeListener"
+)
+if OLD_Y1APP_B4_HEAD not in y1app_src:
+    sys.exit("ERROR: Patch B5.3 anchor not found (B4 head comment).")
+y1app_src = y1app_src.replace(OLD_Y1APP_B4_HEAD, NEW_Y1APP_B4_HEAD, 1)
+with open(y1app_path, 'w') as f:
+    f.write(y1app_src)
+print(f"  Patch B5.3: Y1Application.onCreate registers TrackInfoWriter / "
+      f"PappSetFileObserver / BatteryReceiver (before B4 sendNow)")
+
+# -- Patch B5.4: extend PappStateBroadcaster.sendNow ---------------------------
+# After the existing broadcast (which Y1MediaBridge consumes) we ALSO call
+# TrackInfoWriter.setPapp(repeat, shuffle) so the music-app file reflects the
+# new state immediately — no round-trip through Y1MediaBridge needed for the
+# music-app's own y1-track-info[795..796] bytes.
+OLD_PAPP_BCAST_TAIL = (
+    "    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+    "\n"
+    "    return-void\n"
+    ".end method\n"
+    "\n"
+    "\n"
+    "# virtual methods — OnSharedPreferenceChangeListener"
+)
+NEW_PAPP_BCAST_TAIL = (
+    "    invoke-virtual {v3, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+    "\n"
+    "    # Patch B5.4: also push to in-app TrackInfoWriter (Phase 1 parallel writer)\n"
+    "    sget-object v2, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;\n"
+    "\n"
+    "    invoke-virtual {v2, v0, v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPapp(II)V\n"
+    "\n"
+    "    return-void\n"
+    ".end method\n"
+    "\n"
+    "\n"
+    "# virtual methods — OnSharedPreferenceChangeListener"
+)
+with open(papp_broadcaster_path, 'r') as f:
+    papp_bcast_src = f.read()
+if OLD_PAPP_BCAST_TAIL not in papp_bcast_src:
+    sys.exit("ERROR: Patch B5.4 anchor not found (sendNow tail of PappStateBroadcaster).")
+papp_bcast_src = papp_bcast_src.replace(OLD_PAPP_BCAST_TAIL, NEW_PAPP_BCAST_TAIL, 1)
+with open(papp_broadcaster_path, 'w') as f:
+    f.write(papp_bcast_src)
+print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setPapp")
+
+
 # -- Per-smali md5 report -----------------------------------------------------
 # Hash each patched smali file. These hashes are deterministic regardless of
 # Java version or apktool reassembly behavior, so they reliably indicate
@@ -1849,6 +2066,12 @@ PATCHED_SMALI_FILES = [
     PLAY_CONTROLLER_RECEIVER_SMALI, BASE_ACTIVITY_SMALI,
     BASE_PLAYER_ACTIVITY_SMALI,
     Y1APP_SMALI, PAPP_RECEIVER_SMALI, PAPP_BROADCASTER_SMALI,
+    # Patch B5 — Y1MediaBridge retirement Phase 1
+    STATIC_SMALI, PLAYER_SERVICE_SMALI_FOR_B5,
+    "smali_classes2/com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
+    "smali_classes2/com/koensayr/y1/playback/PlaybackStateBridge.smali",
+    "smali_classes2/com/koensayr/y1/battery/BatteryReceiver.smali",
+    "smali_classes2/com/koensayr/y1/papp/PappSetFileObserver.smali",
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
