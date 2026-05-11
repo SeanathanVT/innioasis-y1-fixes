@@ -631,16 +631,21 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   cat <<'AVRCP_POST_NOTE'
 
   -- Post-flash device steps for AVRCP --
-  After the flash completes, on the first boot run:
+  apply.bash flashes the `android` (system) partition only. /data is never
+  touched, so on every --avrcp install (first-flash or incremental) the
+  following adb steps are required to pick up classes2.dex changes and
+  remove any prior Y1MediaBridge install:
 
       adb shell rm -rf /data/data/com.innioasis.y1/code_cache/secondary-dexes/
       adb shell pm uninstall com.y1.mediabridge 2>/dev/null || true
       adb reboot
 
-  The first line invalidates the MultiDex cache so AvrcpBridgeService (which
-  lives in classes2.dex) is re-extracted from the new APK. The second line is
-  defensive cleanup for any prior non-system-app install of the old bridge.
-  A fresh `--all` flash reprovisions /data and skips both steps automatically.
+  Line 1 invalidates the MultiDex cache so AvrcpBridgeService (which lives
+  in classes2.dex) is re-extracted from the new APK on next process start —
+  MultiDex 1.0.x on Dalvik 1.6 has been observed reusing a stale cached
+  classes2.dex despite the APK file changing, so this step is unconditional.
+  Line 2 is defensive cleanup for any prior non-system-app install of the
+  old bridge.
 
 AVRCP_POST_NOTE
 fi
