@@ -1881,6 +1881,18 @@ INJECT_ROOT = os.path.join(SCRIPT_DIR, "inject")
 # /data/data/com.innioasis.y1/code_cache/ and survives /system/app/ reflashes
 # — a stale cache loads the pre-patch classes2.dex and TrackInfoWriter is
 # nowhere to be found at runtime (NoClassDefFoundError on Y1Application.onCreate).
+#
+# TODO(Phase 3): primary-DEX placement is a Phase-1 expedient. Post-B5 the
+# music app's classes.dex sits at 65330/65536 methods (99.7% of the 64K cap;
+# ~176 slots remaining). Phase 3's AvrcpBridgeService + IBTAvrcpMusic.Stub (38
+# txns) + IMediaPlaybackService.Stub (32 txns) + IBTAvrcpMusicCallback.Proxy
+# is easily 100+ methods and will not fit here. When Phase 3 lands, route the
+# new classes through smali_classes2/ AND add a cache-invalidation step to
+# apply.bash before the apk push (e.g. `adb shell rm -rf
+# /data/data/com.innioasis.y1/code_cache/secondary-dexes/`, NOT pm clear which
+# would wipe musicRepeatMode/musicIsShuffle). Re-measure DEX method counts
+# after the move (snippet in INVESTIGATION.md Trace #20 gotcha #2). See also
+# `docs/INVESTIGATION.md` Trace #20 for the on-device crash that surfaced this.
 PATCH_B5_INJECT_FILES = [
     ("com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
         "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
