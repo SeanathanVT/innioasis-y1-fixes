@@ -1158,3 +1158,94 @@
 
     return-void
 .end method
+
+
+# Wake the trampoline chain's track-changed dispatch by firing
+# com.android.music.metachanged. MtkBt.odex's cardinality-NOP-patched
+# BTAvrcpMusicAdapter.handleKeyMessage sswitch_1a3 wakes
+# notificationTrackChangedNative on this broadcast, which jumps to T5 →
+# AVRCP §5.4.2 Tbl 5.30 TRACK_CHANGED CHANGED (+ §5.4.2 Tbl 5.31/5.32 if
+# the natural-end / start-of-track edges are armed).
+#
+# Call site: PlaybackStateBridge.onPrepared, after onTrackEdge has flushed
+# the new track's y1-track-info to disk.
+.method public wakeTrackChanged()V
+    .locals 3
+
+    :try_start_0
+    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;
+
+    if-eqz v0, :cond_no_ctx
+
+    new-instance v1, Landroid/content/Intent;
+
+    const-string v2, "com.android.music.metachanged"
+
+    invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
+
+    :cond_no_ctx
+    return-void
+    :try_end_0
+    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
+
+    :catch_0
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
+# Wake the trampoline chain's play-status / battery / position / papp
+# dispatch by firing com.android.music.playstatechanged. MtkBt.odex's
+# cardinality-NOP-patched BTAvrcpMusicAdapter.handleKeyMessage sswitch_18a
+# wakes notificationPlayStatusChangedNative on this broadcast, which jumps
+# to T9 → AVRCP §5.4.2 CHANGED for the four events T9 handles (PLAYBACK_STATUS
+# 0x01, PLAYBACK_POS 0x05, BATT_STATUS 0x06, PLAYER_APPLICATION_SETTING 0x08;
+# each gated on its own file vs state edge inside T9).
+#
+# Call sites: PlaybackStateBridge.onPlayValue (state-edge wake), and
+# PlaybackStateBridge.onPrepared (new-track wake — position resets to 0).
+.method public wakePlayStateChanged()V
+    .locals 3
+
+    :try_start_0
+    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;
+
+    if-eqz v0, :cond_no_ctx
+
+    new-instance v1, Landroid/content/Intent;
+
+    const-string v2, "com.android.music.playstatechanged"
+
+    invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
+
+    :cond_no_ctx
+    return-void
+    :try_end_0
+    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
+
+    :catch_0
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method

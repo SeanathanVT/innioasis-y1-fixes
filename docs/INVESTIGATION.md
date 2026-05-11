@@ -2308,3 +2308,50 @@ All visibility-critical logic lives in the music app's process. Y1MediaBridge is
 - **Drop the gradle dep**: shrink-source is small enough to build with just `javac` + `d8` + a minimal aapt2 substitute (or commit a prebuilt APK). Not addressed here because the user's flash machine already has gradle set up.
 - **Truly retire `Y1MediaBridge.apk`**: requires `MtkBt.odex` smali surgery to component-bind into `com.innioasis.y1/.service.PlayerService` directly (option (c) from Trace #23). `patch_mtkbt_odex.py` would need a smali-reassembly path; currently it only supports same-size byte substitutions.
 
+
+## Trace #25 (2026-05-11) — Phase 1+2 broadcast-wake regression: `PlaybackStateBridge` now fires `metachanged` + `playstatechanged`
+
+### Symptom
+Multi-CT capture session 2026-05-11 afternoon (`dual-bolt-20260511-1339`, `dual-kia-20260511-1336`) surfaced three user-visible regressions vs the pre-Phase-2 Y1MediaBridge.apk-driven behavior:
+
+- **Bolt:** zero metadata rendered. Only 1 × `msg=540` (GetElementAttributes response) in 4 min, vs Sonos's 190 × in 3 min during Phase 3 v3 verification. Bolt's CT subscribes to `EVENT_TRACK_CHANGED` and waits for CHANGED notifications before issuing `GetElementAttributes` — without CHANGED firing on track edges, the CT never queries.
+- **Kia:** time-playhead lags real device playhead by ~seconds; timestamps appear only after a pause. Kia polls `GetPlayStatus` (75 × in 3 min) so T6's `clock_gettime(BOOTTIME)` extrapolation returns live position correctly, but the rendering side appears to anchor on `EVENT_PLAYBACK_POS_CHANGED` CHANGED notifications which were only firing every 10 s (BatteryReceiver tick), not the documented 1 s cadence.
+- **Bolt:** Repeat toggle from the CT updates `SharedPreferences` but the music-app UI doesn't refresh until the user backs out and returns; shuffle state appears stuck "on" on the CT regardless of Y1 state.
+
+### Root cause
+The Y1 music app's `PlayerService` does NOT fire the standard `com.android.music.metachanged` / `playstatechanged` broadcasts at play-state or track edges. It uses its own internal `android.intent.action.MY_PLAY_SONG` instead. Pre-Phase-2 `Y1MediaBridge.apk` had a logcat-scraping `LogcatMonitor` + a 1 s `Handler` loop that synthesised these broadcasts whenever it observed state changes. The Phase 3 v2 shrink removed both.
+
+Verified by grep: `inject/com/koensayr/y1/playback/PlaybackStateBridge.smali` had no `sendBroadcast` call before this fix. Only `BatteryReceiver.smali` and `PappStateBroadcaster.smali` were firing `playstatechanged`, and nothing was firing `metachanged`.
+
+MtkBt.odex's cardinality-NOP-patched `BTAvrcpMusicAdapter.handleKeyMessage` (`patch_mtkbt_odex.py` `sswitch_1a3`/`sswitch_18a`) is what wakes `notificationTrackChangedNative` / `notificationPlayStatusChangedNative` (and thus T5 / T9). Without the broadcasts being emitted, the wake never fires.
+
+### Fix
+Added two helper methods to `TrackInfoWriter`:
+
+- `wakeTrackChanged()V` — fires `com.android.music.metachanged` via the stored Application Context.
+- `wakePlayStateChanged()V` — fires `com.android.music.playstatechanged` via the same.
+
+Modified `PlaybackStateBridge`:
+
+- `onPlayValue` — after `setPlayStatus(B)` flushes the new state byte synchronously, calls `wakePlayStateChanged()`. Drives T9 → PLAYBACK_STATUS / PLAYBACK_POS CHANGED on real state edges (play→pause, pause→play, etc.).
+- `onPrepared` — after `onTrackEdge` flushes the new track to disk, calls `wakeTrackChanged()` + `wakePlayStateChanged()`. The metachanged wake drives T5 → TRACK_CHANGED / REACHED_END (gated) / REACHED_START. The playstatechanged wake drives T9 → PLAYBACK_POS CHANGED for the position reset to 0.
+
+`onCompletion` / `onError` unchanged — the next `onPrepared` will fire the broadcasts.
+
+### Method-count budget
+classes.dex post-Patch-B5 was 65330/65536. Two new methods (wakeTrackChanged + wakePlayStateChanged on TrackInfoWriter) take it to 65332. Three new method-ref uses inside `PlaybackStateBridge` reference these same defined methods, so no additional method refs. ~204 slots remain (still under cap; cap-check passes via apktool reassembly succeeding).
+
+### Verification (pending hardware)
+Patcher smoke-test: `output/com.innioasis.y1_3.0.2-patched.apk` reassembles cleanly. META-INF + AndroidManifest.xml byte-identical to stock (md5 match) — JarVerifier won't reject. New smali md5s:
+- `TrackInfoWriter.smali` → `35496cf01171fa9c5293813a45553cc0` (was `1f6a3f44dd4ac4f3edf7c08caf76eba9` pre-fix)
+- `PlaybackStateBridge.smali` → `69d50e5835b23cbf6e546298a7130f06` (was `0d8e4ed14b4dbe5683e8716b30dba76b` pre-fix)
+
+Expected behavior on hardware:
+- Bolt: TRACK_CHANGED CHANGED should fire on every `onPrepared`; Bolt CT should query `GetElementAttributes` → metadata renders.
+- Kia: PLAYBACK_STATUS / POS CHANGED should fire on every play / pause / track edge, not just the 10 s battery tick. Playhead lag should reduce (full 1 s position cadence is a separate follow-up — that requires a `Handler.postDelayed` tick loop while playing; not in this fix).
+
+### Out of scope for this fix
+- 1 s position-tick loop (Kia's residual playhead drift between actual edges). Separate change to PlaybackStateBridge — a Handler scheduled from `onPlayValue(PLAYING)` and cancelled at `STOPPED`/`PAUSED`, calling `wakePlayStateChanged` on tick.
+- Shuffle "always on" — likely initial-state issue: `y1-track-info[795..796]` is zero-filled at creation and `0x00` is not a valid AVRCP §5.2.4 Tbl 5.20 / 5.21 value. Need to initialize `TrackInfoWriter` defaults to `0x01 OFF` / `0x01 OFF` before any read. Separate change.
+- Music-app Settings UI refresh on CT-driven Repeat/Shuffle change. Music-app side observer, not a wire-level issue.
+

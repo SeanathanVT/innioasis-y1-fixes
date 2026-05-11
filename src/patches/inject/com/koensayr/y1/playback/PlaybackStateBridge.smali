@@ -78,6 +78,11 @@
 
     invoke-virtual {v1, v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPlayStatus(B)V
 
+    # State-edge wake: setPlayStatus has flushed y1-track-info[792]/[780..787]
+    # synchronously; fire playstatechanged so MtkBt routes through T9 and emits
+    # PLAYBACK_STATUS / POS CHANGED.
+    invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
     :cond_unmapped
     return-void
     :try_end_b5
@@ -100,6 +105,8 @@
 
 # OnPreparedListener hook (IJK + MediaPlayer). Track has finished decoder warmup
 # and is now playable — treat as track edge and consume any pending natural-end.
+# After the flush, fire metachanged (wakes T5 → TRACK_CHANGED CHANGED) and
+# playstatechanged (wakes T9 → PLAYBACK_POS CHANGED for the position reset).
 .method public static onPrepared()V
     .locals 3
 
@@ -107,6 +114,10 @@
     sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
 
     invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onTrackEdge()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
 
     return-void
     :try_end_b5
