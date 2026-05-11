@@ -469,7 +469,7 @@ Y1MediaBridge consumes the broadcast, updates its volatile fields, rewrites `y1-
 
 Music app becomes the second writer of the 1104-byte `y1-track-info` schema. Trampolines still read `Y1MediaBridge`'s file; this writes a parallel copy at `/data/data/com.innioasis.y1/files/y1-track-info` so both paths can be `md5sum`-compared on device.
 
-Four new classes under `com/koensayr/y1/` (smali sources at `src/patches/inject/com/koensayr/y1/`, copied into `smali_classes2/` at patcher time):
+Four new classes under `com/koensayr/y1/` (smali sources at `src/patches/inject/com/koensayr/y1/`, copied into `smali/` — the primary DEX — at patcher time, so they load with `Y1Application` itself; `smali_classes2/` would route through `MultiDex.install`'s cache at `/data/data/com.innioasis.y1/code_cache/secondary-dexes/` which survives `/system/app/` reflashes and stales out the new classes):
 
 | Class | Role |
 |---|---|

@@ -1875,17 +1875,21 @@ INJECT_ROOT = os.path.join(SCRIPT_DIR, "inject")
 
 # (source-relative-to-inject, dest-relative-to-unpacked) tuples. Source files
 # live under src/patches/inject/com/koensayr/y1/* (real .smali, syntax-checked
-# by apktool's smali assembler at reassembly time). Drop into smali_classes2/
-# so they ride classes2.dex with the rest of com.koensayr.y1.*.
+# by apktool's smali assembler at reassembly time). Drop into smali/ (primary
+# DEX) so they load with Y1Application and don't depend on MultiDex.install,
+# which on Dalvik 1.6 (Android 4.2.2) caches secondary-dexes under
+# /data/data/com.innioasis.y1/code_cache/ and survives /system/app/ reflashes
+# — a stale cache loads the pre-patch classes2.dex and TrackInfoWriter is
+# nowhere to be found at runtime (NoClassDefFoundError on Y1Application.onCreate).
 PATCH_B5_INJECT_FILES = [
     ("com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
-        "smali_classes2/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
+        "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
     ("com/koensayr/y1/playback/PlaybackStateBridge.smali",
-        "smali_classes2/com/koensayr/y1/playback/PlaybackStateBridge.smali"),
+        "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali"),
     ("com/koensayr/y1/battery/BatteryReceiver.smali",
-        "smali_classes2/com/koensayr/y1/battery/BatteryReceiver.smali"),
+        "smali/com/koensayr/y1/battery/BatteryReceiver.smali"),
     ("com/koensayr/y1/papp/PappSetFileObserver.smali",
-        "smali_classes2/com/koensayr/y1/papp/PappSetFileObserver.smali"),
+        "smali/com/koensayr/y1/papp/PappSetFileObserver.smali"),
 ]
 
 for src_rel, dst_rel in PATCH_B5_INJECT_FILES:
@@ -2068,10 +2072,10 @@ PATCHED_SMALI_FILES = [
     Y1APP_SMALI, PAPP_RECEIVER_SMALI, PAPP_BROADCASTER_SMALI,
     # Patch B5 — Y1MediaBridge retirement Phase 1
     STATIC_SMALI, PLAYER_SERVICE_SMALI_FOR_B5,
-    "smali_classes2/com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
-    "smali_classes2/com/koensayr/y1/playback/PlaybackStateBridge.smali",
-    "smali_classes2/com/koensayr/y1/battery/BatteryReceiver.smali",
-    "smali_classes2/com/koensayr/y1/papp/PappSetFileObserver.smali",
+    "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
+    "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali",
+    "smali/com/koensayr/y1/battery/BatteryReceiver.smali",
+    "smali/com/koensayr/y1/papp/PappSetFileObserver.smali",
 ]
 for rel in PATCHED_SMALI_FILES:
     full = os.path.join(UNPACKED_DIR, rel)
