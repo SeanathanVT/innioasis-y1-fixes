@@ -46,6 +46,17 @@
 # AVRCP §5.2.4 Tbl 5.21 Shuffle (default OFF=0x01)
 .field private mShuffleAvrcp:B
 
+# Cached current-track metadata populated by flushLocked, consumed by
+# wakeTrackChanged / wakePlayStateChanged so MMI_AVRCP's Java mirror sees
+# AOSP-convention Intent extras (id / track / artist / album / playing).
+.field private mCachedAudioId:J
+
+.field private mCachedTitle:Ljava/lang/String;
+
+.field private mCachedArtist:Ljava/lang/String;
+
+.field private mCachedAlbum:Ljava/lang/String;
+
 
 # direct methods
 .method static constructor <clinit>()V
@@ -88,6 +99,18 @@
     iput-byte v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mRepeatAvrcp:B
 
     iput-byte v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mShuffleAvrcp:B
+
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    const-string v0, ""
+
+    iput-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedTitle:Ljava/lang/String;
+
+    iput-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedArtist:Ljava/lang/String;
+
+    iput-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;
 
     return-void
 .end method
@@ -714,6 +737,17 @@
     add-int/lit8 v13, v13, 0x1
 
     :cond_no_svc
+    # Cache the live metadata so wakeTrackChanged / wakePlayStateChanged can
+    # emit AOSP-convention Intent extras without re-reading PlayerService
+    # (which can return null mid-prepare).
+    iput-wide v9, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    iput-object v4, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedTitle:Ljava/lang/String;
+
+    iput-object v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedArtist:Ljava/lang/String;
+
+    iput-object v6, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;
+
     # bytes 0..7 = audio_id (BE u64)
     const/4 v0, 0x0
 
@@ -1179,7 +1213,7 @@
 # Call site: PlaybackStateBridge.onPrepared, after onTrackEdge has flushed
 # the new track's y1-track-info to disk.
 .method public wakeTrackChanged()V
-    .locals 3
+    .locals 5
 
     :try_start_0
     iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;
@@ -1191,6 +1225,34 @@
     const-string v2, "com.android.music.metachanged"
 
     invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    # AOSP-convention Intent extras: id (long), track (String), artist (String),
+    # album (String). MMI_AVRCP's onReceive reads these directly into its Java
+    # mirror; without them MtkBt logs `track-info id:-1` and gates downstream
+    # notification dispatch on stale defaults.
+    const-string v2, "id"
+
+    iget-wide v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    invoke-virtual {v1, v2, v3, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;J)Landroid/content/Intent;
+
+    const-string v2, "track"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedTitle:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v2, "artist"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedArtist:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v2, "album"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
 
     invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
 
@@ -1225,7 +1287,7 @@
 # Call sites: PlaybackStateBridge.onPlayValue (state-edge wake), and
 # PlaybackStateBridge.onPrepared (new-track wake — position resets to 0).
 .method public wakePlayStateChanged()V
-    .locals 3
+    .locals 5
 
     :try_start_0
     iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;
@@ -1237,6 +1299,48 @@
     const-string v2, "com.android.music.playstatechanged"
 
     invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+
+    # AOSP-convention Intent extras: id (long), track / artist / album
+    # (String), and playing (boolean). MMI_AVRCP's onReceive logs
+    # `update-info playing:<bool>` + `track-info isPlaying:<bool> id:<long>`
+    # from these extras directly — without them MtkBt's Java mirror stays
+    # at the (false, -1) defaults regardless of actual playback state.
+    const-string v2, "id"
+
+    iget-wide v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    invoke-virtual {v1, v2, v3, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;J)Landroid/content/Intent;
+
+    const-string v2, "track"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedTitle:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v2, "artist"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedArtist:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v2, "album"
+
+    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
+
+    const-string v2, "playing"
+
+    iget-byte v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B
+
+    const/4 v4, 0x1
+
+    if-eq v3, v4, :cond_playing
+
+    const/4 v4, 0x0
+
+    :cond_playing
+    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;
 
     invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
 
