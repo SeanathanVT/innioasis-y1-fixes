@@ -169,6 +169,10 @@ class Asm:
     # short-form skip. Range: ±1 MB (the underlying b.w T4).
     def beq_w(self, label: str) -> None: self._bcond_w(1, label)   # NE skips
     def bne_w(self, label: str) -> None: self._bcond_w(0, label)   # EQ skips
+    def blt_w(self, label: str) -> None: self._bcond_w(10, label)  # GE skips
+    def bge_w(self, label: str) -> None: self._bcond_w(11, label)  # LT skips
+    def bgt_w(self, label: str) -> None: self._bcond_w(13, label)  # LE skips
+    def ble_w(self, label: str) -> None: self._bcond_w(12, label)  # GT skips
 
     # ------------------------------------------------------------------ T3/T4 (32-bit)
 

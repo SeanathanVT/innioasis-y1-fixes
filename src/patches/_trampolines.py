@@ -239,9 +239,13 @@ T9_STATE_LAST_PS_OFF      = T9_OFF_STATE + 9   # last_play_status
 T9_STATE_LAST_BATT_OFF    = T9_OFF_STATE + 10  # last_battery_status
 T9_STATE_LAST_REPEAT_OFF  = T9_OFF_STATE + 11  # last_repeat_avrcp (papp edge)
 T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
-T9_STATE_SUB_POS_OFF      = T9_OFF_STATE + 13  # sub_pos_changed (subscription
-                                               #   gate for event 0x05 per
-                                               #   AVRCP §6.7.1 "once" rule)
+# Per-subscription gates for AVRCP §6.7.1's "TG shall notify only once"
+# semantics. T8 INTERIM emit for a given event sets the matching byte = 1;
+# T9 CHANGED emit reads + clears the byte. Without these, strict CTs (Bolt
+# / Kia) reject CHANGEDs after the first one and freeze their UI mirrors.
+T9_STATE_SUB_POS_OFF      = T9_OFF_STATE + 13  # sub_pos_changed (event 0x05)
+T9_STATE_SUB_PLAY_OFF     = T9_OFF_STATE + 14  # sub_play_status (event 0x01)
+T9_STATE_SUB_PAPP_OFF     = T9_OFF_STATE + 15  # sub_papp (event 0x08)
 # T9's position-emit block needs a struct timespec for clock_gettime(CLOCK_BOOTTIME)
 # to live-extrapolate the playback position (same arithmetic T6 does for
 # GetPlayStatus). Place the 8 B timespec immediately after the file buf.
@@ -1660,6 +1664,43 @@ def _emit_t_papp(a: Asm) -> None:
     a.b_w("t4_to_epilogue")
 
 
+def _emit_subscription_write(a: Asm, byte_value: int, state_byte_offset: int,
+                             scratch_sp_offset: int, fail_label: str) -> None:
+    """Write `byte_value` (0 or 1) to y1-trampoline-state[state_byte_offset].
+
+    Used by T8 to ARM and T9 to CLEAR per-event subscription bits for the
+    AVRCP §6.7.1 once-per-registration semantic. r4 is used as fd; caller
+    must ensure r4 is dead. `scratch_sp_offset` is an unused 4-byte stack
+    region the byte_value is written to first (so we can pass &sp[off] as
+    the write source). `fail_label` is the branch target if open() fails;
+    the rest of the block silently exits via fall-through after close().
+    """
+    a.movs_imm8(0, byte_value)
+    a.str_sp_imm(0, scratch_sp_offset)
+
+    a.adr_w(0, "path_state")
+    a.movw(1, O_WRONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt_w(fail_label)                       # wide-form: ±1 MB range
+    a.mov_lo_lo(4, 0)                         # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.movs_imm8(1, state_byte_offset)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, scratch_sp_offset)
+    a.movs_imm8(2, 1)
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
+
 def _emit_t8(a: Asm) -> None:
     """T8: RegisterNotification INTERIM dispatch for events other than
     TRACK_CHANGED (0x02, handled by extended_T2).
@@ -1747,6 +1788,9 @@ def _emit_t8(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # success
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.blx_imm(PLT_reg_notievent_playback_rsp)
+
+    # Arm sub_play_status bit (event 0x01) per AVRCP §6.7.1.
+    _emit_subscription_write(a, 1, 14, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
     a.label("t8_check_3")
@@ -1825,39 +1869,10 @@ def _emit_t8(a: Asm) -> None:
     a.add_imm_t3(0, 5, 8)
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
 
-    # Arm sub_pos_changed in y1-trampoline-state[13] so T9 will emit exactly
-    # one PLAYBACK_POS_CHANGED CHANGED before clearing the bit, matching
-    # AVRCP §6.7.1's per-subscription "once" rule. Strict CTs (Kia) reject
-    # unsolicited CHANGEDs after subscription is consumed; without this gate
-    # our 1 Hz PositionTicker emits ~∞ CHANGEDs and Kia stops tracking the
-    # playhead after the first 1-2. With this gate, each RegisterNotification
-    # yields one CHANGED and the CT must re-register to receive the next —
-    # the same pattern iPhone / Pixel TGs implement.
-    a.movs_imm8(0, 1)
-    a.str_sp_imm(0, T8_OFF_TIMESPEC_SEC)      # 1-byte source = 0x01
-
-    a.adr_w(0, "path_state")
-    a.movw(1, O_WRONLY)
-    a.movs_imm8(2, 0)
-    a.blx_imm(PLT_open)
-    a.cmp_imm8(0, 0)
-    a.blt("t8_done")                          # open failed → skip bit-set
-    a.mov_lo_lo(4, 0)                         # r4 = fd
-
-    a.mov_lo_lo(0, 4)
-    a.movs_imm8(1, 13)
-    a.movs_imm8(2, SEEK_SET)
-    a.movs_imm8(7, NR_lseek)
-    a.svc(0)
-
-    a.mov_lo_lo(0, 4)
-    a.add_sp_imm(1, T8_OFF_TIMESPEC_SEC)
-    a.movs_imm8(2, 1)
-    a.blx_imm(PLT_write)
-
-    a.mov_lo_lo(0, 4)
-    a.blx_imm(PLT_close)
-
+    # Arm sub_pos_changed bit (event 0x05) per AVRCP §6.7.1 per-subscription
+    # "once" rule. T9 will emit exactly one PLAYBACK_POS_CHANGED CHANGED then
+    # clear the bit; CT must re-register to receive the next.
+    _emit_subscription_write(a, 1, 13, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
     a.label("t8_check_6")
@@ -1910,6 +1925,9 @@ def _emit_t8(a: Asm) -> None:
     a.movs_imm8(2, REASON_INTERIM)
     a.movs_imm8(3, 2)                           # n=2
     a.blx_imm(PLT_reg_notievent_player_appsettings_rsp)
+
+    # Arm sub_papp bit (event 0x08) per AVRCP §6.7.1.
+    _emit_subscription_write(a, 1, 15, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
     a.label("t8_unknown_event")
@@ -2082,20 +2100,31 @@ def _emit_t9(a: Asm) -> None:
     a.cmp_w(0, 1)
     a.beq("t9_after_play_check")
 
+    # Edge detected. Update state[9] = file[792] in-memory unconditionally
+    # so we don't loop "edge detected" forever while un-subscribed; the
+    # state-writeback below will persist this.
+    a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
+    a.movs_imm8(5, 1)                         # any_change = 1
+
+    # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
+    # has armed sub_play_status (state[14] = 1) since last emit. CTs that
+    # don't re-register won't get phantom CHANGEDs; CTs that do (Sonos,
+    # iPhone) get a fresh CHANGED per subscription cycle.
+    a.ldrb_w(1, 13, T9_STATE_SUB_PLAY_OFF)
+    a.cmp_imm8(1, 0)
+    a.beq("t9_after_play_check")
+
     # ---- emit CHANGED via reg_notievent_playback_rsp ----
     # r0 = conn (= struct + 8); r1 = 0 success; r2 = REASON_CHANGED;
-    # r3 = play_status (from file_buf[792]). transId is auto-extracted from
-    # conn[17] by the response builder (same convention as T5).
+    # r3 = play_status (from file_buf[792]).
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # success
     a.movs_imm8(2, REASON_CHANGED)
     a.ldrb_w(3, 13, T9_OFF_FILE_PLAYFLAG)     # r3 = play_status
     a.blx_imm(PLT_reg_notievent_playback_rsp)
 
-    # ---- update state[9] = file[792] in-memory ----
-    a.ldrb_w(0, 13, T9_OFF_FILE_PLAYFLAG)
-    a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
-    a.movs_imm8(5, 1)                         # any_change = 1
+    # Clear sub_play_status (state[14]) — subscription consumed.
+    _emit_subscription_write(a, 0, 14, T9_OFF_TIMESPEC_SEC, "t9_after_play_check")
 
     a.label("t9_after_play_check")
 
@@ -2143,6 +2172,22 @@ def _emit_t9(a: Asm) -> None:
     a.beq("t9_after_papp_check")
 
     a.label("t9_papp_emit")
+    # Edge detected. Update state[11] / state[12] in-memory unconditionally
+    # so we don't loop "edge detected" forever while un-subscribed.
+    a.ldrb_w(0, 13, T9_OFF_FILE_REPEAT)
+    a.strb_w(0, 13, T9_STATE_LAST_REPEAT_OFF)
+    a.ldrb_w(0, 13, T9_OFF_FILE_SHUFFLE)
+    a.strb_w(0, 13, T9_STATE_LAST_SHUFFLE_OFF)
+    a.movs_imm8(5, 1)                         # any_change = 1
+
+    # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
+    # has armed sub_papp (state[15] = 1) since last emit. Without this,
+    # Bolt's PApp UI freezes after the first CHANGED (subscription consumed,
+    # no re-registration).
+    a.ldrb_w(1, 13, T9_STATE_SUB_PAPP_OFF)
+    a.cmp_imm8(1, 0)
+    a.beq("t9_after_papp_check")
+
     # ---- emit CHANGED via reg_notievent_player_appsettings_changed_rsp ----
     # (conn, 0, REASON_CHANGED, n=2, *attr_ids, *values)
     # *values = &file[795] — file_buf already holds [repeat, shuffle]
@@ -2157,12 +2202,8 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(3, 2)                         # n
     a.blx_imm(PLT_reg_notievent_player_appsettings_rsp)
 
-    # ---- update state[11] / state[12] in-memory ----
-    a.ldrb_w(0, 13, T9_OFF_FILE_REPEAT)
-    a.strb_w(0, 13, T9_STATE_LAST_REPEAT_OFF)
-    a.ldrb_w(0, 13, T9_OFF_FILE_SHUFFLE)
-    a.strb_w(0, 13, T9_STATE_LAST_SHUFFLE_OFF)
-    a.movs_imm8(5, 1)                         # any_change = 1
+    # Clear sub_papp (state[15]) — subscription consumed.
+    _emit_subscription_write(a, 0, 15, T9_OFF_TIMESPEC_SEC, "t9_after_papp_check")
 
     a.label("t9_after_papp_check")
 
@@ -2278,37 +2319,11 @@ def _emit_t9(a: Asm) -> None:
     # r3 already = live_pos
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
 
-    # ---- clear sub_pos_changed = 0 in y1-trampoline-state[13] ----
-    # Subscription is consumed per AVRCP §6.7.1; next CHANGED only fires
-    # after T8 INTERIM emit re-arms the bit (i.e. CT re-registers). The
-    # state-writeback block above already ran for this T9 invocation, so
-    # we do a dedicated 1-byte write here. timespec area (used by the
-    # position math above) is dead at this point; reuse it as the byte-0
-    # source buffer.
-    a.movs_imm8(0, 0)
-    a.str_sp_imm(0, T9_OFF_TIMESPEC_SEC)      # 1-byte source = 0x00
-
-    a.adr_w(0, "path_state")
-    a.movw(1, O_WRONLY)
-    a.movs_imm8(2, 0)
-    a.blx_imm(PLT_open)
-    a.cmp_imm8(0, 0)
-    a.blt("t9_done")                          # open failed → skip clear
-    a.mov_lo_lo(4, 0)                         # r4 = fd
-
-    a.mov_lo_lo(0, 4)
-    a.movs_imm8(1, 13)
-    a.movs_imm8(2, SEEK_SET)
-    a.movs_imm8(7, NR_lseek)
-    a.svc(0)
-
-    a.mov_lo_lo(0, 4)
-    a.add_sp_imm(1, T9_OFF_TIMESPEC_SEC)
-    a.movs_imm8(2, 1)
-    a.blx_imm(PLT_write)
-
-    a.mov_lo_lo(0, 4)
-    a.blx_imm(PLT_close)
+    # Clear sub_pos_changed (event 0x05) per AVRCP §6.7.1 once-consumed
+    # semantics. Next CHANGED only fires after T8 INTERIM emit re-arms the
+    # bit (CT re-registers). State-writeback block above already ran for
+    # this T9 invocation; dedicated 1-byte write needed here.
+    _emit_subscription_write(a, 0, 13, T9_OFF_TIMESPEC_SEC, "t9_done")
 
     a.label("t9_done")
     # ---- epilogue: return jboolean true ----
