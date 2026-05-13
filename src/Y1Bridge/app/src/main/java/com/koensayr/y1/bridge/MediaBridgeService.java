@@ -11,6 +11,7 @@ import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 
@@ -42,6 +43,14 @@ public class MediaBridgeService extends Service {
     private static final String TRACK_INFO_PATH =
             "/data/data/com.innioasis.y1/files/y1-track-info";
     private static final int TRACK_INFO_SIZE = 1104;
+    // y1-papp-set — 2-byte (attr_id, AVRCP value) tuple consumed by the
+    // music app's PappSetFileObserver. World-writable per ensureFile
+    // (TrackInfoWriter.smali:243-245). Backstop sink when a Java-routed
+    // PApp Set arrives without the wire PDU 0x14 going through T_papp.
+    private static final String PAPP_SET_PATH =
+            "/data/data/com.innioasis.y1/files/y1-papp-set";
+    private static final byte PAPP_ATTR_REPEAT  = 0x02;
+    private static final byte PAPP_ATTR_SHUFFLE = 0x03;
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
@@ -127,6 +136,24 @@ public class MediaBridgeService extends Service {
         }
     }
 
+    // Write a 2-byte (attr_id, AVRCP value) tuple to y1-papp-set. The music
+    // app's PappSetFileObserver picks it up on CLOSE_WRITE and applies via
+    // SharedPreferencesUtils. Idempotent with the canonical wire path: if
+    // T_papp 0x14 already wrote the same tuple, we just trigger a duplicate
+    // observer fire with identical bytes — SharedPreferencesUtils setters
+    // are no-ops when the value is unchanged.
+    private static void writePappSet(byte attr, byte val) {
+        FileOutputStream out = null;
+        try {
+            out = new FileOutputStream(PAPP_SET_PATH);
+            out.write(new byte[]{ attr, val });
+        } catch (IOException ignored) {
+            // File may not exist yet (cold boot before TrackInfoWriter.init).
+        } finally {
+            if (out != null) try { out.close(); } catch (IOException ignored) {}
+        }
+    }
+
     private static long computePosition(byte[] buf) {
         long base = readBeU32(buf, OFF_POSITION_MS);
         if ((buf[OFF_PLAY_STATUS] & 0xff) != 1) return base;
@@ -179,11 +206,29 @@ public class MediaBridgeService extends Service {
                 if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
                 return true;
 
-            case 4:  // setPlayerApplicationSettingValue(byte, byte) -> boolean
+            case 4: { // setPlayerApplicationSettingValue(byte attr, byte val) -> boolean
+                // Defensive backstop: T_papp 0x14 catches the wire PDU before
+                // MtkBt's Java path forwards it to us, but if that ever misses
+                // (or if MtkBt has a non-wire Java caller) the file write here
+                // ensures PappSetFileObserver still applies the change.
+                byte attr = 0, val = 0;
+                try { attr = data.readByte(); val = data.readByte(); } catch (Exception ignored) {}
+                if (attr == PAPP_ATTR_REPEAT || attr == PAPP_ATTR_SHUFFLE) {
+                    writePappSet(attr, val);
+                }
+                if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
+                return true;
+            }
             case 14: // setEqualizeMode(int) -> boolean
             case 16: // setShuffleMode(int)  -> boolean
             case 18: // setRepeatMode(int)   -> boolean
             case 20: // setScanMode(int)     -> boolean
+                // Codes 16/18 are the AIDL-int counterparts to case 4 but the
+                // int param's value semantics (Y1 enum vs AVRCP enum) aren't
+                // documented in MtkBt's BTAvrcpMusicAdapter — would need
+                // on-device verification before forwarding to y1-papp-set.
+                // The canonical wire-PApp-Set path runs through T_papp 0x14
+                // → case 4 above, so these stay ack-success no-ops.
                 if (reply != null) { reply.writeNoException(); reply.writeInt(1); }
                 return true;
 
@@ -279,9 +324,21 @@ public class MediaBridgeService extends Service {
                 }
                 return true;
             }
-            case 30: // getAlbumId() -> long  (not in schema; benign 0)
-                if (reply != null) { reply.writeNoException(); reply.writeLong(0); }
+            case 30: { // getAlbumId() -> long
+                // Schema doesn't carry album_id, so synthesize from the album
+                // name with the same hash scheme TrackInfoWriter uses for
+                // audio_id when MediaStore _ID isn't available. Bit prefix
+                // 0x200000000L distinguishes it from audio_id's 0x100000000L
+                // so the two can't collide. Empty album → 0 (was the old
+                // benign default).
+                byte[] buf = readTrackInfo();
+                String album = readUtf8(buf, OFF_ALBUM);
+                long id = album.isEmpty()
+                        ? 0L
+                        : (((long) album.hashCode()) & 0xFFFFFFFFL) | 0x200000000L;
+                if (reply != null) { reply.writeNoException(); reply.writeLong(id); }
                 return true;
+            }
 
             case 31: { // getArtistName() -> String
                 byte[] buf = readTrackInfo();
