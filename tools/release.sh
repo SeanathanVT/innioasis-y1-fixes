@@ -16,7 +16,7 @@
 #      is the more-likely-to-fail of the two mutations, so it runs first —
 #      if it fails, apply.bash hasn't been touched yet.)
 #   7a. Update the bash's `# Version:` header in-place.
-#   7b. Commit both files with message "Release v$VERSION. See CHANGELOG.md for notes."
+#   7b. Commit both files with message "Release v$VERSION" + the new CHANGELOG section body.
 #   8. Create annotated tag `v$VERSION` at HEAD with the same message.
 #   9. If --push given: push the commit and the tag together. Otherwise print
 #      the commands you'd run to push later.
@@ -174,10 +174,17 @@ fi
 
 # 6 — rewrite CHANGELOG first (the more-likely-to-fail step). If the regex
 # misses or anything else goes wrong, the apply.bash sed below never runs.
-python3 - "$CHANGELOG" "$VERSION" "$TODAY" <<'PYEOF'
+# Also captures the [Unreleased] body for re-use as the commit + tag message.
+RELEASE_BODY="$(mktemp)"
+trap 'rm -f "$RELEASE_BODY"' EXIT
+python3 - "$CHANGELOG" "$VERSION" "$TODAY" "$RELEASE_BODY" <<'PYEOF'
 import sys, re, pathlib
-path, version, today = sys.argv[1], sys.argv[2], sys.argv[3]
+path, version, today, body_path = sys.argv[1:5]
 text = pathlib.Path(path).read_text()
+m = re.search(r'^## \[Unreleased\]\s*\n(.*?)(?=^## \[|\Z)', text, re.M | re.S)
+if not m:
+    sys.exit("ERROR: failed to locate [Unreleased] section in CHANGELOG")
+pathlib.Path(body_path).write_text(m.group(1).strip() + '\n')
 new = re.sub(
     r'^## \[Unreleased\]\s*\n',
     f'## [Unreleased]\n\n## [{version}] - {today}\n',
@@ -200,14 +207,17 @@ if ! grep -qE "^# Version:[[:space:]]+$VERSION[[:space:]]*$" "$BASH_FILE"; then
 fi
 echo "[bumped] $BASH_FILE  '# Version: $VERSION'"
 
-# 7b — commit
-COMMIT_MSG="Release v$VERSION. See CHANGELOG.md for notes."
+# 7b — commit. Message = "Release v$VERSION" + the new CHANGELOG section body.
+# --cleanup=verbatim preserves '### Added' / '### Changed' / '### Fixed' headers
+# (default cleanup strips lines starting with '#').
 git add "$BASH_FILE" "$CHANGELOG"
-git commit -m "$COMMIT_MSG"
+{ printf 'Release v%s\n\n' "$VERSION"; cat "$RELEASE_BODY"; } \
+    | git commit --cleanup=verbatim -F -
 echo "[committed] $(git log -1 --pretty='%h %s')"
 
-# 8 — annotated tag
-git tag -a "$TAG" -m "Release $VERSION. See CHANGELOG.md for notes."
+# 8 — annotated tag with the same body.
+{ printf 'Release v%s\n\n' "$VERSION"; cat "$RELEASE_BODY"; } \
+    | git tag -a --cleanup=verbatim -F - "$TAG"
 echo "[tagged]    $TAG → $(git rev-parse --short "$TAG")"
 
 # 9 — push (or print). Pushes the current branch (not a hardcoded `main`)
