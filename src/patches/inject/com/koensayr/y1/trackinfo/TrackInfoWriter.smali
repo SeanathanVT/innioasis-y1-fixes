@@ -57,6 +57,12 @@
 
 .field private mCachedAlbum:Ljava/lang/String;
 
+# Last duration value PlayerService.getDuration() returned while prepared.
+# flushLocked preserves it across prepare gaps so y1-track-info[776..779]
+# never falls back to 0 (which CTs treat as "duration unknown" and hide
+# the playhead display).
+.field private mLastKnownDuration:J
+
 
 # direct methods
 .method static constructor <clinit>()V
@@ -111,6 +117,10 @@
     iput-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedArtist:Ljava/lang/String;
 
     iput-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;
+
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
 
     return-void
 .end method
@@ -327,9 +337,12 @@
 
 
 # Latch a natural-end signal from MediaPlayer.OnCompletionListener. The next
-# onTrackEdge consumes + clears it.
+# onTrackEdge consumes + clears it. Also freezes the playhead anchor at
+# duration so T9 / T6 stop extrapolating past end-of-track during the gap
+# until onPrepared fires for the next track — CTs hide the playhead when
+# position > duration arrives on the wire.
 .method public declared-synchronized markCompletion()V
-    .locals 1
+    .locals 3
 
     monitor-enter p0
 
@@ -337,6 +350,16 @@
     const/4 v0, 0x1
 
     iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
 
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
     :try_end_0
@@ -729,7 +752,18 @@
 
     move-result-wide v11
 
+    # Cache the live duration so we can fall back to it when getPlayerIsPrepared
+    # goes false during a prepare gap. Without this, the duration field in
+    # y1-track-info briefly resets to 0 and the CT loses its playhead display
+    # ("0:00 / 0:00" or hidden entirely) until the next prepare completes.
+    iput-wide v11, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    goto :cond_have_duration
+
     :cond_skip_duration
+    iget-wide v11, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    :cond_have_duration
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getMusicIndex()I
 
     move-result v13

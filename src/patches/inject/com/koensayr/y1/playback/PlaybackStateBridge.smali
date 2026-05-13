@@ -156,7 +156,11 @@
 
 
 # OnCompletionListener hook (IJK + MediaPlayer). Player engine reached EOS.
-# Latch the natural-end signal so the next onPrepared sets mPreviousTrackNaturalEnd.
+# Latch the natural-end signal so the next onPrepared sets
+# mPreviousTrackNaturalEnd, freeze the playhead at duration so T6 / T9 stop
+# extrapolating past end-of-track, stop PositionTicker so we don't keep
+# firing PLAYBACK_POS_CHANGED CHANGED during the prepare gap, and fire one
+# final wake so the CT sees the frozen "at duration" anchor immediately.
 .method public static onCompletion()V
     .locals 3
 
@@ -164,6 +168,10 @@
     sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
 
     invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->markCompletion()V
+
+    invoke-static {}, Lcom/koensayr/y1/playback/PositionTicker;->stop()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
 
     return-void
     :try_end_b5
