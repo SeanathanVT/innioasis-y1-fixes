@@ -123,19 +123,8 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
 #                      848..1103 Genre                      UTF-8 (256 B)
-#                      1104..1111 CoverArtHandle slot (always 0). Reserved for
-#                                                            AVRCP 1.6 §5.14.1 Default Cover Art
-#                                                            (attribute id 0x8 per §26 Table 26.1
-#                                                            via ESR09 E6073). Y1 does not
-#                                                            implement Cover Art transfer (out of
-#                                                            project scope). Slot exists so T4 can
-#                                                            emit attr 0x08 as a §5.3.4 zero-length
-#                                                            attribute, since strict CTs include
-#                                                            0x08 in their attribute-set request
-#                                                            and gate render on a §5.3.4-compliant
-#                                                            response shape.
 T4_FRAME           = 1136
-T4_FILE_SIZE       = 1112
+T4_FILE_SIZE       = 1104
 T4_OFF_ARGS        = 0
 T4_OFF_STATE       = 16
 T4_OFF_FILE        = 32
@@ -147,12 +136,18 @@ T4_OFF_FILE_TRACK_NUM   = T4_OFF_FILE + 800  # file_buf[800..815]
 T4_OFF_FILE_TOTAL_NUM   = T4_OFF_FILE + 816  # file_buf[816..831]
 T4_OFF_FILE_PLAY_TIME   = T4_OFF_FILE + 832  # file_buf[832..847]
 T4_OFF_FILE_GENRE       = T4_OFF_FILE + 848  # file_buf[848..1103]
-T4_OFF_FILE_COVER_HANDLE = T4_OFF_FILE + 1104 # file_buf[1104..1111]
 
 # Caller-relative offsets shift by T4_FRAME after our SUB SP.
 T4_TRANSID_OFF = 368 + T4_FRAME           # 1176
 T4_PDU_OFF_ENTRY  = 382                   # before SUB SP (entry pre-check)
 T4_LR_CANARY_OFF_ENTRY = 374              # before SUB SP (epilogue restore)
+# Inbound GetElementAttributes request body (AVRCP wire layout):
+#   caller_sp + 382 = PDU (0x20), 383 = PT, 384..385 = ParamLen BE u16,
+#   386..393 = Identifier (8 B, 0x0=PLAYING),
+#   394 = NumAttributes (1 B), 395+ = AttributeID[N] (4 B BE each).
+# Post-SUB-SP, these slots are at sp + offset + T4_FRAME.
+T4_NUMATTR_OFF = 394 + T4_FRAME           # 1530 - inbound NumAttributes byte
+T4_ATTRIDS_OFF = 395 + T4_FRAME           # 1531 - inbound AttributeID[0] base
 
 # extended_T2 frame: 16 B for [track_id (8) || transId (1) || pad (7)].
 T2_FRAME = 16
@@ -544,70 +539,182 @@ def _emit_t4(a: Asm) -> None:
     #   arg3 = TOTAL number of attributes
     #   EMIT trigger: (arg2+1 == arg3) AND (arg3 != 0)
     # transId is read by the function itself from conn[17]; we don't pass it.
-    # Passing arg3=0 takes a legacy "EMIT every call" path that produces
-    # one msg=540 frame per attribute; we pack all attributes into a single
-    # frame by accumulating with arg3=N and emitting on the final call.
+    # We pack all emitted attributes into a single msg=540 frame by accumulating
+    # with arg3=N and emitting on the final call.
+    #
+    # AVRCP 1.3 §6.6.1 Table 6.26 mandates the response shape:
+    #   "If NumAttributes is set to zero, all attribute information shall be
+    #    returned, else attribute information for the specified attribute IDs
+    #    shall be returned by the TG."
+    # Together with §5.3.4 ("For attributes not supported by the TG, this
+    # field shall be sent with 0 length data"), this means T4 must:
+    #   - Read the CT's inbound NumAttributes byte (caller_sp + 394).
+    #   - If N == 0: emit all 7 supported attrs (1..7) in canonical order.
+    #   - If N > 0: emit each requested AttributeID in the CT-specified order;
+    #     for any IDs outside {0x01..0x07} (= our supported set), emit with
+    #     AttributeValueLength = 0. Per-attr-id offset lookup via the inline
+    #     `t4_attr_offset_table` data block below.
+    # The empty-attribute emit relies on patch_libextavrcp.py E1 landing —
+    # without it, libextavrcp.so's response builder drops zero-length attrs.
     #
     # AVRCP 1.3 §5.3.4 attribute IDs:
     #   0x01 Title              0x05 TotalNumberOfTracks
     #   0x02 Artist             0x06 Genre
     #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
     #   0x04 TrackNumber
-    # AVRCP 1.6 §5.14.1 attribute id (§26 Table 26.1 per ESR09 E6073):
-    #   0x08 Default Cover Art — Y1 does not implement Cover Art transfer
-    #        (out of project scope per AVRCP 1.3-only policy). T4 still emits
-    #        the slot so strict CTs that include 0x08 in their requested
-    #        attribute set receive a §5.3.4-compliant zero-length response
-    #        entry ("attribute not supported by TG") rather than a silently
-    #        truncated response. Requires patch_libextavrcp.py E1 to land —
-    #        stock libextavrcp.so drops zero-length attributes on the floor
-    #        in violation of §5.3.4.
-    # All values are UTF-8 (charset 0x006A); per §5.3.4 a missing attribute is
-    # signalled by AttributeValueLength=0. Requires patch_libextavrcp.py E1
-    # to land — the stock response builder drops zero-length attributes on
-    # the floor instead of emitting them, which is non-compliant with §5.3.4.
-    attr_table = (
-        ("title",         0x01, T4_OFF_FILE_TITLE),
-        ("artist",        0x02, T4_OFF_FILE_ARTIST),
-        ("album",         0x03, T4_OFF_FILE_ALBUM),
-        ("track_num",     0x04, T4_OFF_FILE_TRACK_NUM),
-        ("total_num",     0x05, T4_OFF_FILE_TOTAL_NUM),
-        ("genre",         0x06, T4_OFF_FILE_GENRE),
-        ("play_time",     0x07, T4_OFF_FILE_PLAY_TIME),
-        ("cover_handle",  0x08, T4_OFF_FILE_COVER_HANDLE),
-    )
-    # add_sp_imm has 0..1020 imm range; cover_handle at offset 1136 needs the
-    # wider addw rd, sp, #imm12 encoding. Pick per-offset to stay compact.
-    def _t4_add_sp(rd: int, off: int) -> None:
-        if 0 <= off <= 1020 and (off & 3) == 0:
-            a.add_sp_imm(rd, off)
-        else:
-            a.addw(rd, 13, off)
+    # All values are UTF-8 (charset 0x006A).
 
+    # ---- read NumAttributes from inbound request ----
+    a.ldrb_w(7, 13, T4_NUMATTR_OFF)           # r7 = N (CT-requested count)
+    a.cmp_imm8(7, 0)
+    a.beq_w("t4_emit_all")                    # N==0 -> §6.6.1 "return all"
+
+    # ---- Phase 1: request-driven emit loop ----
+    # Register conventions in this loop:
+    #   r5  = JNI base (preserved by caller's stmdb prologue, untouched here)
+    #   r6  = i  (loop counter; preserved across strlen/rsp calls — low reg
+    #             happens to be caller-saved, but we re-emit it through the
+    #             call args anyway, so no extra save needed)
+    #   r7  = N  (loop bound; ditto)
+    #   r9  = attr_id (saved across strlen/rsp; r9 is callee-saved per AAPCS)
+    #   r10 = str_offset (saved across strlen/rsp; r10 callee-saved)
+    a.movs_imm8(6, 0)                         # r6 = i = 0
+
+    a.label("t4_req_loop")
+    # Compute pointer to AttributeID[i]: r4 = sp + T4_ATTRIDS_OFF + 4*i
+    a.addw(4, 13, T4_ATTRIDS_OFF)             # r4 = sp + T4_ATTRIDS_OFF
+    a.mov_lo_lo(0, 6)                         # r0 = i
+    a.lsls_imm5(0, 0, 2)                      # r0 = i * 4
+    a.add_reg(4, 0)                           # r4 += i*4 (now r4 = &AttrIDs[i])
+
+    # Load BE u32 attr_id, byte-reverse to LE for compare.
+    a.ldr_w(0, 4, 0)                          # r0 = BE u32 attr_id
+    a.rev_lo_lo(0, 0)                         # r0 = LE attr_id
+
+    # Save attr_id to r9 (preserved across strlen + rsp calls).
+    a.mov_lo_lo(9, 0)
+
+    # If attr_id is 0 or >= 8: unsupported. AVRCP 1.3 §26 Table 26.1 marks 0
+    # as "Not Used" and 0x8-0xFFFFFFFF as Reserved.
+    a.cmp_imm8(0, 0)
+    a.beq("t4_req_unsup")
+    a.cmp_imm8(0, 8)
+    a.bhs("t4_req_unsup")                     # attr_id >= 8 → unsupported
+
+    # Look up table[attr_id] → r4 (= sp-relative file_buf offset).
+    a.adr_w(4, "t4_attr_offset_table")        # r4 = table base
+    a.lsls_imm5(0, 0, 2)                      # r0 = attr_id * 4
+    a.add_reg(4, 0)                           # r4 = &table[attr_id]
+    a.ldr_w(4, 4, 0)                          # r4 = table[attr_id]
+    a.b_w("t4_req_have_off")
+
+    a.label("t4_req_unsup")
+    # Unsupported attr: emit with length=0. r4 = 0 → sp+0 = T4_OFF_ARGS region,
+    # which we initialize each iteration via the str writes below; the args
+    # region's leading byte is whatever we wrote last (overwritten before
+    # strlen call sees it), so use a pre-known-zero sentinel.
+    # Simpler: just emit length=0 directly. Use 0 as ptr (the response
+    # builder won't deref past length, but we set it for shape).
+    a.movs_imm8(4, 0)                         # r4 = 0 sentinel
+
+    a.label("t4_req_have_off")
+    # Save str_offset to r10 (preserved across strlen + rsp calls).
+    a.mov_lo_lo(10, 4)
+
+    # strlen(sp + str_offset). For unsupported (str_offset = 0), this points
+    # at the args region. Its current contents are whatever we set last —
+    # but since the FIRST byte at sp+0 is the previous iteration's attr_id
+    # write (a non-zero value 1..7) or the initial pre-loop zero-fill, the
+    # strlen result is unpredictable. Override: short-circuit unsupported
+    # by setting r0 to 0 directly.
+    a.cmp_imm8(4, 0)                          # str_offset == 0?
+    a.beq("t4_req_skip_strlen")
+    a.mov_lo_lo(0, 13)                        # r0 = sp
+    a.add_reg(0, 4)                           # r0 = sp + str_offset
+    a.blx_imm(PLT_strlen)                     # r0 = strlen
+    a.b_w("t4_req_have_strlen")
+
+    a.label("t4_req_skip_strlen")
+    a.movs_imm8(0, 0)                         # r0 = 0 (no value to measure)
+
+    a.label("t4_req_have_strlen")
+    # Pack response args: sp[0]=attr_id, sp[4]=charset, sp[8]=strlen, sp[12]=ptr
+    a.str_sp_imm(0, T4_OFF_ARGS + 8)          # sp[8]  = strlen
+
+    a.mov_lo_lo(0, 9)                         # r0 = attr_id
+    a.str_sp_imm(0, T4_OFF_ARGS + 0)          # sp[0]  = attr_id
+
+    a.movs_imm8(0, 0x6A)
+    a.str_sp_imm(0, T4_OFF_ARGS + 4)          # sp[4]  = charset (UTF-8)
+
+    a.mov_lo_lo(0, 13)                        # r0 = sp
+    a.add_reg(0, 10)                          # r0 = sp + str_offset
+    a.str_sp_imm(0, T4_OFF_ARGS + 12)         # sp[12] = ptr
+
+    # Call get_element_attributes_rsp(conn, 0, i, N).
+    a.add_imm_t3(0, 5, 8)                     # r0 = conn (= r5+8)
+    a.movs_imm8(1, 0)                         # r1 = 0
+    a.mov_lo_lo(2, 6)                         # r2 = i
+    a.mov_lo_lo(3, 7)                         # r3 = N
+    a.blx_imm(PLT_get_element_attributes_rsp)
+
+    # i++; if i < N: loop.
+    a.add_imm_t3(6, 6, 1)
+    a.cmp_w(6, 7)
+    a.blt_w("t4_req_loop")
+    a.b_w("t4_req_done")
+
+    # ---- N==0 fallback: emit all 7 supported attrs per §6.6.1 ----
+    a.label("t4_emit_all")
+    attr_table = (
+        ("title",       0x01, T4_OFF_FILE_TITLE),
+        ("artist",      0x02, T4_OFF_FILE_ARTIST),
+        ("album",       0x03, T4_OFF_FILE_ALBUM),
+        ("track_num",   0x04, T4_OFF_FILE_TRACK_NUM),
+        ("total_num",   0x05, T4_OFF_FILE_TOTAL_NUM),
+        ("genre",       0x06, T4_OFF_FILE_GENRE),
+        ("play_time",   0x07, T4_OFF_FILE_PLAY_TIME),
+    )
     total_attrs = len(attr_table)
     for idx, (label_suffix, attr_id, str_offset) in enumerate(attr_table):
         a.label(f"t4_reply_{label_suffix}")
-        _t4_add_sp(0, str_offset)             # r0 = string ptr
+        a.add_sp_imm(0, str_offset)           # r0 = sp + str_offset
         a.blx_imm(PLT_strlen)                 # r0 = strlen
         a.mov_lo_lo(6, 0)                     # r6 = strlen
 
         a.add_imm_t3(0, 5, 8)                 # r0 = conn
-        a.movs_imm8(1, 0)                     # r1 = 0 (with-string flag)
-        a.movs_imm8(2, idx)                   # r2 = attribute index
-        a.movs_imm8(3, total_attrs)           # r3 = total attributes
+        a.movs_imm8(1, 0)
+        a.movs_imm8(2, idx)
+        a.movs_imm8(3, total_attrs)
         a.movs_imm8(4, attr_id)
         a.str_sp_imm(4, T4_OFF_ARGS + 0)      # sp[0]  = attr_id
         a.movs_imm8(4, 0x6A)
-        a.str_sp_imm(4, T4_OFF_ARGS + 4)      # sp[4]  = charset (UTF-8)
+        a.str_sp_imm(4, T4_OFF_ARGS + 4)      # sp[4]  = charset
         a.str_sp_imm(6, T4_OFF_ARGS + 8)      # sp[8]  = strlen
-        _t4_add_sp(4, str_offset)
+        a.add_sp_imm(4, str_offset)
         a.str_sp_imm(4, T4_OFF_ARGS + 12)     # sp[12] = ptr
         a.blx_imm(PLT_get_element_attributes_rsp)
 
     # ---- restore stack and tail-call the function epilogue ----
-    a.addw(13, 13, T4_FRAME)                  # add.w sp, sp, #808
-    a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # restore lr canary
+    a.label("t4_req_done")
+    a.addw(13, 13, T4_FRAME)
+    a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)
     a.b_w("t4_to_epilogue")
+
+    # ---- Inline data: attr_id → file_buf-relative offset lookup ----
+    # Indexed by AVRCP 1.3 §26 Table 26.1 attribute ID (1..7).
+    # Index 0 is unused (attr_id 0 = "Not Used"; bounds check above redirects
+    # to the unsupported path before reaching this table).
+    a.align(4)
+    a.label("t4_attr_offset_table")
+    a._word(0)                                # attr_id 0 (Not Used)
+    a._word(T4_OFF_FILE_TITLE)                # attr_id 1
+    a._word(T4_OFF_FILE_ARTIST)               # attr_id 2
+    a._word(T4_OFF_FILE_ALBUM)                # attr_id 3
+    a._word(T4_OFF_FILE_TRACK_NUM)            # attr_id 4
+    a._word(T4_OFF_FILE_TOTAL_NUM)            # attr_id 5
+    a._word(T4_OFF_FILE_GENRE)                # attr_id 6
+    a._word(T4_OFF_FILE_PLAY_TIME)            # attr_id 7
 
 
 def _emit_extended_t2(a: Asm) -> None:

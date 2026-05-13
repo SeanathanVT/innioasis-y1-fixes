@@ -2596,3 +2596,53 @@ The AVRCP 1.6 Cover Art carve-out is rolled back — no BIP responder, no OBEX c
 
 - Strict-CT pause-icon stuck after first toggle: CT doesn't re-register after our CHANGED, §6.7.1 prevents subsequent CHANGED without re-registration. CT-side §6.7.1 violation.
 - Strict-CT Shuffle stuck on: same root cause.
+
+## Trace #30 (2026-05-13) — Phase 1 request-shape compliance; drop all AVRCP 1.6 framing
+
+### Diagnosis from post-E1 captures
+
+Bolt's metadata pane still empty after `patch_libextavrcp.py` E1 landed. The post-flash capture (`dual-bolt-20260513-1556`) shows:
+
+- `EXTADP_AVRCP send_get_element_attributes strlen:0 offset:57 g_offset:58` — attr 8 zero-length entry now reaches the wire (E1 working as designed).
+- But the inbound parser shows Bolt's actual request was **`NumAttr=7, AttrIDs=[0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7]`** (canonical 1.3 set, no attr 0x08), and Y1 was sending a frame with 8 attributes (1..7 plus 0x08 zero-length).
+
+So Y1's response violates **AVRCP 1.3 §6.6.1 Table 6.26**:
+
+> *"If NumAttributes is set to zero, all attribute information shall be returned, else attribute information for the specified attribute IDs shall be returned by the TG."*
+
+We were emitting more (and in a different order) than Bolt asked for. Lenient CTs tolerate the extras; strict-CT parsers reject the entire frame.
+
+### Phase 1 implementation
+
+T4 in `_trampolines.py` rewritten to:
+
+1. Read `NumAttributes` (1 byte at caller's sp+394, post-SUB-SP at sp+1530).
+2. If `N == 0`: fall back to the compile-time-unrolled "emit all 7" loop (per §6.6.1 zero means all).
+3. Otherwise: loop `i = 0..N-1`, read each `AttributeID[i]` (4 byte BE u32 at caller's sp+395+4i), byte-reverse, dispatch:
+   - `attr_id ∈ {0x01..0x07}`: look up `y1-track-info` offset via the inline `t4_attr_offset_table` data block + emit with `strlen` value.
+   - Else (`attr_id == 0` or `> 7`): emit with `AttributeValueLength=0` per §5.3.4.
+
+The lookup table is appended at the trampoline blob's tail (8 u32 words = 32 B). Register conventions: `r5`=JNI base, `r6`=`i`, `r7`=`N`, `r9`=saved attr_id across calls, `r10`=saved str_offset across calls, `r0..r4` scratch.
+
+New asm primitives added in `_thumb2asm.py`: `ldr_w` (32-bit imm word load, T3), `add_reg` (ADD register T2, supports any reg incl. SP), `lsls_imm5` (LSL imm T1), and `bhi`/`bls`/`bcs`/`bcc`/`bhs`/`blo` + `bhi_w`/`bhs_w` branch helpers.
+
+### Schema rollback
+
+`y1-track-info` returns to **1104 B** (was bumped to 1112 in the previous trace to make room for the cover-art handle slot at `[1104..1110]`). The slot is gone; Y1 emits attr 0x08 (and any other unsupported ID) with `AttributeValueLength=0` regardless of whether `y1-track-info` carries any handle data.
+
+`OUTPUT_MD5` of `libextavrcp_jni.so` is now `3454ffe3c28f609d07852435433cf3a8`. File size unchanged at 50,992 B — Phase 1 + the new data table still fit within the LOAD #1 padding extension.
+
+### AVRCP 1.6 framing stripped
+
+All AVRCP 1.6 implementation references removed from active docs (`docs/PATCHES.md`, `docs/BT-COMPLIANCE.md`, `docs/ARCHITECTURE.md`, `CHANGELOG.md`, `src/patches/_trampolines.py`, `src/patches/patch_libextavrcp.py`). The §5.14.1 / §26 Table 26.1 / ESR09 E6073 citations were originally kept under a "narrow citation exception" — they're now gone entirely because attr 0x08 no longer requires special-case explanation: it's just "any attribute outside 0x01-0x07, handled by the general unsupported-attribute path".
+
+Memory `feedback_avrcp13_only_scope.md` tightened: no more narrow citation exception. AVRCP 1.6 is not referenced anywhere in active docs/source. The four memory files about Cover Art / BIP / SDP infrastructure stay marked `HISTORICAL` for future-reference value but are no longer load-bearing.
+
+### Open: Bolt pane render still uncertain
+
+Whether Phase 1 unblocks Bolt's pane is unverified on hardware — we shipped 0 in-spec `[1..7]` responses pre-Phase-1 and Bolt's pane was still empty. Possibilities:
+
+1. Pre-Phase-1 Bolt was rejecting `[1..7] + extra(0x08)` shape; Phase 1 emits exactly `[1..7]` matching the request — pane may now render.
+2. Bolt's pane has additional requirements we haven't identified (e.g., specific event subscriptions before pane query). Already noted: Bolt only subscribes to event 0x01 PLAYBACK_STATUS_CHANGED, not TRACK_CHANGED — significantly narrower than Kia's 6-event subscription set.
+
+If Phase 1 doesn't unblock the pane, the remaining diagnosis path is on the CT-state side (forget+repair, force-open the metadata pane at a specific point, etc.) rather than further TG-side changes — we've now exhausted the §5.3.4 / §6.6.1 spec deviations on Y1's end.

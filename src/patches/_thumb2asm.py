@@ -134,6 +134,12 @@ class Asm:
         _check(0 <= rd <= 7 and 0 <= rm <= 7 and 0 <= imm5 <= 31, "lsrs_imm5 bad")
         self._hw(0x0800 | (imm5 << 6) | (rm << 3) | rd)
 
+    def lsls_imm5(self, rd: int, rm: int, imm5: int) -> None:
+        # LSL (immediate) T1: 00000 imm5 Rm[2..0] Rd[2..0]
+        # imm5=1..31 = shift amount; imm5=0 is MOVS (just register copy).
+        _check(0 <= rd <= 7 and 0 <= rm <= 7 and 0 <= imm5 <= 31, "lsls_imm5 bad")
+        self._hw(0x0000 | (imm5 << 6) | (rm << 3) | rd)
+
     def bcond(self, cond: int, label: str) -> None:
         # T1: 1101 cond imm8 (range ±256 bytes from PC)
         _check(0 <= cond <= 14, "bcond cond")  # cond=14 unconditional reserved -> 15 = SVC
@@ -189,6 +195,30 @@ class Asm:
                "ldrh_w bad operands")
         self._hw(0xF8B0 | rn)
         self._hw((rt << 12) | imm)
+
+    def ldr_w(self, rt: int, rn: int, imm: int) -> None:
+        # LDR (immediate) T3: 1111 1000 1101 Rn / Rt imm12
+        _check(0 <= rn <= 14 and 0 <= rt <= 14 and 0 <= imm <= 0xFFF,
+               "ldr_w bad operands")
+        self._hw(0xF8D0 | rn)
+        self._hw((rt << 12) | imm)
+
+    def add_reg(self, rdn: int, rm: int) -> None:
+        # ADD (register) T2: 0100 0100 DN Rm[3..0] Rdn[2..0]; DN = bit 3 of Rdn.
+        # Rdn = Rdn + Rm; no flag change; any reg in {0..15}.
+        _check(0 <= rdn <= 15 and 0 <= rm <= 15, "add_reg bad regs")
+        d = (rdn >> 3) & 1
+        self._hw(0x4400 | (d << 7) | (rm << 3) | (rdn & 7))
+
+    def bhi(self, label: str) -> None: self.bcond(8, label)
+    def bls(self, label: str) -> None: self.bcond(9, label)
+    def bcs(self, label: str) -> None: self.bcond(2, label)
+    def bcc(self, label: str) -> None: self.bcond(3, label)
+    def bhs(self, label: str) -> None: self.bcond(2, label)  # alias for bcs
+    def blo(self, label: str) -> None: self.bcond(3, label)  # alias for bcc
+
+    def bhi_w(self, label: str) -> None: self._bcond_w(9, label)   # LS skips
+    def bhs_w(self, label: str) -> None: self._bcond_w(3, label)   # LO skips
 
     def strb_w(self, rt: int, rn: int, imm: int) -> None:
         # STRB (immediate) T3: 1111 1000 1000 Rn / Rt imm12

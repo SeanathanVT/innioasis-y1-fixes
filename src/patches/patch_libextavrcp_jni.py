@@ -182,7 +182,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "4da9283b85954648521efd0d11524192"
+OUTPUT_MD5        = "3454ffe3c28f609d07852435433cf3a8"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include

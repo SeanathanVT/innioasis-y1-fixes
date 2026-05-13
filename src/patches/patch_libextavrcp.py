@@ -46,10 +46,12 @@ unconditionally. The attr_id=0 ("Not Used" per AVRCP 1.3 §26 Table 26.1)
 guard is also dropped, but T4 in `libextavrcp_jni.so` never emits attr_id
 0, so that side of the gate has no caller in practice.
 
-Pairs with: T4 in `_trampolines.py` already emits attr 0x08 (AVRCP 1.6
-§5.14.1 Default Cover Art, attribute id assigned in §26 Table 26.1 per
-ESR09 E6073) with an empty value when no handle is available; before
-this patch the empty attr was being silently dropped by libextavrcp.so.
+Pairs with: T4 in `_trampolines.py` reads the CT's inbound `NumAttributes`
++ `AttributeID[N]` request (AVRCP 1.3 §6.6.1 Table 6.26) and emits each
+requested ID in order. For IDs outside the canonical 1.3 set 0x01-0x07,
+T4 emits with length 0 per §5.3.4. Without this patch, stock libextavrcp.so
+silently drops the zero-length entries, so strict CTs that gate render
+on response-shape see a truncated frame.
 
 Usage:
     python3 patch_libextavrcp.py libextavrcp.so
