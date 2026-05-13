@@ -10,7 +10,7 @@
 - **Bluetooth pairing** — audio.conf / auto_pairing.conf / blacklist.conf / build.prop edits for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
 - **Root** — install `/system/xbin/su` (setuid, mode 06755) for `adb shell /system/xbin/su` escalation. Stock `/sbin/adbd` stays untouched.
-- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car stereo, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Behind `--avrcp` (excluded from `--all` because it requires a `Y1Bridge` Gradle build first).
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car stereo, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Spec-compliant 1.3 TG behaviour throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit §5.3.4).
 - **Investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe, gdbserver attach). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.
@@ -29,29 +29,27 @@ The bash entry-point at the root dispatches into source trees under `src/`:
 
 ## Quick start
 
-Stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) inside the repo's `staging/` directory:
+One-time setup (clones tooling, builds the prebuilt artifacts `--all` needs):
 
 ```bash
-./tools/setup.sh                    # one-time: clone MTKClient + Python venvs
-( cd src/su && make )               # one-time: build the setuid-su binary for --root
+./tools/setup.sh                                            # MTKClient + Python venvs
+( cd src/su && make )                                        # setuid-su for --root
+./tools/install-android-sdk.sh && source tools/android-sdk-env.sh
+( cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug )   # Y1Bridge.apk for --avrcp
+```
 
+Then stage `rom.zip` (the official OTA — MD5-validated against [`KNOWN_FIRMWARES`](#stock-firmware-manifest)) and run:
+
+```bash
 cp /path/to/rom.zip staging/
-
 ./apply.bash --all
 ```
 
-`--all` = `--adb --bluetooth --music-apk --remove-apps --root`. `--avrcp` is intentionally excluded (see [Status](#status)).
+`--all` = `--adb --avrcp --bluetooth --music-apk --remove-apps --root`.
 
-The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the selected patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
+The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
 
-Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or one you'd rather have outside the repo for safety).
-
-Opting in to `--avrcp` additionally needs the Android SDK + `Y1Bridge.apk` build:
-
-```bash
-./tools/install-android-sdk.sh && source tools/android-sdk-env.sh
-( cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug )
-```
+Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or outside the repo).
 
 Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env) if you have those installed elsewhere.
 
@@ -60,12 +58,12 @@ Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <pat
 | Flag | Effect |
 |---|---|
 | `--adb` | Append `persist.service.adb.enable=1` + `persist.service.debuggable=1` to `build.prop`. |
-| `--avrcp` | AVRCP 1.3 metadata pipeline: patches `mtkbt`, `libextavrcp_jni.so`, `MtkBt.odex`, the music app, plus `Y1Bridge.apk` install. Excluded from `--all` because it requires `assembleDebug` first. Patch ID legend in [`docs/PATCHES.md`](docs/PATCHES.md); architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
+| `--avrcp` | AVRCP 1.3 metadata pipeline: patches `mtkbt`, `libextavrcp.so`, `libextavrcp_jni.so`, `MtkBt.odex`, the music app, plus `Y1Bridge.apk` install. Pre-requires `gradlew assembleDebug` in `src/Y1Bridge/`. Patch ID legend in [`docs/PATCHES.md`](docs/PATCHES.md); architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). |
 | `--bluetooth` | Pairing-essential `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits. Required for car pairing. |
 | `--music-apk` | Patch Y1 music player APK (Artist→Album navigation). |
 | `--remove-apps` | Remove bloatware (`ApplicationGuide`, `BasicDreams`, …). |
-| `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). |
-| `--all` | `--adb` + `--bluetooth` + `--music-apk` + `--remove-apps` + `--root`. Excludes `--avrcp`. |
+| `--root` | Install `src/su/build/su` at `/system/xbin/su` (mode 06755). Pre-requires `make` in `src/su/`. |
+| `--all` | All of the above. Pre-requires the `src/su/` + `src/Y1Bridge/` builds. |
 
 Run `./apply.bash --help` for full flag detail. Patchers can also be run standalone — see [`src/patches/README.md`](src/patches/README.md).
 
@@ -81,9 +79,9 @@ Background on the failed alternatives these tools replace: [`docs/INVESTIGATION.
 
 ## Status
 
-`--all` produces a working device — pairing, A2DP audio, stock AVRCP 1.0 PASSTHROUGH, `--root`, `--music-apk` / `--remove-apps` / `--adb`. `--bluetooth` is pairing-essential config only.
+`--all` produces a working device — Bluetooth pairing, A2DP audio, full AVRCP 1.3 metadata + control over Bluetooth, `--root`, `--music-apk` / `--remove-apps` / `--adb`.
 
-`--avrcp` delivers full AVRCP 1.3 metadata + control. Every Mandatory and Optional ICS Table 7 (Target Features) row closes. Spec-compliant 1.3 TG behaviour (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit for unsupported attributes §5.3.4). Per-row scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+The AVRCP 1.3 TG implementation is spec-compliant throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit for unsupported attributes §5.3.4). Every Mandatory and Optional ICS Table 7 (Target Features) row closes. Per-row scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Stock firmware manifest
 

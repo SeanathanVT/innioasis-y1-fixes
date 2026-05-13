@@ -25,8 +25,7 @@ FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
   --avrcp        AVRCP 1.3 metadata + control pipeline. Patches mtkbt /
                  libextavrcp.so / libextavrcp_jni.so / MtkBt.odex / music
-                 app, installs Y1Bridge.apk. Excluded from --all because
-                 it requires a Y1Bridge build first:
+                 app, installs Y1Bridge.apk. Requires Y1Bridge built first:
                    cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug
                  Architecture: docs/ARCHITECTURE.md. Byte-level patch
                  reference: docs/PATCHES.md.
@@ -36,9 +35,9 @@ FLAGS:
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
-  --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
-                 --avrcp is excluded because it requires building Y1Bridge
-                 first (analogous to --root needing src/su/ built).
+  --all          --adb + --avrcp + --bluetooth + --music-apk + --remove-apps
+                 + --root. Pre-requires the src/su/ and src/Y1Bridge/ builds
+                 (see those flags above).
   --debug        Build patches with KOENSAYR_DEBUG=1. Build-time switch
                  (reflash to toggle); zero runtime overhead when omitted.
   -h, --help     This help
@@ -132,10 +131,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      # --avrcp is intentionally excluded — it requires the Y1Bridge
-      # gradle build to have run first. Opt in explicitly when ready.
-      FLAG_BLUETOOTH=true
       FLAG_ADB=true
+      FLAG_AVRCP=true
+      FLAG_BLUETOOTH=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
       FLAG_ROOT=true

@@ -23,7 +23,7 @@ AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller (car ste
 
 ### Changed
 - GitHub repository renamed `y1-mods` → `koensayr`.
-- `--avrcp` is the canonical metadata-pipeline flag. Excluded from `--all` (needs a `Y1Bridge` Gradle build first).
+- `--all` now includes `--avrcp`. The AVRCP 1.3 pipeline is spec-mature; the prebuild requirement (`./gradlew assembleDebug` in `src/Y1Bridge/`) mirrors `--root`'s `make` in `src/su/`.
 
 ### Removed
 - Legacy SDP-only byte-patch attempts (regressed PASSTHROUGH without delivering metadata).
