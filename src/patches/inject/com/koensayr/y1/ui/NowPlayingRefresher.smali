@@ -10,7 +10,7 @@
 # Stock music app re-reads SharedPreferences only in MusicPlayerActivity.
 # onResume(), so a CT-initiated change wouldn't visually reflect on the
 # Now Playing screen until the user navigated away and back — this patch
-# closes that gap to match iPhone/Pixel-class MediaSession behaviour.
+# closes that gap to match spec-compliant MediaSession behaviour.
 
 
 .field public static final INSTANCE:Lcom/koensayr/y1/ui/NowPlayingRefresher;

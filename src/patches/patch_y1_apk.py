@@ -805,12 +805,11 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       If `isPlaying()` → `playOrPause()V` (effectively pause). Else
 #       → `play(Z)V` with bool=true (start playback).
 #       Per AVRCP 1.3 §4.6 PLAY is "begin/continue playing" (no toggle),
-#       but some CTs (Chevrolet Bolt and similar) map their on-screen
-#       pause button to PASSTHROUGH PLAY and rely on the TG to toggle.
-#       Treating PLAY-while-already-playing as pause matches what AOSP-
-#       based players (and iPhone/Pixel) do in practice. Spec-compliant
-#       CTs never send PLAY against a playing TG, so this branch only
-#       fires for the non-compliant case.
+#       but some non-spec CTs map their on-screen pause button to
+#       PASSTHROUGH PLAY and rely on the TG to toggle. Treating PLAY-
+#       while-already-playing as pause matches what AOSP-based players
+#       do in practice. Spec-compliant CTs never send PLAY against a
+#       playing TG, so this branch only fires for the non-compliant case.
 #       The play(true) branch's boolean runs `Static.setPlayValue(1, ...)`
 #       after player start(), propagating the resume edge to UI / RCC /
 #       AudioFocus.
@@ -2017,8 +2016,8 @@ NEW_PAPP_BCAST_TAIL = (
     "\n"
     "    # Patch B5.4a: refresh MusicPlayerActivity if it's visible so the\n"
     "    # in-app Now Playing screen reflects the new Repeat / Shuffle state\n"
-    "    # without requiring a back-out / re-enter. Mirrors what AOSP MediaSession\n"
-    "    # callbacks do for iPhone/Pixel-class players.\n"
+    "    # without requiring a back-out / re-enter. Mirrors what AOSP\n"
+    "    # MediaSession callbacks do for spec-compliant players.\n"
     "    invoke-static {}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->refresh()V\n"
     "\n"
     "    :try_end_b5_setpapp\n"

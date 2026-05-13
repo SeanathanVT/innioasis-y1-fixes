@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
-AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller (car stereo, TV, smart speaker) now sees full track metadata, live play status, and play-state changes from the Y1, and can drive Repeat / Shuffle from its own UI. Reference docs: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PATCHES.md`](docs/PATCHES.md). Investigation history: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
+AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller now sees full track metadata, live play status, and play-state changes from the Y1, and can drive Repeat / Shuffle from its own UI. Reference docs: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PATCHES.md`](docs/PATCHES.md). Investigation history: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 ### Added
 - AVRCP 1.3 metadata (Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime), with UTF-8 codepoint-safe text truncation.
@@ -17,7 +17,7 @@ AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller (car ste
 - Bidirectional Repeat / Shuffle. CT and Y1 UI stay in sync without navigating away and back.
 - Discrete PASSTHROUGH routing (PLAY / PAUSE / STOP / NEXT / PREVIOUS) for CTs that don't tolerate toggle behaviour, plus PLAY-while-playing → pause-toggle for non-spec CTs.
 - A2DP stream survives pauses — AudioFlinger silence-timeout no longer tears down the AVDTP source.
-- Per-subscription notification gating (AVRCP §6.7.1) — one INTERIM + one CHANGED per registration, matching iPhone/Pixel TG semantics.
+- Per-subscription notification gating (AVRCP §6.7.1) — one INTERIM + one CHANGED per registration, matching spec-compliant TG semantics.
 - `Y1Bridge` Android service satisfies MtkBt's `bindService(MediaPlaybackService)` and answers synchronous queries from the music-app-owned state file.
 - Spec-compliant `GetElementAttributes` response shape — TG emits exactly the requested attribute IDs in the requested order; unsupported IDs emit with length 0.
 

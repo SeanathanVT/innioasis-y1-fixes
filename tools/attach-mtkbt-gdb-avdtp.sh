@@ -39,7 +39,7 @@
 #   ./tools/attach-mtkbt-gdb-avdtp.sh --gdbserver /path/to/gdbserver
 #
 # Driving the capture (once gdb is running):
-#   1. Pair Y1 with any A2DP Sink (Sonos / Bolt / TV).
+#   1. Pair Y1 with any A2DP Sink.
 #   2. The pairing exchange will issue DISCOVER (sig 0x01) +
 #      GET_CAPABILITIES (sig 0x02) — breakpoints will fire.
 #   3. Watch BP@0x50c46 (parser exit): note the post-return PC the
@@ -409,7 +409,7 @@ echo "    # extracted from /work/v3.0.2/system.img.extracted/bin/mtkbt works fin
 
 echo
 echo "Then drive a peer-side AVDTP exchange:"
-echo "    1. Pair Y1 with any A2DP Sink (Sonos / Bolt / TV)."
+echo "    1. Pair Y1 with any A2DP Sink."
 echo "    2. The pairing exchange will issue DISCOVER (sig 0x01) +"
 echo "       GET_CAPABILITIES (sig 0x02) — breakpoints will fire."
 echo "    3. The critical capture is BP@0x50c46 / BP@0xde2a — those tell"

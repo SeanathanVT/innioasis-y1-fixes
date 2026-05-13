@@ -10,7 +10,7 @@
 - **Bluetooth pairing** — audio.conf / auto_pairing.conf / blacklist.conf / build.prop edits for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
 - **Root** — install `/system/xbin/su` (setuid, mode 06755) for `adb shell /system/xbin/su` escalation. Stock `/sbin/adbd` stays untouched.
-- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car stereo, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Spec-compliant 1.3 TG behaviour throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit §5.3.4).
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Spec-compliant 1.3 TG behaviour throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit §5.3.4).
 - **Investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe, gdbserver attach). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.

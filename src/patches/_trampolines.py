@@ -180,8 +180,7 @@ T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
 # Per-subscription gates for AVRCP §6.7.1's "TG shall notify only once"
 # semantics. T2 / T8 INTERIM emit for a given event sets the matching byte
 # = 1; T5 / T9 CHANGED emit reads + clears the byte. Without these, strict
-# CTs (Bolt / Kia) reject CHANGEDs after the first one and freeze their UI
-# mirrors. y1-trampoline-state is 20 bytes; bytes 13..19 hold one byte per
+# CTs reject CHANGEDs after the first one and freeze their UI mirrors. y1-trampoline-state is 20 bytes; bytes 13..19 hold one byte per
 # event we emit CHANGED for. Bytes 16..19 added 2026-05-13; older 16-byte
 # files degrade gracefully (read returns zero-fill on the new bytes, so
 # the gate evaluates as "not subscribed" and the CT just misses
@@ -2202,8 +2201,8 @@ def _emit_t9(a: Asm) -> None:
 
     # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
     # has armed sub_play_status (state[14] = 1) since last emit. CTs that
-    # don't re-register won't get phantom CHANGEDs; CTs that do (Sonos,
-    # iPhone) get a fresh CHANGED per subscription cycle.
+    # don't re-register won't get phantom CHANGEDs; spec-compliant CTs
+    # that do re-register get a fresh CHANGED per subscription cycle.
     a.ldrb_w(1, 13, T9_STATE_SUB_PLAY_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_play_check")
@@ -2284,8 +2283,8 @@ def _emit_t9(a: Asm) -> None:
 
     # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
     # has armed sub_papp (state[15] = 1) since last emit. Without this,
-    # Bolt's PApp UI freezes after the first CHANGED (subscription consumed,
-    # no re-registration).
+    # strict CTs that don't re-register freeze their PApp UI after the
+    # first CHANGED.
     a.ldrb_w(1, 13, T9_STATE_SUB_PAPP_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_papp_check")
@@ -2366,7 +2365,7 @@ def _emit_t9(a: Asm) -> None:
     # Subscription gate per AVRCP §6.7.1: state[13] = 1 means T8 emitted an
     # INTERIM for event 0x05 since the last CHANGED. If 0, the previous
     # CHANGED already consumed the subscription and we must wait for a new
-    # RegisterNotification before emitting again — strict CTs (Kia) reject
+    # RegisterNotification before emitting again — strict CTs reject
     # unsolicited CHANGEDs and freeze the playhead display.
     a.ldrb_w(0, 13, T9_STATE_SUB_POS_OFF)
     a.cmp_imm8(0, 0)

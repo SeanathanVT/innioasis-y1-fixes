@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
 # attach-libextavrcp-gdb-papp.sh — attach gdbserver to whatever Java process
 # has loaded libextavrcp_jni.so, break at T_papp's PDU-0x14 dispatch arm,
-# and dump the inbound param body (n + attr_id + value) so we can verify the
-# AVRCP↔Y1 enum mapping a real CT (Bolt) is using before iter3 ships.
-#
-# Background: 2026-05-09 Bolt postflash (`/work/logs/dual-bolt-20260509-2249/`)
-# showed Bolt issuing PDU 0x14 SetPlayerApplicationSettingValue every 3 s
-# after connect (14 retries, all rejected by iter1's INTERNAL_ERROR arm).
-# Logcat surfaces only `size:11` (= 8-byte AV/C header + 3-byte body =
-# n + attr_id + value); the body bytes aren't decoded by the existing log
-# surface. This script breaks at papp_set entry (post-flash vaddr 0xb13c
-# inside libextavrcp_jni.so's LOAD #1 padding extension) and dumps sp+410..412.
+# and dump the inbound param body (n + attr_id + value) so we can verify
+# the AVRCP↔Y1 enum mapping a peer CT is using.
 #
 # Pre-reqs:
 #   - --root flashed (su via `adb shell su -c` works)
@@ -23,11 +15,10 @@
 #   ./tools/attach-libextavrcp-gdb-papp.sh --port 5039
 #
 # Driving the capture (once gdb is running):
-#   1. Pair / connect Bolt (or any peer CT that issues PDU 0x14).
-#   2. Wait — Bolt issues its first Set ~21 s after connect, then every 3 s.
-#   3. Each `BP@papp_set` hit prints n / attr_id / value. Three bytes that
-#      tell us exactly what CT->TG enum the peer is sending.
-#   4. Output is also tee'd to /tmp/papp-gdb.log.
+#   1. Pair / connect a peer CT that issues PDU 0x14.
+#   2. Each `BP@papp_set` hit prints n / attr_id / value — three bytes
+#      that tell us exactly what CT→TG enum the peer is sending.
+#   3. Output is also tee'd to /tmp/papp-gdb.log.
 #
 # Post-capture: feed the n / attr_id / value into iter3's enum-mapping table
 # (Trace #18). attr_id 0x02 = Repeat (Y1 enum 0/1/2 OFF/SINGLE/ALL <-> AVRCP
@@ -211,10 +202,10 @@ echo "    ${HOST_GDB} -x ${GDB_CMDS} ${REPO_ROOT}/src/patches/output/libextavrcp
 echo "    # symbols optional; lib at that path is the post-flash binary so addresses match."
 echo
 echo "Then drive the capture:"
-echo "    1. Pair the Bolt (or any CT that issues PDU 0x14)."
-echo "    2. Wait ~21 s after connect for the first Set."
+echo "    1. Pair a peer CT that issues PDU 0x14."
+echo "    2. Wait for the first Set after connect."
 echo "    3. Each 'BP@papp_set' line will print n / attr_id / value bytes."
-echo "    4. Three bytes is enough — Bolt sends n=1 + (attr, value) per the size:11 frame."
+echo "    4. Three bytes is enough — n=1 + (attr, value) per the size:11 frame."
 echo "    Output mirrored to /tmp/papp-gdb.log."
 echo
 

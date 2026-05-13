@@ -5,7 +5,7 @@ patch_libaudio_a2dp.py — keep the AVDTP source stream alive across pauses.
 Single-byte ARM cond-flip (EQ → AL) at file offset 0x000086ab in
 A2dpAudioStreamOut::standby_l. Skips the a2dp_stop call AudioFlinger's
 silence-timeout standby would otherwise make, so PAUSED leaves the stream
-paused-but-up (AVDTP 1.3 §8.13 / §8.15). TV-class CTs that aggressively
+paused-but-up (AVDTP 1.3 §8.13 / §8.15). Strict CTs that aggressively
 close+reopen their A2DP sink on SUSPEND no longer burst-on-resume.
 
 Byte-level reference: docs/PATCHES.md.
