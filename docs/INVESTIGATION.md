@@ -2403,3 +2403,88 @@ classes.dex now 65337/65536 method refs (199 slots free). +7 over the pre-Trace-
 - **Bolt PAUSE not actually pausing.** PASSTHROUGH 0x46 receipt confirmed at the MMI_AVRCP layer; the downstream kernel input → AVRCP.kl → KeyEvent → BaseActivity (Patch H) → PlayControllerReceiver (Patch E) path needs to be traced. Bolt's icon toggling without actual pause action suggests a dispatch hole somewhere in the foreground-activity propagation path.
 - **Music-app Settings UI refresh on CT-driven Repeat/Shuffle.** Music-app side observer, not a wire-level issue. Fix needs SharedPreferences listener in the Settings activity or an explicit refresh Intent from PappSetFileObserver.
 
+
+
+## Trace #27 (2026-05-13) — AVRCP §6.7.1 per-subscription gate completes the 1.3 pipeline; Bolt's metadata pane remains 1.4-CoverArt-blocked
+
+### Background
+
+Trace #26's hardware verification showed Kia's playhead "appeared, played for 2 seconds, then froze." The two-second window is the smoking gun: the wire was emitting `PLAYBACK_POS_CHANGED CHANGED` continuously at 1 s cadence via PositionTicker, but Kia stopped updating its display after the second frame. Bolt similarly showed its play/pause icon flipping correctly on the first state-edge, then sticking on "Play" forever — and its Shuffle button enabling shuffle on Y1 but never registering as enabled in Bolt's own UI.
+
+Both symptoms point at the same spec gap: AVRCP 1.3 §6.7.1 says "Once a Controller has registered to receive a particular EventID, the Target shall notify the CT of the change to the registered EventID only once." After CHANGED, the subscription is consumed; the CT must re-register to receive another. We were emitting CHANGED unconditionally — on every PositionTicker tick (for event 0x05) and on every actual state edge (for events 0x01/0x02/0x06/0x08).
+
+Cadence comparison from `dual-kia-20260513-1144` vs the older Sonos working capture (`dual-sonos-20260511-1042`):
+
+| CT | size:13 (RegNotify event 0x05) cadence |
+|---|---|
+| Sonos | ~10 ms between frames, 20 frames in 280 ms after connect, continuously re-registering |
+| Kia | 6 in 80 ms at connect, then NONE for 15+ seconds |
+
+Sonos's aggressive re-registration matches the strict §6.7.1 contract — it gets a steady stream of valid CHANGEDs. Kia subscribes once and trusts the TG to keep sending. Our excess CHANGEDs after the first were silently rejected by Kia.
+
+### Fix — full §6.7.1 compliance via per-subscription gates
+
+`y1-trampoline-state` grew from 16 B → 20 B. Bytes 13..19 each hold one subscription byte:
+
+| Byte | Event | Arm site | Clear site |
+|---|---|---|---|
+| 13 | 0x05 PLAYBACK_POS_CHANGED | T8 INTERIM | T9 CHANGED |
+| 14 | 0x01 PLAYBACK_STATUS_CHANGED | T8 INTERIM | T9 CHANGED |
+| 15 | 0x08 PLAYER_APPLICATION_SETTING_CHANGED | T8 INTERIM | T9 CHANGED |
+| 16 | 0x02 TRACK_CHANGED | T2 INTERIM | T5 CHANGED |
+| 17 | 0x03 TRACK_REACHED_END | T8 INTERIM | T5 CHANGED |
+| 18 | 0x04 TRACK_REACHED_START | T8 INTERIM | T5 CHANGED |
+| 19 | 0x06 BATT_STATUS_CHANGED | T8 INTERIM | T9 CHANGED |
+
+INTERIM emit sites write `0x01` to their byte via `_emit_subscription_write` helper (1-byte `strb_w` + `open + lseek + write + close`). CHANGED emit sites read the byte; if 0, skip emit; if 1, emit + clear. Edge-detection writes (state[9..12]) remain unconditional so we don't loop "edge detected, can't emit" forever while un-subscribed.
+
+Schema migration: existing 16-B files on already-flashed devices grow naturally — T2/T8's `lseek(N >= 16) + write(1)` extends the file. Until then, new gate-bytes read as 0 = "not subscribed" via T5/T9's memset-then-read pattern. No manual remediation needed.
+
+Stack-frame growth: T5_FRAME 816 → 820, T9_FRAME 832 → 836. T5_OFF_FILE 16 → 20, T9_OFF_FILE 24 → 28 (timespec offset shifts accordingly). T4 state write switched from `O_WRONLY|O_TRUNC` to `O_WRONLY` so it doesn't clobber bytes 16..19 that T2/T8 may have written. Some short-form branches in T5 needed promotion to wide-form (`blt_w` / `beq_w`) — extended body exceeded the 254-B short range.
+
+OUTPUT_MD5 of `libextavrcp_jni.so` is now `c017b6ab5d66ccbd851c9399e0642262`.
+
+### Other fixes shipped same session
+
+| Commit | What |
+|---|---|
+| `1381d57` | Y1Bridge.MediaBridgeService.AvrcpBinder reads `y1-track-info` for synchronous IBTAvrcpMusic queries (codes 17/19/24/25/26/27/28/29/30/31). MtkBt's Java mirror now reflects real state instead of empty/default. |
+| `7833cf0` | `getAlbumId` synthesizes a stable handle from album-name hash (CTs that group by album_id no longer conflate all tracks). `setPlayerApplicationSettingValue` (code 4) backstops to `y1-papp-set` so the apply path works whether T_papp 0x14 or the Java setter is the trigger. |
+| `d535c7e` | AOSP-convention Intent extras (`id`, `track`, `artist`, `album`, `playing`) on `wakeTrackChanged` / `wakePlayStateChanged` broadcasts. MtkBt's `MMI_AVRCP` logs flipped from `playing:false id:-1` to real values, unblocking the cardinality-NOP wake path. |
+| `dbdf5d0` | TrackInfoWriter.`mLastKnownDuration` preserves duration across prepare gaps (CTs no longer see `song_length=0` and hide the playhead). `markCompletion` freezes the anchor at `mLastKnownDuration` so post-EOS T9 emissions read `position == duration` (not `position > duration` which strict CTs reject). PlaybackStateBridge.`onCompletion` stops PositionTicker and fires one final wake. |
+| `56ab3b7` | `PlayerService.setCurrentPosition(J)` (the music app's single seek funnel) prepended with `PlaybackStateBridge.onSeek(J)` → `TrackInfoWriter.onSeek(J)` refreshes the anchor + fires wakePlayStateChanged. Seek bar now propagates to CT immediately. |
+| `44d376c` | Patch E `:cond_play_strict` — PASSTHROUGH PLAY (0x44) while `isPlaying()` is true now routes to `PlayerService.playOrPause()` (effectively pause-toggle). Spec-compliant CTs never send PLAY while playing so this only fires for non-spec CTs (Bolt) that map their Pause button to AVRCP PLAY. |
+| `1947dd8` | `MusicPlayerActivity.refreshRepeatShuffleUi()` injected — re-renders just the Repeat/Shuffle ImageView icons from current SharedPreferences. `NowPlayingRefresher.run()` calls it (previously called `refreshUI()` which only updates track-name text labels and doesn't touch the icons). CT-driven Repeat/Shuffle changes now paint live on the Now Playing screen. |
+
+### Hardware results (2026-05-13 captures)
+
+**Kia EV6** (`dual-kia-20260513-1351`): play/pause toggles work, playhead updates continuously, Repeat/Shuffle UI flips in real-time on the Y1 Now Playing screen, metadata pane renders. **All previously-reported Kia issues resolved.**
+
+**Bolt EV** (`dual-bolt-20260513-1355`):
+- Audio actually pauses on Pause button press (was broken pre-`44d376c`). ✓
+- Forward / Previous PASSTHROUGH actions work. ✓
+- Metadata pane stays empty. **Root cause confirmed: Bolt's `GetElementAttributes` request (wire `size:45`) asks for 8 attributes including attr 8 (Default Cover Art handle, AVRCP 1.6 §5.13.4). We return 7. Bolt gates pane render on receiving a non-empty CoverArt entry.** Note: Default Cover Art is an AVRCP 1.6 feature (Dec 2015), NOT 1.4. AVRCP 1.4 added browsing + AbsoluteVolume; 1.5 added AddressedPlayer / AvailablePlayers; 1.6 added DCA via attribute 8 + BIP integration.
+- Play/Pause icon stuck after first toggle. **Root cause: Bolt subscribes for event 0x01 once at connect and never re-registers. Our gate emits exactly one CHANGED per registration; Bolt only ever sees one. UI mirror frozen at first-CHANGED state.**
+- Shuffle stuck on. Same root cause — Bolt subscribes for event 0x08 once.
+
+Bolt's failure to re-register after CHANGED is a CT-side spec violation we cannot work around without violating §6.7.1 on the TG side (which would re-break Kia). The empty metadata pane is the actionable symptom — implementing AVRCP 1.6 Default Cover Art unblocks it.
+
+### Scope change: AVRCP 1.6 Default Cover Art newly in-scope
+
+User directive 2026-05-13 after seeing the §6.7.1 fixes work end-to-end on Kia: "I do not accept the Bolt's behavior as-is. I think the cover art thing might be worth a look."
+
+Project policy amended: `feedback_avrcp13_only_scope.md` now lists two carve-outs:
+1. MtkBt.odex F1 BlueAngel internal-flag spoof (existing).
+2. AVRCP 1.6 Default Cover Art (BIP/OBEX) — new. Specifically: GetElementAttributes attribute id 8 (Default Cover Art handle per AVRCP 1.6 §5.13.4), BIP responder (UUID 0x111A Imaging Responder / 0x111B Imaging Reference), OBEX channel for image transfer.
+
+Other 1.4+ / 1.5+ / 1.6+ features (SetAbsoluteVolume, browse channel for player switching, SetAddressedPlayer, NOW_PLAYING_CONTENT_CHANGED, etc.) remain out of scope.
+
+### What needs investigation before implementing Default Cover Art
+
+1. Does mtkbt include a BIP server? — `strings /work/v3.0.2/system.img.extracted/system/bin/mtkbt | grep -i "bip\|imaging\|cover.art\|0x111a\|0x111b"`. If yes, just wire it up. If no, implement BIP atop mtkbt's existing OBEX or in a parallel daemon.
+2. What SDP record does Bolt expect for BIP? Capture an iPhone-or-Pixel-paired session's SDP advertisement and compare.
+3. Where does the music app store/access cover art for local display? Likely `MediaMetadataRetriever.getEmbeddedPicture()` or similar.
+4. How is attr 8 transferred on the wire? AVRCP 1.6 §5.13.4: handle is a 7-character ASCII hex string returned in the GetElementAttributes response payload. CT then opens an OBEX channel and issues GetImage / GetLinkedThumbnail to fetch the actual JPEG bytes by handle.
+5. JPEG thumbnail constraints per AVRCP 1.6 §5.13.4: max 200×200 pixels, max 200 KB.
+
+Implementation plan sketch in memory `project_y1_cover_art_direction.md`.
