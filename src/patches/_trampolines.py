@@ -123,8 +123,12 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
 #                      848..1103 Genre                      UTF-8 (256 B)
+#                      1104..1111 CoverArtHandle             UTF-8 ASCII (7 hex chars + NUL).
+#                                                            AVRCP 1.6 §5.13.4 Default Cover Art.
+#                                                            Empty string = no handle available
+#                                                            (graceful degradation; CT skips DCA).
 T4_FRAME           = 1136
-T4_FILE_SIZE       = 1104
+T4_FILE_SIZE       = 1112
 T4_OFF_ARGS        = 0
 T4_OFF_STATE       = 16
 T4_OFF_FILE        = 32
@@ -136,6 +140,7 @@ T4_OFF_FILE_TRACK_NUM   = T4_OFF_FILE + 800  # file_buf[800..815]
 T4_OFF_FILE_TOTAL_NUM   = T4_OFF_FILE + 816  # file_buf[816..831]
 T4_OFF_FILE_PLAY_TIME   = T4_OFF_FILE + 832  # file_buf[832..847]
 T4_OFF_FILE_GENRE       = T4_OFF_FILE + 848  # file_buf[848..1103]
+T4_OFF_FILE_COVER_HANDLE = T4_OFF_FILE + 1104 # file_buf[1104..1111]
 
 # Caller-relative offsets shift by T4_FRAME after our SUB SP.
 T4_TRANSID_OFF = 368 + T4_FRAME           # 1176
@@ -541,23 +546,37 @@ def _emit_t4(a: Asm) -> None:
     #   0x02 Artist             0x06 Genre
     #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
     #   0x04 TrackNumber
+    # AVRCP 1.6 §5.13.4 attribute id:
+    #   0x08 DefaultCoverArt (7 ASCII hex chars; resolved by CT via BIP/OBEX).
     # All values are UTF-8 (charset 0x006A); per §5.3.4 a missing attribute is
     # signalled by AttributeValueLength=0, which is what an empty string slot
     # produces here (strlen returns 0, the response builder packs the 8-byte
-    # header with no value bytes).
+    # header with no value bytes). For attr 0x08 specifically, an empty value
+    # tells the CT "DCA not available for this track" and it skips BIP/OBEX
+    # — spec-compliant graceful degradation until the music app writes a real
+    # handle into y1-track-info[1104..1110].
     attr_table = (
-        ("title",       0x01, T4_OFF_FILE_TITLE),
-        ("artist",      0x02, T4_OFF_FILE_ARTIST),
-        ("album",       0x03, T4_OFF_FILE_ALBUM),
-        ("track_num",   0x04, T4_OFF_FILE_TRACK_NUM),
-        ("total_num",   0x05, T4_OFF_FILE_TOTAL_NUM),
-        ("genre",       0x06, T4_OFF_FILE_GENRE),
-        ("play_time",   0x07, T4_OFF_FILE_PLAY_TIME),
+        ("title",         0x01, T4_OFF_FILE_TITLE),
+        ("artist",        0x02, T4_OFF_FILE_ARTIST),
+        ("album",         0x03, T4_OFF_FILE_ALBUM),
+        ("track_num",     0x04, T4_OFF_FILE_TRACK_NUM),
+        ("total_num",     0x05, T4_OFF_FILE_TOTAL_NUM),
+        ("genre",         0x06, T4_OFF_FILE_GENRE),
+        ("play_time",     0x07, T4_OFF_FILE_PLAY_TIME),
+        ("cover_handle",  0x08, T4_OFF_FILE_COVER_HANDLE),
     )
+    # add_sp_imm has 0..1020 imm range; cover_handle at offset 1136 needs the
+    # wider addw rd, sp, #imm12 encoding. Pick per-offset to stay compact.
+    def _t4_add_sp(rd: int, off: int) -> None:
+        if 0 <= off <= 1020 and (off & 3) == 0:
+            a.add_sp_imm(rd, off)
+        else:
+            a.addw(rd, 13, off)
+
     total_attrs = len(attr_table)
     for idx, (label_suffix, attr_id, str_offset) in enumerate(attr_table):
         a.label(f"t4_reply_{label_suffix}")
-        a.add_sp_imm(0, str_offset)           # r0 = string ptr
+        _t4_add_sp(0, str_offset)             # r0 = string ptr
         a.blx_imm(PLT_strlen)                 # r0 = strlen
         a.mov_lo_lo(6, 0)                     # r6 = strlen
 
@@ -570,7 +589,7 @@ def _emit_t4(a: Asm) -> None:
         a.movs_imm8(4, 0x6A)
         a.str_sp_imm(4, T4_OFF_ARGS + 4)      # sp[4]  = charset (UTF-8)
         a.str_sp_imm(6, T4_OFF_ARGS + 8)      # sp[8]  = strlen
-        a.add_sp_imm(4, str_offset)
+        _t4_add_sp(4, str_offset)
         a.str_sp_imm(4, T4_OFF_ARGS + 12)     # sp[12] = ptr
         a.blx_imm(PLT_get_element_attributes_rsp)
 

@@ -187,8 +187,9 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
 | 848..1103 | Genre (UTF-8) | 256 | shipped | `MediaStore.Audio.Genres` / `METADATA_KEY_GENRE` |
+| 1104..1111 | CoverArtHandle (UTF-8 ASCII 7-hex-char + NUL) | 8 | partial | AVRCP 1.6 §5.13.4 Default Cover Art handle. Empty string when no art available — CT skips BIP/OBEX (spec-compliant graceful degradation). Real handle populated once the music app writes per-track JPEG bytes for the BIP responder to serve. |
 
-Total file size: **1104 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6 / T8 / T9 only read up to offset 792 and are unaffected by attrs 4-7 being appended past 800).
+Total file size: **1112 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6 / T8 / T9 only read up to offset 792 and are unaffected by attrs 4-8 being appended past 800).
 
 The numeric AVRCP §5.3.4 attrs (4 / 5 / 7) are stored pre-formatted as ASCII decimal strings rather than binary u16 / u32 with a Thumb-2 itoa, keeping the T4 trampoline a uniform strlen+memcpy loop.
 

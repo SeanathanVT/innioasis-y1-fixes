@@ -2488,3 +2488,43 @@ Other 1.4+ / 1.5+ / 1.6+ features (SetAbsoluteVolume, browse channel for player 
 5. JPEG thumbnail constraints per AVRCP 1.6 §5.13.4: max 200×200 pixels, max 200 KB.
 
 Implementation plan sketch in memory `project_y1_cover_art_direction.md`.
+
+## Trace #28 (2026-05-13) — AVRCP 1.6 Default Cover Art recon + T4 attr 8 emit landed
+
+### Investigation answers
+
+**Q1 (mtkbt BIP server)** — answered YES, partial. Native side fully present, Java side stripped:
+
+- `/work/v3.0.2/system.img.extracted/system/lib/libextbip.so` (63 108 B) — full BIP responder + initiator state machine. Source path baked in: `mediatek/protect/external/bluetooth/blueangel/btadp_ext/profiles/bip/`. Exports `bip_responder_enable / disable / disconnect / authorize_response / getcapability_response / access_response / auth_response / obj_rename` plus `btmtk_bipr_*` helpers covering get capabilities / images list / image properties / image / linked thumbnail / put image / put thumbnail / continue / abort / connect.
+- `/work/v3.0.2/system.img.extracted/system/lib/libextbip_jni.so` (21 900 B) — JNI bridge. `JNI_OnLoad` calls `FindClass com/mediatek/bluetooth/bip/BluetoothBipServer` and `RegisterNatives` for 21 methods (full signature table at memory `architecture_y1_bip_jni_shape.md`). `classInitNative` caches one field (`mNativeData:I`) + one method (`onCallback:(III[Ljava/lang/String;)V`). Value-class field IDs are looked up lazily inside the methods that use them; partial shapes recovered (e.g. `ImageFormat`: Encoding / Width / Height / Width2 / Height2 / Size / Transform; `ImageDescriptor`: DirName / FileName / Version / ThumbnailFullPath / ObjectSize; `AuthInfo`: bAuth / UserId / Passwd).
+- `/work/v3.0.2/system.img.extracted/system/framework/javax.obex.jar` — OBEX Java APIs available.
+- **No Dalvik classes** under `com/mediatek/bluetooth/bip/*` anywhere in the system image. Scanned every `.dex` + `.odex` + APK `classes.dex`. `MtkBt.odex` references `com.mediatek.bluetooth.bip.BipService` only as a string passed to `startService(...)` — that service doesn't exist on this build, so the start silently no-ops.
+
+The OEM stripped the Java BIP service layer (likely to slim the firmware — Y1 has no native UI for OPP/FTP image push). Native libs ship as-built; nothing currently calls into them.
+
+**Q2 (SDP record)** — answered NO at runtime, but resolved cleanly. Complete BIP Imaging Responder SDP record is baked into `mtkbt` at file offset `0xf9df0` (record body, 10 attribute entries of 12 B each) + value blobs at .rodata `0xebc97..0xebd40`. Full attribute set: ServiceClassIDList (`0x111B`), ProtocolDescriptorList (L2CAP / RFCOMM / OBEX), BrowseGroupList (PublicBrowseRoot), LanguageBaseAttributeIDList, BluetoothProfileDescriptorList (`0x111A` v1.0), ServiceName ("Imaging"), SupportedCapabilities, SupportedFeatures, SupportedFunctions, TotalImagingDataCapacity (0x50000000 ≈ 1.34 GB).
+
+Live `sdptool browse` (capture `logs/y1-sdptool-20260513-1437.log`) confirms the record is **not** advertised: server returns 5 records (A2DP / AVRCP TG / PBAP PSE / NAP / OBEX Object Push) — handle slots `0x10001` and `0x10006` are absent, indicating selective registration.
+
+Root cause: registration is gated on the activation chain `Java biprEnableNative → libextbip_jni.so → bip_responder_enable (libextbip.so 0x89f0) → BIPR_ACTIVATE IPC → mtkbt SDP_AddRecord`. Since `BluetoothBipServer` doesn't exist, nothing ever calls `biprEnableNative`, the chain never starts, the record stays out of SDP. **No SDP patch needed** — implementing the Java service is sufficient by itself.
+
+**Q3 (music-app cover art source)** — not yet investigated; deferred to the image-wiring chunk.
+
+**Q4 (wire format for attr 8)** — confirmed AVRCP 1.6 §5.13.4: 7-character ASCII hex handle returned in the `GetElementAttributes` response. CT resolves to image bytes via BIP/OBEX (GetImage / GetLinkedThumbnail) using the handle as identifier.
+
+**Q5 (image constraints)** — AVRCP 1.6 §5.13.4: max 200 × 200 pixels, max 200 KB, JPEG.
+
+### T4 attr 8 emit shipped (`_trampolines.py`)
+
+`T4` `attr_table` grew from 7 entries to 8 with `("cover_handle", 0x08, T4_OFF_FILE_COVER_HANDLE)`. `y1-track-info` schema grew `1104 → 1112 B` (new tail `[1104..1110]` for the 7-char ASCII hex handle + NUL terminator at 1111). T4's `add_sp_imm` calls in the attr-emit loop gained a per-offset fallback to the wider `addw rd, sp, #imm12` encoding so the new cover_handle slot at SP+1136 emits cleanly — `add_sp_imm` only reaches 1020 via its imm8<<2.
+
+Until the Java BIP responder lands and `TrackInfoWriter` starts writing per-track handles into `y1-track-info[1104..1110]`, T4 emits attr 8 with an empty value (file is 1104 B on disk; T4's `read(fd, buf, 1112)` short-returns at 1104, the new tail bytes stay memset-zeroed; `strlen` of zeroed bytes returns 0). Per AVRCP §5.3.4 a 0-length attribute is the canonical "not available" signal — spec-compliant graceful degradation. The wire frame now contains the expected 8th attribute slot; strict-CT metadata-pane render still gates on a non-empty handle, so panes remain empty today but the protocol surface is in place.
+
+`OUTPUT_MD5` of `libextavrcp_jni.so` is now `4da9283b85954648521efd0d11524192`. File size unchanged at 50 992 B (T4 grew ~32 B from the new attr iteration + 4 widened `add_sp_imm → addw` encodings; still fits inside the LOAD #1 padding code-cave).
+
+### What remains for the metadata pane to render
+
+1. **`BluetoothBipServer` Java skeleton** in Y1Bridge.apk (or a new APK). Must declare all 21 native methods + the `mNativeData:I` field + the `onCallback(III[Ljava/lang/String;)V` method that `classInitNative` caches IDs for. Service started at boot calls `enableServiceNative → startListenNative → biprEnableNative(serviceName)`. mtkbt registers the SDP record automatically as a side effect.
+2. **`Capability` + `ImageFormat` value classes** to describe what we serve (JPEG, 200×200, ≤200 KB).
+3. **`biprAccessRspNative(int, int, String)` handler** that hands a per-track JPEG file path when CT issues `GetImage`. Music app writes the per-track JPEG (via `MediaMetadataRetriever.getEmbeddedPicture()` re-encode to JPEG-200) to a known location; `BluetoothBipServer` serves it.
+4. **`TrackInfoWriter` schema bump** — grow on-disk write from 1104 B to 1112 B, populate `[1104..1110]` with a 7-char ASCII hex handle per track (e.g., low 28 bits of audio_id). Independent of (1)-(3) but only useful once those land.
