@@ -187,7 +187,7 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
 | 832..847 | PlayingTime (UTF-8 ASCII decimal ms) | 16 | shipped | derived from `duration_ms` |
 | 848..1103 | Genre (UTF-8) | 256 | shipped | `MediaStore.Audio.Genres` / `METADATA_KEY_GENRE` |
-| 1104..1111 | CoverArtHandle (UTF-8 ASCII 7-hex-char + NUL) | 8 | partial | AVRCP 1.6 §5.13.4 Default Cover Art handle. Empty string when no art available — CT skips BIP/OBEX (spec-compliant graceful degradation). Real handle populated once the music app writes per-track JPEG bytes for the BIP responder to serve. |
+| 1104..1111 | CoverArtHandle (UTF-8 ASCII 7-char + NUL) | 8 | partial | AVRCP 1.6 §5.14.1 Default Cover Art (attribute id 0x8 per §26 Table 26.1 / ESR09 E6073). Value is a BIP Image Handle (BIP §4.4.4 format) — 7 ASCII chars per the §29.23 example MSC. Empty string when not available (per §5.3.4 zero-length convention). Real handle populated once the AVRCP-Cover-Art OBEX responder is wired and the music app writes per-track JPEG bytes for it to serve. |
 
 Total file size: **1112 B**. Page-aligned write is still single-block. Schema bumps are append-only; we never relocate existing fields, so older trampolines keep working against a newer file (T6 / T8 / T9 only read up to offset 792 and are unaffected by attrs 4-8 being appended past 800).
 

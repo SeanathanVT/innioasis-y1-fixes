@@ -2463,7 +2463,7 @@ OUTPUT_MD5 of `libextavrcp_jni.so` is now `c017b6ab5d66ccbd851c9399e0642262`.
 **Bolt EV** (`dual-bolt-20260513-1355`):
 - Audio actually pauses on Pause button press (was broken pre-`44d376c`). ✓
 - Forward / Previous PASSTHROUGH actions work. ✓
-- Metadata pane stays empty. **Root cause confirmed: Bolt's `GetElementAttributes` request (wire `size:45`) asks for 8 attributes including attr 8 (Default Cover Art handle, AVRCP 1.6 §5.13.4). We return 7. Bolt gates pane render on receiving a non-empty CoverArt entry.** Note: Default Cover Art is an AVRCP 1.6 feature (Dec 2015), NOT 1.4. AVRCP 1.4 added browsing + AbsoluteVolume; 1.5 added AddressedPlayer / AvailablePlayers; 1.6 added DCA via attribute 8 + BIP integration.
+- Metadata pane stays empty. **Root cause confirmed: Bolt's `GetElementAttributes` request (wire `size:45`) asks for 8 attributes including attr 8 (Default Cover Art handle, AVRCP 1.6 §5.14.1; attribute id assigned in §26 Table 26.1 per ESR09 E6073). We return 7. Bolt gates pane render on receiving a non-empty CoverArt entry.** Note: Default Cover Art is an AVRCP 1.6 feature (Dec 2015), NOT 1.4. AVRCP 1.4 added browsing + AbsoluteVolume; 1.5 added AddressedPlayer / AvailablePlayers; 1.6 added Default Cover Art via attribute 8.
 - Play/Pause icon stuck after first toggle. **Root cause: Bolt subscribes for event 0x01 once at connect and never re-registers. Our gate emits exactly one CHANGED per registration; Bolt only ever sees one. UI mirror frozen at first-CHANGED state.**
 - Shuffle stuck on. Same root cause — Bolt subscribes for event 0x08 once.
 
@@ -2475,17 +2475,17 @@ User directive 2026-05-13 after seeing the §6.7.1 fixes work end-to-end on Kia:
 
 Project policy amended: `feedback_avrcp13_only_scope.md` now lists two carve-outs:
 1. MtkBt.odex F1 BlueAngel internal-flag spoof (existing).
-2. AVRCP 1.6 Default Cover Art (BIP/OBEX) — new. Specifically: GetElementAttributes attribute id 8 (Default Cover Art handle per AVRCP 1.6 §5.13.4), BIP responder (UUID 0x111A Imaging Responder / 0x111B Imaging Reference), OBEX channel for image transfer.
+2. AVRCP 1.6 Default Cover Art — new. Specifically: GetElementAttributes attribute id 8 (AVRCP 1.6 §5.14.1; ID assigned in §26 Table 26.1 per ESR09 E6073), the AVRCP Cover Art OBEX channel (§5.14.2.1 Target Header UUID `7163DD54-4A7E-11E2-B47C-0050C2490048`) on a dynamically-assigned L2CAP PSM advertised via the AVRCP TG SDP record's Additional Protocol Descriptor List (Table 8.2), and the BIP Image Pull functions GetImageProperties / GetImage / GetLinkedThumbnail (§5.14.2.2). The generic BIP Imaging Responder SDP record (0x111B) is **not** used — §13 forbids publishing it when BIP is used solely for Cover Art.
 
 Other 1.4+ / 1.5+ / 1.6+ features (SetAbsoluteVolume, browse channel for player switching, SetAddressedPlayer, NOW_PLAYING_CONTENT_CHANGED, etc.) remain out of scope.
 
 ### What needs investigation before implementing Default Cover Art
 
-1. Does mtkbt include a BIP server? — `strings /work/v3.0.2/system.img.extracted/system/bin/mtkbt | grep -i "bip\|imaging\|cover.art\|0x111a\|0x111b"`. If yes, just wire it up. If no, implement BIP atop mtkbt's existing OBEX or in a parallel daemon.
-2. What SDP record does Bolt expect for BIP? Capture an iPhone-or-Pixel-paired session's SDP advertisement and compare.
-3. Where does the music app store/access cover art for local display? Likely `MediaMetadataRetriever.getEmbeddedPicture()` or similar.
-4. How is attr 8 transferred on the wire? AVRCP 1.6 §5.13.4: handle is a 7-character ASCII hex string returned in the GetElementAttributes response payload. CT then opens an OBEX channel and issues GetImage / GetLinkedThumbnail to fetch the actual JPEG bytes by handle.
-5. JPEG thumbnail constraints per AVRCP 1.6 §5.13.4: max 200×200 pixels, max 200 KB.
+1. AVRCP TG SDP record changes — Table 8.2 specifies: AVRCP profile version `0x0106` (currently 0x0103); `SupportedFeatures` (attr 0x0311) bit 8 = Supports Cover Art (currently 0x0001, bit 8 unset); Additional Protocol Descriptor List with a Cover Art L2CAP PSM + OBEX entry. Need to extend `patch_mtkbt.py` V-family to inject these.
+2. Where does the music app store/access cover art for local display? Likely `MediaMetadataRetriever.getEmbeddedPicture()` or similar.
+3. Wire format for attribute 8: per AVRCP 1.6 §5.14.1 + §29.23 example MSC, the value is a BIP Image Handle (BIP §4.4.4 format; the example shows a 7-character ASCII identifier such as "1000004").
+4. AVRCP Cover Art OBEX responder implementation — must listen on the dynamically-assigned PSM, accept OBEX connections with Target Header UUID `7163DD54-4A7E-11E2-B47C-0050C2490048` (§5.14.2.1), and serve `GetImageProperties` / `GetImage` / `GetLinkedThumbnail`. mtkbt ships a generic BIP responder in `libextbip.so` that could potentially be reused; whether it matches the Cover-Art-specific Target Header UUID needs verification.
+5. Imaging Thumbnail format per §5.14.2.2.1: 200×200 pixels, JPEG baseline-compliant, sRGB default colour space, YCC422 sampling, one marker segment per DHT/DQT, typical Huffman table, DCF thumbnail file format. (Spec specifies pixel size + encoding; no byte-size limit.)
 
 Implementation plan sketch in memory `project_y1_cover_art_direction.md`.
 
@@ -2502,29 +2502,43 @@ Implementation plan sketch in memory `project_y1_cover_art_direction.md`.
 
 The OEM stripped the Java BIP service layer (likely to slim the firmware — Y1 has no native UI for OPP/FTP image push). Native libs ship as-built; nothing currently calls into them.
 
-**Q2 (SDP record)** — answered NO at runtime, but resolved cleanly. Complete BIP Imaging Responder SDP record is baked into `mtkbt` at file offset `0xf9df0` (record body, 10 attribute entries of 12 B each) + value blobs at .rodata `0xebc97..0xebd40`. Full attribute set: ServiceClassIDList (`0x111B`), ProtocolDescriptorList (L2CAP / RFCOMM / OBEX), BrowseGroupList (PublicBrowseRoot), LanguageBaseAttributeIDList, BluetoothProfileDescriptorList (`0x111A` v1.0), ServiceName ("Imaging"), SupportedCapabilities, SupportedFeatures, SupportedFunctions, TotalImagingDataCapacity (0x50000000 ≈ 1.34 GB).
+**Q2 (SDP record)** — recon initially focused on the wrong artifact. Complete generic BIP Imaging Responder SDP record is baked into `mtkbt` at file offset `0xf9df0` (record body, 10 attribute entries of 12 B each) + value blobs at .rodata `0xebc97..0xebd40` — ServiceClassIDList (`0x111B`), ProtocolDescriptorList (L2CAP / RFCOMM / OBEX), BrowseGroupList (PublicBrowseRoot), LanguageBaseAttributeIDList, BluetoothProfileDescriptorList (`0x111A` v1.0), ServiceName ("Imaging"), SupportedCapabilities, SupportedFeatures, SupportedFunctions, TotalImagingDataCapacity (0x50000000 ≈ 1.34 GB). Live `sdptool browse` (capture `logs/y1-sdptool-20260513-1437.log`) confirms it is **not** advertised: server returns 5 records (A2DP / AVRCP TG / PBAP PSE / NAP / OBEX Object Push); record handle slots `0x10001` and `0x10006` are absent.
 
-Live `sdptool browse` (capture `logs/y1-sdptool-20260513-1437.log`) confirms the record is **not** advertised: server returns 5 records (A2DP / AVRCP TG / PBAP PSE / NAP / OBEX Object Push) — handle slots `0x10001` and `0x10006` are absent, indicating selective registration.
+**Reading the spec afterward reveals this record is the wrong target anyway.** AVRCP 1.6 §13 explicitly forbids publishing the generic BIP SDP record when BIP is used solely for AVRCP Cover Art:
 
-Root cause: registration is gated on the activation chain `Java biprEnableNative → libextbip_jni.so → bip_responder_enable (libextbip.so 0x89f0) → BIPR_ACTIVATE IPC → mtkbt SDP_AddRecord`. Since `BluetoothBipServer` doesn't exist, nothing ever calls `biprEnableNative`, the chain never starts, the record stays out of SDP. **No SDP patch needed** — implementing the Java service is sufficient by itself.
+> *"When BIP functionality is used solely for AVRCP Cover Art the BIP SDP record described in [BIP] shall not be published. The Cover Art feature never affects the format or values of the BIP SDP record described in [BIP]. L2CAP channels implementing BIP functionality for AVRCP Cover Art shall be distinct from L2CAP channels implementing BIP functionality in conformance to [BIP]."* — AVRCP 1.6 §13
+
+The correct AVRCP-Cover-Art SDP signaling lives in the **AVRCP TG service record** (§8 Table 8.2):
+- AVRCP profile version **0x0106** (currently Y1 advertises 0x0103).
+- `SupportedFeatures` (attr `0x0311`) **bit 8 = Supports Cover Art** (currently Y1 advertises `0x0001`, bit 8 unset).
+- **Additional Protocol Descriptor List** with an entry for `L2CAP, PSM=<dynamically assigned Cover Art PSM>, OBEX`.
+
+And the OBEX channel uses **Target Header UUID `7163DD54-4A7E-11E2-B47C-0050C2490048`** (§5.14.2.1) on an L2CAP PSM **distinct from any generic BIP channel** — the generic `libextbip.so` BIP responder accepts the BIP target header (`E33D9545-8374-4AD7-9EC5-C16BE31EDE8E`), not the Cover Art one, so even if we could activate it, it would not match the AVRCP Cover Art client's connect.
+
+Net effect: the **whole "mtkbt has a baked-in BIP record, just call `biprEnableNative` to advertise it"** framing in earlier sections of this trace is misdirected. The 0x111B record is the wrong record. The actual SDP changes belong in `patch_mtkbt.py` against the AVRCP TG record (already mutated by V1/V6/V7/S1) — specifically: bump the AVRCP-profile-version bytes, flip the SupportedFeatures attribute, append the Additional Protocol Descriptor List entry.
 
 **Q3 (music-app cover art source)** — not yet investigated; deferred to the image-wiring chunk.
 
-**Q4 (wire format for attr 8)** — confirmed AVRCP 1.6 §5.13.4: 7-character ASCII hex handle returned in the `GetElementAttributes` response. CT resolves to image bytes via BIP/OBEX (GetImage / GetLinkedThumbnail) using the handle as identifier.
+**Q4 (wire format for attr 8)** — confirmed AVRCP 1.6 §5.14.1 + §29.23 example MSC. The value is a BIP Image Handle (BIP §4.4.4 format). The §29.23 MSC shows `AttributeValueLength=7; AttributeValue='1000004'` — a 7-character ASCII identifier. (Earlier notes claimed "hex" — spec doesn't constrain the encoding to hex; BIP defines the format.)
 
-**Q5 (image constraints)** — AVRCP 1.6 §5.13.4: max 200 × 200 pixels, max 200 KB, JPEG.
+**Q5 (image constraints)** — AVRCP 1.6 §5.14.2.2.1 Imaging Thumbnail: 200×200 pixels, JPEG baseline-compliant, sRGB default colour space, YCC422 sampling, one marker segment per DHT/DQT, typical Huffman table, DCF thumbnail file format. (Spec specifies pixel size + encoding; no byte-size limit. Earlier notes citing a 200 KB cap were fabricated.)
 
 ### T4 attr 8 emit shipped (`_trampolines.py`)
 
-`T4` `attr_table` grew from 7 entries to 8 with `("cover_handle", 0x08, T4_OFF_FILE_COVER_HANDLE)`. `y1-track-info` schema grew `1104 → 1112 B` (new tail `[1104..1110]` for the 7-char ASCII hex handle + NUL terminator at 1111). T4's `add_sp_imm` calls in the attr-emit loop gained a per-offset fallback to the wider `addw rd, sp, #imm12` encoding so the new cover_handle slot at SP+1136 emits cleanly — `add_sp_imm` only reaches 1020 via its imm8<<2.
+`T4` `attr_table` grew from 7 entries to 8 with `("cover_handle", 0x08, T4_OFF_FILE_COVER_HANDLE)`. `y1-track-info` schema grew `1104 → 1112 B` (new tail `[1104..1110]` for the 7-character ASCII BIP Image Handle + NUL terminator at 1111). T4's `add_sp_imm` calls in the attr-emit loop gained a per-offset fallback to the wider `addw rd, sp, #imm12` encoding so the new cover_handle slot at SP+1136 emits cleanly — `add_sp_imm` only reaches 1020 via its imm8<<2.
 
-Until the Java BIP responder lands and `TrackInfoWriter` starts writing per-track handles into `y1-track-info[1104..1110]`, T4 emits attr 8 with an empty value (file is 1104 B on disk; T4's `read(fd, buf, 1112)` short-returns at 1104, the new tail bytes stay memset-zeroed; `strlen` of zeroed bytes returns 0). Per AVRCP §5.3.4 a 0-length attribute is the canonical "not available" signal — spec-compliant graceful degradation. The wire frame now contains the expected 8th attribute slot; strict-CT metadata-pane render still gates on a non-empty handle, so panes remain empty today but the protocol surface is in place.
+Until the AVRCP Cover Art OBEX responder lands and `TrackInfoWriter` starts writing per-track handles into `y1-track-info[1104..1110]`, T4 emits attr 8 with an empty value (file is 1104 B on disk; T4's `read(fd, buf, 1112)` short-returns at 1104, the new tail bytes stay memset-zeroed; `strlen` of zeroed bytes returns 0). Per AVRCP §5.3.4 a 0-length attribute is the canonical "not available" signal — spec-compliant graceful degradation. The wire frame now contains the expected 8th attribute slot; strict-CT metadata-pane render still gates on a non-empty handle, so panes remain empty today but the protocol surface is in place.
 
 `OUTPUT_MD5` of `libextavrcp_jni.so` is now `4da9283b85954648521efd0d11524192`. File size unchanged at 50 992 B (T4 grew ~32 B from the new attr iteration + 4 widened `add_sp_imm → addw` encodings; still fits inside the LOAD #1 padding code-cave).
 
 ### What remains for the metadata pane to render
 
-1. **`BluetoothBipServer` Java skeleton** in Y1Bridge.apk (or a new APK). Must declare all 21 native methods + the `mNativeData:I` field + the `onCallback(III[Ljava/lang/String;)V` method that `classInitNative` caches IDs for. Service started at boot calls `enableServiceNative → startListenNative → biprEnableNative(serviceName)`. mtkbt registers the SDP record automatically as a side effect.
-2. **`Capability` + `ImageFormat` value classes** to describe what we serve (JPEG, 200×200, ≤200 KB).
-3. **`biprAccessRspNative(int, int, String)` handler** that hands a per-track JPEG file path when CT issues `GetImage`. Music app writes the per-track JPEG (via `MediaMetadataRetriever.getEmbeddedPicture()` re-encode to JPEG-200) to a known location; `BluetoothBipServer` serves it.
-4. **`TrackInfoWriter` schema bump** — grow on-disk write from 1104 B to 1112 B, populate `[1104..1110]` with a 7-char ASCII hex handle per track (e.g., low 28 bits of audio_id). Independent of (1)-(3) but only useful once those land.
+Per AVRCP 1.6 §5.14 + §8 + §13 + §29.23 the actual blockers are:
+
+1. **AVRCP TG SDP-record patches** (`patch_mtkbt.py` V-family extensions). Three changes to the served AVRCP TG record (handle `0x10003` in current capture):
+   - **AVRCP profile version** bytes: `0x0103 → 0x0106` (Table 8.2 requires 1.6 advertisement for Cover Art support).
+   - **`SupportedFeatures`** attribute (`0x0311`): set **bit 8** (`Supports Cover Art`). Currently `0x0001` → must include `0x0100`.
+   - **Additional Protocol Descriptor List**: add an entry `L2CAP (PSM=<dynamic Cover Art PSM>), OBEX`.
+2. **AVRCP Cover Art OBEX responder** listening on the dynamic PSM and accepting OBEX connections whose Target Header carries the **`7163DD54-4A7E-11E2-B47C-0050C2490048`** UUID (§5.14.2.1). Must serve `GetImageProperties` / `GetImage` / `GetLinkedThumbnail`. mtkbt's stock `libextbip.so` BIP responder accepts the generic BIP target UUID (`E33D9545-8374-4AD7-9EC5-C16BE31EDE8E`), so it likely will *not* match the Cover Art target out of the box — needs verification, and if the mismatch is confirmed we either patch the target-UUID check or write a small OBEX responder of our own (javax.obex on the Y1's classpath would make this tractable).
+3. **Music-app image source**: `MediaMetadataRetriever.getEmbeddedPicture()` (or equivalent) to extract album art, JPEG-200 re-encode to the Imaging Thumbnail constraints (§5.14.2.2.1), and write to a known file path the responder reads.
+4. **`TrackInfoWriter` schema bump**: grow on-disk write from 1104 B to 1112 B, populate `[1104..1110]` with a 7-character BIP Image Handle per track (e.g. a 7-char encoding of audio_id low bits). Independent of (1)-(3) but only useful once those land.

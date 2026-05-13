@@ -123,10 +123,14 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
 #                      848..1103 Genre                      UTF-8 (256 B)
-#                      1104..1111 CoverArtHandle             UTF-8 ASCII (7 hex chars + NUL).
-#                                                            AVRCP 1.6 §5.13.4 Default Cover Art.
-#                                                            Empty string = no handle available
-#                                                            (graceful degradation; CT skips DCA).
+#                      1104..1111 CoverArtHandle             UTF-8 ASCII (7 chars + NUL).
+#                                                            AVRCP 1.6 §5.14.1 Default Cover Art
+#                                                            attribute id 0x8 (§26 Table 26.1 via
+#                                                            ESR09 E6073). Value is a BIP Image
+#                                                            Handle (BIP §4.4.4 format) — 7 ASCII
+#                                                            chars per the §29.23 example MSC.
+#                                                            Empty string = attribute not available
+#                                                            (per §5.3.4 zero-length convention).
 T4_FRAME           = 1136
 T4_FILE_SIZE       = 1112
 T4_OFF_ARGS        = 0
@@ -546,15 +550,20 @@ def _emit_t4(a: Asm) -> None:
     #   0x02 Artist             0x06 Genre
     #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
     #   0x04 TrackNumber
-    # AVRCP 1.6 §5.13.4 attribute id:
-    #   0x08 DefaultCoverArt (7 ASCII hex chars; resolved by CT via BIP/OBEX).
+    # AVRCP 1.6 §5.14.1 attribute id (§26 Table 26.1 per ESR09 E6073):
+    #   0x08 Default Cover Art — value is a BIP Image Handle (BIP §4.4.4 format),
+    #        7 ASCII chars per the §29.23 example MSC. Resolved by CT via the
+    #        AVRCP Cover Art OBEX channel (§5.14.2.1 Target Header UUID
+    #        7163DD54-4A7E-11E2-B47C-0050C2490048), not via the generic BIP
+    #        Imaging Responder SDP record (§13 forbids publishing that record
+    #        when BIP is used solely for AVRCP Cover Art).
     # All values are UTF-8 (charset 0x006A); per §5.3.4 a missing attribute is
     # signalled by AttributeValueLength=0, which is what an empty string slot
     # produces here (strlen returns 0, the response builder packs the 8-byte
     # header with no value bytes). For attr 0x08 specifically, an empty value
-    # tells the CT "DCA not available for this track" and it skips BIP/OBEX
-    # — spec-compliant graceful degradation until the music app writes a real
-    # handle into y1-track-info[1104..1110].
+    # tells the CT "Cover Art handle not available for this track" and it
+    # skips the OBEX fetch — spec-compliant graceful degradation until the
+    # music app writes a real handle into y1-track-info[1104..1110].
     attr_table = (
         ("title",         0x01, T4_OFF_FILE_TITLE),
         ("artist",        0x02, T4_OFF_FILE_ARTIST),
