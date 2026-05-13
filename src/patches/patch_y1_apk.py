@@ -2202,9 +2202,101 @@ if "invoke-static {p0}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->onPause" not i
     # Append before the final closing of the file (smali files don't have an
     # end marker; appending after the last .end method is sufficient).
     mpa_src = mpa_src.rstrip() + MPA_ON_PAUSE_INJECT + "\n"
+
+# Inject refreshRepeatShuffleUi() — re-renders ONLY the Repeat / Shuffle
+# ImageView icons from current SharedPreferences. Used by
+# NowPlayingRefresher.run() to propagate CT-driven Repeat / Shuffle
+# changes to the Now Playing screen without the side effects of re-
+# running initView() (finish() on no-music, setSpeed(1.0f) reset).
+# Resource IDs / SharedPreferences key mapping mirror initView()'s logic:
+#   isShuffle TRUE  → R 0x7f0e002a   FALSE → R 0x7f0e0027
+#   musicRepeatMode == 0 OFF    → R 0x7f0e0026
+#   musicRepeatMode == 1 SINGLE → R 0x7f0e0029
+#   musicRepeatMode == 2 ALL    → R 0x7f0e0028
+MPA_REFRESH_PAPP_INJECT = """
+
+.method public refreshRepeatShuffleUi()V
+    .locals 3
+
+    :try_start_0
+    sget-object v0, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v0}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->getMusicIsShuffle()Z
+
+    move-result v0
+
+    invoke-virtual {p0}, Lcom/innioasis/music/MusicPlayerActivity;->getVb()Landroidx/viewbinding/ViewBinding;
+
+    move-result-object v1
+
+    check-cast v1, Lcom/innioasis/y1/databinding/ActivityMusicPlayerBinding;
+
+    iget-object v1, v1, Lcom/innioasis/y1/databinding/ActivityMusicPlayerBinding;->isShuffle:Landroid/widget/ImageView;
+
+    if-eqz v0, :cond_shuffle_off
+
+    const v2, 0x7f0e002a
+
+    goto :goto_shuffle_set
+
+    :cond_shuffle_off
+    const v2, 0x7f0e0027
+
+    :goto_shuffle_set
+    invoke-virtual {v1, v2}, Landroid/widget/ImageView;->setImageResource(I)V
+
+    sget-object v0, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->INSTANCE:Lcom/innioasis/y1/utils/SharedPreferencesUtils;
+
+    invoke-virtual {v0}, Lcom/innioasis/y1/utils/SharedPreferencesUtils;->getMusicRepeatMode()I
+
+    move-result v0
+
+    invoke-virtual {p0}, Lcom/innioasis/music/MusicPlayerActivity;->getVb()Landroidx/viewbinding/ViewBinding;
+
+    move-result-object v1
+
+    check-cast v1, Lcom/innioasis/y1/databinding/ActivityMusicPlayerBinding;
+
+    iget-object v1, v1, Lcom/innioasis/y1/databinding/ActivityMusicPlayerBinding;->repeatMode:Landroid/widget/ImageView;
+
+    const/4 v2, 0x1
+
+    if-ne v0, v2, :cond_repeat_check_2
+
+    const v2, 0x7f0e0029
+
+    goto :goto_repeat_set
+
+    :cond_repeat_check_2
+    const/4 v2, 0x2
+
+    if-ne v0, v2, :cond_repeat_off
+
+    const v2, 0x7f0e0028
+
+    goto :goto_repeat_set
+
+    :cond_repeat_off
+    const v2, 0x7f0e0026
+
+    :goto_repeat_set
+    invoke-virtual {v1, v2}, Landroid/widget/ImageView;->setImageResource(I)V
+    :try_end_0
+    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
+
+    return-void
+
+    :catch_0
+    move-exception v0
+
+    return-void
+.end method
+"""
+if "refreshRepeatShuffleUi" not in mpa_src:
+    mpa_src = mpa_src.rstrip() + MPA_REFRESH_PAPP_INJECT + "\n"
 with open(mpa_path, 'w') as f:
     f.write(mpa_src)
-print(f"  Patch B5.5: MusicPlayerActivity onResume/onPause → NowPlayingRefresher")
+print(f"  Patch B5.5: MusicPlayerActivity onResume/onPause + refreshRepeatShuffleUi → NowPlayingRefresher")
 
 
 # ============================================================

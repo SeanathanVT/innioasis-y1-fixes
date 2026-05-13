@@ -120,7 +120,15 @@
 
     if-eqz v0, :cond_no_current
 
-    invoke-virtual {v0}, Lcom/innioasis/music/MusicPlayerActivity;->refreshUI()V
+    # Stock refreshUI() only updates track-name / artist labels — the
+    # Repeat / Shuffle ImageView icons are bound in initView() and not
+    # touched by refreshUI(). Patch B5.5 injects refreshRepeatShuffleUi()
+    # (a dedicated SharedPreferences → ImageView resource setter) into
+    # MusicPlayerActivity so we can re-render JUST the Repeat / Shuffle
+    # button icons without the side effects of re-running initView()
+    # (which can finish() the activity if no music is loaded, and resets
+    # PlayerService.setSpeed(1.0f)).
+    invoke-virtual {v0}, Lcom/innioasis/music/MusicPlayerActivity;->refreshRepeatShuffleUi()V
 
     :cond_no_current
     return-void
