@@ -2,61 +2,16 @@
 """
 patch_libextavrcp.py — make GetElementAttributes response §5.3.4-compliant.
 
-Stock md5:  6442b137d3074e5ac9a654de83a4941a
-Output md5: 1347e1b337879840ad2f66597836b05f
+2-byte CBZ→NOP at file offset 0x00002266 in
+btmtk_avrcp_send_get_element_attributes_rsp. Disables the "ignore empty
+attrib" check that drops zero-length attributes from the wire (a deviation
+from AVRCP 1.3 §5.3.4, which requires unsupported attributes to emit with
+AttributeValueLength=0). T4 in libextavrcp_jni.so emits zero-length
+entries for any requested AttributeID outside 0x01-0x07; this patch lets
+those entries reach the wire so strict CTs see a §5.3.4-compliant
+response shape.
 
-Single 2-byte Thumb-2 CBZ→NOP flip at file offset 0x00002266 inside
-`btmtk_avrcp_send_get_element_attributes_rsp` (function entry at 0x2188).
-Disables the "ignore empty attrib" check that drops attributes whose value
-length is 0 — a deviation from AVRCP 1.3 §5.3.4 which requires the TG to
-emit unsupported attributes with `AttributeValueLength=0` rather than
-omit them entirely.
-
-Strict-CT impact: some CTs request a specific attribute set (e.g. one
-strict CT in the test matrix requests `[0x1, 0x2, 0x3, 0x6, 0x8, 0x7]`)
-and gate their metadata-pane render on receiving every requested
-attribute back, even if some come with zero-length values. With the
-"ignore empty" drop in place, that CT receives a response missing any
-attribute whose value isn't set on the TG side, and refuses to render.
-Lenient CTs already render fine — they pick out whatever attribute IDs
-they recognize from the response.
-
-Stock disassembled gate (annotated with the patch site):
-
-    2254: adds.w r0, fp, #0          ; r0 = attr_id (fp), set flags
-    2258: it ne
-    225a: movne r0, #1                 ; r0 = 1 if attr_id != 0 else 0
-    225c: cmp r7, #0                   ; r7 = strlen
-    225e: ite eq
-    2260: moveq r0, #0                 ; r0 = 0 if strlen == 0
-    2262: andne.w r0, r0, #1           ; else r0 &= 1
-    2266: cbz r0, 0x22cc               ; ← PATCH SITE: 88 b3 -> 00 bf (NOP)
-                                       ;   Stock: skip emit when (attr_id == 0)
-                                       ;          OR (strlen == 0)
-                                       ;   Patched: fall through unconditionally —
-                                       ;   emit every attr with whatever length
-                                       ;   T4 supplied (zero is fine per §5.3.4).
-    2268: ... (emit attribute path)
-    22cc: ldr r1, [pc, #124]           ; "ignore empty attrib" log path —
-                                       ; unreachable post-patch.
-
-Patch: at file offset 0x00002266 change 2 bytes from `88 b3` (CBZ r0,
-+0x62) to `00 bf` (NOP T1). Execution falls through to the emit path
-unconditionally. The attr_id=0 ("Not Used" per AVRCP 1.3 §26 Table 26.1)
-guard is also dropped, but T4 in `libextavrcp_jni.so` never emits attr_id
-0, so that side of the gate has no caller in practice.
-
-Pairs with: T4 in `_trampolines.py` reads the CT's inbound `NumAttributes`
-+ `AttributeID[N]` request (AVRCP 1.3 §6.6.1 Table 6.26) and emits each
-requested ID in order. For IDs outside the canonical 1.3 set 0x01-0x07,
-T4 emits with length 0 per §5.3.4. Without this patch, stock libextavrcp.so
-silently drops the zero-length entries, so strict CTs that gate render
-on response-shape see a truncated frame.
-
-Usage:
-    python3 patch_libextavrcp.py libextavrcp.so
-    python3 patch_libextavrcp.py libextavrcp.so --output /tmp/lib.patched
-    python3 patch_libextavrcp.py libextavrcp.so --verify-only
+Byte-level reference: docs/PATCHES.md.
 """
 
 import argparse

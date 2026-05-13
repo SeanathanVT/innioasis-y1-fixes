@@ -23,57 +23,15 @@ venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
-  --avrcp        AVRCP 1.3 metadata pipeline (1.3 SDP shape + AVCTP 1.2
-                 + JNI trampoline chain in libextavrcp_jni.so + proactive
-                 CHANGED on Y1 track changes via Java→JNI hook in MtkBt.odex
-                 + Y1Bridge.apk Binder declaration). The trampoline chain
-                 bypasses mtkbt's compiled-1.0 command dispatcher and
-                 synthesises the 1.3 responses inside the JNI library
-                 directly. The music app writes y1-track-info; Y1Bridge
-                 stays installed as the Binder host MtkBt's bindService
-                 resolves to (the music APK's manifest can't be modified —
-                 com.innioasis.y1 declares sharedUserId=android.uid.system,
-                 which constrains signing to the OEM platform key).
-
-                 Components:
-                   - patch_mtkbt.py (V1: AVRCP 1.0->1.3 SDP, V2: AVCTP
-                     1.0->1.2 SDP, S1: replace 0x0311 entry with 0x0100
-                     ServiceName, P1: force fn 0x144bc op_code dispatch
-                     to msg 519 emit for VENDOR_DEPENDENT)
-                   - patch_libextavrcp_jni.py (R1 + T1 / T2 / extended_T2 /
-                     T4 / T5 / T_charset / T_battery / T6 / T8 / T9
-                     trampoline chain in LOAD #1 page-padding extension
-                     + U1 kernel auto-repeat NOP)
-                   - patch_libextavrcp.py (E1: drop the GetElement-
-                     Attributes 'ignore empty attrib' check so unsupported
-                     attributes emit with AttributeValueLength=0 per
-                     AVRCP 1.3 §5.3.4)
-                   - patch_mtkbt_odex.py (F1: getPreferVersion -> 14;
-                     F2: disable() resets sPlayServiceInterface; two
-                     cardinality NOPs in handleKeyMessage so Java fires
-                     notificationTrackChangedNative + notification-
-                     PlayStatusChangedNative on every metachanged /
-                     playstatechanged broadcast)
-                   - patch_libaudio_a2dp.py (HAL standby_l: skip
-                     a2dp_stop unconditionally so silence-timeout leaves
-                     the AVDTP source stream alive across pauses)
-                   - patch_y1_apk.py B5/B6 (in-music-app TrackInfoWriter +
-                     PlaybackStateBridge + BatteryReceiver + PappSetFile-
-                     Observer; AvrcpBinder smali groundwork for Phase 3 v2)
-                   - Y1Bridge.apk install (manifest-declared service hosting
-                     the IBTAvrcpMusic + IMediaPlaybackService Binder MtkBt's
-                     bindService resolves to)
-
-                 Excluded from --all because it requires a Y1Bridge build
-                 step. Build first:
+  --avrcp        AVRCP 1.3 metadata + control pipeline. Patches mtkbt /
+                 libextavrcp.so / libextavrcp_jni.so / MtkBt.odex / music
+                 app, installs Y1Bridge.apk. Excluded from --all because
+                 it requires a Y1Bridge build first:
                    cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug
-
-                 See docs/ARCHITECTURE.md for the trampoline chain reference.
-  --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
-                 + build.prop entries that are essential for car / peer pairing.
-                 Does NOT set persist.bluetooth.avrcpversion — the AVRCP
-                 version advertised on the wire is shaped by --avrcp's
-                 SDP patches instead.
+                 Architecture: docs/ARCHITECTURE.md. Byte-level patch
+                 reference: docs/PATCHES.md.
+  --bluetooth    Pairing-essential audio.conf / auto_pairing.conf /
+                 blacklist.conf / build.prop edits. No SDP / AVRCP changes.
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
@@ -81,12 +39,8 @@ FLAGS:
   --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
                  --avrcp is excluded because it requires building Y1Bridge
                  first (analogous to --root needing src/su/ built).
-  --debug        Build patches with diagnostic Log.d / __android_log_print
-                 calls injected. Surfaces under "adb logcat -s Y1Patch:*"
-                 on-device. Reflash required to toggle (this is a build-
-                 time switch, not a runtime one). Omit for release builds
-                 (zero runtime overhead). Sets KOENSAYR_DEBUG=1 in the
-                 patcher env; each patch script reads it independently.
+  --debug        Build patches with KOENSAYR_DEBUG=1. Build-time switch
+                 (reflash to toggle); zero runtime overhead when omitted.
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed

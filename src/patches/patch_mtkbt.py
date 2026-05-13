@@ -1,59 +1,19 @@
 #!/usr/bin/env python3
 """
-patch_mtkbt.py — SDP / VENDOR_DEPENDENT routing patches against stock mtkbt.
+patch_mtkbt.py — SDP shape + AV/C op_code dispatch against the stock mtkbt
+Bluetooth daemon. Shapes the served AVRCP TG SDP record to AVRCP 1.3 / AVCTP
+1.2 (V1+V2), A2DP/AVDTP 1.3 (V3+V4), drops the 1.4 Browse PSM advertisement
+(V7), clears the 1.4 GroupNavigation feature bit (V8), inserts a 0x0100
+ServiceName attribute (S1), reroutes the daemon to the v=14 SDP template
+(V6), force-emits PASSTHROUGH dispatch for all AV/C frames (P1), and
+best-effort aliases AVDTP sig 0x0c → 0x02 (V5).
 
-Stock md5:  3af1d4ad8f955038186696950430ffda
-Output md5: 04daa66a4694d5b2602ab740ed2511aa
+Per-patch byte-level reference (offsets, before/after, rationale, ICS row
+coverage, spec citations): docs/PATCHES.md.
 
-Four byte-level patches against the SERVED AVRCP TG record (Group D, the
-record that actually lands on the wire after mtkbt's last-wins merge) plus
-the AV/C op_code dispatcher. The goal is (1) make permissive CTs and other AVRCP
-1.3+ controllers engage with the record and start sending VENDOR_DEPENDENT
-commands and (2) route those commands into the JNI's msg 519 emit path so
-the libextavrcp_jni.so trampoline chain (patch_libextavrcp_jni.py) can
-synthesise the AVRCP 1.3 responses.
-
-Targets a spec-conformant AVRCP 1.3 SDP record shape: the standard set of
-attributes plus a 0x0100 ServiceName attribute that stock mtkbt lacks.
-
-V1 — AVRCP 1.0 -> 1.3 (served AVRCP TG ProfileDescList LSB)
-V2 — AVCTP 1.0 -> 1.2 (served AVRCP TG ProtocolDescList AVCTP version LSB)
-V3 — A2DP 1.0 -> 1.3 (served A2DP Source ProfileDescList LSB)
-V4 — AVDTP 1.0 -> 1.3 (served A2DP Source ProtocolDescList AVDTP version LSB)
-V5 — AVDTP sig 0x0c GET_ALL_CAPABILITIES dispatch alias (best-effort workaround)
-S1 — Replace the 0x0311 SupportedFeatures attribute table entry with a
-     0x0100 ServiceName entry pointing at the existing "Advanced Audio"
-     SDP string at file offset 0x0eb9ce. This sacrifices the SupportedFeatures
-     attribute on the wire (peers see no 0x0311); the known-working AVRCP 1.3
-     reference advertises features=0x0001 but permissive CTs engage without
-     strictly requiring the attribute.
-     The string content "Advanced Audio" is reused from mtkbt's existing A2DP
-     ServiceName — peers don't validate ServiceName content; they just need
-     the attribute present so the record passes structural sanity checks.
-P1 — Force fn 0x144bc's op_code dispatch to always take the PASSTHROUGH branch
-     (which calls bl 0x10404 → emits msg 519 CMD_FRAME_IND to JNI). gdbserver
-     traces confirmed PASSTHROUGH (op_code=0x7c) flows through fn 0x144bc's
-     b.n 0x14528 path → bl 0x10404 and produces msg 519, while VENDOR_DEPENDENT
-     (op_code=0x00) takes the bcc → bl 0x11374 path which only logs. The patch
-     replaces the first cmp at 0x144e8 with an unconditional b.n 0x14528,
-     skipping the op_code check entirely. All inbound AV/C frames now take the
-     emit path; the libextavrcp_jni.so trampoline chain parses the frame
-     and responds.
-
-     Risk: the bl 0x10404 path may interpret VENDOR_DEPENDENT frame bytes as
-     PASSTHROUGH, producing malformed responses. Worst case is mtkbt emits
-     a NOT_IMPLEMENTED reply to the peer (which is what currently happens
-     anyway). Best case msg 519 fires with the inbound bytes preserved and
-     the JNI trampolines handle the rest.
-
-Pairs with patch_libextavrcp_jni.py (handles the inbound-COMMAND response
-side via the trampoline chain in libextavrcp_jni.so) and patch_mtkbt_odex.py
-(F1 / F2 + cardinality NOP Java-side patches).
-
-Usage:
-    python3 patch_mtkbt.py mtkbt
-    python3 patch_mtkbt.py mtkbt --output /tmp/mtkbt.patched
-    python3 patch_mtkbt.py mtkbt --verify-only
+Pairs with patch_libextavrcp_jni.py (trampoline chain handles the
+1.3-COMMAND response side) and patch_mtkbt_odex.py (Java-side flag flips
++ cardinality NOPs).
 """
 
 import argparse
@@ -66,16 +26,9 @@ from pathlib import Path
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
 OUTPUT_MD5        = "5d65088540898231d5f235ac270ad5e1"
 
-# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
-# Placeholder — mtkbt is a stripped-down ARM ELF without symbols or a Java
-# layer; current patches are byte-level SDP-record edits. If we ever need
-# to instrument the daemon's AVRCP dispatch, we'd inject a syscall write()
-# stub from the patcher conditional on this flag. Once the debug build
-# diverges from release, pin a separate hash in OUTPUT_DEBUG_MD5.
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
 
-# Effective expected output MD5 for the current invocation.
 EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
 # 12-byte descriptor table entry: attrID:LE16, len:LE16, ptr:LE32, zeros:LE32

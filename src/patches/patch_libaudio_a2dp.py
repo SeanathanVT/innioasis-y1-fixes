@@ -1,68 +1,14 @@
 #!/usr/bin/env python3
 """
-patch_libaudio_a2dp.py — keep AVDTP stream alive during pause via HAL standby_l fix.
+patch_libaudio_a2dp.py — keep the AVDTP source stream alive across pauses.
 
-Stock md5:  0d909a0bcf7972d6e5d69a1704d35d1f
-Output md5: adbd98afeb5593f1ffe3b90acd0f2536
+Single-byte ARM cond-flip (EQ → AL) at file offset 0x000086ab in
+A2dpAudioStreamOut::standby_l. Skips the a2dp_stop call AudioFlinger's
+silence-timeout standby would otherwise make, so PAUSED leaves the stream
+paused-but-up (AVDTP 1.3 §8.13 / §8.15). TV-class CTs that aggressively
+close+reopen their A2DP sink on SUSPEND no longer burst-on-resume.
 
-Single-byte ARM-conditional → unconditional flip at file offset 0x000086ab
-inside `_ZN20android_audio_legacy18A2dpAudioInterface18A2dpAudioStreamOut9standby_lEv`
-(symbol entry 0x8654). Forces the standby path to ALWAYS skip the call to
-`a2dp_stop@plt`, so AudioFlinger's silence-timeout standby leaves the AVDTP
-source stream alive instead of emitting AVDTP SUSPEND on the wire.
-
-AVDTP 1.3 §8.13 / §8.15 expectation: AVRCP TG entering PAUSED leaves the
-A2DP source stream paused-but-up; SUSPEND is reserved for explicit policy
-changes (phone call routing, etc.). TV-class CTs that aggressively close
-+ reopen their A2DP sink on SUSPEND otherwise produce burst-on-resume
-audio + playhead drift.
-
-Why a HAL byte patch and not a Java-side `setParameters("A2dpSuspended=...")`
-hook: the AOSP A2DP HAL implements `setSuspended(true)` as a synchronous
-stream tear-down — it calls `a2dp_stop` directly inside `setSuspended`,
-which would trigger the SUSPEND we're trying to prevent. The HAL byte
-patch short-circuits the only standby path that calls a2dp_stop instead.
-
-Disassembled standby_l (annotated with the patch site):
-
-    8654: push {r3, r4, r5, lr}
-    8658: mov  r4, r0
-    865c: ldrb r3, [r0, #8]                   ; r3 = mStandby
-    8660: cmp  r3, #0
-    8664: beq  8674
-    8668: ldrb r5, [r0, #57]
-    866c: cmp  r5, #0
-    8670: beq  8698                           ; already-in-standby fast return
-    8674: ldrb r0, [r4, #56]
-    8678: cmp  r0, #0
-    867c: movne r5, #0
-    8680: beq  86a0                           ; falls into the a2dp_stop guard
-    8684: ldr  r2, [pc, #48]                  ; "WAKE_LOCK_NAME"-ish
-    8688: add  r0, pc, r2
-    868c: bl   release_wake_lock
-    8690: mov  r1, #1
-    8694: strb r1, [r4, #8]                   ; mStandby = 1
-    8698: mov  r0, r5                         ; return r5
-    869c: pop  {r3, r4, r5, pc}
-
-    86a0: ldrb r5, [r4, #48]
-    86a4: cmp  r5, #0
-    86a8: beq  8684                           ; ← PATCH SITE: change to `b 8684`
-    86ac: ldr  r0, [r4, #40]
-    86b0: bl   a2dp_stop@plt                  ; ← becomes unreachable post-patch
-    86b4: mov  r5, r0
-    86b8: b    8684
-
-Patch: at file offset 0x000086ab change byte 0x0a (ARM cond `EQ`) to 0xea
-(ARM cond `AL` = always). The `beq 8684` becomes an unconditional `b 8684`,
-so the a2dp_stop branch (instructions at 0x86ac-0x86b8) is never taken.
-
-Pairs with: nothing — self-contained single-byte HAL fix.
-
-Usage:
-    python3 patch_libaudio_a2dp.py libaudio.a2dp.default.so
-    python3 patch_libaudio_a2dp.py libaudio.a2dp.default.so --output /tmp/lib.patched
-    python3 patch_libaudio_a2dp.py libaudio.a2dp.default.so --verify-only
+Byte-level reference: docs/PATCHES.md.
 """
 
 import argparse

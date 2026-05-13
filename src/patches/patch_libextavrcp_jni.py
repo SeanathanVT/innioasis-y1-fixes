@@ -1,156 +1,21 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni.py — AVRCP TG / Target trampoline chain patched into
-libextavrcp_jni.so so this firmware (where Java-side AVRCP is a no-op stub)
-can answer permissive CTs' metadata queries directly from native code.
+patch_libextavrcp_jni.py — AVRCP TG trampoline chain.
 
-Pairs with patch_mtkbt.py's P1 patch which routes inbound VENDOR_DEPENDENT
-AV/C commands through msg 519 with size=9.
+Patches libextavrcp_jni.so with a redirect (R1), a uinput auto-repeat NOP
+(U1), and a dynamically-assembled Thumb-2 trampoline blob in the LOAD #1
+page-padding code-cave at vaddr 0xac54. The blob handles GetCapabilities,
+GetElementAttributes, GetPlayStatus, RegisterNotification (all events),
+InformDisplayableCharacterSet, InformBatteryStatusOfCT, and the §5.4.2
+track-edge 3-tuple — answering inbound 1.3 PDUs directly from native code
+since the stock Java AVRCP layer is a no-op stub on this firmware.
 
-Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        (recomputed each build — set OUTPUT_MD5 below)
+The blob is built by _trampolines.py via the Thumb-2 assembler in
+_thumb2asm.py. Per-trampoline behaviour: docs/PATCHES.md. Stack frame
+and JNI calling convention: docs/ARCHITECTURE.md.
 
---- Background (per docs/INVESTIGATION.md Trace #12 + docs/ARCHITECTURE.md) ---
-
-The JNI's msg-519 receive function `_Z17saveRegEventSeqIdhh` (body at file
-0x5f0c) dispatches inbound CMD_FRAME_IND on frame size:
-
-  size == 3 → PASSTHROUGH path → btmtk_avrcp_send_pass_through_rsp + JNI->Java
-  size == 8 → BT-SIG vendor check; on match calls JNIEnv->CallVoidMethodV
-              (vtable offset 248) into a Java *Ind callback
-  otherwise → "unknow indication" + default reject (msg 520 NOT_IMPLEMENTED)
-
-P1 (in patch_mtkbt.py) routes VENDOR_DEPENDENT frames into the msg-519
-emit path with size=9, so the JNI sees size!=8 and falls into the "unknow
-indication" branch. We need to handle 1.3+ commands here, since mtkbt's own
-dispatcher is compiled against AVRCP 1.0 and never invokes the response
-builder for 1.3+ COMMANDs.
-
---- Trampoline chain ---
-
-R1 — at file 0x6538: replace `bne.n 0x65bc; movs r5, #9` (40 d1 09 25)
-     with `bl.w 0x7308` (00 f0 e6 fe). Branches to T1 for all size!=3 cases.
-
-U1 — at file 0x74e8: NOP the `blx ioctl@plt` (fc f7 b4 e8 → 00 bf 00 bf)
-     inside the AVRCP uinput init (0x73c8, called via the exported
-     `avrcp_input_init` and ultimately registering the keyboard observed at
-     /dev/input/event4 named "AVRCP" with BUS_BLUETOOTH=5). The NOP'd call
-     is the third in a four-call UI_SET_EVBIT sequence — specifically the
-     one passing EV_REP (0x14). Dropping that claim means
-     input_register_device() in the kernel never enables soft auto-repeat
-     for this device, so a dropped PASSTHROUGH RELEASE no longer leads to
-     the kernel auto-firing KEY_xxx REPEAT at REP_PERIOD=33ms (~25 Hz)
-     until something else cancels the held-key state. The other three
-     UI_SET_EVBIT calls (EV_KEY at 0x74d4, the EV_REL vendor typo at
-     0x74e0, EV_SYN at 0x74f2) are left intact; the device still emits
-     key / syn events normally, just without kernel-side auto-repeat.
-     Spec-correct per AVRCP 1.3 §4.6.1 (PASS THROUGH command, defined
-     in AV/C Panel Subunit Specification [ref 2 of AVRCP 1.3]): the CT
-     owns the periodic-resend responsibility for held buttons; the TG
-     forwards one event per frame, not synthesizing extras at the input
-     layer.
-
-T1 — at 0x7308 (overwrites unused JNI debug method `testparmnum`, 40 of 48
-     bytes): GetCapabilities (PDU 0x10) — answers with the supported-events
-     list (events 0x01..0x08) and falls through (b.w 0x72d4) to the T2 stub
-     for everything else.
-
-T2 stub — at 0x72d0 (overwrites unused JNI debug method `classInitNative`,
-     8 of 48 bytes):
-       0x72d0: classInitNative `return 0` stub (4 bytes preserves contract)
-       0x72d4: b.w extended_T2 (4 bytes)
-       0x72d8..0x72ff: padding (40 bytes; unreachable, kept zero)
-
-extended_T2 — in LOAD #1 padding area, at vaddr derived from T4 layout.
-     Handles RegisterNotification(EVENT_TRACK_CHANGED, PDU 0x31, event 0x02):
-       1. Read first 8 bytes of /data/data/com.innioasis.y1/files/y1-track-info
-          (the track_id the music app's TrackInfoWriter wrote there).
-       2. Write [track_id (8) || transId (1) || pad (7)] to y1-trampoline-state
-          (so T4 can later check whether the track has changed).
-       3. Reply track_changed_rsp INTERIM with the 0xFF×8 sentinel
-          ("not bound to a particular media element" per AVRCP 1.3 §5.4.2
-          Table 5.30 + ESR07 §2.2 clarification of the 8-byte form).
-     PDU 0x31 + event ≠ 0x02 → b.w T8 (RegisterNotification dispatcher
-     for the rest of the events). Other PDUs fall through to T4 (PDU 0x20).
-
-T4 — in LOAD #1 padding at vaddr 0xac54.
-     Handles GetElementAttributes (PDU 0x20):
-       1. memset file buffer (1104 B) on stack, read y1-track-info into it.
-       2. Read y1-trampoline-state (16 B) into a state buffer on stack.
-       3. If state[0..7] != file[0..7] (track changed since we last said so):
-            - Emit track_changed_rsp CHANGED with arg1=0
-            - Update state[0..7] = file[0..7] and write back to state file
-       4. Reply 7× get_element_attributes_rsp covering all AVRCP 1.3 §5.3.4
-          attribute IDs 0x01..0x07: Title (file+8) / Artist (file+264) /
-          Album (file+520) / TrackNumber (file+800) / TotalNumberOfTracks
-          (file+816) / Genre (file+848) / PlayingTime (file+832).
-     T4's pre-check also dispatches PDU 0x17 → T_charset, PDU 0x18 →
-     T_battery, PDU 0x30 → T6, PDU 0x40/0x41 → T_continuation before
-     falling through to "unknow indication".
-
-T5 — proactive on Y1 track change. Entered via `b.w T5` from the patched
-     first instruction of `notificationTrackChangedNative` (libextavrcp_jni.so:
-     0x3bc0). Reads the full 800 B y1-track-info (incl. natural_end flag at
-     [793]) and the 16 B y1-trampoline-state. On track-id divergence
-     (state[0..7] != file[0..7]) emits the AVRCP §5.4.2 track-edge 3-tuple
-     in spec order: reg_notievent_reached_end_rsp CHANGED (gated on
-     file[793]==1 natural-end flag), track_changed_rsp CHANGED (always,
-     0xFF×8 sentinel), reg_notievent_reached_start_rsp CHANGED (always,
-     every track edge crosses a start-of-new-track boundary). Then writes
-     file[0..7] back into state[0..7] and persists state.
-
-T_charset — InformDisplayableCharacterSet (PDU 0x17) → inform_charsetset_rsp
-     via PLT 0x3588 with arg1=0 (success). Bare 8-byte ack frame; the spec
-     doesn't require us to honor the CT's charset declaration, just to
-     acknowledge it. A strict CT sends this once at connect; without the
-     ack we'd return msg=520 NOT_IMPLEMENTED, which strict CTs interpret
-     as the TG distrusting subsequent metadata.
-
-T_battery — InformBatteryStatusOfCT (PDU 0x18) → battery_status_rsp via
-     PLT 0x357c. Structurally identical to T_charset; the CT notifies us of
-     its battery state and we ack. Y1 has no CT-battery API surface to
-     feed the value into; the ack alone is what the spec requires.
-
-T6 — GetPlayStatus (PDU 0x30) → get_playstatus_rsp via PLT 0x3564. Reads
-     y1-track-info[776..795] (duration_ms / pos_at_state_change_ms /
-     state_change_time_ms / playing_flag, all big-endian on disk),
-     byte-swaps the u32s to host order via Thumb-2 REV. When playing,
-     calls `clock_gettime(CLOCK_BOOTTIME, &timespec)` to extrapolate live
-     position from the saved freeze-point.
-
-T8 — RegisterNotification dispatcher for events ≠ 0x02. INTERIM-only (the
-     proactive CHANGED edges live in T5 / T9). Reads y1-track-info for
-     event payloads and dispatches on event_id, calling the matching
-     reg_notievent_*_rsp PLT entry for events 0x01/0x03/0x04/0x05/0x06/0x07.
-
-T9 — proactive on Y1 play / battery / position events. Entered via `b.w T9`
-     from the patched first instruction of `notificationPlayStatusChangedNative`
-     (libextavrcp_jni.so:0x3c88). Reads y1-track-info + y1-trampoline-state
-     and runs three independent edge / cadence checks:
-       - play_status (file[792] vs state[9]): emit CHANGED via
-         reg_notievent_playback_rsp on edge.
-       - battery_status (file[794] vs state[10]): emit CHANGED via
-         reg_notievent_battery_status_changed_rsp on edge.
-       - position: if file[792] == PLAYING, clock_gettime(CLOCK_BOOTTIME)
-         + same arithmetic as T6 → live_pos, emit CHANGED via
-         reg_notievent_pos_changed_rsp. Driven at 1 s cadence by the music
-         app's position-tick runnable firing `playstatechanged`.
-     Single combined state-file write per fire if either play or battery
-     edge fired. Position emission never dirties state.
-
-The trampoline blob (extended_T2 + T4 + T5 + T_charset + T_battery +
-T_continuation + T6 + T8 + T9 + path strings + sentinel data) is built
-dynamically by _trampolines.py using a tiny Thumb-2 assembler
-(_thumb2asm.py). LOAD #1's filesz / memsz is extended to cover the blob,
-which lets the kernel map it as R+E at runtime — the 4020-byte
-page-alignment gap between LOAD #1's stock end (0xac54) and LOAD #2's
-start (0xbc08) is zero padding, so we can grow LOAD #1 freely up to that
-limit.
-
-Usage:
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --output /tmp/jni.patched
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --verify-only
+Pairs with patch_mtkbt.py's P1 (msg 519 size=9 routing) and
+patch_libextavrcp.py's E1 (§5.3.4 zero-length emit).
 """
 
 import argparse

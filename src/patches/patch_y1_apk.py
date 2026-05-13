@@ -1,137 +1,30 @@
 #!/usr/bin/env python3
 """
-patch_y1_apk.py  —  Innioasis Y1 Artist->Album navigation patch
-================================================================
-Patches a Y1 media player APK so that selecting an Artist shows
-that artist's Albums (with cover art) before listing songs,
-instead of jumping straight to a flat song list.
+patch_y1_apk.py — smali patches on the Y1 music player APK.
 
-Verified against: 3.0.2 (DEX-level analysis performed on actual binary)
+Patches (per docs/PATCHES.md ## patch_y1_apk.py):
+  A/B/C  Artist→Album navigation (tapping an artist drills into that
+         artist's albums instead of a flat song list).
+  B5/B6  In-music-app TrackInfoWriter + PlaybackStateBridge +
+         BatteryReceiver + PappSetFileObserver injection (companions to
+         the libextavrcp_jni.so trampoline chain).
+  E      Discrete PASSTHROUGH routing in PlayControllerReceiver
+         (PLAY / PAUSE / STOP / NEXT / PREVIOUS).
+  H      BaseActivity / BasePlayerActivity dispatchKeyEvent propagates
+         unhandled media keys past the foreground activity, with a
+         framework-synthetic-repeat filter.
 
-REQUIREMENTS
-------------
-  Python 3.8+
-  Java 11–21  (apktool 2.9.3's smali assembler is unreliable on Java 22+;
-               see WHAT THIS PATCH DOES below for the silent-drop failure
-               mode, and the Java-version warning printed at startup).
-  apktool 2.9.3 (downloaded automatically into `tools/` if not present;
-               md5-verified against e28e4b4a413a252617d92b657a33c947).
-  pip packages: androguard
-    pip install androguard
+Output APK keeps the stock META-INF/ signature block (stale but
+parseable). Must be deployed directly to /system/app/, not via
+`adb install` — see README "Deployment notes".
 
-USAGE
------
-  python3 patch_y1_apk.py <path/to/com_innioasis_y1_X_X_X.apk>
-  python3 patch_y1_apk.py [--skip-md5] [--clean-staging] <apk>
+Requirements: Python 3.8+, Java 11–21 (apktool 2.9.3's smali assembler
+silently drops on Java 22+), androguard. apktool jar is auto-downloaded
+into tools/ on first run (md5-verified).
 
-  If no argument is given, the script looks for any
-  com_innioasis_y1_*.apk in the current directory.
-
-  --skip-md5     bypasses the input APK md5 check (the patcher pins to
-                 stock 3.0.2 by default; an already-patched APK fed back
-                 in would silently fail to apply the patches without it).
-  --clean-staging wipes the cached staging dir before patching (default
-                 reuses it, which is faster across iterations).
-
-  apktool jar is downloaded once and cached in `tools/` at the repo root.
-  Decoded smali + rebuilt DEX live under `staging/y1-apk/` and are
-  retained between runs for inspection.
-
-Produces:  com.innioasis.y1_<version>-patched.apk
-
-  The original META-INF/ signature block is retained from the stock APK.
-  PackageManager requires a parseable signature block to be present at boot
-  even for system apps pushed directly to /system/app/ -- a completely
-  unsigned zip triggers "no certificates" rejection. The stale signature
-  is harmless since cert verification is bypassed when pushing via ADB.
-
-DEPLOYMENT
-----------
-  The output APK must be deployed directly to the device filesystem --
-  not installed via PackageManager -- because com.innioasis.y1 is a
-  system app and signature verification would reject a re-signed APK.
-
-  Option A -- ADB push (requires root / remounted /system):
-    adb root
-    adb remount
-    adb push com.innioasis.y1_<version>-patched.apk \\
-        /system/app/com.innioasis.y1/com.innioasis.y1.apk
-    adb shell chmod 644 \\
-        /system/app/com.innioasis.y1/com.innioasis.y1.apk
-    adb reboot
-
-  Option B -- Firmware flash:
-    Replace the APK inside the stock firmware image
-    (under /system/app/) and reflash via MTK scatter tool.
-
-  Do NOT use `adb install` or sideload via a file manager --
-  PackageManager will reject the APK due to signature mismatch.
-
-WHAT THIS PATCH DOES
---------------------
-  Six smali patches (A / B / C for Artist→Album navigation, E for discrete
-  PASSTHROUGH PLAY / PAUSE / STOP / NEXT / PREVIOUS coverage per AVRCP 1.3
-  §4.6.1 + ICS Table 8, H + H' for foreground-activity propagation of
-  unhandled discrete media keys with framework-synthetic-repeat filter),
-  no new files, no Manifest changes.
-
-  Patch A -- ArtistsActivity.confirm():
-    When the user taps an artist row (isShowArtists()==true,
-    isMultiSelect==false), the original code calls switchSongSortType()
-    which navigates to a flat song list. The patch replaces this with an
-    Intent launching AlbumsActivity, passing the artist name via the
-    "artist_key" extra. All other branches are unchanged.
-
-  Patch B -- AlbumsActivity.initView():
-    After the existing setup (title, ListView adapter, SPV bind), reads
-    the "artist_key" Intent extra. If present and non-empty, calls
-    SongDao.getSongsByArtistSortByAlbum(artist) -- which runs
-    SELECT * FROM song WHERE artist = ? ORDER BY lower(pinyinAlbum) --
-    deduplicates the returned Song list by album name using a LinkedHashSet,
-    builds an ArrayList<String> of unique album names in album sort order,
-    then calls AlbumListAdapter.setAlbums() and returns.
-    If the extra is absent, falls through to the original getAlbumListBySort()
-    call, preserving the normal Albums screen behavior.
-
-DEX ANALYSIS FACTS (verified from actual 3.0.2 binary)
--------------------------------------------------------
-  ArtistsActivity.confirm():
-    registers_size=5; p0=this=v4
-    Artist-tap branch at instructions 53-79 (isShowArtists true, not multiselect)
-    ArtistsActivity.artist field stores the selected artist name (Ljava/lang/String;)
-    switchSongSortType() call is at instructions 72-73 -- this is what we replace
-
-  AlbumsActivity.initView():
-    registers_size=3; p0=this=v2; locals=2 original (patched to .locals 8)
-    Resource ID const: 2131820833 (0x7f110121)
-    getAlbumListBySort() launches a coroutine (async) -- safe to skip via early return
-
-  Y1Repository.getAlbumsByKey(String)List -- NOT used:
-    Queries album column LIKE '%key%' -- searches by album name substring.
-    Passing an artist name returns albums whose title contains the artist name,
-    which produces empty results. This method is NOT the correct one to use.
-
-  SongDao.getSongsByArtistSortByAlbum(String)List -- CORRECT method:
-    SQL: SELECT * FROM song WHERE isAudiobook = 0 AND artist = ?
-         ORDER BY lower(pinyinAlbum)
-    Returns List<Song> for an exact artist match, sorted by album.
-    SongDao is accessed via Y1Repository.access$getSongDao$p(repo) -- a Kotlin
-    compiler-generated static accessor. The songDao field itself is private and
-    cannot be read via iget-object from outside Y1Repository (IllegalAccessError).
-    The accessor exists in the DEX but exhibits NoSuchMethodError on this device's
-    old Dalvik (API 17). Instead, Patch C makes songDao public so iget-object works.
-    Song.getAlbum() returns Ljava/lang/String;.
-
-  AlbumListAdapter.setAlbums(List)V:
-    EXISTS. Takes List<String> (album names). Correct method name is setAlbums.
-
-  Intent extra key for album->song drill-down:
-    ShowSongListActivity reads "album_name" (lowercase, underscore).
-    AlbumsActivity.confirm()->switchSongSortType() uses this key internally.
-    No changes needed to the album->song navigation flow.
-
-  "ARTIST" / "ALBUM_NAME" string constants: NOT present in this DEX.
-    We use "artist_key" to avoid any collision with existing strings.
+Usage:
+    python3 patch_y1_apk.py <com.innioasis.y1*.apk>
+    python3 patch_y1_apk.py [--skip-md5] [--clean-staging] <apk>
 """
 
 import os, sys, re, shutil, subprocess, urllib.request, zipfile

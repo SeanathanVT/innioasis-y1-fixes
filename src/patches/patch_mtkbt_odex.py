@@ -1,101 +1,19 @@
 #!/usr/bin/env python3
 """
-patch_mtkbt_odex.py — Patch stock MtkBt.odex -> MtkBt.odex.patched
+patch_mtkbt_odex.py — Java-side flag flips + cardinality NOPs in MtkBt.odex.
 
-Stock binary md5:  11566bc23001e78de64b5db355238175
-Output md5:        00cc642742044286966cbb7b01135ca7
+F1 — getPreferVersion(): return 14 instead of 10 (BlueAngel internal flag,
+     unblocks the Java AVRCP dispatcher's 1.3+ command path).
+F2 — BluetoothAvrcpService.disable(): reset sPlayServiceInterface so the
+     second BT-toggle activation doesn't short-circuit to STATE_ENABLED +
+     teardown before the peer CONNECT_IND arrives.
+Cardinality NOPs (TRACK_CHANGED, PLAYBACK_STATUS_CHANGED) — Java's
+     mRegisteredEvents BitSet is never populated because the JNI's TG
+     layer uses native conn-state tracking. NOPing the if-eqz gates lets
+     notificationTrackChangedNative / notificationPlayStatusChangedNative
+     fire on every metachanged / playstatechanged broadcast.
 
-ODEX structure:
-  ODEX header (0x28 bytes): magic "dey\n036\0", dex_offset=0x28, dex_length=0x98490
-  DEX data at 0x28: standard DEX with magic "dex\n035\0"
-  DEX adler32 at ODEX file offset 0x30 (= DEX header field offset 0x08)
-    covers DEX bytes [12 : dex_length]  (ODEX file bytes [0x34 : 0x984b8])
-
---- Patch 1: getPreferVersion() return value ---
-
-  BTAvrcpProfile.getPreferVersion() (code @ DEX 0x0003e0b0):
-    const/16 v0, #10   ; DEX bytes: 13 00 0A 00
-    return v0
-
-  This return value drives the Java-side dispatcher's command-handling
-  cascade. The stock value 10 routes commands through MtkBt's compiled-in
-  AVRCP 1.0 handlers and rejects anything past PASSTHROUGH. Returning 14
-  unblocks 1.3+ command dispatch through the rest of the JNI / native path.
-  This is internal flag bookkeeping inside MtkBt's BlueAngel layer; the
-  on-the-wire AVRCP version is determined by the SDP record (V1 patch in
-  patch_mtkbt.py), not by this value.
-
-    getPreferVersion() -> checkCapability() -> activateConfig_3req(bitmask)
-    -> g_tg_feature = 0x0e (@ libextavrcp_jni.so 0xD29C)
-    -> activate_1req reads global -> btmtk_avrcp_send_activate_req payload[6] = 0x0e
-    -> mtkbt daemon receives the unblocked internal code on abstract socket bt.ext.adp.avrcp
-
-  Patch: change return value from 10 (0x0a) to 14 (0x0e).
-  Confirmed working in logcat: getPreferVersion:14, _activate_1req
-  version:14 sdpfeature:35.
-
---- Patch 3: cardinality bypass for proactive TRACK_CHANGED ---
-
-  In BTAvrcpMusicAdapter.handleKeyMessage(Message)V, the sparse-switch case
-  for msg.what:34 (ACTION_REG_NOTIFY) → arg1=2 (TRACK_CHANGED) goes:
-
-      iget-object v5, this, mRegisteredEvents:BitSet
-      invoke-virtual v5, vtable@20    ; bitset.get(2) — peer subscription bit
-      move-result v5
-      if-eqz v5, :cond_184            ; <<< if no peer subscribed, skip
-      ; ... build sMusicId, log "songid:N", call notificationTrackChangedNative
-
-  The `if-eqz` is at ODEX file offset 0x03c530, encoded as `38 05 da ff` (4 B).
-  The Java-side BitSet is never populated because the JNI's TG layer doesn't
-  use the Java cardinality bookkeeping (it has its own native conn-state
-  tracking). So Java's view is permanently `cardinality:0` and the
-  notification path always exits early.
-
-  This patch NOPs out the if-eqz (4 bytes → 4 zero bytes = two `nop` opcodes).
-  Java now always invokes notificationTrackChangedNative when the music app
-  fires a `com.android.music.metachanged` broadcast. The libextavrcp_jni.so
-  side redirects that native to a state-aware T5 trampoline that emits
-  track_changed_rsp CHANGED via the same PLT entry our T4 uses.
-
---- Patch 2: sPlayServiceInterface reset in BluetoothAvrcpService.disable() ---
-
-  Root cause: sPlayServiceInterface (field@1267, static boolean) is set true in
-  startToBindPlayService() when bindService() succeeds on first BT activation.
-  It is never reset during the BT-toggle disable cycle.
-
-  On second activation, BTAvrcpMusicAdapter$1.onServiceConnected() reads
-  sPlayServiceInterface as true, skips re-initialization, and immediately calls
-  notifyProfileState(11) (STATE_ENABLED) before any car CONNECT_IND arrives.
-  The Android BT profile manager interprets STATE_ENABLED, calls stopSelf(),
-  and tears the service down at onDestroy — visible in logcat immediately after
-  PlayService.onServiceConnected.
-
-  Fix: replace the 14-byte "-disable" log preamble in disable() with:
-    const/4 v1, #0                           (2 bytes)
-    sput-byte v1, sPlayServiceInterface      (4 bytes)
-    nop x4                                   (8 bytes)
-
-  Verified in logcat (second activation after BT toggle):
-    Before fix: PlayService.onServiceConnected -> notifyProfileState:11 -> onDestroy
-    After fix:  PlayService.onServiceConnected -> connect_ind -> CONNECT_CNF
-
---- DEX analysis reference ---
-
-  sPlayServiceInterface: field@1267, static boolean, flags=0x000a (private+static)
-    Write opcode: sput-byte (0x6a) — NOT sput-boolean (0x69)
-    Write sites:  startToBindPlayService() dex[0x03df46] and dex[0x03dfac]
-    Read sites:   startToBindPlayService() dex[0x03df3c], dex[0x03dfe2]
-    Reset site:   disable() dex[0x03f21a] — THIS PATCH
-  disable() code_off: dex[0x03f188] = ODEX[0x03f1b0]; insns_off: ODEX[0x03f1c0]
-
-Usage:
-    python3 patch_mtkbt_odex.py MtkBt.odex
-    python3 patch_mtkbt_odex.py MtkBt.odex --output /tmp/MtkBt.odex.patched
-    python3 patch_mtkbt_odex.py MtkBt.odex --verify-only
-
-Deploy:
-    adb push output/MtkBt.odex.patched /system/app/MtkBt.odex
-    adb reboot
+Recomputes DEX adler32. Per-patch byte-level reference: docs/PATCHES.md.
 """
 
 import argparse
@@ -109,16 +27,9 @@ from pathlib import Path
 STOCK_MD5         = "11566bc23001e78de64b5db355238175"
 OUTPUT_MD5        = "00cc642742044286966cbb7b01135ca7"
 
-# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
-# Placeholder — currently we only patch DEX bytecode in-place via byte
-# offsets, with no smali decoding. If we ever need to add Log.d to the
-# AVRCP Java dispatcher (BTAvrcpMusicAdapter.handleKeyMessage etc.), we
-# can deodex first, gate on this flag, and inject before re-odexing. Once
-# the debug build diverges from release, pin a separate hash here.
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
 
-# Effective expected output MD5 for the current invocation.
 EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
 DEX_OFFSET     = 0x28

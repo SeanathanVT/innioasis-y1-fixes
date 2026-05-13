@@ -6,12 +6,12 @@
 
 ## Overview
 
-- **Music-player UX** — Artist→Album navigation on the system music APK (cover art on artist tap).
-- **Bluetooth pairing** — `audio.conf` / `auto_pairing.conf` / `blacklist.conf` / `build.prop` edits required for car and headset pairing.
+- **Music-player UX** — Artist→Album navigation on the system music APK.
+- **Bluetooth pairing** — audio.conf / auto_pairing.conf / blacklist.conf / build.prop edits for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
-- **Root** — install `/system/xbin/su` (setuid-root, 06755) for `adb shell /system/xbin/su`-style escalation. Stock `/sbin/adbd` is untouched.
-- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car head unit, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision position, play-state and track-change notifications, battery status, and Repeat / Shuffle (bidirectional). Behind `--avrcp` (excluded from `--all` because it requires a Y1Bridge gradle build). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Compliance scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md).
-- **AVRCP investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture with `getevent` + `dumpsys input`, post-root probe, gdbserver attach to mtkbt). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
+- **Root** — install `/system/xbin/su` (setuid, mode 06755) for `adb shell /system/xbin/su` escalation. Stock `/sbin/adbd` stays untouched.
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller (car stereo, TV, smart speaker) sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Behind `--avrcp` (excluded from `--all` because it requires a `Y1Bridge` Gradle build first).
+- **Investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe, gdbserver attach). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.
 
@@ -73,17 +73,17 @@ Run `./apply.bash --help` for full flag detail. Patchers can also be run standal
 
 Post-root tools for investigating AVRCP behaviour on hardware. None are invoked by the patch flow. Pre-req: `--root` flashed.
 
-- **`@btlog` tap** — `src/btlog-dump/` (no-libc ARM ELF) + `tools/dual-capture.sh` (push + run + capture btlog & logcat) + `tools/btlog-parse.py` (decode framing). See [`src/btlog-dump/README.md`](src/btlog-dump/README.md).
-- **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, MTK debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets. Re-run against any new `KNOWN_FIRMWARES` entry.
-- **gdbserver attach to mtkbt** — `tools/install-gdbserver.sh` + `tools/attach-mtkbt-gdb.sh`. The installer fetches a pinned ARM 32-bit static `gdbserver` binary from AOSP prebuilts (~186 KB, sha256-verified) into `tools/gdbserver`. The attach script pushes it to `/data/local/tmp/`, attaches to the live mtkbt PID, computes the PIE base from `/proc/<pid>/maps`, and generates a gdb command file with breakpoints at the AVCTP-RX classifier (file offsets `0x6db7c` / `0x6dc36` / `0x6dc52`) plus the dispatcher arms (`0x515ca` / `0x51622`) — all translated to live addresses. Used to settle which event-code path PASSTHROUGH vs VENDOR_DEPENDENT inbound frames take.
+- **`@btlog` tap** — `src/btlog-dump/` (no-libc ARM ELF) + `tools/dual-capture.sh` (push + run + capture btlog & logcat) + `tools/btlog-parse.py` (decode framing).
+- **Post-root probe** — `tools/probe-postroot.sh` + `tools/probe-postroot-device.sh`. Enumerates PIE base, debug nodes, btsnoop paths, `getprop` keys, ptrace policy, abstract sockets.
+- **gdbserver attach to mtkbt** — `tools/install-gdbserver.sh` + `tools/attach-mtkbt-gdb.sh`. Pulls a pinned static ARM gdbserver, attaches to the live PID, generates a breakpoint command file at the AVCTP-RX classifier + dispatcher arms.
 
-Background and the failed alternatives these tools replace (`persist.bt.virtualsniff`, the G1/G2 xlog→logcat redirect): [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
+Background on the failed alternatives these tools replace: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 ## Status
 
-`--all` produces a working device: pairing, A2DP audio, AVRCP 1.0 PASSTHROUGH (play / pause / skip from car / headset), `--root`, and the `--music-apk` / `--remove-apps` / `--adb` flags all work. `--bluetooth` is pairing-essential config only — it does not modify SDP / AVRCP behavior.
+`--all` produces a working device — pairing, A2DP audio, stock AVRCP 1.0 PASSTHROUGH, `--root`, `--music-apk` / `--remove-apps` / `--adb`. `--bluetooth` is pairing-essential config only.
 
-`--avrcp` delivers full AVRCP 1.3 metadata + control. Every Mandatory and every Optional row of ICS Table 7 (Target Features) closes. PDU coverage and per-row scorecard live in [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture and the ELF-segment-extension trick that hosts the trampoline blob: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+`--avrcp` delivers full AVRCP 1.3 metadata + control. Every Mandatory and Optional ICS Table 7 (Target Features) row closes. Spec-compliant 1.3 TG behaviour (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit for unsupported attributes §5.3.4). Per-row scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Stock firmware manifest
 
@@ -116,7 +116,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 ## Deployment notes
 
-The patched music-player APK must be deployed directly to `/system/app/` on the device filesystem — **not** via `adb install` or PackageManager. The original META-INF signature block is retained (stale, not re-signed); it satisfies PackageManager's parseable-signature requirement, and signature verification is bypassed when deploying via the filesystem during boot. The bash's `--music-apk` flag handles this automatically. Manual ADB push:
+The patched music-player APK must land directly on `/system/app/`, not via `adb install` or PackageManager — the stale META-INF block satisfies parseable-signature requirements only when filesystem-deployed at boot. `apply.bash --music-apk` handles this. Manual ADB push:
 
 ```bash
 adb root && adb remount
@@ -127,7 +127,7 @@ adb reboot
 
 ## Verified against
 
-Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2 (JDQ39), Dalvik VM API 17. Hardware-verified against the v3.0.2 build enrolled in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
+Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2. Hardware-verified against the v3.0.2 firmware in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
 
 ## Author
 

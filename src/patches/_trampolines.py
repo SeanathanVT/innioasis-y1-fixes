@@ -1,47 +1,21 @@
 """
 Trampoline assembly for libextavrcp_jni.so.
 
-Builds the dynamically-assembled trampoline blob that ships at vaddr 0xac54
-in the LOAD #1 page-padding area. Per-trampoline behavior, entry conditions,
-and design rationale (including the wire-level `track_id` sentinel choice
-and the `r1=0` calling convention shared by all `reg_notievent_*_rsp`
-builders): see `docs/PATCHES.md` `## patch_libextavrcp_jni.py`. Stack-frame
-+ `saveRegEventSeqId` calling convention: `docs/ARCHITECTURE.md`. Schema
-of the on-disk file the trampolines read: `docs/BT-COMPLIANCE.md` §4.
-PLT inventory: `PLT_*` constants below; full table in COMPLIANCE.md §3.
+Builds the dynamically-assembled trampoline blob at vaddr 0xac54 in the
+LOAD #1 page-padding area. Per-trampoline behaviour: docs/PATCHES.md.
+Stack-frame / calling convention: docs/ARCHITECTURE.md. On-disk file
+schema: docs/BT-COMPLIANCE.md §4. PLT inventory: docs/BT-COMPLIANCE.md §3.
 
-Trampolines emitted by this module (T1 + T2 stub are written separately by
-patch_libextavrcp_jni.py at other code-cave addresses):
-
-  extended_T2  PDU 0x31 event 0x02 RegisterNotification(TRACK_CHANGED)
-  T4           PDU 0x20 GetElementAttributes — also routes PDU 0x17 / 0x18 /
-               0x30 / 0x40 / 0x41 to T_charset / T_battery / T6 / T_continuation
-  T5           proactive AVRCP §5.4.2 track-edge 3-tuple (REACHED_END
-               gated on natural-end + TRACK_CHANGED + REACHED_START)
-  T_charset    PDU 0x17 InformDisplayableCharacterSet ack
-  T_battery    PDU 0x18 InformBatteryStatusOfCT ack
-  T_continuation PDU 0x40 / 0x41 → AV/C NOT_IMPLEMENTED reject
-  T6           PDU 0x30 GetPlayStatus, w/ clock_gettime live position
-  T8           PDU 0x31 events ≠ 0x02 INTERIM dispatcher
-  T9           proactive PLAYBACK_STATUS / BATT_STATUS / PLAYBACK_POS /
-               PLAYER_APPLICATION_SETTING CHANGED, entered from
-               notificationPlayStatusChangedNative
-
-Implementation note. read(2) is not in the PLT — we issue the syscall
-directly via SVC #0 with r7=3 (NR_read on Linux ARM EABI). clock_gettime(2)
-is via SVC #0 with r7=263 (NR_clock_gettime).
+read(2) and clock_gettime(2) aren't in the PLT — issued via SVC #0 with
+r7 = NR_read (3) / NR_clock_gettime (263).
 """
 
 import os
 
 from _thumb2asm import Asm
 
-# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
-# Placeholder — when set, future trampoline edits could call
-# `__android_log_print` (via a new PLT entry) at trampoline entry / exit so
-# native-side traces show up under `adb logcat -s Y1Patch:*`. Currently
-# no trampoline emits Log calls; the flag is wired so future edits can
-# hook it without re-plumbing.
+# Placeholder for future native-side trace edits; no trampoline emits Log
+# calls today.
 DEBUG_LOGGING = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 
 # ---------------------------------------------------------------- constants
@@ -80,49 +54,13 @@ PLT_get_player_value_text_rsp    = 0x35a0
 EPILOGUE          = 0x712a   # mov r9,#1; canary check; pop {r4-r9, sl, fp, pc}
 UNKNOW_INDICATION = 0x65bc   # original "unknow indication" path
 
-# JNI helper that returns the BluetoothAvrcpService's per-conn struct.
-# Same helper called by the original notificationTrackChangedNative at file
-# offset 0x3bda; we re-use it from T5 to obtain the conn buffer (which lives
-# at +8 inside the returned struct).
+# Returns BluetoothAvrcpService's per-conn struct (conn buffer at +8 inside);
+# same helper called by notificationTrackChangedNative at file offset 0x3bda.
 JNI_GET_AVRCP_STATE = 0x36c0
 
-# Stack frame layout inside T4 (after sub.w sp, sp, #FRAME_LEN):
-#   sp+0   .. +15    = outgoing stack args for get_element_attributes_rsp (16 B)
-#   sp+16  .. +31    = state buffer (16 B; mirrors y1-trampoline-state schema:
-#                                          bytes 0..7 = last_seen track_id,
-#                                          byte 8     = last RegisterNotification transId,
-#                                          byte 9     = last_play_status (T9 edge),
-#                                          byte 10    = last_battery_status (T9 edge),
-#                                          byte 11    = last_repeat_avrcp (T9 papp edge),
-#                                          byte 12    = last_shuffle_avrcp (T9 papp edge),
-#                                          bytes 13..15 = padding)
-#   sp+32  .. +1135  = file buffer (1104 B; full y1-track-info image)
-#                      0..7      track_id
-#                      8..263    Title  (256 B UTF-8, null-padded)
-#                      264..519  Artist
-#                      520..775  Album
-#                      776..779  duration_ms                BE u32 (T6)
-#                      780..783  pos_at_state_change_ms     BE u32 (T6, T8 event 0x05)
-#                      784..787  state_change_time_ms       BE u32 (CLOCK_BOOTTIME
-#                                                                    ms-since-boot, full ms
-#                                                                    precision; T6 / T9
-#                                                                    live-position extrapolation)
-#                      788..791  pad
-#                      792       playing_flag               u8 (AVRCP §5.4.1 Tbl 5.26 enum;
-#                                                                T6, T8 event 0x01, T9)
-#                      793       previous_track_natural_end u8 (T5 gate for §5.4.2 Tbl 5.31
-#                                                                TRACK_REACHED_END CHANGED)
-#                      794       battery_status             u8 (AVRCP §5.4.2 Tbl 5.35 enum;
-#                                                                T8 event 0x06, T9)
-#                      795       repeat_avrcp               u8 (AVRCP §5.2.4 Tbl 5.20 enum;
-#                                                                T_papp 0x13, T8 event 0x08, T9)
-#                      796       shuffle_avrcp              u8 (AVRCP §5.2.4 Tbl 5.21 enum;
-#                                                                T_papp 0x13, T8 event 0x08, T9)
-#                      797..799  pad
-#                      800..815  TrackNumber                UTF-8 ASCII decimal (16 B)
-#                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
-#                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
-#                      848..1103 Genre                      UTF-8 (256 B)
+# T4 stack frame (post-SUB SP by T4_FRAME): args[0..15], state[16..31] (mirrors
+# y1-trampoline-state), file_buf[32..1135] (y1-track-info image; schema in
+# docs/BT-COMPLIANCE.md §4).
 T4_FRAME           = 1136
 T4_FILE_SIZE       = 1104
 T4_OFF_ARGS        = 0
@@ -158,17 +96,8 @@ T2_OFF_SUB_SCRATCH = 12   # 4 B scratch for subscription-write byte source
 T2_TRANSID_CALLER_OFF = 368 + T2_FRAME    # 384
 T2_EVENT_ID_OFF_ENTRY = 386               # before SUB SP
 
-# T6 (GetPlayStatus) frame: 16 B outgoing args + 800 B file_buf.
-# The y1-track-info schema's GetPlayStatus block at offset 776 carries
-# four BE u32 fields:
-#   776..779: duration_ms          BE u32
-#   780..783: pos_at_state_change  BE u32
-#   784..787: state_change_time_ms BE u32 (ms since CLOCK_BOOTTIME boot — paired with
-#                                          clock_gettime in T6/T9 for ms-precise
-#                                          live-position extrapolation)
-#   792:      playing_flag         u8 (0=STOPPED, 1=PLAYING, 2=PAUSED — direct
-#                                      mapping to AVRCP 1.3 §5.4.1 Table 5.26
-#                                      `PlayStatus` field allowed-values enum)
+# T6 (GetPlayStatus): 16 B args + 800 B file_buf. Reads y1-track-info offsets
+# 776/780/784/792 (duration/pos/state_time BE u32 + playing_flag u8).
 T6_FRAME           = 816
 T6_OFF_ARGS        = 0
 T6_OFF_FILE        = 16
@@ -532,52 +461,22 @@ def _emit_t4(a: Asm) -> None:
 
     a.label("t4_no_change")
 
-    # ---- N× get_element_attributes_rsp(conn, 0, idx, total,
-    #                                    [attr_id, charset=0x6a, len, ptr]) ----
-    # Per disassembly of the rsp function (libextavrcp.so:0x2188):
-    #   arg2 = attribute INDEX in the response (0..N-1)
-    #   arg3 = TOTAL number of attributes
-    #   EMIT trigger: (arg2+1 == arg3) AND (arg3 != 0)
-    # transId is read by the function itself from conn[17]; we don't pass it.
-    # We pack all emitted attributes into a single msg=540 frame by accumulating
-    # with arg3=N and emitting on the final call.
+    # N× get_element_attributes_rsp(conn, 0, idx, total, [attr_id, charset, len, ptr]).
+    # Response builder (libextavrcp.so:0x2188) emits the packed frame when
+    # idx+1 == total && total != 0; we accumulate and emit on the final call.
     #
-    # AVRCP 1.3 §6.6.1 Table 6.26 mandates the response shape:
-    #   "If NumAttributes is set to zero, all attribute information shall be
-    #    returned, else attribute information for the specified attribute IDs
-    #    shall be returned by the TG."
-    # Together with §5.3.4 ("For attributes not supported by the TG, this
-    # field shall be sent with 0 length data"), this means T4 must:
-    #   - Read the CT's inbound NumAttributes byte (caller_sp + 394).
-    #   - If N == 0: emit all 7 supported attrs (1..7) in canonical order.
-    #   - If N > 0: emit each requested AttributeID in the CT-specified order;
-    #     for any IDs outside {0x01..0x07} (= our supported set), emit with
-    #     AttributeValueLength = 0. Per-attr-id offset lookup via the inline
-    #     `t4_attr_offset_table` data block below.
-    # The empty-attribute emit relies on patch_libextavrcp.py E1 landing —
-    # without it, libextavrcp.so's response builder drops zero-length attrs.
-    #
-    # AVRCP 1.3 §5.3.4 attribute IDs:
-    #   0x01 Title              0x05 TotalNumberOfTracks
-    #   0x02 Artist             0x06 Genre
-    #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
-    #   0x04 TrackNumber
-    # All values are UTF-8 (charset 0x006A).
+    # AVRCP 1.3 §6.6.1 Table 6.26: TG returns exactly the requested attribute IDs
+    # in the requested order (NumAttributes=0 means all). §5.3.4: unsupported
+    # attributes emit with length=0. Supported attrs 0x01..0x07 mapped via the
+    # inline t4_attr_offset_table; zero-length emit relies on patch_libextavrcp.py E1.
 
     # ---- read NumAttributes from inbound request ----
     a.ldrb_w(7, 13, T4_NUMATTR_OFF)           # r7 = N (CT-requested count)
     a.cmp_imm8(7, 0)
     a.beq_w("t4_emit_all")                    # N==0 -> §6.6.1 "return all"
 
-    # ---- Phase 1: request-driven emit loop ----
-    # Register conventions in this loop:
-    #   r5  = JNI base (preserved by caller's stmdb prologue, untouched here)
-    #   r6  = i  (loop counter; preserved across strlen/rsp calls — low reg
-    #             happens to be caller-saved, but we re-emit it through the
-    #             call args anyway, so no extra save needed)
-    #   r7  = N  (loop bound; ditto)
-    #   r9  = attr_id (saved across strlen/rsp; r9 is callee-saved per AAPCS)
-    #   r10 = str_offset (saved across strlen/rsp; r10 callee-saved)
+    # Request-driven loop. r5=JNI base, r6=i, r7=N, r9=attr_id, r10=str_offset
+    # (r9/r10 callee-saved per AAPCS; survive the strlen + rsp calls).
     a.movs_imm8(6, 0)                         # r6 = i = 0
 
     a.label("t4_req_loop")
@@ -609,25 +508,15 @@ def _emit_t4(a: Asm) -> None:
     a.b_w("t4_req_have_off")
 
     a.label("t4_req_unsup")
-    # Unsupported attr: emit with length=0. r4 = 0 → sp+0 = T4_OFF_ARGS region,
-    # which we initialize each iteration via the str writes below; the args
-    # region's leading byte is whatever we wrote last (overwritten before
-    # strlen call sees it), so use a pre-known-zero sentinel.
-    # Simpler: just emit length=0 directly. Use 0 as ptr (the response
-    # builder won't deref past length, but we set it for shape).
-    a.movs_imm8(4, 0)                         # r4 = 0 sentinel
+    # Unsupported attr: sentinel str_offset = 0 → response builder gets length=0.
+    a.movs_imm8(4, 0)
 
     a.label("t4_req_have_off")
-    # Save str_offset to r10 (preserved across strlen + rsp calls).
-    a.mov_lo_lo(10, 4)
+    a.mov_lo_lo(10, 4)                        # save str_offset across strlen/rsp
 
-    # strlen(sp + str_offset). For unsupported (str_offset = 0), this points
-    # at the args region. Its current contents are whatever we set last —
-    # but since the FIRST byte at sp+0 is the previous iteration's attr_id
-    # write (a non-zero value 1..7) or the initial pre-loop zero-fill, the
-    # strlen result is unpredictable. Override: short-circuit unsupported
-    # by setting r0 to 0 directly.
-    a.cmp_imm8(4, 0)                          # str_offset == 0?
+    # strlen(sp + str_offset). Short-circuit unsupported (r4 == 0) to avoid
+    # measuring whatever's in the args region.
+    a.cmp_imm8(4, 0)
     a.beq("t4_req_skip_strlen")
     a.mov_lo_lo(0, 13)                        # r0 = sp
     a.add_reg(0, 4)                           # r0 = sp + str_offset
