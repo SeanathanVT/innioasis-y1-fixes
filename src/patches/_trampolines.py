@@ -239,6 +239,9 @@ T9_STATE_LAST_PS_OFF      = T9_OFF_STATE + 9   # last_play_status
 T9_STATE_LAST_BATT_OFF    = T9_OFF_STATE + 10  # last_battery_status
 T9_STATE_LAST_REPEAT_OFF  = T9_OFF_STATE + 11  # last_repeat_avrcp (papp edge)
 T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
+T9_STATE_SUB_POS_OFF      = T9_OFF_STATE + 13  # sub_pos_changed (subscription
+                                               #   gate for event 0x05 per
+                                               #   AVRCP §6.7.1 "once" rule)
 # T9's position-emit block needs a struct timespec for clock_gettime(CLOCK_BOOTTIME)
 # to live-extrapolate the playback position (same arithmetic T6 does for
 # GetPlayStatus). Place the 8 B timespec immediately after the file buf.
@@ -1821,6 +1824,40 @@ def _emit_t8(a: Asm) -> None:
     a.movs_imm8(1, 0)
     a.add_imm_t3(0, 5, 8)
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
+
+    # Arm sub_pos_changed in y1-trampoline-state[13] so T9 will emit exactly
+    # one PLAYBACK_POS_CHANGED CHANGED before clearing the bit, matching
+    # AVRCP §6.7.1's per-subscription "once" rule. Strict CTs (Kia) reject
+    # unsolicited CHANGEDs after subscription is consumed; without this gate
+    # our 1 Hz PositionTicker emits ~∞ CHANGEDs and Kia stops tracking the
+    # playhead after the first 1-2. With this gate, each RegisterNotification
+    # yields one CHANGED and the CT must re-register to receive the next —
+    # the same pattern iPhone / Pixel TGs implement.
+    a.movs_imm8(0, 1)
+    a.str_sp_imm(0, T8_OFF_TIMESPEC_SEC)      # 1-byte source = 0x01
+
+    a.adr_w(0, "path_state")
+    a.movw(1, O_WRONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t8_done")                          # open failed → skip bit-set
+    a.mov_lo_lo(4, 0)                         # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.movs_imm8(1, 13)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, T8_OFF_TIMESPEC_SEC)
+    a.movs_imm8(2, 1)
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
+
     a.b_w("t8_done")
 
     a.label("t8_check_6")
@@ -2183,6 +2220,15 @@ def _emit_t9(a: Asm) -> None:
     a.cmp_imm8(0, 1)                          # 1 = PLAYING (AVRCP §5.4.1 Tbl 5.26)
     a.bne("t9_done")
 
+    # Subscription gate per AVRCP §6.7.1: state[13] = 1 means T8 emitted an
+    # INTERIM for event 0x05 since the last CHANGED. If 0, the previous
+    # CHANGED already consumed the subscription and we must wait for a new
+    # RegisterNotification before emitting again — strict CTs (Kia) reject
+    # unsolicited CHANGEDs and freeze the playhead display.
+    a.ldrb_w(0, 13, T9_STATE_SUB_POS_OFF)
+    a.cmp_imm8(0, 0)
+    a.beq("t9_done")
+
     # ---- clock_gettime(CLOCK_BOOTTIME, &timespec) ----
     # Default the timespec to zero so a syscall failure yields a useless
     # but bounded fallback (delta_sec computed against now=0 is negative,
@@ -2231,6 +2277,38 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(2, REASON_CHANGED)
     # r3 already = live_pos
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
+
+    # ---- clear sub_pos_changed = 0 in y1-trampoline-state[13] ----
+    # Subscription is consumed per AVRCP §6.7.1; next CHANGED only fires
+    # after T8 INTERIM emit re-arms the bit (i.e. CT re-registers). The
+    # state-writeback block above already ran for this T9 invocation, so
+    # we do a dedicated 1-byte write here. timespec area (used by the
+    # position math above) is dead at this point; reuse it as the byte-0
+    # source buffer.
+    a.movs_imm8(0, 0)
+    a.str_sp_imm(0, T9_OFF_TIMESPEC_SEC)      # 1-byte source = 0x00
+
+    a.adr_w(0, "path_state")
+    a.movw(1, O_WRONLY)
+    a.movs_imm8(2, 0)
+    a.blx_imm(PLT_open)
+    a.cmp_imm8(0, 0)
+    a.blt("t9_done")                          # open failed → skip clear
+    a.mov_lo_lo(4, 0)                         # r4 = fd
+
+    a.mov_lo_lo(0, 4)
+    a.movs_imm8(1, 13)
+    a.movs_imm8(2, SEEK_SET)
+    a.movs_imm8(7, NR_lseek)
+    a.svc(0)
+
+    a.mov_lo_lo(0, 4)
+    a.add_sp_imm(1, T9_OFF_TIMESPEC_SEC)
+    a.movs_imm8(2, 1)
+    a.blx_imm(PLT_write)
+
+    a.mov_lo_lo(0, 4)
+    a.blx_imm(PLT_close)
 
     a.label("t9_done")
     # ---- epilogue: return jboolean true ----
