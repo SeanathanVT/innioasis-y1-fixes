@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
 # tools/install-android-sdk.sh — auto-install Android cmdline-tools and the
-# components needed to build src/Y1MediaBridge/ via gradle. Re-runnable;
+# components needed to build src/Y1Bridge/ via gradle. Re-runnable;
 # safe to run after a partial first run (still writes local.properties +
 # env file at the end so any prior partial state is healed).
 #
 # Wires the result into:
-#   - src/Y1MediaBridge/local.properties (sdk.dir=…) — gradle reads this
+#   - src/Y1Bridge/local.properties (sdk.dir=…) — gradle reads this
 #     directly; gradle builds work without ANDROID_HOME in your shell.
 #   - tools/android-sdk-env.sh — sourceable by the user; exports
 #     ANDROID_HOME and adds adb / sdkmanager to PATH for interactive use.
@@ -26,7 +26,7 @@ case "${1:-}" in
 Usage: ./tools/install-android-sdk.sh
 
 Auto-installer for the Android SDK on Linux. Required for building
-src/Y1MediaBridge/ via Gradle; needed only for the --avrcp flag
+src/Y1Bridge/ via Gradle; needed only for the --avrcp flag
 (which is currently known-broken — see INVESTIGATION.md).
 
 Detects existing \$ANDROID_HOME and short-circuits; otherwise
@@ -35,7 +35,7 @@ tools/android-sdk/, accepts licenses, and installs platforms;android-34
 + build-tools;34.0.0 + platform-tools.
 
 Always writes:
-  - src/Y1MediaBridge/local.properties (sdk.dir=…) — Gradle reads this
+  - src/Y1Bridge/local.properties (sdk.dir=…) — Gradle reads this
   - tools/android-sdk-env.sh — sourceable for ANDROID_HOME on PATH
 
 Disk:    ~1.5–2 GB
@@ -56,7 +56,7 @@ esac
 # delete tools/android-sdk, re-run.
 CMDLINE_TOOLS_BUILD="14742923"
 
-# Component versions to install (bump alongside src/Y1MediaBridge/app/build.gradle).
+# Component versions to install (bump alongside src/Y1Bridge/app/build.gradle).
 ANDROID_PLATFORM="android-34"
 BUILD_TOOLS_VERSION="34.0.0"
 
@@ -64,7 +64,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 TOOLS_DIR="$(pwd)"
 SDK_DIR="${TOOLS_DIR}/android-sdk"
 REPO_ROOT="$(cd .. && pwd)"
-LOCAL_PROPS="${REPO_ROOT}/src/Y1MediaBridge/local.properties"
+LOCAL_PROPS="${REPO_ROOT}/src/Y1Bridge/local.properties"
 ENV_FILE="${TOOLS_DIR}/android-sdk-env.sh"
 
 # --- OS detection ---------------------------------------------------------
@@ -245,7 +245,7 @@ cat <<EOF
   Local props:   ${LOCAL_PROPS}     (gradle reads sdk.dir from here)
   Env file:      ${ENV_FILE}        (source for ANDROID_HOME + adb/sdkmanager on PATH)
 
-  Gradle build (cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew
+  Gradle build (cd src/Y1Bridge && ./gradlew --stop && ./gradlew
   assembleDebug) reads sdk.dir from local.properties directly — no shell
   setup needed for that.
 

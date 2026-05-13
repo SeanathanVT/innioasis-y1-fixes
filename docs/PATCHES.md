@@ -445,8 +445,8 @@ BroadcastReceiver class registered dynamically from `Y1Application.onCreate`. Li
 
 | Action | Extra | Calls |
 |---|---|---|
-| `com.y1.mediabridge.SET_REPEAT_MODE` | `value:I` (Y1 enum 0/1/2 = OFF/ONE/ALL) | `SharedPreferencesUtils.setMusicRepeatMode(I)` |
-| `com.y1.mediabridge.SET_IS_SHUFFLE` | `value:Z` | `SharedPreferencesUtils.setMusicIsShuffle(Z)` |
+| `com.koensayr.y1.bridge.SET_REPEAT_MODE` | `value:I` (Y1 enum 0/1/2 = OFF/ONE/ALL) | `SharedPreferencesUtils.setMusicRepeatMode(I)` |
+| `com.koensayr.y1.bridge.SET_IS_SHUFFLE` | `value:Z` | `SharedPreferencesUtils.setMusicIsShuffle(Z)` |
 
 Same setters the in-app Settings screen calls when the Y1 user toggles Repeat / Shuffle, so `PlayerService` re-reads SharedPreferences at the next track-end and the playback behavior changes without an app restart. Receiver class lives under `com.koensayr.*` to avoid collisions with the existing `com.innioasis.y1.*` tree. The live CT-Set consumer is B5's `PappSetFileObserver`; B3 stays in tree as a no-op safety net.
 

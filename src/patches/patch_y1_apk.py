@@ -1470,8 +1470,8 @@ print(
 # Adds a new BroadcastReceiver `com.koensayr.PappSetReceiver` to the music
 # app. The receiver listens for two intents:
 #
-#   ACTION_SET_REPEAT_MODE  (com.y1.mediabridge.SET_REPEAT_MODE, EXTRA "value":I)
-#   ACTION_SET_IS_SHUFFLE   (com.y1.mediabridge.SET_IS_SHUFFLE,  EXTRA "value":Z)
+#   ACTION_SET_REPEAT_MODE  (com.koensayr.y1.bridge.SET_REPEAT_MODE, EXTRA "value":I)
+#   ACTION_SET_IS_SHUFFLE   (com.koensayr.y1.bridge.SET_IS_SHUFFLE,  EXTRA "value":Z)
 #
 # On receipt, it calls `SharedPreferencesUtils.INSTANCE.setMusicRepeatMode(I)`
 # or `setMusicIsShuffle(Z)` — the same setters the in-app Settings screen
@@ -1526,7 +1526,7 @@ PAPP_RECEIVER_SMALI_BODY = """\
 
     if-eqz v0, :end
 
-    const-string v1, "com.y1.mediabridge.SET_REPEAT_MODE"
+    const-string v1, "com.koensayr.y1.bridge.SET_REPEAT_MODE"
 
     invoke-virtual {v0, v1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
 
@@ -1550,7 +1550,7 @@ PAPP_RECEIVER_SMALI_BODY = """\
     goto :end
 
     :try_shuffle
-    const-string v1, "com.y1.mediabridge.SET_IS_SHUFFLE"
+    const-string v1, "com.koensayr.y1.bridge.SET_IS_SHUFFLE"
 
     invoke-virtual {v0, v1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
 
@@ -1610,11 +1610,11 @@ NEW_Y1APP_RETURN = """\
 
     invoke-direct {v1}, Landroid/content/IntentFilter;-><init>()V
 
-    const-string v2, "com.y1.mediabridge.SET_REPEAT_MODE"
+    const-string v2, "com.koensayr.y1.bridge.SET_REPEAT_MODE"
 
     invoke-virtual {v1, v2}, Landroid/content/IntentFilter;->addAction(Ljava/lang/String;)V
 
-    const-string v2, "com.y1.mediabridge.SET_IS_SHUFFLE"
+    const-string v2, "com.koensayr.y1.bridge.SET_IS_SHUFFLE"
 
     invoke-virtual {v1, v2}, Landroid/content/IntentFilter;->addAction(Ljava/lang/String;)V
 
@@ -1784,11 +1784,11 @@ PAPP_BROADCASTER_SMALI_BODY = """\
 
     new-instance v2, Landroid/content/Intent;
 
-    const-string v3, "com.y1.mediabridge.PAPP_STATE_DID_CHANGE"
+    const-string v3, "com.koensayr.y1.bridge.PAPP_STATE_DID_CHANGE"
 
     invoke-direct {v2, v3}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
 
-    const-string v3, "com.y1.mediabridge"
+    const-string v3, "com.koensayr.y1.bridge"
 
     invoke-virtual {v2, v3}, Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;
 

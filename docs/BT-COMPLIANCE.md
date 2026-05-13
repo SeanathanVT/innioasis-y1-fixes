@@ -169,19 +169,19 @@ If we ever do exhaust LOAD #1 padding, the fallback is to extend the same trick 
 
 | Offset | Field | Size | Status | Source |
 |---|---|---|---|---|
-| 0..7 | track_id (synthetic) | 8 | shipped | `mCurrentAudioId` (MediaStore `_ID` or `syntheticAudioId(path)` fallback) |
-| 8..263 | Title | 256 | shipped | `MediaStore.Audio.Media.TITLE` / `METADATA_KEY_TITLE` |
-| 264..519 | Artist | 256 | shipped | `MediaStore.Audio.Media.ARTIST` / `METADATA_KEY_ARTIST` |
-| 520..775 | Album | 256 | shipped | `MediaStore.Audio.Media.ALBUM` / `METADATA_KEY_ALBUM` |
-| 776..779 | duration_ms (BE u32) | 4 | shipped | `MediaStore.Audio.Media.DURATION` / `METADATA_KEY_DURATION` |
-| 780..783 | position_at_state_change_ms (BE u32) | 4 | shipped | `MediaBridgeService.mPositionAtStateChange` |
-| 784..787 | state_change_time_ms (BE u32) | 4 | shipped | `MediaBridgeService.mStateChangeTime` (CLOCK_BOOTTIME ms-since-boot, full ms precision; T6 / T9 live-position extrapolation. tv_nsec/1e6 computed in-trampoline via magic-multiply) |
+| 0..7 | track_id (synthetic) | 8 | shipped | `Song.getId()` or `syntheticAudioId(path)` fallback (read live from `PlayerService.getCurrentSong()` in `TrackInfoWriter.flushLocked`) |
+| 8..263 | Title | 256 | shipped | `Song.getName()` (read live from `PlayerService.getCurrentSong()`) |
+| 264..519 | Artist | 256 | shipped | `Song.getArtist()` (read live from `PlayerService.getCurrentSong()`) |
+| 520..775 | Album | 256 | shipped | `Song.getAlbum()` (read live from `PlayerService.getCurrentSong()`) |
+| 776..779 | duration_ms (BE u32) | 4 | shipped | `Song.getDuration()` (read live from `PlayerService.getCurrentSong()`) |
+| 780..783 | position_at_state_change_ms (BE u32) | 4 | shipped | `TrackInfoWriter.mPositionAtStateChange` |
+| 784..787 | state_change_time_ms (BE u32) | 4 | shipped | `TrackInfoWriter.mStateChangeTime` (CLOCK_BOOTTIME ms-since-boot, full ms precision; T6 / T9 live-position extrapolation. tv_nsec/1e6 computed in-trampoline via magic-multiply) |
 | 788..791 | reserved | 4 | — | (pad) |
-| 792 | playing_flag | 1 | shipped | `mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — set by `PlaybackStateBridge.onPlayValue` hooking `Static.setPlayValue` newValue 0/1/3/5) |
-| 793 | previous_track_natural_end | 1 | shipped | `mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
-| 794 | battery_status | 1 | shipped | `mCurrentBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
-| 795 | repeat_avrcp | 1 | shipped | `mCurrentRepeatAvrcp` (AVRCP §5.2.4 Tbl 5.20 enum; written by `handlePappStateIntent` from Patch B4 broadcaster; T8 0x08 INTERIM + T9 papp CHANGED-on-edge read this byte) |
-| 796 | shuffle_avrcp | 1 | shipped | `mCurrentShuffleAvrcp` (AVRCP §5.2.4 Tbl 5.21 enum; same write/read pipeline as 795) |
+| 792 | playing_flag | 1 | shipped | `TrackInfoWriter.mPlayStatus` (3-valued AVRCP §5.4.1 Tbl 5.26 enum: 0=STOPPED, 1=PLAYING, 2=PAUSED — set by `PlaybackStateBridge.onPlayValue` hooking `Static.setPlayValue` newValue 0/1/3/5) |
+| 793 | previous_track_natural_end | 1 | shipped | `TrackInfoWriter.mPreviousTrackNaturalEnd` (T5 gate for AVRCP §5.4.2 Tbl 5.31 TRACK_REACHED_END CHANGED) |
+| 794 | battery_status | 1 | shipped | `TrackInfoWriter.mBatteryStatus` (T8 INTERIM + T9 CHANGED-on-edge for AVRCP §5.4.2 Tbl 5.34 BATT_STATUS_CHANGED) |
+| 795 | repeat_avrcp | 1 | shipped | `TrackInfoWriter.mRepeatAvrcp` (AVRCP §5.2.4 Tbl 5.20 enum; written by `PappSetFileObserver` on `y1-papp-set` writes; T8 0x08 INTERIM + T9 papp CHANGED-on-edge read this byte) |
+| 796 | shuffle_avrcp | 1 | shipped | `TrackInfoWriter.mShuffleAvrcp` (AVRCP §5.2.4 Tbl 5.21 enum; same write/read pipeline as 795) |
 | 797..799 | reserved | 3 | — | available for future PApp attribute additions (Equalizer / Scan if a Y1 release ever surfaces them) |
 | 800..815 | TrackNumber (UTF-8 ASCII decimal) | 16 | shipped | `MediaStore.Audio.Media.TRACK % 1000` / parsed from `METADATA_KEY_CD_TRACK_NUMBER` |
 | 816..831 | TotalNumberOfTracks (UTF-8 ASCII decimal) | 16 | shipped | `count(*) WHERE ALBUM_ID=?` / parsed from `CD_TRACK_NUMBER` "n/total" |
