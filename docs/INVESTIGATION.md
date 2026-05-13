@@ -2646,3 +2646,52 @@ Whether Phase 1 unblocks Bolt's pane is unverified on hardware — we shipped 0 
 2. Bolt's pane has additional requirements we haven't identified (e.g., specific event subscriptions before pane query). Already noted: Bolt only subscribes to event 0x01 PLAYBACK_STATUS_CHANGED, not TRACK_CHANGED — significantly narrower than Kia's 6-event subscription set.
 
 If Phase 1 doesn't unblock the pane, the remaining diagnosis path is on the CT-state side (forget+repair, force-open the metadata pane at a specific point, etc.) rather than further TG-side changes — we've now exhausted the §5.3.4 / §6.6.1 spec deviations on Y1's end.
+
+## Trace #31 (2026-05-13) — Phase 1 verified on wire; AVRCP 1.3 Y1-side exhausted for Bolt-class pane
+
+### Phase 1 confirmed working
+
+`dual-bolt-20260513-1703` (post-Phase-1 flash):
+
+```
+AVRCP send_get_element_attributes_rsp raw i:0 total:7 attid:1 strlen:13
+AVRCP send_get_element_attributes strlen:13 offset:0 g_offset:14
+AVRCP send_get_element_attributes_rsp raw i:1 total:7 attid:2 strlen:9
+... (attid 3 strlen:18, attid 4 strlen:4, attid 5 strlen:4, attid 6 strlen:13, attid 7 strlen:6)
+msg=540, ptr=0x52385638, size=644
+```
+
+`total:7` confirms T4 now emits exactly the seven attributes Bolt requested (`[0x1,0x2,0x3,0x4,0x5,0x6,0x7]` Pattern B), in the requested order, with real-value lengths. No spurious attr 8. No "ignore empty attrib" lines. Spec-compliant per AVRCP 1.3 §6.6.1 Table 6.26.
+
+Response timing on this capture: 1 ms (matches `dual-bolt-20260513-1556` timing audit — well under T_MTP 1000 ms).
+
+### Bolt's metadata pane: still empty
+
+Despite the wire response now exactly matching the request shape, the Bolt-class CT's metadata pane still doesn't render. This is the end of what's reachable from the AVRCP 1.3 TG side.
+
+### Exhaustion checklist — AVRCP 1.3 Y1-side spec compliance
+
+| Surface | Status |
+|---|---|
+| §6.6.1 request-shape (return only requested attrs, in order) | ✅ Phase 1 |
+| §5.3.4 zero-length emit for unsupported attrs | ✅ E1 |
+| §6.7.1 once-per-registration | ✅ T2/T5/T8/T9 subscription gating |
+| Charset (honor CT's `InformDisplayableCharacterSet` advertisement) | ✅ Bolt declares UTF-8, we send UTF-8 |
+| Response timing (§15 T_MTP=1000 ms) | ✅ 1 ms measured |
+| Fragmentation / MTU | ✅ Single packet, well under L2CAP MTU |
+| Metadata content (real values from `y1-track-info`) | ✅ All non-zero strlens, content correct |
+| PASSTHROUGH routing | ✅ Patch E (PLAY-as-toggle for Bolt-class non-spec CTs) |
+| `GetPlayStatus` (T6) | ✅ Working — Bolt doesn't query it |
+| `InformDisplayableCharacterSet` / `InformBatteryStatusOfCT` ack | ✅ T_charset / T_battery |
+
+### Bolt's residual symptoms — all CT-side / out-of-1.3-scope
+
+- **Metadata pane empty**: forum evidence + community knowledge points at Bolt-class CTs gating pane render on AVRCP 1.4+ SDP advertisement (profile version `0x0104+`, `SupportedFeatures` GroupNavigation bit, AdditionalProtocolDescriptorList Browse PSM). Out of the AVRCP 1.3-only project policy; will be tackled on a separate feature branch.
+- **Play/Pause icon stuck after first toggle**: Bolt doesn't re-register after CHANGED. §6.7.1 prevents subsequent CHANGED without re-registration. CT-side spec violation, not fixable on the TG side without re-violating §6.7.1 (which would re-break Kia and other spec-compliant CTs).
+- **Shuffle stuck on**: same root cause as Play/Pause icon — Bolt doesn't re-register after the §6.7.1-compliant CHANGED.
+
+### Conclusion
+
+The `feature/bluetooth-metadata` branch is at AVRCP 1.3 spec-compliance equilibrium on the Y1 TG side. Strict CTs (Kia-class) work end-to-end. Bolt-class CTs work for control (PASSTHROUGH, play/pause routing) but their metadata pane is blocked by their CT-side reliance on 1.4+ SDP advertisement.
+
+Next development cycle: separate feature branch scoped to AVRCP 1.4 SDP advertisement (reverse V7+V8, restore the 1.4-class served record, validate no regression on strict 1.3 CTs).
