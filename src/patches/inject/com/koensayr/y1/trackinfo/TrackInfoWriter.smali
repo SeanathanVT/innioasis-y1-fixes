@@ -336,6 +336,44 @@
 .end method
 
 
+# Public mutator: seek edge. Captures the new position as the live anchor
+# so T6 / T9 / T8's clock_gettime extrapolation runs forward from there.
+# Without this, a user-initiated seek (via the music app's seek bar) leaves
+# the anchor at the previous position and the CT's playhead either jumps
+# back to the pre-seek value or freezes until the next state edge.
+.method public declared-synchronized onSeek(J)V
+    .locals 3
+
+    monitor-enter p0
+
+    :try_start_0
+    iput-wide p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_seek
+
+    monitor-exit p0
+
+    invoke-virtual {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
+    return-void
+
+    :catchall_seek
+    move-exception v0
+
+    monitor-exit p0
+
+    throw v0
+.end method
+
+
 # Latch a natural-end signal from MediaPlayer.OnCompletionListener. The next
 # onTrackEdge consumes + clears it. Also freezes the playhead anchor at
 # duration so T9 / T6 stop extrapolating past end-of-track during the gap

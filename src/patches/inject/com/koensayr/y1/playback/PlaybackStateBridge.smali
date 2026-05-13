@@ -192,6 +192,38 @@
 .end method
 
 
+# Seek hook — prepended to PlayerService.setCurrentPosition(J)V. Forwards
+# the new position to TrackInfoWriter so the live anchor refreshes and the
+# CT sees PLAYBACK_POS_CHANGED CHANGED immediately on seek instead of
+# waiting for the next 1 s PositionTicker tick (which would still report
+# the pre-seek extrapolation).
+.method public static onSeek(J)V
+    .locals 3
+
+    :try_start_seek
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    invoke-virtual {v0, p0, p1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onSeek(J)V
+
+    return-void
+    :try_end_seek
+    .catch Ljava/lang/Throwable; {:try_start_seek .. :try_end_seek} :catch_seek
+
+    :catch_seek
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
 # OnErrorListener hook (IJK + MediaPlayer). Clear pending natural-end since an
 # error means the track was interrupted, not naturally ended.
 .method public static onError()V

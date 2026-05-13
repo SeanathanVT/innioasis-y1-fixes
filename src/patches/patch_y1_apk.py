@@ -1998,6 +1998,35 @@ with open(ps_path, 'w') as f:
     f.write(ps_src)
 print(f"  Patch B5.2: PlayerService 6 listener lambdas → PlaybackStateBridge")
 
+# -- Patch B5.2a: hook PlayerService.setCurrentPosition (seek edge) -----------
+# The music app doesn't register OnSeekCompleteListener on either engine, so
+# we hook the seek call directly. setCurrentPosition(J) is the single public
+# entry from BasePlayerActivity's seek-bar handler and PlayerService's own
+# internal repositioning paths — every seek funnels through it before the
+# call to IjkMediaPlayer.seekTo / MediaPlayer.seekTo.
+OLD_SET_CUR_POS_HEAD = (
+    ".method public final setCurrentPosition(J)V\n"
+    "    .locals 2\n"
+    "\n"
+    "    .line 171\n"
+    "    iget-object v0, p0, Lcom/innioasis/y1/service/PlayerService;->playing:Lcom/innioasis/y1/service/PlayerService$Playing;\n"
+)
+NEW_SET_CUR_POS_HEAD = (
+    ".method public final setCurrentPosition(J)V\n"
+    "    .locals 2\n"
+    "\n"
+    "    invoke-static {p1, p2}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onSeek(J)V\n"
+    "\n"
+    "    .line 171\n"
+    "    iget-object v0, p0, Lcom/innioasis/y1/service/PlayerService;->playing:Lcom/innioasis/y1/service/PlayerService$Playing;\n"
+)
+if OLD_SET_CUR_POS_HEAD not in ps_src:
+    sys.exit("ERROR: Patch B5.2a anchor not found in PlayerService.smali (setCurrentPosition header).")
+ps_src = ps_src.replace(OLD_SET_CUR_POS_HEAD, NEW_SET_CUR_POS_HEAD, 1)
+with open(ps_path, 'w') as f:
+    f.write(ps_src)
+print(f"  Patch B5.2a: PlayerService.setCurrentPosition → PlaybackStateBridge.onSeek")
+
 # -- Patch B5.3: extend Y1Application.onCreate registration block -------------
 # Insert BEFORE the B4 PappStateBroadcaster registration so TrackInfoWriter is
 # initialised by the time sendNow() runs (sendNow → B5.4 setPapp → flushLocked
