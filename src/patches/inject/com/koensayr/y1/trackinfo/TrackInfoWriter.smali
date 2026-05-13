@@ -208,7 +208,7 @@
 
     const-string v1, "y1-trampoline-state"
 
-    const/16 v2, 0x10
+    const/16 v2, 0x14
 
     invoke-direct {p0, v1, v2}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->ensureFile(Ljava/lang/String;I)V
 
