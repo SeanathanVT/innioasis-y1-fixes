@@ -53,7 +53,7 @@ After printing a summary, sleeps 3 seconds before mutating anything
 
 Examples:
     ./tools/release.sh 2.0.0          # commits + tags locally
-    ./tools/release.sh 2.0.0 --push   # also pushes main + the new tag
+    ./tools/release.sh 2.0.0 --push   # also pushes current branch + tag
 
 Without --push, prints the manual push commands at the end.
 EOF
@@ -153,7 +153,7 @@ echo "  - $BASH_FILE  (# Version: bump)"
 echo "  - $CHANGELOG  (rename [Unreleased] → [$VERSION] - $TODAY, add new empty [Unreleased])"
 echo "Then: commit + annotated tag $TAG."
 if $PUSH; then
-    echo "Then: git push origin main && git push origin $TAG."
+    echo "Then: git push origin $(git symbolic-ref --short HEAD) && git push origin $TAG."
 else
     echo "(push: not requested; will print commands for later)"
 fi
@@ -210,15 +210,23 @@ echo "[committed] $(git log -1 --pretty='%h %s')"
 git tag -a "$TAG" -m "Release $VERSION. See CHANGELOG.md for notes."
 echo "[tagged]    $TAG → $(git rev-parse --short "$TAG")"
 
-# 9 — push (or print)
+# 9 — push (or print). Pushes the current branch (not a hardcoded `main`)
+# so this works whether you released from `main` or a long-lived release
+# branch.
+CURRENT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)"
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+    echo "ERROR: detached HEAD — release commit is unreachable from any branch." >&2
+    echo "       Checkout a branch first, then re-run." >&2
+    exit 1
+fi
 if $PUSH; then
     echo
-    echo "Pushing main + tag…"
-    git push origin main
+    echo "Pushing $CURRENT_BRANCH + tag…"
+    git push origin "$CURRENT_BRANCH"
     git push origin "$TAG"
     echo "Done."
 else
     echo
     echo "Not pushing. To publish:"
-    echo "  git push origin main && git push origin $TAG"
+    echo "  git push origin $CURRENT_BRANCH && git push origin $TAG"
 fi
