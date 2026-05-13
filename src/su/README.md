@@ -4,7 +4,7 @@ Minimal setuid-root escalator for the Innioasis Y1 research device. Installed at
 
 ## Why this exists
 
-The H1/H2/H3 byte patches in `/sbin/adbd` (see `../patches/patch_adbd.py`) all caused "device offline" on hardware in every revision tried. This `su` sidesteps the issue: stock `/sbin/adbd` stays untouched and runs at uid 2000 (shell) as normal, ADB protocol comes up cleanly, and root is obtained post-flash via `adb shell /system/xbin/su`.
+The H1/H2/H3 byte patches in `/sbin/adbd` (formerly `../patches/patch_adbd.py`, removed in v2.1.0; analysis preserved in [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) §"adbd Root Patches (H1/H2/H3)") all caused "device offline" on hardware in every revision tried. This `su` sidesteps the issue: stock `/sbin/adbd` stays untouched and runs at uid 2000 (shell) as normal, ADB protocol comes up cleanly, and root is obtained post-flash via `adb shell /system/xbin/su`.
 
 ## Files
 
@@ -65,5 +65,5 @@ adb shell /system/xbin/su                # interactive root shell
 
 - [`../../README.md`](../../README.md) — project overview
 - [`../../docs/PATCHES.md`](../../docs/PATCHES.md) — how this fits into the broader patch set
-- [`../../INVESTIGATION.md`](../../INVESTIGATION.md) — the AVRCP-debugging context that motivated needing root
+- [`../../docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md) — the AVRCP-debugging context that motivated needing root
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — top-level changelog

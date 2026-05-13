@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp.py — make GetElementAttributes response §5.3.4-compliant.
+patch_libaudio_a2dp.py — keep the AVDTP source stream alive across pauses.
 
-2-byte CBZ→NOP at file offset 0x00002266 in
-btmtk_avrcp_send_get_element_attributes_rsp. Disables the "ignore empty
-attrib" check that drops zero-length attributes from the wire (a deviation
-from AVRCP 1.3 §5.3.4, which requires unsupported attributes to emit with
-AttributeValueLength=0). T4 in libextavrcp_jni.so emits zero-length
-entries for any requested AttributeID outside 0x01-0x07; this patch lets
-those entries reach the wire so strict CTs see a §5.3.4-compliant
-response shape.
+Single-byte ARM cond-flip (EQ → AL) at file offset 0x000086ab in
+A2dpAudioStreamOut::standby_l. Skips the a2dp_stop call AudioFlinger's
+silence-timeout standby would otherwise make, so PAUSED leaves the stream
+paused-but-up (AVDTP 1.3 §8.13 / §8.15). Strict CTs that aggressively
+close+reopen their A2DP sink on SUSPEND no longer burst-on-resume.
 
 Byte-level reference: docs/PATCHES.md.
 """
@@ -20,8 +17,8 @@ import os
 import sys
 from pathlib import Path
 
-STOCK_MD5         = "6442b137d3074e5ac9a654de83a4941a"
-OUTPUT_MD5        = "1347e1b337879840ad2f66597836b05f"
+STOCK_MD5         = "0d909a0bcf7972d6e5d69a1704d35d1f"
+OUTPUT_MD5        = "adbd98afeb5593f1ffe3b90acd0f2536"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -30,10 +27,10 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
 PATCHES = [
     {
-        "name":   "[E1] GetElementAttributes empty-attr drop -> NOP (§5.3.4 zero-length emit)",
-        "offset": 0x00002266,
-        "before": bytes([0x88, 0xb3]),  # cbz r0, +0x62 (-> 0x22cc 'ignore empty')
-        "after":  bytes([0x00, 0xbf]),  # nop T1 (fall through to emit)
+        "name":   "[A2DP-HAL] standby_l: beq 8684 -> b 8684 (skip a2dp_stop unconditionally)",
+        "offset": 0x000086ab,
+        "before": bytes([0x0a]),  # ARM cond EQ
+        "after":  bytes([0xea]),  # ARM cond AL (always)
     },
 ]
 
@@ -71,13 +68,11 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="libextavrcp.so byte-patch — drop the 'ignore empty attrib' check"
-                    " so GetElementAttributes responses honor AVRCP 1.3 §5.3.4"
-                    " (unsupported attributes emit with AttributeValueLength=0)"
+        description="HAL standby_l byte-patch — keep AVDTP stream alive across pauses"
     )
-    parser.add_argument("input", help="Path to stock libextavrcp.so")
+    parser.add_argument("input", help="Path to stock libaudio.a2dp.default.so")
     parser.add_argument("--output", "-o", default=None,
-                        help="Output path (default: output/libextavrcp.so.patched)")
+                        help="Output path (default: output/libaudio.a2dp.default.so.patched)")
     parser.add_argument("--verify-only", action="store_true",
                         help="Check patch sites only, do not write output")
     parser.add_argument("--skip-md5", action="store_true",
@@ -152,7 +147,7 @@ def main():
     else:
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
-        output_path = output_dir / "libextavrcp.so.patched"
+        output_path = output_dir / "libaudio.a2dp.default.so.patched"
     output_path.write_bytes(data)
 
     md5_var = "OUTPUT_DEBUG_MD5" if DEBUG_LOGGING else "OUTPUT_MD5"
@@ -166,8 +161,8 @@ def main():
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")
     print(f"\nDeploy:")
-    print(f"  adb push {output_path} /system/lib/libextavrcp.so")
-    print(f"  adb shell chmod 644 /system/lib/libextavrcp.so")
+    print(f"  adb push {output_path} /system/lib/libaudio.a2dp.default.so")
+    print(f"  adb shell chmod 644 /system/lib/libaudio.a2dp.default.so")
     print(f"  adb reboot")
 
     if output_md5_mismatch and not args.skip_md5:

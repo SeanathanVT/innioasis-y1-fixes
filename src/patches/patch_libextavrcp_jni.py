@@ -1,132 +1,288 @@
 #!/usr/bin/env python3
 """
-patch_libextavrcp_jni.py — Patch stock libextavrcp_jni.so -> libextavrcp_jni.so.patched
+patch_libextavrcp_jni.py — AVRCP TG trampoline chain.
 
-Stock binary md5:  fd2ce74db9389980b55bccf3d8f15660
-Output md5:        6c348ed9b2da4bb9cc364c16d20e3527
+Patches libextavrcp_jni.so with a redirect (R1), a uinput auto-repeat NOP
+(U1), and a dynamically-assembled Thumb-2 trampoline blob in the LOAD #1
+page-padding code-cave at vaddr 0xac54. The blob handles GetCapabilities,
+GetElementAttributes, GetPlayStatus, RegisterNotification (all events),
+InformDisplayableCharacterSet, InformBatteryStatusOfCT, and the §5.4.2
+track-edge 3-tuple — answering inbound 1.3 PDUs directly from native code
+since the stock Java AVRCP layer is a no-op stub on this firmware.
 
---- Full verified call chain (Java -> daemon socket) ---
+The blob is built by _trampolines.py via the Thumb-2 assembler in
+_thumb2asm.py. Per-trampoline behaviour: docs/PATCHES.md. Stack frame
+and JNI calling convention: docs/ARCHITECTURE.md.
 
-  Java BTAvrcpMusicAdapter.checkCapability()
-    -> native activateConfig_3req(tg_feature_bits, ct_feature_bits, ...)
-  [BluetoothAvrcpService_activateConfig_3req @ 0x375C, 120 bytes]:
-    Feature bitmask decision tree:
-      bits & 0x00104010 (bits 4,14,20) -> tg_feature_code = 0x0e (AVRCP 1.4)
-      bits & 0x00082008 (bits 3,13,19) -> tg_feature_code = 0x0d (intermediate)
-      else                             -> tg_feature_code = 0x0a (AVRCP 1.3)
-    Stores tg_feature_code -> g_tg_feature global @ 0xD29C (verified)
-    Stores ct_feature_code -> g_ct_feature global @ 0xD004 (verified)
-    -> native activate_1req(conn_handle)
-  [BluetoothAvrcpService_activate_1req @ 0x3E3C, 180 bytes]:
-    Reads g_tg_feature (0xD29C) -> r3
-    Reads g_ct_feature (0xD004) -> stack[0]
-    -> btmtk_avrcp_send_activate_req(conn+8, 0, 0, tg_feature_code, ct_feature_code)
-  [libextavrcp.so: btmtk_avrcp_send_activate_req @ 0x19CC]:
-    8-byte socket payload: [0..3]=0x00000000, [4]=0, [5]=0, [6]=tg_code, [7]=ct_code
-    -> AVRCP_SendMessage(conn, 0x1bfe, &payload, 8)
-    -> send() -> abstract socket bt.ext.adp.avrcp (ANDROID_SOCKET_NAMESPACE_ABSTRACT)
-
-  Global address derivation (activateConfig_3req writer):
-    ADD r14, r15 at 0x37ae: 0x9aea + PC(0x37b2) = 0xD29C  (g_tg_feature)
-    ADD r12, r15 at 0x37b0: 0x9850 + PC(0x37b4) = 0xD004  (g_ct_feature)
-    STRB.W r4, [r14, #0] at 0x37b2 -> writes tg_feature_code to 0xD29C
-    STRB.W r5, [r12, #0] at 0x37b6 -> writes ct_feature_code to 0xD004
-
---- Patches 1+2 (activateConfig_3req @ 0x375C) — defense-in-depth ---
-
-  These bypass the bitmask decision tree, hardcoding the outputs regardless of
-  what checkCapability() computed. They complement (do not replace) the ODEX
-  patch: the ODEX patch enables the 1.4 capability block so the bitmask reaches
-  activateConfig_3req with the right bits; these patches guarantee g_tg_feature=0x0e
-  even if the bitmask produces a wrong result.
-
-  Patch 1: sdpfeature = 0x23 (Cat1+Cat2+PlayerAppSettings)
-    At 0x3764, r5 holds sdpfeature sourced from r3 (a capability register that
-    may be zero before the 1.4 block initializes). mov r5,r3 -> movs r5,#0x23.
-
-  Patch 2: g_tg_feature = 0x0e (AVRCP 1.4)
-    At 0x37a8 the else-branch has set r4=0x0a (1.3). This instruction
-    (movs r0,#1, unrelated setup) is repurposed to overwrite r4=0x0e before
-    the STRB.W to g_tg_feature at 0x37b2.
-
---- Patches 3+4 (getCapabilitiesRspNative, FUN_005de8) ---
-
-  NOTE: FUN_005de8 is getCapabilitiesRspNative, NOT the CONNECT_CNF handler.
-  The actual CONNECT_CNF handler is at 0x62EA (TBH dispatch table at 0x60B8,
-  msg_id=505, TBH index=4, entry=0x0117). The CONNECT_CNF handler reads and
-  logs tg_feature but does not gate on it; it is unrelated to cardinality.
-
-  getCapabilitiesRspNative runs when the car CT sends a GetCapabilities(EventList)
-  request (CapabilityId=2). Stock code caps the event count at 13 (0x0d — the
-  AVRCP 1.3 maximum):
-    0x5e56: cmp r4, #0xd   ; if event count > 13...
-    0x5e5a: bls +4
-    0x5e5c: movs r4, #0xd  ; ...cap to 13
-
-  This prevents Y1 from reporting event 14 (0x0e in MTK's numbering), which is
-  the signal that unlocks AVRCP 1.4 on the car CT. Without event 14 in the
-  GetCapabilities response, the car treats Y1 as AVRCP 1.3 and never sends
-  REGISTER_NOTIFICATION — cardinality stays 0.
-  Patches raise the cap from 13 (0x0d) to 14 (0x0e).
-
-  Note: this cap was confirmed as NOT the root cause of cardinality:0 in isolation
-  (patched + flashed without the SDP fix, cardinality remained 0 because the car
-  was negotiating 1.3 from the SDP advertisement). These patches become meaningful
-  once the SDP shows Version: 0x0104 via patch_mtkbt.py.
-
-Usage:
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --output /tmp/libextavrcp_jni.so.patched
-    python3 patch_libextavrcp_jni.py libextavrcp_jni.so --verify-only
-
-Deploy:
-    adb push output/libextavrcp_jni.so.patched /system/lib/libextavrcp_jni.so
-    adb reboot
+Pairs with patch_mtkbt.py's P1 (msg 519 size=9 routing) and
+patch_libextavrcp.py's E1 (§5.3.4 zero-length emit).
 """
 
 import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
 
-STOCK_MD5  = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5 = "6c348ed9b2da4bb9cc364c16d20e3527"
+# Allow `from _trampolines import ...` when invoked from any cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _trampolines import build as build_trampolines, T4_VADDR
+from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
+from _thumb2asm import Asm
 
-PATCHES = [
-    {
-        "name":   "[C2a] sdpfeature: mov r5,r3 -> movs r5,#0x23  (defense-in-depth)",
-        "offset": 0x3764,
-        "before": bytes([0x1d, 0x46]),
-        "after":  bytes([0x23, 0x25]),
-    },
-    {
-        "name":   "[C2b] g_tg_feature: movs r0,#1 -> movs r4,#0x0e  (force AVRCP 1.4)",
-        "offset": 0x37a8,
-        "before": bytes([0x01, 0x20]),
-        "after":  bytes([0x0e, 0x24]),
-    },
-    {
-        "name":   "[C3a] getCapabilitiesRsp event cap: cmp r4,#0xd -> cmp r4,#0xe",
-        "offset": 0x5e56,
-        "before": bytes([0x0d, 0x2c]),
-        "after":  bytes([0x0e, 0x2c]),
-    },
-    {
-        "name":   "[C3b] getCapabilitiesRsp event cap: movs r4,#0xd -> movs r4,#0xe",
-        "offset": 0x5e5c,
-        "before": bytes([0x0d, 0x24]),
-        "after":  bytes([0x0e, 0x24]),
-    },
-]
+# notificationTrackChangedNative lives at vaddr 0x3bc0 in libextavrcp_jni.so.
+# Java's BTAvrcpMusicAdapter.handleKeyMessage (with the cardinality if-eqz
+# NOPed by patch_mtkbt_odex.py's TRACK_CHANGED entry) calls this native on
+# every track-change broadcast from the music app. We replace its entry
+# instruction with `b.w T5` so it lands in our state-aware trampoline.
+NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
+
+# notificationPlayStatusChangedNative at vaddr 0x3c88. Same shape as the
+# TRACK_CHANGED hook above, paired with the cardinality NOP at 0x3c4fe in
+# MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's nested
+# sparse-switch). Replace entry instruction with `b.w T9` so every
+# `playstatechanged` broadcast emitted by the music app lands in T9, which fires
+# PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
+# Closes the AVRCP 1.3 §5.4.2 spec gap that would otherwise be INTERIM-only.
+NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
+
+STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
+OUTPUT_MD5        = "3454ffe3c28f609d07852435433cf3a8"
+
+# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
+# Placeholder — when set, future trampoline edits could include
+# `__android_log_print` calls so on-device `adb logcat -s Y1Patch:*` traces
+# show whether each T-trampoline fired. Currently no trampoline emits Log
+# calls so the debug build is byte-identical to the release build; once we
+# wire native instrumentation, pin a separate hash in OUTPUT_DEBUG_MD5.
+DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
+OUTPUT_DEBUG_MD5  = OUTPUT_MD5
+
+# Effective expected output MD5 for the current invocation — used by all
+# verification below. Routes through DEBUG_LOGGING so a single switch
+# governs both what's emitted and what's expected.
+EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
+
+# ---------------------------------------------------------------- T1
+
+# T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
+# bytes). Advertises every event we actually handle in the trampoline chain:
+#   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
+#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4 / T5 CHANGED on edge)
+#   0x03 TRACK_REACHED_END             (T8 INTERIM + T5 CHANGED on natural-end edge)
+#   0x04 TRACK_REACHED_START           (T8 INTERIM + T5 CHANGED on every track edge)
+#   0x05 PLAYBACK_POS_CHANGED          (T8 INTERIM + T9 CHANGED at 1 s cadence while playing)
+#   0x06 BATT_STATUS_CHANGED           (T8 INTERIM from y1-track-info[794] + T9 CHANGED on bucket edge)
+#   0x07 SYSTEM_STATUS_CHANGED         (T8 INTERIM only, canned POWERED_ON — intentional;
+#                                         the canned value IS the real value while trampolines run)
+#   0x08 PLAYER_APPLICATION_SETTING_CHANGED  (T8 INTERIM + T9 CHANGED-on-edge,
+#                                              both reading live (Repeat, Shuffle)
+#                                              from y1-track-info[795..796])
+T1_TRAMPOLINE = bytes([
+    0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
+    0x10, 0x28,                               # cmp r0, #0x10
+    0x0D, 0xD1,                               # bne.n 0x732c (bridge to T2)
+    0x04, 0xA3,                               # adr r3, 0x7324
+    0x05, 0xF1, 0x08, 0x00,                  # add.w r0, r5, #8
+    0x00, 0x21,                               # movs r1, #0
+    0x08, 0x22,                               # movs r2, #8   (events count = 8)
+    0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
+    0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
+    0x00, 0xBF,                               # nop
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # advertised events 0x01..0x08
+    0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
+])
+assert len(T1_TRAMPOLINE) == 40
+
+# Stock testparmnum first 40 bytes.
+TESTPARMNUM_STOCK = bytes([
+    0x10, 0xB5, 0x04, 0x20, 0x07, 0x4C, 0x08, 0x4A,
+    0x7C, 0x44, 0x21, 0x46, 0x7A, 0x44, 0xFB, 0xF7,
+    0xF4, 0xEF, 0x06, 0x4A, 0x04, 0x20, 0x21, 0x46,
+    0x00, 0x23, 0x7A, 0x44, 0xFB, 0xF7, 0xEC, 0xEF,
+    0x00, 0x20, 0x10, 0xBD, 0x01, 0x07, 0x00, 0x00,
+])
+assert len(TESTPARMNUM_STOCK) == 40
+
+# ---------------------------------------------------------------- T2 stub
+
+# Stock classInitNative (48 bytes) — entry + body + literal pool.
+CLASSINITNATIVE_STOCK = bytes([
+    0x10, 0xB5, 0x04, 0x20, 0x07, 0x4C, 0x08, 0x4A,
+    0x7C, 0x44, 0x21, 0x46, 0x7A, 0x44, 0xFC, 0xF7,
+    0x10, 0xE8, 0x06, 0x4A, 0x04, 0x20, 0x21, 0x46,
+    0x00, 0x23, 0x7A, 0x44, 0xFC, 0xF7, 0x08, 0xE8,
+    0x00, 0x20, 0x10, 0xBD, 0x39, 0x07, 0x00, 0x00,
+    0xCA, 0x12, 0x00, 0x00, 0xDD, 0x2C, 0x00, 0x00,
+])
+assert len(CLASSINITNATIVE_STOCK) == 48
+
+
+def _t2_stub(extended_t2_vaddr: int) -> bytes:
+    """Build the 48-byte block at 0x72d0:
+        0x72d0: movs r0, #0; bx lr      (classInitNative `return 0` stub)
+        0x72d4: b.w extended_T2         (the only T2 logic; everything else
+                                         is dispatched inside extended_T2)
+        0x72d8..0x72ff: zero filler (unreachable)
+    """
+    a = Asm(0x72d0)
+    a.raw(bytes([0x00, 0x20, 0x70, 0x47]))   # movs r0, #0; bx lr
+    a.labels["target"] = extended_t2_vaddr
+    a.b_w("target")
+    while len(a.buf) < 48:
+        a.buf.append(0x00)
+    return a.resolve()
+
+
+# ---------------------------------------------------------------- LOAD #1 phdr
+
+LOAD1_PHDR_OFFSET = 0x54
+LOAD1_FILESZ_OFFSET = LOAD1_PHDR_OFFSET + 16
+LOAD1_MEMSZ_OFFSET  = LOAD1_PHDR_OFFSET + 20
+LOAD1_OLD_SIZE = 0xac54
+
+# ---------------------------------------------------------------- patch list builder
+
+
+def _native_track_changed_stub(t5_vaddr: int) -> bytes:
+    """Replace the first 4 bytes of notificationTrackChangedNative with
+    `b.w T5`. The remaining 196 bytes of the original function body are
+    unreachable but left in place (they form valid but dead code; harmless)."""
+    a = Asm(NATIVE_TRACK_CHANGED_VADDR)
+    a.labels["target"] = t5_vaddr
+    a.b_w("target")
+    return a.resolve()
+
+
+def _native_play_status_changed_stub(t9_vaddr: int) -> bytes:
+    """Replace the first 4 bytes of notificationPlayStatusChangedNative with
+    `b.w T9`. The remaining bytes of the original function body are
+    unreachable but left in place (valid dead code; harmless)."""
+    a = Asm(NATIVE_PLAY_STATUS_CHANGED_VADDR)
+    a.labels["target"] = t9_vaddr
+    a.b_w("target")
+    return a.resolve()
+
+
+# Stock first 4 bytes of notificationTrackChangedNative — the prologue's
+# `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` instruction.
+NATIVE_TRACK_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF0, 0x47])
+
+# Stock first 4 bytes of notificationPlayStatusChangedNative.
+# Disassembled: stmdb sp!, {r0, r1, r4, r5, r6, r7, r8, lr} (reg list 0x41F3) --
+# distinct from notificationTrackChangedNative's prologue (0x47F0) because the
+# play_status native takes 3 jbyte args (Java arg3 = play_status arrives in r4
+# per the AAPCS register / stack split for variadic-byte Java natives), and the
+# stock body needs r0 / r1 (env, this) preserved for re-use after the call into
+# the AVRCP service.  We don't care about the original body — overwriting the
+# first 4 bytes with `b.w T9` short-circuits everything past it.
+NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF3, 0x41])
+
+
+def build_patches() -> tuple[list[dict], int]:
+    """Build the patch list. Returns (patches, new_load1_size)."""
+    blob, addrs = build_trampolines()
+    extended_t2_vaddr = addrs["extended_T2"]
+    t5_vaddr = addrs["T5"]
+    t9_vaddr = addrs["T9"]
+    new_load1_size = T4_VADDR + len(blob)
+
+    patches = [
+        {
+            "name": "R1: redirect bne.n 0x65bc → bl.w 0x7308 (T1) at 0x6538",
+            "offset": 0x6538,
+            "before": bytes([0x40, 0xD1, 0x09, 0x25]),  # bne.n 0x65bc; movs r5, #9
+            "after":  bytes([0x00, 0xF0, 0xE6, 0xFE]),  # bl.w 0x7308
+        },
+        {
+            # U1 — disable kernel auto-repeat on the AVRCP /dev/uinput device.
+            # The init at 0x73c8 (called via exported avrcp_input_init, which
+            # opens "/dev/uinput" @ 0xa849 and registers a keyboard with name
+            # "AVRCP" @ 0x828b, BUS_BLUETOOTH=5) issues four UI_SET_EVBIT
+            # ioctls in sequence: EV_KEY, EV_REL (vendor typo, harmless),
+            # EV_REP (0x14), EV_SYN. Without EV_REP in the device's evbit,
+            # input_register_device() in the kernel won't enable
+            # input_enable_softrepeat(), so a dropped PASSTHROUGH RELEASE no
+            # longer leads to a 25 Hz KEY_xxx REPEAT cascade and the haptic
+            # loop on strict CTs goes away. NOPing the blx ioctl@plt at
+            # 0x74e8 is the most surgical option — register / stack contracts
+            # are untouched; the next ioctl reloads r1 / r2 cleanly. See
+            # docs/INVESTIGATION.md "kernel auto-repeat" for the getevent(8)
+            # trace that drove this.
+            "name": "U1: NOP blx ioctl@plt for UI_SET_EVBIT(EV_REP) at 0x74e8 — disable kernel auto-repeat on AVRCP uinput",
+            "offset": 0x74e8,
+            "before": bytes([0xFC, 0xF7, 0xB4, 0xE8]),  # blx ioctl@plt
+            "after":  bytes([0x00, 0xBF, 0x00, 0xBF]),  # nop ; nop (Thumb-2)
+        },
+        {
+            "name": "T1: GetCapabilities trampoline (testparmnum) at 0x7308",
+            "offset": 0x7308,
+            "before": TESTPARMNUM_STOCK,
+            "after":  T1_TRAMPOLINE,
+        },
+        {
+            "name": (
+                f"notificationTrackChangedNative @ 0x{NATIVE_TRACK_CHANGED_VADDR:x}"
+                f" → b.w T5 (0x{t5_vaddr:x}) — proactive CHANGED on track change"
+            ),
+            "offset": NATIVE_TRACK_CHANGED_VADDR,
+            "before": NATIVE_TRACK_CHANGED_STOCK_PROLOGUE,
+            "after":  _native_track_changed_stub(t5_vaddr),
+        },
+        {
+            "name": (
+                f"notificationPlayStatusChangedNative @"
+                f" 0x{NATIVE_PLAY_STATUS_CHANGED_VADDR:x} → b.w T9 (0x{t9_vaddr:x})"
+                f" — proactive PLAYBACK_STATUS_CHANGED on play / pause edge"
+            ),
+            "offset": NATIVE_PLAY_STATUS_CHANGED_VADDR,
+            "before": NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE,
+            "after":  _native_play_status_changed_stub(t9_vaddr),
+        },
+        {
+            "name": (
+                f"T2 stub: classInitNative stub + b.w 0x{extended_t2_vaddr:x}"
+                " (extended_T2) at 0x72d0"
+            ),
+            "offset": 0x72d0,
+            "before": CLASSINITNATIVE_STOCK,
+            "after":  _t2_stub(extended_t2_vaddr),
+        },
+        {
+            "name": (
+                f"trampoline blob @ 0x{T4_VADDR:x} ({len(blob)} bytes "
+                f"in LOAD #1 padding; final vaddr 0x{new_load1_size:x})"
+            ),
+            "offset": T4_VADDR,
+            "before": bytes([0x00] * len(blob)),  # stock LOAD #1 padding is zeros
+            "after":  blob,
+        },
+        {
+            "name": f"LOAD #1 filesz: 0x{LOAD1_OLD_SIZE:x} → 0x{new_load1_size:x}",
+            "offset": LOAD1_FILESZ_OFFSET,
+            "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+            "after":  new_load1_size.to_bytes(4, "little"),
+        },
+        {
+            "name": f"LOAD #1 memsz: 0x{LOAD1_OLD_SIZE:x} → 0x{new_load1_size:x}",
+            "offset": LOAD1_MEMSZ_OFFSET,
+            "before": LOAD1_OLD_SIZE.to_bytes(4, "little"),
+            "after":  new_load1_size.to_bytes(4, "little"),
+        },
+    ]
+    return patches, new_load1_size
+
+
+# ---------------------------------------------------------------- I/O helpers
 
 
 def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
+def verify(data: bytes, mode: str, patches: list[dict]) -> tuple[bool, list[dict]]:
     results = []
-    for p in PATCHES:
+    for p in patches:
         expected = p[mode]
         actual = bytes(data[p["offset"]: p["offset"] + len(expected)])
         results.append({**p, "actual": actual, "ok": actual == expected})
@@ -134,6 +290,13 @@ def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
 
 
 def print_results(label: str, results: list[dict], mode: str) -> None:
+    ok_count = sum(1 for r in results if r["ok"])
+    total = len(results)
+    # Quiet when everything verifies — print a one-line summary. The full
+    # per-site listing is only needed for diagnosis when something fails.
+    if ok_count == total:
+        print(f"\n{label}: {ok_count}/{total} sites OK")
+        return
     print(f"\n{label}")
     print("-" * 72)
     for r in results:
@@ -146,9 +309,9 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
     print("-" * 72)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patch stock libextavrcp_jni.so for AVRCP 1.4"
+        description="Minimum JNI patch — route size-9 msg-519 frames to BT-SIG VENDOR path"
     )
     parser.add_argument("input", help="Path to stock libextavrcp_jni.so")
     parser.add_argument("--output", "-o", default=None,
@@ -167,6 +330,16 @@ def main():
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    # Already-at-expected-output fast path. MD5 over the whole file is
+    # strictly stronger evidence than verifying a handful of patch sites,
+    # so when the input already hashes to the expected output for the
+    # current build mode (release or debug) there's nothing to do.
+    if EXPECTED_OUTPUT_MD5 is not None and input_md5 == EXPECTED_OUTPUT_MD5:
+        print(f"Input:  {input_path}  ({len(data):,} bytes)")
+        print(f"MD5:    {input_md5}  [OK — already at expected output]")
+        print("Nothing to do.")
+        sys.exit(0)
+
     if args.skip_md5:
         md5_tag = "(stock check skipped)"
     elif input_md5 == STOCK_MD5:
@@ -179,34 +352,51 @@ def main():
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
         print("ERROR: input is not the expected stock build.")
+        if EXPECTED_OUTPUT_MD5 is not None:
+            print(f"       Expected stock ({STOCK_MD5}) or already-patched ({EXPECTED_OUTPUT_MD5}).")
         print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
-    pre_ok, pre_results = verify(data, "before")
-    print_results("Pre-patch verification (stock)", pre_results, "before")
+    patches, new_load1_size = build_patches()
 
-    if not pre_ok:
-        post_ok, post_results = verify(data, "after")
-        print_results("Already-patched check", post_results, "after")
-        if post_ok:
-            print("\nBinary is already patched. Nothing to do.")
-            sys.exit(0)
-        print("\nERROR: patch sites match neither stock nor patched.")
-        sys.exit(1)
+    # Site-level verification is only informative when MD5 alone isn't
+    # sufficient: alternate stock build (--skip-md5) or development mode
+    # where the expected output MD5 isn't pinned yet. On the normal happy
+    # path the input-MD5 and output-MD5 checks cover every byte in the file.
+    show_sites = args.skip_md5 or EXPECTED_OUTPUT_MD5 is None
+
+    if show_sites:
+        pre_ok, pre_results = verify(data, "before", patches)
+        print_results("Pre-patch verification (stock)", pre_results, "before")
+
+        if not pre_ok:
+            post_ok, post_results = verify(data, "after", patches)
+            print_results("Already-patched check", post_results, "after")
+            if post_ok:
+                print("\nBinary is already patched. Nothing to do.")
+                sys.exit(0)
+            print("\nERROR: patch site matches neither stock nor patched.")
+            sys.exit(1)
 
     if args.verify_only:
         print("\nVerify-only — no output written.")
         sys.exit(0)
 
-    for p in PATCHES:
+    for p in patches:
         data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
-    post_ok, post_results = verify(data, "after")
-    print_results("Post-patch verification", post_results, "after")
+    output_md5 = md5(data)
+    output_md5_mismatch = EXPECTED_OUTPUT_MD5 is not None and output_md5 != EXPECTED_OUTPUT_MD5
 
-    if not post_ok:
-        print("\nERROR: post-patch verification failed — output not written.")
-        sys.exit(1)
+    # Post-patch site verification fires either when we're already in a
+    # site-aware mode (developer / alternate stock) or as a diagnostic when
+    # the produced output doesn't hash to the pinned expected value.
+    if show_sites or output_md5_mismatch:
+        post_ok, post_results = verify(data, "after", patches)
+        print_results("Post-patch verification", post_results, "after")
+        if not post_ok:
+            print("\nERROR: post-patch verification failed — output not written.")
+            sys.exit(1)
 
     if args.output:
         output_path = Path(args.output)
@@ -215,16 +405,14 @@ def main():
         output_dir.mkdir(exist_ok=True)
         output_path = output_dir / "libextavrcp_jni.so.patched"
     output_path.write_bytes(data)
-    output_md5 = md5(data)
 
-    output_md5_mismatch = False
-    if OUTPUT_MD5 is None:
-        out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
-    elif output_md5 == OUTPUT_MD5:
+    md5_var = "OUTPUT_DEBUG_MD5" if DEBUG_LOGGING else "OUTPUT_MD5"
+    if EXPECTED_OUTPUT_MD5 is None:
+        out_tag = f"[set {md5_var} = \"{output_md5}\"]"
+    elif output_md5 == EXPECTED_OUTPUT_MD5:
         out_tag = "[OK — matches expected]"
     else:
-        out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
-        output_md5_mismatch = True
+        out_tag = f"[MISMATCH — expected {EXPECTED_OUTPUT_MD5}]"
 
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")
@@ -232,6 +420,7 @@ def main():
     print(f"  adb push {output_path} /system/lib/libextavrcp_jni.so")
     print(f"  adb shell chmod 644 /system/lib/libextavrcp_jni.so")
     print(f"  adb reboot")
+    print(f"  logcat | grep -E 'CMD_FRAME_IND|registerNotificationInd|cardinality|Y1Patch'")
 
     if output_md5_mismatch and not args.skip_md5:
         print("\nERROR: output MD5 doesn't match expected. Output was written but"

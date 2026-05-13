@@ -1,8 +1,8 @@
 # Android SDK setup
 
-The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1MediaBridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1MediaBridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt`/`d8`/etc.
+The Android SDK is required only for the `--avrcp` flag, which builds `src/Y1Bridge/` via Gradle. Gradle itself is bootstrapped by the in-tree wrapper (`src/Y1Bridge/gradlew`) — no separate Gradle install needed — but the wrapper still needs the SDK to compile against and locate `aapt` / `d8` / etc.
 
-This project (apply.bash flash flow) is **Linux-only**, so all instructions below target Linux. There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF/APT/EPEL/RPMFusion). Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1MediaBridge/local.properties`).
+This project (apply.bash flash flow) is **Linux-only**, so all instructions below target Linux. There is **no Linux distribution package for the Android SDK** (Google's licensing prevents redistribution, so it's not in DNF / APT / EPEL / RPMFusion). Everything below ends up at the same end state: an SDK directory containing `cmdline-tools/`, `platform-tools/`, `platforms/android-34/`, and `build-tools/34.0.0/`, with `ANDROID_HOME` pointing at it (or `sdk.dir` set in `src/Y1Bridge/local.properties`).
 
 ## Easy path: `tools/install-android-sdk.sh`
 
@@ -17,7 +17,7 @@ It will:
 1. Detect an existing SDK at `$ANDROID_HOME` or `tools/android-sdk/` — if either is usable (has `platforms/android-34/`), reuse it without re-downloading.
 2. Otherwise: download Google's `commandlinetools-linux-XXXXXXX_latest.zip` (pinned build) into `tools/android-sdk/cmdline-tools/latest/`, accept licenses (`yes | sdkmanager --licenses` — running this script is your acceptance, see the script header), install `platforms;android-34` + `build-tools;34.0.0` + `platform-tools`.
 3. **Always** (re-runnable / heals partial-state from prior runs):
-   - Write `sdk.dir=<path>` into `src/Y1MediaBridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
+   - Write `sdk.dir=<path>` into `src/Y1Bridge/local.properties` so Gradle finds the SDK without `ANDROID_HOME` in your shell.
    - Write `tools/android-sdk-env.sh` (sourceable). Contains `export ANDROID_HOME=…; export PATH=…:cmdline-tools/latest/bin:platform-tools`. Source it (`source tools/android-sdk-env.sh`) when you want `adb` / `sdkmanager` on PATH for interactive shell use. Gradle doesn't need this — it reads `local.properties` directly.
 
 Disk: ~1.5–2 GB. Network: ~1.7 GB total. JDK 17+ is a prereq (the script bails early with install instructions if it's missing).
@@ -26,7 +26,7 @@ The two outputs serve different consumers:
 
 | File | Read by | Required for |
 |---|---|---|
-| `src/Y1MediaBridge/local.properties` | Gradle (build time) | `./gradlew assembleDebug` |
+| `src/Y1Bridge/local.properties` | Gradle (build time) | `./gradlew assembleDebug` |
 | `tools/android-sdk-env.sh` | Your interactive shell (after `source …`) | `adb shell …`, `sdkmanager --list_installed`, etc. |
 
 If you want `ANDROID_HOME` persisted across shells, append the contents of `tools/android-sdk-env.sh` to your `~/.bashrc` / `~/.zshrc`.
@@ -39,7 +39,7 @@ Everything below is the **manual fallback**: how to install the SDK by hand if t
 
 | Component | Why |
 |---|---|
-| `platforms;android-34` | `compileSdk 34` in `src/Y1MediaBridge/app/build.gradle` |
+| `platforms;android-34` | `compileSdk 34` in `src/Y1Bridge/app/build.gradle` |
 | `build-tools;34.0.0` | AGP 9.2.0 invokes `aapt2`, `d8`, `zipalign` from this version |
 | `platform-tools` | `adb` for device interaction. Optional for *building*, mandatory for the post-flash verification steps. |
 
@@ -109,7 +109,7 @@ echo 'export JAVA_HOME=/usr/lib/jvm/java-25-openjdk' >> ~/.bashrc
 **Gotcha — gradle daemon caching:** Gradle keeps its build daemon alive across invocations. If you change `JAVA_HOME` (or upgrade the underlying JDK install) after a build has run, the cached daemon keeps the *old* JVM. You'll get the same `[JAVA_COMPILER]` error even though the new `JAVA_HOME` is fine. Stop the daemon before rebuilding:
 
 ```bash
-( cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug )
+( cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug )
 ```
 
 `./gradlew --version` shows the current daemon JVM under `Daemon JVM:`; if that doesn't match your `JAVA_HOME`, run `--stop`.
@@ -122,7 +122,7 @@ After the steps above, in a fresh shell:
 echo $ANDROID_HOME                                       # → your SDK path
 sdkmanager --list_installed                              # → lists platforms;android-34, build-tools;34.0.0, platform-tools
 java -version                                            # → 17 or newer
-( cd src/Y1MediaBridge && ./gradlew --version )          # → Gradle 9.5.0, JVM 17+
+( cd src/Y1Bridge && ./gradlew --version )          # → Gradle 9.5.0, JVM 17+
 ```
 
 If those four pass, `./apply.bash --avrcp` will resolve the SDK and Gradle correctly (with `rom.zip` staged in `staging/` or pointed at via `--artifacts-dir <path>`).
@@ -141,6 +141,6 @@ The licenses live at `$ANDROID_HOME/licenses/` after acceptance — back them up
 
 If the project bumps `compileSdk` or AGP:
 
-1. Update the corresponding pin in `src/Y1MediaBridge/app/build.gradle` (`compileSdk`).
+1. Update the corresponding pin in `src/Y1Bridge/app/build.gradle` (`compileSdk`).
 2. Re-run `sdkmanager --install "platforms;android-XX" "build-tools;XX.Y.Z"`.
 3. Update the **Components needed** table at the top of this file.

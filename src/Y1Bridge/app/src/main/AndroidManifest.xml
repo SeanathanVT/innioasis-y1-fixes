@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:label="Y1 Bridge"
+        android:allowBackup="false">
+
+        <!--
+            Service exposed under com.android.music.MediaPlaybackService.
+            MtkBt's BTAvrcpMusicAdapter.bindService resolves to this. The
+            music app (com.innioasis.y1) cannot declare this intent-filter
+            itself because it's signed with the OEM platform key (required
+            for sharedUserId=android.uid.system) and any manifest change
+            breaks JarVerifier. This APK is self-signed at its own package
+            name, so its manifest is freely editable.
+
+            All real AVRCP work happens inside the music app process.
+            See MediaBridgeService.java for the full rationale.
+        -->
+        <service
+            android:name=".MediaBridgeService"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.android.music.MediaPlaybackService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

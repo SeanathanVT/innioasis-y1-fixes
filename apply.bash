@@ -23,27 +23,23 @@ venv.
 
 FLAGS:
   --adb          Set persist.service.adb.enable + persist.service.debuggable
-  --avrcp        KNOWN BROKEN. Patches the AVRCP 1.4 binaries + installs
-                 Y1MediaBridge.apk. Empirically regresses stock AVRCP 1.0
-                 PASSTHROUGH (play/pause from car/headset stops working) and
-                 does not deliver 1.4 metadata as intended — mtkbt's compiled
-                 AVRCP layer is 1.0-only and the byte-patch path can shape
-                 the SDP advertisement but cannot make the daemon process
-                 1.3+ commands. See INVESTIGATION.md "Conclusion (2026-05-04)"
-                 and the Diagnostics section of README.md. Excluded from
-                 --all. Available as an opt-in for the user-space proxy
-                 work that aims to fix the underlying issue. Build first:
-                   cd src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug
-  --bluetooth    Configure audio.conf + auto_pairing.conf + blacklist.conf
-                 + build.prop entries that are essential for car/peer pairing.
-                 Does NOT set persist.bluetooth.avrcpversion — that property
-                 is dropped pending the AVRCP wire-protocol work.
+  --avrcp        AVRCP 1.3 metadata + control pipeline. Patches mtkbt /
+                 libextavrcp.so / libextavrcp_jni.so / MtkBt.odex / music
+                 app, installs Y1Bridge.apk. Requires Y1Bridge built first:
+                   cd src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug
+                 Architecture: docs/ARCHITECTURE.md. Byte-level patch
+                 reference: docs/PATCHES.md.
+  --bluetooth    Pairing-essential audio.conf / auto_pairing.conf /
+                 blacklist.conf / build.prop edits. No SDP / AVRCP changes.
   --music-apk    Patch the Y1 music player APK (Artist→Album navigation)
   --remove-apps  Remove bloatware APKs (ApplicationGuide, BasicDreams, …)
   --root         Install /system/xbin/su (06755 root:root). Build first:
                  cd src/su && make
-  --all          --adb + --bluetooth + --music-apk + --remove-apps + --root.
-                 NOT --avrcp (see warning above).
+  --all          --adb + --avrcp + --bluetooth + --music-apk + --remove-apps
+                 + --root. Pre-requires the src/su/ and src/Y1Bridge/ builds
+                 (see those flags above).
+  --debug        Build patches with KOENSAYR_DEBUG=1. Build-time switch
+                 (reflash to toggle); zero runtime overhead when omitted.
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed
@@ -66,6 +62,7 @@ FLAG_ADB=false
 FLAG_ANY_SPECIFIED=false
 FLAG_AVRCP=false
 FLAG_BLUETOOTH=false
+FLAG_DEBUG=false
 FLAG_MUSIC_APK=false
 FLAG_REMOVE_APPS=false
 FLAG_ROOT=false
@@ -107,20 +104,15 @@ while [[ $# -gt 0 ]]; do
     --avrcp)
       FLAG_AVRCP=true
       FLAG_ANY_SPECIFIED=true
-      echo "WARNING: --avrcp is known-broken on this device. It regresses stock" >&2
-      echo "         AVRCP 1.0 PASSTHROUGH (play/pause stops working from car/" >&2
-      echo "         headset) without delivering the AVRCP 1.4 metadata it" >&2
-      echo "         intends to enable. mtkbt is internally a 1.0 implementation" >&2
-      echo "         and byte-patches cannot make it process 1.3+ commands." >&2
-      echo "         See INVESTIGATION.md 'Conclusion (2026-05-04)' for the" >&2
-      echo "         full negative result and the user-space proxy path that" >&2
-      echo "         aims to fix this. Continuing only because you asked." >&2
-      echo "" >&2
       shift
       ;;
     --bluetooth)
       FLAG_BLUETOOTH=true
       FLAG_ANY_SPECIFIED=true
+      shift
+      ;;
+    --debug)
+      FLAG_DEBUG=true
       shift
       ;;
     --music-apk)
@@ -139,10 +131,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --all)
-      # --avrcp is intentionally excluded — known broken; opt-in only via
-      # explicit --avrcp. See apply.bash --help.
-      FLAG_BLUETOOTH=true
       FLAG_ADB=true
+      FLAG_AVRCP=true
+      FLAG_BLUETOOTH=true
       FLAG_MUSIC_APK=true
       FLAG_REMOVE_APPS=true
       FLAG_ROOT=true
@@ -198,6 +189,17 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   exit 0
 fi
 
+# Debug-logging toggle. Patch scripts read KOENSAYR_DEBUG from the env to
+# decide whether to inject diagnostic Log.d / __android_log_print calls
+# into the patched binaries. Pass --debug when you want a build that
+# surfaces patch-internal traces under `adb logcat -s Y1Patch:*` etc.;
+# omit for a release build (zero runtime overhead).
+if [[ "$FLAG_DEBUG" == true ]]; then
+  export KOENSAYR_DEBUG=1
+  echo "[debug] KOENSAYR_DEBUG=1 — patches will include diagnostic logging."
+  echo "        Filter on-device:  adb logcat -s Y1Patch:* MMI_AVRCP:*"
+fi
+
 # Separate from FLAG_ANY_SPECIFIED so a future boot.img-only flag stays a one-line gate change.
 FLAG_ANY_SYSTEM_PATCH=false
 if [[ "$FLAG_ADB" == true || "$FLAG_AVRCP" == true || "$FLAG_BLUETOOTH" == true || "$FLAG_MUSIC_APK" == true || "$FLAG_REMOVE_APPS" == true || "$FLAG_ROOT" == true ]]; then
@@ -224,7 +226,7 @@ fi
 FILENAME_ROM_ZIP="rom.zip"
 FILENAME_SYSTEM_IMAGE_BASENAME="system.img"
 FILENAME_BUILD_PROP="build.prop"
-FILENAME_Y1_MEDIA_BRIDGE_APK="Y1MediaBridge.apk"
+FILENAME_Y1_BRIDGE_APK="Y1Bridge.apk"
 
 # Version-dependent constants (set after stock MD5 validation)
 VERSION_FIRMWARE=""
@@ -485,10 +487,10 @@ if [[ "$FLAG_ANY_SYSTEM_PATCH" == true ]]; then
       cat >&2 <<EOF
 ERROR: extracted system.img is an Android sparse image, but simg2img is not
 in PATH. Install it and re-run:
-  Debian/Ubuntu:        sudo apt install android-sdk-libsparse-utils
+  Debian / Ubuntu:      sudo apt install android-sdk-libsparse-utils
   Arch:                 sudo pacman -S android-tools
   Fedora:               sudo dnf install android-tools
-  RHEL/Rocky/Alma 8+:   sudo dnf install epel-release && sudo dnf install android-tools
+  RHEL / Rocky / Alma 8+: sudo dnf install epel-release && sudo dnf install android-tools
 EOF
       exit 1
     fi
@@ -562,27 +564,30 @@ if [[ "$FLAG_ROOT" == true ]]; then
   fi
 fi
 
-# Apply AVRCP 1.4 patches (KNOWN BROKEN — see warning at flag-parse and INVESTIGATION.md)
+# Apply AVRCP 1.3 metadata pipeline (SDP shape + JNI trampoline chain +
+# Y1Bridge.apk Binder host). See docs/ARCHITECTURE.md for the full
+# trampoline chain reference.
 if [[ "$FLAG_AVRCP" == true ]]; then
-  echo "Applying AVRCP 1.4 patches (known broken; opt-in only).."
+  echo "Applying AVRCP 1.3 metadata pipeline (--avrcp).."
 
-  src_y1mb="${PATH_SCRIPT_DIR}/src/Y1MediaBridge/app/build/outputs/apk/debug/app-debug.apk"
-  if [[ ! -f "$src_y1mb" ]]; then
-    echo "ERROR: ${src_y1mb} not found." >&2
-    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1MediaBridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
+  src_bridge="${PATH_SCRIPT_DIR}/src/Y1Bridge/app/build/outputs/apk/debug/app-debug.apk"
+  if [[ ! -f "$src_bridge" ]]; then
+    echo "ERROR: ${src_bridge} not found." >&2
+    echo "       Build it first: cd ${PATH_SCRIPT_DIR}/src/Y1Bridge && ./gradlew --stop && ./gradlew assembleDebug" >&2
     exit 1
   fi
 
-  echo "  Installing Y1MediaBridge.apk from src/Y1MediaBridge build output.."
-  if ! sudo install -m 644 -o root -g root "$src_y1mb" "${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}"; then
-    echo "ERROR: failed to install ${src_y1mb} → ${PATH_MOUNT}/app/${FILENAME_Y1_MEDIA_BRIDGE_APK}" >&2
+  echo "  Installing Y1Bridge.apk from src/Y1Bridge build output.."
+  if ! sudo install -m 644 -o root -g root "$src_bridge" "${PATH_MOUNT}/app/${FILENAME_Y1_BRIDGE_APK}"; then
+    echo "ERROR: failed to install ${src_bridge} → ${PATH_MOUNT}/app/${FILENAME_Y1_BRIDGE_APK}" >&2
     exit 1
   fi
 
-  patch_in_place_bytes "app/MtkBt.odex"          "patch_mtkbt_odex.py"        644
-  patch_in_place_bytes "bin/mtkbt"               "patch_mtkbt.py"             755
-  patch_in_place_bytes "lib/libextavrcp.so"      "patch_libextavrcp.py"       644
-  patch_in_place_bytes "lib/libextavrcp_jni.so"  "patch_libextavrcp_jni.py"   644
+  patch_in_place_bytes "app/MtkBt.odex"               "patch_mtkbt_odex.py"        644
+  patch_in_place_bytes "bin/mtkbt"                    "patch_mtkbt.py"             755
+  patch_in_place_bytes "lib/libextavrcp_jni.so"       "patch_libextavrcp_jni.py"   644
+  patch_in_place_bytes "lib/libextavrcp.so"           "patch_libextavrcp.py"       644
+  patch_in_place_bytes "lib/libaudio.a2dp.default.so" "patch_libaudio_a2dp.py"     644
 fi
 
 # Configure Bluetooth fixes
@@ -597,10 +602,10 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
 
   echo "Configuring build.prop for Bluetooth fixes.."
   # persist.bluetooth.avrcpversion is intentionally NOT set — see
-  # INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to an
-  # AVRCP 1.4 advertisement that mtkbt can't actually deliver, regressing
-  # the working AVRCP 1.0 PASSTHROUGH. The remaining properties are
-  # essential for car/peer pairing and stay regardless of AVRCP version.
+  # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to
+  # an AVRCP version mtkbt cannot actually deliver, regressing the working
+  # stock PASSTHROUGH. The remaining properties are essential for car / peer
+  # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
 ro.bluetooth.class=2098204

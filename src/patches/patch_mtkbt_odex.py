@@ -1,94 +1,77 @@
 #!/usr/bin/env python3
 """
-patch_mtkbt_odex.py — Patch stock MtkBt.odex -> MtkBt.odex.patched
+patch_mtkbt_odex.py — Java-side flag flips + cardinality NOPs in MtkBt.odex.
 
-Stock binary md5:  11566bc23001e78de64b5db355238175
-Output md5:        acc578ada5e41e27475340f4df6afa59
+F1 — getPreferVersion(): return 14 instead of 10 (BlueAngel internal flag,
+     unblocks the Java AVRCP dispatcher's 1.3+ command path).
+F2 — BluetoothAvrcpService.disable(): reset sPlayServiceInterface so the
+     second BT-toggle activation doesn't short-circuit to STATE_ENABLED +
+     teardown before the peer CONNECT_IND arrives.
+Cardinality NOPs (TRACK_CHANGED, PLAYBACK_STATUS_CHANGED) — Java's
+     mRegisteredEvents BitSet is never populated because the JNI's TG
+     layer uses native conn-state tracking. NOPing the if-eqz gates lets
+     notificationTrackChangedNative / notificationPlayStatusChangedNative
+     fire on every metachanged / playstatechanged broadcast.
 
-ODEX structure:
-  ODEX header (0x28 bytes): magic "dey\n036\0", dex_offset=0x28, dex_length=0x98490
-  DEX data at 0x28: standard DEX with magic "dex\n035\0"
-  DEX adler32 at ODEX file offset 0x30 (= DEX header field offset 0x08)
-    covers DEX bytes [12 : dex_length]  (ODEX file bytes [0x34 : 0x984b8])
-
---- Patch 1: getPreferVersion() return value ---
-
-  BTAvrcpProfile.getPreferVersion() (code @ DEX 0x0003e0b0):
-    const/16 v0, #10   ; DEX bytes: 13 00 0A 00
-    return v0
-
-  BlueAngel internal version codes: 10 = AVRCP 1.3, 14 = AVRCP 1.4.
-
-  This return value drives the entire Java -> JNI -> daemon capability cascade:
-    getPreferVersion() -> checkCapability() 1.4 block -> activateConfig_3req(bitmask)
-    -> g_tg_feature = 0x0e (@ libextavrcp_jni.so 0xD29C)
-    -> activate_1req reads global -> btmtk_avrcp_send_activate_req payload[6] = 0x0e
-    -> mtkbt daemon receives AVRCP 1.4 internal code on abstract socket bt.ext.adp.avrcp
-
-  Patch: change return value from 10 (0x0a) to 14 (0x0e).
-  Confirmed working in logcat: getPreferVersion:14, Support AVRCP1.4,
-  _activate_1req version:14 sdpfeature:35.
-
---- Patch 2: sPlayServiceInterface reset in BluetoothAvrcpService.disable() ---
-
-  Root cause: sPlayServiceInterface (field@1267, static boolean) is set true in
-  startToBindPlayService() when bindService() succeeds on first BT activation.
-  It is never reset during the BT-toggle disable cycle.
-
-  On second activation, BTAvrcpMusicAdapter$1.onServiceConnected() reads
-  sPlayServiceInterface as true, skips re-initialization, and immediately calls
-  notifyProfileState(11) (STATE_ENABLED) before any car CONNECT_IND arrives.
-  The Android BT profile manager interprets STATE_ENABLED, calls stopSelf(),
-  and tears the service down at onDestroy — visible in logcat immediately after
-  PlayService.onServiceConnected.
-
-  Fix: replace the 14-byte "-disable" log preamble in disable() with:
-    const/4 v1, #0                           (2 bytes)
-    sput-byte v1, sPlayServiceInterface      (4 bytes)
-    nop x4                                   (8 bytes)
-
-  Verified in logcat (second activation after BT toggle):
-    Before fix: PlayService.onServiceConnected -> notifyProfileState:11 -> onDestroy
-    After fix:  PlayService.onServiceConnected -> connect_ind -> CONNECT_CNF
-
---- DEX analysis reference ---
-
-  sPlayServiceInterface: field@1267, static boolean, flags=0x000a (private+static)
-    Write opcode: sput-byte (0x6a) — NOT sput-boolean (0x69)
-    Write sites:  startToBindPlayService() dex[0x03df46] and dex[0x03dfac]
-    Read sites:   startToBindPlayService() dex[0x03df3c], dex[0x03dfe2]
-    Reset site:   disable() dex[0x03f21a] — THIS PATCH
-  disable() code_off: dex[0x03f188] = ODEX[0x03f1b0]; insns_off: ODEX[0x03f1c0]
-
-Usage:
-    python3 patch_mtkbt_odex.py MtkBt.odex
-    python3 patch_mtkbt_odex.py MtkBt.odex --output /tmp/MtkBt.odex.patched
-    python3 patch_mtkbt_odex.py MtkBt.odex --verify-only
-
-Deploy:
-    adb push output/MtkBt.odex.patched /system/app/MtkBt.odex
-    adb reboot
+Recomputes DEX adler32. Per-patch byte-level reference: docs/PATCHES.md.
 """
 
 import argparse
 import hashlib
+import os
 import struct
 import sys
 import zlib
 from pathlib import Path
 
-STOCK_MD5  = "11566bc23001e78de64b5db355238175"
-OUTPUT_MD5 = "acc578ada5e41e27475340f4df6afa59"
+STOCK_MD5         = "11566bc23001e78de64b5db355238175"
+OUTPUT_MD5        = "00cc642742044286966cbb7b01135ca7"
+
+DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
+OUTPUT_DEBUG_MD5  = OUTPUT_MD5
+
+EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
 DEX_OFFSET     = 0x28
 ADLER_FILE_OFF = 0x30
 
 PATCHES = [
     {
-        "name":   "[F1] getPreferVersion return  (BlueAngel 10=AVRCP1.3 -> 14=AVRCP1.4)",
+        "name":   "[F1] getPreferVersion return value (BlueAngel internal 10 -> 14, unblocks 1.3+ dispatch)",
         "offset": 0x3e0ea,
         "before": bytes([0x0a]),
         "after":  bytes([0x0e]),
+    },
+    {
+        "name":   "handleKeyMessage TRACK_CHANGED cardinality bypass (NOP if-eqz at 0x3c530)",
+        "offset": 0x3c530,
+        "before": bytes([0x38, 0x05, 0xda, 0xff]),  # if-eqz v5, +-38 (-> :cond_184)
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
+    },
+    {
+        "name":   "handleKeyMessage PLAYBACK_STATUS_CHANGED cardinality bypass (NOP if-eqz at 0x3c4fe)",
+        # sswitch_18a / event 0x01 case in handleKeyMessage's nested
+        # sparse-switch (same idiom as the TRACK_CHANGED NOP above).
+        # Without this NOP the JNI's notificationPlayStatusChangedNative is
+        # never invoked because the Java BitSet of registered events is
+        # permanently empty (TG bookkeeping isn't updated by our
+        # trampolines). With the NOP, the native fires on every
+        # `com.android.music.playstatechanged` broadcast and lands in T9 via
+        # the libextavrcp_jni.so hook at 0x3c88.
+        "offset": 0x3c4fe,
+        "before": bytes([0x38, 0x05, 0xf3, 0xff]),  # if-eqz v5, +-13 (-> :cond_184)
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
+    },
+    {
+        "name":   "BTAvrcpMusicAdapter$3.onReceive playstatechanged dedupe NOP",
+        # NOP `if-eq v3, v2, :cond_50` (mPreviousPlayStatus dedupe) so every
+        # playstatechanged broadcast posts msg=1 + msg=2. T5 / T9 internal
+        # dedupes gate wire emits on actual edges; the broadcast-handler
+        # dedupe was blocking the 1 Hz position tick, the papp CHANGED
+        # loop, and PAUSED → STOPPED transitions.
+        "offset": 0x3b310,
+        "before": bytes([0x32, 0x23, 0xea, 0xff]),  # if-eq v3, v2, +0xffea
+        "after":  bytes([0x00, 0x00, 0x00, 0x00]),  # nop; nop
     },
     {
         "name":   "[F2] disable() reset sPlayServiceInterface = false",
@@ -126,6 +109,13 @@ def verify(data: bytes, mode: str) -> tuple[bool, list[dict]]:
 
 
 def print_results(label: str, results: list[dict], mode: str) -> None:
+    ok_count = sum(1 for r in results if r["ok"])
+    total = len(results)
+    # Quiet when everything verifies — print a one-line summary. The full
+    # per-site listing is only needed for diagnosis when something fails.
+    if ok_count == total:
+        print(f"\n{label}: {ok_count}/{total} sites OK")
+        return
     print(f"\n{label}")
     print("-" * 72)
     for r in results:
@@ -140,7 +130,7 @@ def print_results(label: str, results: list[dict], mode: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patch stock MtkBt.odex for AVRCP 1.4 + BT toggle fix"
+        description="Patch stock MtkBt.odex for AVRCP 1.3+ Java-dispatcher unblock + BT toggle fix"
     )
     parser.add_argument("input", help="Path to stock MtkBt.odex")
     parser.add_argument("--output", "-o", default=None,
@@ -159,6 +149,16 @@ def main() -> None:
     data = bytearray(input_path.read_bytes())
     input_md5 = md5(data)
 
+    # Already-at-expected-output fast path. MD5 over the whole file is
+    # strictly stronger evidence than verifying a handful of patch sites,
+    # so when the input already hashes to the expected output for the
+    # current build mode (release or debug) there's nothing to do.
+    if EXPECTED_OUTPUT_MD5 is not None and input_md5 == EXPECTED_OUTPUT_MD5:
+        print(f"Input:  {input_path}  ({len(data):,} bytes)")
+        print(f"MD5:    {input_md5}  [OK — already at expected output]")
+        print("Nothing to do.")
+        sys.exit(0)
+
     if args.skip_md5:
         md5_tag = "(stock check skipped)"
     elif input_md5 == STOCK_MD5:
@@ -171,6 +171,8 @@ def main() -> None:
 
     if not args.skip_md5 and input_md5 != STOCK_MD5:
         print("ERROR: input is not the expected stock build.")
+        if EXPECTED_OUTPUT_MD5 is not None:
+            print(f"       Expected stock ({STOCK_MD5}) or already-patched ({EXPECTED_OUTPUT_MD5}).")
         print("       Use --skip-md5 for alternate stock builds.")
         sys.exit(1)
 
@@ -178,25 +180,35 @@ def main() -> None:
         print("ERROR: not an ODEX file (missing 'dey\\n' magic)")
         sys.exit(1)
 
-    pre_ok, pre_results = verify(data, "before")
-    print_results("Pre-patch verification (stock)", pre_results, "before")
+    # Site-level verification is only informative when MD5 alone isn't
+    # sufficient: alternate stock build (--skip-md5) or development mode
+    # where the expected output MD5 isn't pinned yet. On the normal happy
+    # path the input-MD5 and output-MD5 checks cover every byte in the file.
+    show_sites = args.skip_md5 or EXPECTED_OUTPUT_MD5 is None
 
-    if not pre_ok:
-        post_ok, post_results = verify(data, "after")
-        print_results("Already-patched check", post_results, "after")
-        if post_ok:
-            print("\nBinary is already fully patched. Nothing to do.")
-            sys.exit(0)
-        print("\nERROR: patch sites match neither stock nor fully-patched state.")
-        sys.exit(1)
+    if show_sites:
+        pre_ok, pre_results = verify(data, "before")
+        print_results("Pre-patch verification (stock)", pre_results, "before")
 
-    stored_adler   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
-    computed_adler = compute_adler32(data)
-    adler_ok = stored_adler == computed_adler
-    print(f"\n  [{'OK' if adler_ok else 'WARN'}] 0x{ADLER_FILE_OFF:06x}  "
-          f"adler32 stored=0x{stored_adler:08x} computed=0x{computed_adler:08x}")
-    if not adler_ok:
-        print("  WARNING: adler32 mismatch on input — continuing anyway")
+        if not pre_ok:
+            post_ok, post_results = verify(data, "after")
+            print_results("Already-patched check", post_results, "after")
+            if post_ok:
+                print("\nBinary is already fully patched. Nothing to do.")
+                sys.exit(0)
+            print("\nERROR: patch sites match neither stock nor fully-patched state.")
+            sys.exit(1)
+
+        # adler32 check on input — only meaningful in site-aware mode (mismatch
+        # there could indicate the alternate-stock build has a different DEX
+        # body than expected). On the normal happy path the input-MD5 already
+        # validated the entire file, including the adler32 field.
+        stored_adler   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
+        computed_adler = compute_adler32(data)
+        if stored_adler != computed_adler:
+            print(f"\n  [WARN] 0x{ADLER_FILE_OFF:06x}  "
+                  f"adler32 stored=0x{stored_adler:08x} computed=0x{computed_adler:08x}")
+            print("  WARNING: adler32 mismatch on input — continuing anyway")
 
     if args.verify_only:
         print("\nVerify-only — no output written.")
@@ -205,21 +217,31 @@ def main() -> None:
     for p in PATCHES:
         data[p["offset"]: p["offset"] + len(p["after"])] = p["after"]
 
+    # adler32 must always be recomputed and written back regardless of
+    # verification mode — Dalvik refuses to load the DEX without it.
     new_adler = compute_adler32(data)
     struct.pack_into("<I", data, ADLER_FILE_OFF, new_adler)
 
-    post_ok, post_results = verify(data, "after")
-    print_results("Post-patch verification", post_results, "after")
+    output_md5 = md5(data)
+    output_md5_mismatch = EXPECTED_OUTPUT_MD5 is not None and output_md5 != EXPECTED_OUTPUT_MD5
 
-    stored_after   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
-    computed_after = compute_adler32(data)
-    adler_after_ok = stored_after == computed_after
-    print(f"  [{'OK' if adler_after_ok else 'FAIL'}] 0x{ADLER_FILE_OFF:06x}  "
-          f"adler32 = 0x{stored_after:08x}")
+    # Post-patch site verification fires either when we're already in a
+    # site-aware mode (developer / alternate stock) or as a diagnostic when
+    # the produced output doesn't hash to the pinned expected value.
+    if show_sites or output_md5_mismatch:
+        post_ok, post_results = verify(data, "after")
+        print_results("Post-patch verification", post_results, "after")
 
-    if not (post_ok and adler_after_ok):
-        print("\nERROR: post-patch verification failed — output not written.")
-        sys.exit(1)
+        stored_after   = struct.unpack_from("<I", data, ADLER_FILE_OFF)[0]
+        computed_after = compute_adler32(data)
+        if stored_after != computed_after:
+            print(f"  [FAIL] 0x{ADLER_FILE_OFF:06x}  "
+                  f"adler32 stored=0x{stored_after:08x} computed=0x{computed_after:08x}")
+            post_ok = False
+
+        if not post_ok:
+            print("\nERROR: post-patch verification failed — output not written.")
+            sys.exit(1)
 
     if args.output:
         output_path = Path(args.output)
@@ -229,16 +251,14 @@ def main() -> None:
         output_path = output_dir / "MtkBt.odex.patched"
 
     output_path.write_bytes(data)
-    output_md5 = md5(data)
 
-    output_md5_mismatch = False
-    if OUTPUT_MD5 is None:
-        out_tag = f"[set OUTPUT_MD5 = \"{output_md5}\"]"
-    elif output_md5 == OUTPUT_MD5:
+    md5_var = "OUTPUT_DEBUG_MD5" if DEBUG_LOGGING else "OUTPUT_MD5"
+    if EXPECTED_OUTPUT_MD5 is None:
+        out_tag = f"[set {md5_var} = \"{output_md5}\"]"
+    elif output_md5 == EXPECTED_OUTPUT_MD5:
         out_tag = "[OK — matches expected]"
     else:
-        out_tag = f"[MISMATCH — expected {OUTPUT_MD5}]"
-        output_md5_mismatch = True
+        out_tag = f"[MISMATCH — expected {EXPECTED_OUTPUT_MD5}]"
 
     print(f"\nOutput: {output_path}  ({len(data):,} bytes)")
     print(f"MD5:    {output_md5}  {out_tag}")

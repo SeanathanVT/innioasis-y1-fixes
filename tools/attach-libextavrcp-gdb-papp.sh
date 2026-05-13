@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# attach-libextavrcp-gdb-papp.sh — attach gdbserver to whatever Java process
+# has loaded libextavrcp_jni.so, break at T_papp's PDU-0x14 dispatch arm,
+# and dump the inbound param body (n + attr_id + value) so we can verify
+# the AVRCP↔Y1 enum mapping a peer CT is using.
+#
+# Pre-reqs:
+#   - --root flashed (su via `adb shell su -c` works)
+#   - --avrcp flashed (this trampoline only exists post-flash)
+#   - tools/gdbserver in tree (or $GDBSERVER env var override)
+#   - host has gdb-multiarch / arm-linux-gnu-gdb
+#
+# Usage:
+#   ./tools/attach-libextavrcp-gdb-papp.sh
+#   ./tools/attach-libextavrcp-gdb-papp.sh --port 5039
+#
+# Driving the capture (once gdb is running):
+#   1. Pair / connect a peer CT that issues PDU 0x14.
+#   2. Each `BP@papp_set` hit prints n / attr_id / value — three bytes
+#      that tell us exactly what CT→TG enum the peer is sending.
+#   3. Output is also tee'd to /tmp/papp-gdb.log.
+#
+# Post-capture: feed the n / attr_id / value into iter3's enum-mapping table
+# (Trace #18). attr_id 0x02 = Repeat (Y1 enum 0/1/2 OFF/SINGLE/ALL <-> AVRCP
+# 0x01/0x02/0x03 OFF/SINGLE/ALL); attr_id 0x03 = Shuffle (Y1 bool false/true
+# <-> AVRCP 0x01/0x02 OFF/ALL).
+
+set -e
+
+PORT=5040
+GDBSERVER=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port) PORT=$2; shift 2 ;;
+        --gdbserver) GDBSERVER=$2; shift 2 ;;
+        -h|--help)
+            sed -n '2,30p' "$0"
+            exit 0 ;;
+        *)
+            echo "Unknown flag: $1" >&2
+            exit 1 ;;
+    esac
+done
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# gdbserver discovery — same logic as attach-mtkbt-gdb.sh.
+if [ -z "$GDBSERVER" ]; then
+    if [ -x "${REPO_ROOT}/tools/gdbserver" ]; then
+        GDBSERVER="${REPO_ROOT}/tools/gdbserver"
+    elif [ -n "$ANDROID_NDK_HOME" ] && \
+         [ -x "${ANDROID_NDK_HOME}/prebuilt/android-arm/gdbserver/gdbserver" ]; then
+        GDBSERVER="${ANDROID_NDK_HOME}/prebuilt/android-arm/gdbserver/gdbserver"
+    fi
+fi
+if [ -z "$GDBSERVER" ] || [ ! -x "$GDBSERVER" ]; then
+    echo "ERROR: gdbserver binary not found. Set \$GDBSERVER or run tools/install-gdbserver.sh." >&2
+    exit 1
+fi
+
+HOST_GDB=$(command -v gdb-multiarch || command -v arm-linux-gnu-gdb || command -v gdb || true)
+if [ -z "$HOST_GDB" ]; then
+    echo "ERROR: no host gdb found (need gdb-multiarch or arm-linux-gnu-gdb)." >&2
+    exit 1
+fi
+
+echo "==> Discovering process that loaded libextavrcp_jni.so + lib base.."
+
+# Walk /proc/*/maps under su to find any process that has libextavrcp_jni.so
+# mapped. On Y1 / Android 4.2 this is typically the system_server process or
+# the dedicated com.mediatek.bluetooth process — but we don't hard-code,
+# we just find whoever loaded it.
+maps_scan=$(adb shell "su -c 'for d in /proc/[0-9]*; do
+    if grep -l libextavrcp_jni.so \$d/maps 2>/dev/null >/dev/null; then
+        echo \$d
+    fi
+done'" 2>/dev/null | tr -d '\r')
+
+JNI_PID=""
+for d in $maps_scan; do
+    JNI_PID="${d#/proc/}"
+    break
+done
+
+if [ -z "$JNI_PID" ]; then
+    echo "ERROR: no process has libextavrcp_jni.so mapped." >&2
+    echo "  Is BT enabled? Was the patched library actually deployed?" >&2
+    echo "  Check 'adb shell su -c \"ls -l /system/lib/libextavrcp_jni.so\"' MD5." >&2
+    exit 1
+fi
+
+# Extract libextavrcp_jni.so's load base from that process's maps.
+maps_out=$(adb shell "su -c 'cat /proc/${JNI_PID}/maps'" 2>/dev/null | tr -d '\r')
+LIB_BASE_HEX=""
+PROC_NAME=""
+while IFS= read -r row; do
+    case "$row" in
+        *'/system/lib/libextavrcp_jni.so')
+            range=${row%% *}
+            LIB_BASE_HEX=${range%%-*}
+            break
+            ;;
+    esac
+done <<< "$maps_out"
+
+if [ -z "$LIB_BASE_HEX" ]; then
+    echo "ERROR: couldn't read libextavrcp_jni.so base from /proc/${JNI_PID}/maps." >&2
+    exit 1
+fi
+
+# Friendly process name for the log.
+PROC_NAME=$(adb shell "su -c 'cat /proc/${JNI_PID}/cmdline 2>/dev/null'" 2>/dev/null | tr -d '\r\0')
+[ -z "$PROC_NAME" ] && PROC_NAME="(pid ${JNI_PID})"
+
+LIB_BASE=$((16#$LIB_BASE_HEX))
+printf "    process=%s pid=%s  libextavrcp_jni base=0x%x\n" "$PROC_NAME" "$JNI_PID" "$LIB_BASE"
+
+# Compute live BP addresses. Same Thumb-mode reasoning as attach-mtkbt-gdb.sh:
+# don't OR with 1 — gdb force-mode thumb plants a 2-byte Thumb BKPT at the
+# even byte address.
+fileoff_to_live() {
+    local off=$1
+    printf "0x%x" $(( off + LIB_BASE ))
+}
+
+# T_papp dispatch entry — right after subw sp,sp,#0x18 + ldrb r0,[sp,#406].
+# At this BP r0 = inbound PDU byte (one of 0x11..0x16). Fires for every
+# PApp PDU, useful for distinguishing which sub-PDUs the CT actually
+# exercises.
+BP_T_papp_dispatch=$(fileoff_to_live 0xb070)
+
+# papp_set arm — entered iff PDU == 0x14. At this BP sp is shifted by
+# PAPP_FRAME (0x18=24), so the inbound param body lives at:
+#   sp + 410 (0x19a) = byte 0 = AttributeCount  (n)
+#   sp + 411 (0x19b) = byte 1 = first AttributeID
+#   sp + 412 (0x19c) = byte 2 = first ValueID
+# For a multi-pair Set (n > 1) the additional pairs follow at
+# sp+413..sp+(410 + 1 + 2n - 1).
+BP_papp_set=$(fileoff_to_live 0xb13c)
+
+echo "==> Cleaning up stale gdbserver from any prior run.."
+adb shell 'su -c "for d in /proc/[0-9]*; do n=\$(cat \$d/comm 2>/dev/null); if [ \"\$n\" = gdbserver ]; then kill -9 \${d#/proc/} 2>/dev/null; fi; done"' >/dev/null 2>&1
+adb forward --remove "tcp:${PORT}" >/dev/null 2>&1 || true
+
+echo "==> Pushing gdbserver to /data/local/tmp/.."
+adb push "$GDBSERVER" /data/local/tmp/gdbserver >/dev/null
+adb shell 'su -c "chmod 755 /data/local/tmp/gdbserver"'
+
+echo "==> Setting up adb forward localhost:${PORT} -> device:${PORT}.."
+adb forward "tcp:${PORT}" "tcp:${PORT}"
+
+GDB_CMDS="${REPO_ROOT}/tools/_attach-libextavrcp-gdb-papp.gdb"
+cat > "$GDB_CMDS" <<EOF
+# Auto-generated by tools/attach-libextavrcp-gdb-papp.sh — do not edit; regenerate.
+# libextavrcp_jni.so base: ${LIB_BASE_HEX}, pid: ${JNI_PID}, port: ${PORT}.
+
+set pagination off
+set confirm off
+set print pretty on
+set logging file /tmp/papp-gdb.log
+set logging overwrite on
+set logging on
+
+# libextavrcp_jni is all Thumb-2.
+set arm fallback-mode thumb
+set arm force-mode thumb
+
+target remote :${PORT}
+
+# T_papp dispatch — every PApp PDU (0x11..0x16) lands here. r0 = inbound PDU.
+break *${BP_T_papp_dispatch}
+commands
+silent
+printf "BP@T_papp dispatch: PDU=0x%02x  (caller's sp+382 + frame)\n", \$r0
+continue
+end
+
+# papp_set arm — fires only on PDU 0x14. sp shifted by PAPP_FRAME=24.
+# Param body @ caller's sp+386 = our sp+410. Format: n + n×{attr_id, value}.
+break *${BP_papp_set}
+commands
+silent
+printf "BP@papp_set (PDU 0x14): n=%u  attr_id[0]=0x%02x  value[0]=0x%02x\n", \\
+       *(unsigned char*)(\$sp+0x19a), \\
+       *(unsigned char*)(\$sp+0x19b), \\
+       *(unsigned char*)(\$sp+0x19c)
+# Dump up to 11 bytes for multi-pair Sets (n > 1: extra (attr,value) pairs follow).
+printf "  raw param body @sp+0x19a:\n"
+x/11xb (\$sp+0x19a)
+continue
+end
+
+continue
+EOF
+
+echo "==> gdb command file written to ${GDB_CMDS}"
+echo "==> Starting gdbserver --attach :${PORT} ${JNI_PID} on device.."
+echo "    (Ctrl-C this script when done; gdbserver dies when host gdb detaches.)"
+echo
+echo "In a SECOND terminal, run:"
+echo "    ${HOST_GDB} -x ${GDB_CMDS} ${REPO_ROOT}/src/patches/output/libextavrcp_jni.so.patched"
+echo "    # symbols optional; lib at that path is the post-flash binary so addresses match."
+echo
+echo "Then drive the capture:"
+echo "    1. Pair a peer CT that issues PDU 0x14."
+echo "    2. Wait for the first Set after connect."
+echo "    3. Each 'BP@papp_set' line will print n / attr_id / value bytes."
+echo "    4. Three bytes is enough — n=1 + (attr, value) per the size:11 frame."
+echo "    Output mirrored to /tmp/papp-gdb.log."
+echo
+
+adb shell "su -c '/data/local/tmp/gdbserver --attach :${PORT} ${JNI_PID}'"

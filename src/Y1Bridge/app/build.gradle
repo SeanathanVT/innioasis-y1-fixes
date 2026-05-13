@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'com.koensayr.y1.bridge'
+
+    // AGP requires compileSdk >= 28 (since 8.x). We compile against 34 for
+    // toolchain compatibility but our code ONLY uses APIs available on API 17
+    // (Android 4.2.2).
+    // All API 17 compliance is verified by manual audit — see MediaBridgeService.java.
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.koensayr.y1.bridge"
+        minSdk = 17
+        targetSdk = 17
+        versionCode = 38
+        versionName = "3.8"
+    }
+
+    compileOptions {
+        // Java 7 source/target was removed in JDK 21+.
+        // Java 8 bytecode is fully compatible with Android 4.2.2 via D8/dex.
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled = false
+            debuggable = true
+        }
+        release {
+            minifyEnabled = false
+            signingConfig = signingConfigs.debug
+        }
+    }
+
+    lint {
+        // Y1Bridge installs as a system app at /system/app/ on the
+        // Innioasis Y1 (Android 4.2.2). Never published to Google Play;
+        // never installed on a non-system context.
+        disable += [
+            // We deliberately target API 17. The "expired" warning refers to
+            // Google Play's minimum-target policy, which doesn't apply.
+            "ExpiredTargetSdkVersion",
+            // MediaBridgeService is intentionally exported — MtkBt binds to
+            // it via the com.android.music.MediaPlaybackService intent-filter.
+            "ExportedService",
+            // Y1Bridge is a headless Binder host; no launcher icon needed.
+            "MissingApplicationIcon",
+        ]
+    }
+}
