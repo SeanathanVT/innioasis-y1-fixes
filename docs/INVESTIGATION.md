@@ -2542,3 +2542,57 @@ Per AVRCP 1.6 §5.14 + §8 + §13 + §29.23 the actual blockers are:
 2. **AVRCP Cover Art OBEX responder** listening on the dynamic PSM and accepting OBEX connections whose Target Header carries the **`7163DD54-4A7E-11E2-B47C-0050C2490048`** UUID (§5.14.2.1). Must serve `GetImageProperties` / `GetImage` / `GetLinkedThumbnail`. mtkbt's stock `libextbip.so` BIP responder accepts the generic BIP target UUID (`E33D9545-8374-4AD7-9EC5-C16BE31EDE8E`), so it likely will *not* match the Cover Art target out of the box — needs verification, and if the mismatch is confirmed we either patch the target-UUID check or write a small OBEX responder of our own (javax.obex on the Y1's classpath would make this tractable).
 3. **Music-app image source**: `MediaMetadataRetriever.getEmbeddedPicture()` (or equivalent) to extract album art, JPEG-200 re-encode to the Imaging Thumbnail constraints (§5.14.2.2.1), and write to a known file path the responder reads.
 4. **`TrackInfoWriter` schema bump**: grow on-disk write from 1104 B to 1112 B, populate `[1104..1110]` with a 7-character BIP Image Handle per track (e.g. a 7-char encoding of audio_id low bits). Independent of (1)-(3) but only useful once those land.
+
+## Trace #29 (2026-05-13) — Cover Art dropped; real blocker was a §5.3.4 spec deviation in `libextavrcp.so`
+
+### What we set out to verify (Phase 2 of the "what's blocking Bolt's pane" investigation)
+
+After flashing T4 attr 8 emit (commit `3f99028`) we inspected post-flash Bolt + Kia captures (`dual-bolt-20260513-1514`, `dual-kia-20260513-1515`):
+
+**EXTADP_AVRCP log on every GetElementAttributes response:**
+```
+AVRCP send_get_element_attributes_rsp raw i:7 total:8 attid:8 strlen:0
+AVRCP send_get_element_attributes ignore empty attrib attri_id:8 strlen:0
+```
+
+T4 was correctly emitting all 8 attribute slots, but the stock `libextavrcp.so` response builder was hitting an "ignore empty attrib" branch and dropping every zero-length attribute from the wire frame. This is a deviation from AVRCP 1.3 §5.3.4 which requires "for attributes not supported by the TG, this field shall be sent with 0 length data."
+
+The drop is uniform (not attr-8-specific): in the no-music capture, attrs 1/2/3/5/6/7 also have strlen:0 and are also dropped. Only attr 4 (TrackNumber "1") survives. The `g_offset` tracer in EXTADP_AVRCP confirms: `g_offset` only advances for non-empty attrs.
+
+### What does Bolt actually request?
+
+Parsed raw btlog binary for inbound GetElementAttributes commands (signature `00 19 58 20 00` = SIG CompanyID + PDU 0x20 + PT 0):
+
+**Two request patterns observed from both Bolt-class AND Kia-class CTs:**
+
+| Pattern | NumAttr | Attribute IDs | Likely surface |
+|---------|---------|---------------|-----------------|
+| A | 6 | `[0x1, 0x2, 0x3, 0x6, 0x8, 0x7]` | Metadata pane (Title / Artist / Album / Genre / **CoverArt** / PlayingTime) |
+| B | 7 | `[0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7]` | Other surface (Now Playing widget?) |
+
+Both CTs use both patterns. The "Bolt requests 8 attributes" claim in prior traces was based on the EXTADP_AVRCP `total:8` log, which is what *Y1* unilaterally emits — not what either CT asked for. Both CTs ask for the same attribute set.
+
+### So why does Kia render but Bolt not?
+
+Both receive the same wire frame (whatever non-empty attrs Y1 happens to have). Kia is lenient: picks out what it recognizes from the response. Bolt is strict: the §5.3.4 spec says the TG sends exactly the requested attributes in the requested order, including zero-length entries for unsupported ones, and Bolt's parser gates on receiving that exact shape. When Bolt requested Pattern A `[1,2,3,6,8,7]` it expected to see all six slots back, even if some came with length 0. Y1 was returning `[1,2,3,?,?,4,5,6,7]` — extras (4, 5) it didn't ask for, missing (8) it did.
+
+### Charset ruled out (other ruled-out hypotheses for record)
+
+- **Fragmentation**: `libextavrcp.so` allocates a 644-byte response buffer regardless of content; `g_offset` tracking shows real payload is ~58 bytes. No AVRCP-level Packet Type fragmentation; whole frame goes out as a single Packet Type=00 (Complete) AVRCP frame inside one L2CAP packet of size 672 (well under the 672-byte default L2CAP MTU). Both CTs receive identically shaped frames.
+- **Charset**: parsed Bolt's `InformDisplayableCharacterSet` PDU 0x17 from raw btlog (signature `00 19 58 17`). Bolt advertised `Count=1, CharsetID[0]=0x006A` (UTF-8 only). Y1 emits `charset=0x006A` in every attribute. Match — not the problem.
+- **`LanguageBaseAttributeIDList` in SDP record**: AVRCP TG SDP record doesn't carry attribute `0x0006` (PBAP's does). Not authoritative for charset selection — PDU 0x17 already settled the question — but worth noting as a stylistic gap.
+
+### Fix: `patch_libextavrcp.py` E1
+
+Single 2-byte CBZ→NOP at file offset `0x00002266` inside `btmtk_avrcp_send_get_element_attributes_rsp`. Disables the `(attr_id == 0) OR (strlen == 0)` gate so attributes always emit, including zero-length ones. AVRCP §5.3.4 compliance restored. Stock MD5 `6442b137d3074e5ac9a654de83a4941a` → Output MD5 `1347e1b337879840ad2f66597836b05f`. New patcher wired into `apply.bash --avrcp`.
+
+### Scope decision
+
+User directive 2026-05-13 after spec analysis: "I really don't need to implement DCA as it's outside of the 1.3 spec. I really just want to ensure that all endpoints work as expected."
+
+The AVRCP 1.6 Cover Art carve-out is rolled back — no BIP responder, no OBEX channel, no SDP record changes per §8 Table 8.2, no `MediaMetadataRetriever` image source. Attr 0x08 emits as a §5.3.4-compliant zero-length entry forever. `feedback_avrcp13_only_scope.md` updated: AVRCP 1.6 §5.14.1 + §26 Table 26.1 / ESR09 E6073 may still be cited when explaining what attr 0x08 is, but no implementation work is in scope.
+
+### Remaining strict-CT issues (CT-side, not fixable on TG)
+
+- Strict-CT pause-icon stuck after first toggle: CT doesn't re-register after our CHANGED, §6.7.1 prevents subsequent CHANGED without re-registration. CT-side §6.7.1 violation.
+- Strict-CT Shuffle stuck on: same root cause.

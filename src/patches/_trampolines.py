@@ -123,14 +123,17 @@ JNI_GET_AVRCP_STATE = 0x36c0
 #                      816..831  TotalNumberOfTracks        UTF-8 ASCII decimal (16 B)
 #                      832..847  PlayingTime                UTF-8 ASCII decimal ms (16 B)
 #                      848..1103 Genre                      UTF-8 (256 B)
-#                      1104..1111 CoverArtHandle             UTF-8 ASCII (7 chars + NUL).
+#                      1104..1111 CoverArtHandle slot (always 0). Reserved for
 #                                                            AVRCP 1.6 §5.14.1 Default Cover Art
-#                                                            attribute id 0x8 (§26 Table 26.1 via
-#                                                            ESR09 E6073). Value is a BIP Image
-#                                                            Handle (BIP §4.4.4 format) — 7 ASCII
-#                                                            chars per the §29.23 example MSC.
-#                                                            Empty string = attribute not available
-#                                                            (per §5.3.4 zero-length convention).
+#                                                            (attribute id 0x8 per §26 Table 26.1
+#                                                            via ESR09 E6073). Y1 does not
+#                                                            implement Cover Art transfer (out of
+#                                                            project scope). Slot exists so T4 can
+#                                                            emit attr 0x08 as a §5.3.4 zero-length
+#                                                            attribute, since strict CTs include
+#                                                            0x08 in their attribute-set request
+#                                                            and gate render on a §5.3.4-compliant
+#                                                            response shape.
 T4_FRAME           = 1136
 T4_FILE_SIZE       = 1112
 T4_OFF_ARGS        = 0
@@ -551,19 +554,18 @@ def _emit_t4(a: Asm) -> None:
     #   0x03 Album              0x07 PlayingTime (ms, ASCII decimal)
     #   0x04 TrackNumber
     # AVRCP 1.6 §5.14.1 attribute id (§26 Table 26.1 per ESR09 E6073):
-    #   0x08 Default Cover Art — value is a BIP Image Handle (BIP §4.4.4 format),
-    #        7 ASCII chars per the §29.23 example MSC. Resolved by CT via the
-    #        AVRCP Cover Art OBEX channel (§5.14.2.1 Target Header UUID
-    #        7163DD54-4A7E-11E2-B47C-0050C2490048), not via the generic BIP
-    #        Imaging Responder SDP record (§13 forbids publishing that record
-    #        when BIP is used solely for AVRCP Cover Art).
+    #   0x08 Default Cover Art — Y1 does not implement Cover Art transfer
+    #        (out of project scope per AVRCP 1.3-only policy). T4 still emits
+    #        the slot so strict CTs that include 0x08 in their requested
+    #        attribute set receive a §5.3.4-compliant zero-length response
+    #        entry ("attribute not supported by TG") rather than a silently
+    #        truncated response. Requires patch_libextavrcp.py E1 to land —
+    #        stock libextavrcp.so drops zero-length attributes on the floor
+    #        in violation of §5.3.4.
     # All values are UTF-8 (charset 0x006A); per §5.3.4 a missing attribute is
-    # signalled by AttributeValueLength=0, which is what an empty string slot
-    # produces here (strlen returns 0, the response builder packs the 8-byte
-    # header with no value bytes). For attr 0x08 specifically, an empty value
-    # tells the CT "Cover Art handle not available for this track" and it
-    # skips the OBEX fetch — spec-compliant graceful degradation until the
-    # music app writes a real handle into y1-track-info[1104..1110].
+    # signalled by AttributeValueLength=0. Requires patch_libextavrcp.py E1
+    # to land — the stock response builder drops zero-length attributes on
+    # the floor instead of emitting them, which is non-compliant with §5.3.4.
     attr_table = (
         ("title",         0x01, T4_OFF_FILE_TITLE),
         ("artist",        0x02, T4_OFF_FILE_ARTIST),

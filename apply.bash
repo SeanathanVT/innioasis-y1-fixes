@@ -44,6 +44,10 @@ FLAGS:
                      T4 / T5 / T_charset / T_battery / T6 / T8 / T9
                      trampoline chain in LOAD #1 page-padding extension
                      + U1 kernel auto-repeat NOP)
+                   - patch_libextavrcp.py (E1: drop the GetElement-
+                     Attributes 'ignore empty attrib' check so unsupported
+                     attributes emit with AttributeValueLength=0 per
+                     AVRCP 1.3 §5.3.4)
                    - patch_mtkbt_odex.py (F1: getPreferVersion -> 14;
                      F2: disable() resets sPlayServiceInterface; two
                      cardinality NOPs in handleKeyMessage so Java fires
@@ -630,6 +634,7 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   patch_in_place_bytes "app/MtkBt.odex"               "patch_mtkbt_odex.py"        644
   patch_in_place_bytes "bin/mtkbt"                    "patch_mtkbt.py"             755
   patch_in_place_bytes "lib/libextavrcp_jni.so"       "patch_libextavrcp_jni.py"   644
+  patch_in_place_bytes "lib/libextavrcp.so"           "patch_libextavrcp.py"       644
   patch_in_place_bytes "lib/libaudio.a2dp.default.so" "patch_libaudio_a2dp.py"     644
 fi
 

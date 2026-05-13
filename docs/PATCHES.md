@@ -138,9 +138,9 @@ In the LOAD #1 padding region, reached from extended_T2's PDU-0x20 dispatch arm.
 | 0x05 | TotalNumberOfTracks | `[816..831]` (UTF-8 ASCII decimal) |
 | 0x06 | Genre | `[848..1103]` |
 | 0x07 | PlayingTime | `[832..847]` (UTF-8 ASCII decimal milliseconds) |
-| 0x08 | DefaultCoverArt | `[1104..1110]` (UTF-8 ASCII 7-char BIP Image Handle; CT resolves via the AVRCP Cover Art OBEX channel — distinct from the generic BIP responder) |
+| 0x08 | DefaultCoverArt | `[1104..1110]` — always empty. Y1 does not implement AVRCP 1.6 Cover Art transfer (out of scope per the AVRCP 1.3-only project policy). The attribute is included so strict CTs that request it (e.g. `[0x1, 0x2, 0x3, 0x6, 0x8, 0x7]` for their metadata-pane query) receive a §5.3.4-compliant zero-length response slot indicating "attribute not supported by TG", rather than the wrong-shape response they got pre-E1. |
 
-All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is signalled by `AttributeValueLength=0`, which is what an empty string slot produces (strlen returns 0, the response builder packs the 8-byte attribute header with no value bytes). The numeric attrs (4 / 5 / 7) are stored pre-formatted as ASCII strings by the music app's `TrackInfoWriter` rather than binary u16 / u32 with a Thumb-2 itoa, keeping the trampoline a uniform strlen+memcpy loop. Attr 0x08 returns an empty string until the AVRCP Cover Art OBEX responder is wired and the music app starts writing per-track handles into `y1-track-info[1104..1110]`; empty handle tells the CT "Cover Art handle not available for this track" and it skips the OBEX fetch (per §5.3.4 zero-length convention).
+All values ship as UTF-8 (charset `0x006A`); per §5.3.4 a missing attribute is signalled by `AttributeValueLength=0` and Y1 emits the attribute header (`AttributeID + CharsetID + 0`) with no value bytes — this requires patch `patch_libextavrcp.py` E1, which removes the stock `libextavrcp.so` "ignore empty attrib" drop. The numeric attrs (4 / 5 / 7) are stored pre-formatted as ASCII strings by the music app's `TrackInfoWriter` rather than binary u16 / u32 with a Thumb-2 itoa, keeping the trampoline a uniform strlen+memcpy loop. Attr 0x08 always emits with length 0 — that is the canonical "TG doesn't support this attribute" signal per §5.3.4.
 
 T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-trampoline-state[0..7]`) and emits a reactive CHANGED via `reg_notievent_track_changed_rsp` before the GetElementAttributes response, then writes the new track_id back to state.
 
@@ -284,6 +284,22 @@ Current trampoline blob is 1652 bytes (~2368 bytes still free in the 4020-byte p
 **MD5s:** Stock `fd2ce74db9389980b55bccf3d8f15660` → Output `a2d41f924e07abff4a18afb87989b04c`.
 
 **For the full architectural reference** (data-path diagram, response-builder calling conventions, ELF program-header surgery details, code-cave inventory, msg-id taxonomy, Thumb-2 encoding gotchas), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+---
+
+## `patch_libextavrcp.py`
+
+Single 2-byte Thumb-2 CBZ→NOP flip inside `btmtk_avrcp_send_get_element_attributes_rsp` (function entry at `0x2188`).
+
+**E1** at file `0x00002266` (2 bytes): `88 b3 → 00 bf` (CBZ r0, +0x62 → NOP T1). The function's per-attribute loop has a gate that skips the emit path when `(attr_id == 0) OR (strlen == 0)`, logging `"AVRCP send_get_element_attributes ignore empty attrib attri_id:%d strlen:%d"` instead of writing the attribute slot into the response buffer. The strlen-zero half of this gate is a deviation from AVRCP 1.3 §5.3.4:
+
+> "For attributes not supported by the TG, this field shall be sent with 0 length data."
+
+Patching the CBZ to a NOP makes execution fall through unconditionally to the emit path. Empty-value attributes are now emitted with `AttributeID + CharsetID + AttributeValueLength=0` (no value bytes), per spec. The attr_id=0 ("Not Used" per §26 Table 26.1) half of the gate also collapses, but `T4` in `libextavrcp_jni.so` never emits attr 0, so that side has no caller.
+
+Strict CTs in the test matrix request a specific attribute set in their metadata-pane query (one such CT requests `[0x1, 0x2, 0x3, 0x6, 0x8, 0x7]`) and gate render on receiving every requested attribute back. Without E1, Y1 silently drops any whose value isn't set on its side, and the CT refuses to render. Lenient CTs were already rendering — they pick out what they recognize from the response.
+
+**MD5s:** Stock `6442b137d3074e5ac9a654de83a4941a` → Output `1347e1b337879840ad2f66597836b05f`.
 
 ---
 
@@ -472,7 +488,7 @@ Four new classes under `com/koensayr/y1/` (smali sources at `src/patches/inject/
 
 | Class | Role |
 |---|---|
-| `trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer (tmp + rename, world-readable). 1112-byte schema: audio_id at bytes 0..7 via `syntheticAudioId(path) = (path.hashCode() & 0xFFFFFFFFL) | 0x100000000L`; title/artist/album UTF-8 codepoint-safe-truncated to 240 B; duration/position/state-time BE u32; play_status / natural_end / battery / repeat / shuffle bytes at 792..796; track-num / total-tracks / playing-time / genre at 800..1103; cover-art handle at 1104..1110 (empty until the AVRCP Cover Art OBEX responder is wired). `init(Context)` flushes the file immediately after creating it so MtkBt's first read returns the valid AVRCP defaults (Repeat=0x01 OFF, Shuffle=0x01 OFF) rather than the all-zero fill that would otherwise persist until the first mutator runs. `prepareFiles()` chmods all three files world-rw / world-readable so MtkBt's `bluetooth` uid can `open()` them. `wakeTrackChanged()` / `wakePlayStateChanged()` fire `com.android.music.metachanged` / `playstatechanged` via the stored Application Context — the music app's `PlayerService` doesn't fire these broadcasts itself (it uses an internal `MY_PLAY_SONG` action), so the trampolines' wake path needs them to be synthesised here. |
+| `trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer (tmp + rename, world-readable). 1112-byte schema: audio_id at bytes 0..7 via `syntheticAudioId(path) = (path.hashCode() & 0xFFFFFFFFL) | 0x100000000L`; title/artist/album UTF-8 codepoint-safe-truncated to 240 B; duration/position/state-time BE u32; play_status / natural_end / battery / repeat / shuffle bytes at 792..796; track-num / total-tracks / playing-time / genre at 800..1103; cover-art handle slot at 1104..1110 (always empty — Y1 does not implement Cover Art transfer, the slot exists so T4 can emit attr 0x08 as a §5.3.4 zero-length attribute). `init(Context)` flushes the file immediately after creating it so MtkBt's first read returns the valid AVRCP defaults (Repeat=0x01 OFF, Shuffle=0x01 OFF) rather than the all-zero fill that would otherwise persist until the first mutator runs. `prepareFiles()` chmods all three files world-rw / world-readable so MtkBt's `bluetooth` uid can `open()` them. `wakeTrackChanged()` / `wakePlayStateChanged()` fire `com.android.music.metachanged` / `playstatechanged` via the stored Application Context — the music app's `PlayerService` doesn't fire these broadcasts itself (it uses an internal `MY_PLAY_SONG` action), so the trampolines' wake path needs them to be synthesised here. |
 | `playback.PlaybackStateBridge` | Stateless static dispatcher. `onPlayValue(II)V` maps the music-app's `Static.setPlayValue` newValue (0/1/3/5) to the AVRCP §5.4.1 Tbl 5.26 byte (STOPPED/PLAYING/PAUSED) then calls `TrackInfoWriter.wakePlayStateChanged()` so T9 emits PLAYBACK_STATUS / POS CHANGED on the state edge. On the PLAYING edge it also starts `PositionTicker`; on PAUSED / STOPPED it stops it. `onCompletion()V` latches a natural-end signal; the next `onPrepared()V` consumes it into `mPreviousTrackNaturalEnd`, resets position+time, then calls `wakeTrackChanged()` + `wakePlayStateChanged()` so T5 emits TRACK_CHANGED / REACHED_END / REACHED_START and T9 emits PLAYBACK_POS CHANGED for the position reset. `onError()V` clears the latch. |
 | `playback.PositionTicker` | `Runnable` posted to a main-thread `Handler` every 1000 ms while playing. Each tick calls `TrackInfoWriter.wakePlayStateChanged()` so T9 emits PLAYBACK_POS_CHANGED CHANGED with the live-extrapolated position. Started from `PlaybackStateBridge.onPlayValue` on PLAYING edges, stopped on PAUSED / STOPPED. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the cadence to the TG; 1 s is the conventional minimum interval a 1.3 CT will display playhead at. |
 | `battery.BatteryReceiver` | `Intent.ACTION_BATTERY_CHANGED` consumer. Bucket-maps to AVRCP §5.4.2 Tbl 5.35 (FULL_CHARGE / EXTERNAL / CRITICAL / WARNING / NORMAL). Sticky-broadcast value is processed at registration time so cold boot has a real bucket before the next CHANGED tick. |
