@@ -264,13 +264,13 @@ In `smali_classes2` (secondary DEX):
 
 Y1Bridge.apk stays installed for one reason: MtkBt's `bindService(Intent("com.android.music.MediaPlaybackService"))` needs a `<service>` declaration with that intent-filter, and the music app can't declare it (sharedUserId / platform-key constraint described above). Y1Bridge is its own package (`com.koensayr.y1.bridge`), self-signed with the debug keystore, so its manifest is freely editable.
 
-The bridge does essentially nothing beyond presenting the Binder:
+The bridge presents the Binder and serves synchronous state queries:
 
 - `MediaBridgeService.onCreate` is empty.
-- `MediaBridgeService.onBind` returns an `AvrcpBinder` (~30 lines) whose `onTransact` returns `[0x01, 0x02]` for `getCapabilities` (code 5) and ack-only's every other code. Sufficient because the C-side trampolines respond to every CT-visible PDU on the wire directly — Trace #21 confirmed MtkBt's Java path never transacts past `getCapabilities`.
+- `MediaBridgeService.onBind` returns an `AvrcpBinder` whose `onTransact` implements the `IBTAvrcpMusic` codes `BTAvrcpMusicAdapter` calls. Synchronous state queries (`getPlayStatus` / `position` / `duration` / `getAudioId` / `getTrackName` / `getAlbumName` / `getArtistName` / `getRepeatMode` / `getShuffleMode`) are answered live by reading `/data/data/com.innioasis.y1/files/y1-track-info` (the same 1104-byte file `TrackInfoWriter` maintains; world-readable so the bridge's `uid` can `open()` it). Registration / setter / passthrough codes ack with the success replies that keep `BTAvrcpMusicAdapter.mRegBit` armed and the Java mirror in sync with on-disk state.
 - `BootReceiver` only handles `BOOT_COMPLETED` → `startService(MediaBridgeService)` so the Service is alive when MtkBt first binds.
 
-All AVRCP observation, file writes, broadcast emission, and state production happen in the music app. The bridge has no `LogcatMonitor`, no `BatteryReceiver`, no `RemoteControlClient` setup, no file writer, no callback dispatcher — those were the components that caused the cross-process visibility problems the in-app components now solve. Source: ~200 lines across three files in `src/Y1Bridge/`.
+All AVRCP observation, file writes, broadcast emission, and proactive-notification wake live in the music app — the bridge has no `LogcatMonitor`, no `BatteryReceiver`, no `RemoteControlClient` setup, no file writer, no callback dispatcher. Source: ~300 lines across three files in `src/Y1Bridge/`.
 
 ---
 

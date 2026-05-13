@@ -1,6 +1,9 @@
 # Y1Bridge
 
-Minimal Binder host for the Innioasis Y1 AVRCP pipeline.
+Binder host for the Innioasis Y1 AVRCP pipeline. Hosts the
+`IBTAvrcpMusic` Binder MtkBt resolves to via
+`bindService(com.android.music.MediaPlaybackService)`, and serves the
+synchronous state queries that drive MtkBt's Java-side mirror.
 
 ## Why this APK exists
 
@@ -20,15 +23,24 @@ declare the `<service>` MtkBt's `bindService` resolves to.
 
 ## What it does
 
-- `MediaBridgeService.onBind` returns a `Binder` whose `onTransact` is
-  ack-only for every code except `getCapabilities` (transact 5), which
-  returns `[0x01 EVENT_PLAYBACK_STATUS_CHANGED, 0x02 EVENT_TRACK_CHANGED]` so
-  MtkBt's adapter actually issues `REGISTER_NOTIFICATION` for those events.
-  Per the permissive-CT capture in [`docs/INVESTIGATION.md`](../../docs/INVESTIGATION.md)
-  Trace #21, MtkBt never transacts on this Binder past the initial
-  capability query — the broadcast wake path (cardinality-NOP-patched JNI
-  natives + `metachanged`/`playstatechanged` fired by the music app) is what
-  drives T5/T9 on the wire.
+- `MediaBridgeService.onBind` returns a `Binder` whose `onTransact`
+  implements the `IBTAvrcpMusic` codes MtkBt's `BTAvrcpMusicAdapter`
+  calls — primarily `getPlayStatus` (24), `position` (25), `duration` (26),
+  `getAudioId` (27), `getTrackName` (28), `getAlbumName` (29),
+  `getArtistName` (31), `getRepeatMode` (19), `getShuffleMode` (17), and
+  `getCapabilities` (5) — by reading live values from
+  `/data/data/com.innioasis.y1/files/y1-track-info` (the 1104-byte file
+  maintained by the music app's injected `TrackInfoWriter`, world-readable
+  per `setReadable(true, false)`). The Binder thread reads on every call
+  so MtkBt's Java mirror always reflects current state. Callback-register,
+  notification-register, setter, and passthrough codes (1, 2, 3, 4, 6–14,
+  16, 18, 20, 22, 23, 32–37) ack with the success replies that keep
+  `BTAvrcpMusicAdapter.mRegBit` armed.
+- The proactive wake path is independent of the Binder: the music app
+  fires `com.android.music.metachanged` / `playstatechanged`, MtkBt's
+  cardinality-NOP-patched JNI natives fire, and the trampoline chain in
+  `libextavrcp_jni.so` builds the wire response from the same
+  `y1-track-info` file.
 - `BootReceiver` listens for `BOOT_COMPLETED` and calls
   `startService(MediaBridgeService)` so the Service is alive when MtkBt
   first binds.
@@ -65,6 +77,6 @@ Output: `app/build/outputs/apk/debug/app-debug.apk` (~5-10 KB). `apply.bash
 
 Source is tiny — three files total:
 
-- `app/src/main/java/com/koensayr/y1/bridge/MediaBridgeService.java` (~130 lines)
+- `app/src/main/java/com/koensayr/y1/bridge/MediaBridgeService.java` (~260 lines)
 - `app/src/main/java/com/koensayr/y1/bridge/BootReceiver.java` (~28 lines)
 - `app/src/main/AndroidManifest.xml` (~43 lines)

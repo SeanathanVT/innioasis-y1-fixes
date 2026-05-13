@@ -40,3 +40,6 @@ tools/apktool-*.jar
 #
 # Source: https://www.bluetooth.com/specifications/specs/
 docs/spec/
+
+# Local-only baksmali jar (downloaded for reverse-engineering MtkBt.dex).
+tools/baksmali.jar
