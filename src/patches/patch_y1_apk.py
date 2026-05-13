@@ -908,12 +908,19 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 #       The legacy ACTION_MEDIA_BUTTON broadcast Intent always uses 85, and
 #       toggle is the right semantics for a single physical play/pause key.
 #
-#   - KEYCODE_MEDIA_PLAY (0x7e, 126) → `play(Z)V` with bool=true.
-#     The boolean runs `Static.setPlayValue(1, ...)` after player start(),
-#     propagating the resume edge to UI / RCC / AudioFocus. play(false)
-#     skips that and other components either fight back to paused or
-#     never reflect the change. Matches Kotlin's `play$default` mask=1
-#     used by the music app's own toggle path.
+#   - KEYCODE_MEDIA_PLAY (0x7e, 126):
+#       If `isPlaying()` → `playOrPause()V` (effectively pause). Else
+#       → `play(Z)V` with bool=true (start playback).
+#       Per AVRCP 1.3 §4.6 PLAY is "begin/continue playing" (no toggle),
+#       but some CTs (Chevrolet Bolt and similar) map their on-screen
+#       pause button to PASSTHROUGH PLAY and rely on the TG to toggle.
+#       Treating PLAY-while-already-playing as pause matches what AOSP-
+#       based players (and iPhone/Pixel) do in practice. Spec-compliant
+#       CTs never send PLAY against a playing TG, so this branch only
+#       fires for the non-compliant case.
+#       The play(true) branch's boolean runs `Static.setPlayValue(1, ...)`
+#       after player start(), propagating the resume edge to UI / RCC /
+#       AudioFocus.
 #
 #   - KEYCODE_MEDIA_PAUSE (0x7f, 127) → `pause(IZ)V` with reason=0x12,
 #     flag=true. reason is a diagnostic Timber tag (stock spans 0xc-0x11);
@@ -1060,6 +1067,17 @@ NEW_PLAY_BRANCH = """\
 
     if-eqz p1, :cond_e
 
+    invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->isPlaying()Z
+
+    move-result v0
+
+    if-eqz v0, :cond_play_strict_start
+
+    invoke-virtual {p1}, Lcom/innioasis/y1/service/PlayerService;->playOrPause()V
+
+    goto :goto_5
+
+    :cond_play_strict_start
     const/4 v0, 0x1
 
     invoke-virtual {p1, v0}, Lcom/innioasis/y1/service/PlayerService;->play(Z)V
@@ -1900,6 +1918,8 @@ PATCH_B5_INJECT_FILES = [
         "smali/com/koensayr/y1/battery/BatteryReceiver.smali"),
     ("com/koensayr/y1/papp/PappSetFileObserver.smali",
         "smali/com/koensayr/y1/papp/PappSetFileObserver.smali"),
+    ("com/koensayr/y1/ui/NowPlayingRefresher.smali",
+        "smali/com/koensayr/y1/ui/NowPlayingRefresher.smali"),
 ]
 
 for src_rel, dst_rel in PATCH_B5_INJECT_FILES:
@@ -2102,6 +2122,12 @@ NEW_PAPP_BCAST_TAIL = (
     "\n"
     "    invoke-virtual {v0, v2}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
     "\n"
+    "    # Patch B5.4a: refresh MusicPlayerActivity if it's visible so the\n"
+    "    # in-app Now Playing screen reflects the new Repeat / Shuffle state\n"
+    "    # without requiring a back-out / re-enter. Mirrors what AOSP MediaSession\n"
+    "    # callbacks do for iPhone/Pixel-class players.\n"
+    "    invoke-static {}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->refresh()V\n"
+    "\n"
     "    :try_end_b5_setpapp\n"
     "    .catch Ljava/lang/Throwable; {:try_start_b5_setpapp .. :try_end_b5_setpapp} :catch_b5_setpapp\n"
     "\n"
@@ -2124,6 +2150,61 @@ papp_bcast_src = papp_bcast_src.replace(OLD_PAPP_BCAST_TAIL, NEW_PAPP_BCAST_TAIL
 with open(papp_broadcaster_path, 'w') as f:
     f.write(papp_bcast_src)
 print(f"  Patch B5.4: PappStateBroadcaster.sendNow → also TrackInfoWriter.setPapp + playstatechanged")
+
+# -- Patch B5.5: hook MusicPlayerActivity onResume/onPause for UI refresh ----
+# Track the currently visible Now Playing screen so PappStateBroadcaster can
+# trigger a refreshUI() when Repeat / Shuffle changes (CT-driven or in-app).
+# Without this, CT-driven changes apply to SharedPreferences but the visible
+# UI doesn't re-render until the user navigates away and back.
+MUSIC_PLAYER_ACTIVITY_SMALI = "smali_classes2/com/innioasis/music/MusicPlayerActivity.smali"
+mpa_path = os.path.join(UNPACKED_DIR, MUSIC_PLAYER_ACTIVITY_SMALI)
+if not os.path.exists(mpa_path):
+    sys.exit(f"ERROR: MusicPlayerActivity.smali not found: {mpa_path}")
+with open(mpa_path, 'r') as f:
+    mpa_src = f.read()
+
+OLD_MPA_ON_RESUME_HEAD = (
+    ".method protected onResume()V\n"
+    "    .locals 3\n"
+    "\n"
+    "    .line 108\n"
+    "    invoke-super {p0}, Lcom/innioasis/y1/base/BasePlayerActivity;->onResume()V\n"
+)
+NEW_MPA_ON_RESUME_HEAD = (
+    ".method protected onResume()V\n"
+    "    .locals 3\n"
+    "\n"
+    "    invoke-static {p0}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->onResume(Lcom/innioasis/music/MusicPlayerActivity;)V\n"
+    "\n"
+    "    .line 108\n"
+    "    invoke-super {p0}, Lcom/innioasis/y1/base/BasePlayerActivity;->onResume()V\n"
+)
+if OLD_MPA_ON_RESUME_HEAD not in mpa_src:
+    sys.exit("ERROR: Patch B5.5 anchor not found in MusicPlayerActivity.smali (onResume header).")
+mpa_src = mpa_src.replace(OLD_MPA_ON_RESUME_HEAD, NEW_MPA_ON_RESUME_HEAD, 1)
+
+# MusicPlayerActivity doesn't override onPause (inherits from BasePlayerActivity).
+# Inject a minimal onPause that notifies the refresher then chains to super.
+MPA_ON_PAUSE_INJECT = """
+
+.method protected onPause()V
+    .locals 0
+
+    invoke-static {p0}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->onPause(Lcom/innioasis/music/MusicPlayerActivity;)V
+
+    invoke-super {p0}, Lcom/innioasis/y1/base/BasePlayerActivity;->onPause()V
+
+    return-void
+.end method
+"""
+# Idempotency: skip if already injected.
+if "invoke-static {p0}, Lcom/koensayr/y1/ui/NowPlayingRefresher;->onPause" not in mpa_src:
+    # Append before the final closing of the file (smali files don't have an
+    # end marker; appending after the last .end method is sufficient).
+    mpa_src = mpa_src.rstrip() + MPA_ON_PAUSE_INJECT + "\n"
+with open(mpa_path, 'w') as f:
+    f.write(mpa_src)
+print(f"  Patch B5.5: MusicPlayerActivity onResume/onPause → NowPlayingRefresher")
 
 
 # ============================================================
@@ -2176,6 +2257,8 @@ PATCHED_SMALI_FILES = [
     "smali/com/koensayr/y1/playback/PositionTicker.smali",
     "smali/com/koensayr/y1/battery/BatteryReceiver.smali",
     "smali/com/koensayr/y1/papp/PappSetFileObserver.smali",
+    "smali/com/koensayr/y1/ui/NowPlayingRefresher.smali",
+    MUSIC_PLAYER_ACTIVITY_SMALI,
     # Patch B6 — AvrcpBridgeService (unused groundwork)
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBridgeService.smali",
     "smali_classes2/com/koensayr/y1/avrcp/AvrcpBinder.smali",
