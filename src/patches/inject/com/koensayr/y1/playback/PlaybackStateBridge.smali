@@ -83,6 +83,23 @@
     # PLAYBACK_STATUS / POS CHANGED.
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
 
+    # Drive the 1 s position-tick loop. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the
+    # PLAYBACK_POS_CHANGED cadence to the TG; T9 has the live-extrapolated
+    # position via clock_gettime, but a 1.3 CT that anchors playhead rendering
+    # on CHANGED events (rather than polling GetPlayStatus) needs us to fire
+    # at a steady cadence while playing. Start on the PLAYING edge, stop on
+    # PAUSED / STOPPED.
+    const/4 v2, 0x1
+
+    if-ne v0, v2, :cond_not_playing
+
+    invoke-static {}, Lcom/koensayr/y1/playback/PositionTicker;->start()V
+
+    goto :cond_unmapped
+
+    :cond_not_playing
+    invoke-static {}, Lcom/koensayr/y1/playback/PositionTicker;->stop()V
+
     :cond_unmapped
     return-void
     :try_end_b5

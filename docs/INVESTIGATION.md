@@ -2355,3 +2355,51 @@ Expected behavior on hardware:
 - Shuffle "always on" — likely initial-state issue: `y1-track-info[795..796]` is zero-filled at creation and `0x00` is not a valid AVRCP §5.2.4 Tbl 5.20 / 5.21 value. Need to initialize `TrackInfoWriter` defaults to `0x01 OFF` / `0x01 OFF` before any read. Separate change.
 - Music-app Settings UI refresh on CT-driven Repeat/Shuffle change. Music-app side observer, not a wire-level issue.
 
+
+## Trace #26 (2026-05-11) — Multi-CT verification of Trace #25 + 1 s position tick + cold-boot file-flush
+
+### What the multi-CT capture showed (post-Trace #25)
+Captures: `dual-bolt-20260511-1422`, `dual-kia-20260511-1417`, `dual-tv-20260511-1532`. Hardware confirmation that the Trace #25 broadcast-wake fix landed:
+
+| CT | `metachanged` broadcasts | `playstatechanged` broadcasts | msg=540 (GetElementAttributes resp) | Visible result |
+|---|---|---|---|---|
+| Bolt | 1 | 55 | 1 | Metadata bytes delivered on the wire (full 7 attributes — Title strlen=10, Artist=14, Album=7, TrackNum=1, Total=2, Genre=16, PlayingTime=6, msg=540 size=644). **UI does not render** — CT-side issue, separate investigation. Other passthrough functions partial: PLAY 0x44 routes correctly, but PAUSE 0x46 toggles only the Bolt UI icon without actually pausing music. |
+| Kia | 2 | 31 | Many (no count needed) | Metadata works. Playhead absent on PLAY edge, appears after PAUSE. Visible playhead lags real device playhead by ~1 s. Next-track skip works, but playhead disappears on the new track until next pause. |
+| TV  | 7 | 42 | Many | Metadata works. Next no longer fast-forwards (Patch E/H + Patch H″ working as designed). Play/pause occasionally still gets stuck (rare, much improved). One observed state desync: Y1 showed "stop" while TV showed "paused" (~2 occurrences). |
+| Sonos (prior capture) | n/a | n/a | 190+ | Play/pause/next/prev work. Repeat/shuffle UI elements grayed out — likely Sonos doesn't render PApp Settings over BT for this CT class. |
+
+The Trace #25 wake fix unblocked metadata flow on all CTs that proactively poll `GetElementAttributes` (Kia, TV, Sonos). Bolt still has no UI metadata despite receiving the full response payload — that's a CT-side rendering issue, not a wire-shape issue.
+
+### Fix shipped in this trace
+Two compounding follow-ups for the Kia playhead lag + the shuffle initial-state issue:
+
+**1. 1 s position-tick loop.** New class `com.koensayr.y1.playback.PositionTicker` (Runnable + lazy main-thread Handler):
+
+- `PositionTicker.start()` — `Handler.removeCallbacks(INSTANCE)` + `postDelayed(INSTANCE, 1000)`. Idempotent.
+- `PositionTicker.stop()` — `Handler.removeCallbacks(INSTANCE)`.
+- `PositionTicker.run()` — calls `TrackInfoWriter.wakePlayStateChanged()` then `Handler.postDelayed(this, 1000)`.
+
+`PlaybackStateBridge.onPlayValue` now calls `PositionTicker.start()` on the PLAYING edge (mapped state byte == 0x01) and `PositionTicker.stop()` on STOPPED / PAUSED. The wake fires `com.android.music.playstatechanged` → T9 → AVRCP 1.3 §5.4.2 Tbl 5.33 PLAYBACK_POS_CHANGED CHANGED with `clock_gettime(CLOCK_BOOTTIME)`-extrapolated position.
+
+Expected effect on hardware:
+- Kia: playhead appears immediately on first PLAY edge (T9 fires CHANGED within 1 s of `Static.setPlayValue(1, _)`) and stays current within ~1 s of real device playhead.
+- TV / Sonos: extra wakes are no-ops for CTs that don't subscribe to event 0x05; small overhead (~one broadcast/sec while playing).
+- Bolt: unchanged at the wire metadata layer; downstream of the rendering investigation.
+
+**2. Cold-boot `y1-track-info` flush.** `TrackInfoWriter.init(Context)` now calls `flushLocked()` immediately after `prepareFilesLocked()`. The file lands on disk with the in-memory defaults (mRepeatAvrcp=0x01 OFF, mShuffleAvrcp=0x01 OFF — valid AVRCP §5.2.4 Tbl 5.20 / 5.21 values) before any CT can read it.
+
+Pre-fix sequence:
+1. Y1Application.onCreate → TrackInfoWriter.init → prepareFilesLocked creates `y1-trampoline-state` + `y1-papp-set`, but NOT `y1-track-info`.
+2. CT subscribes to PApp CHANGED before B4's `PappStateBroadcaster.sendNow()` fires → T8 INTERIM reads `y1-track-info[795..796]`, file doesn't exist, trampoline buffer stays zero-filled, MtkBt sends `[0, 0]` → invalid AVRCP enum.
+3. CT latches onto invalid initial state; some CTs (observed: Bolt) refuse to follow subsequent CHANGED events from that point.
+
+Post-fix: file always exists with `[0x01, 0x01]` at boot.
+
+### Method-count budget
+classes.dex now 65337/65536 method refs (199 slots free). +7 over the pre-Trace-#25 baseline of 65330. Inside 64K cap.
+
+### Out of scope
+- **Bolt no UI metadata.** Wire-level metadata response is correct (full 7 attributes, valid UTF-8, valid SongPosition). Investigation needs btlog.bin parse of the AVRCP frames Bolt sends back, to figure out what specific event/PDU Bolt is waiting for before rendering. Possibilities: missing AVRCP 1.4 ABSOLUTE_VOLUME response, missing PLAYBACK_STATUS_CHANGED INTERIM with status=PLAYING, AVCTP fragmentation parsing on the CT side.
+- **Bolt PAUSE not actually pausing.** PASSTHROUGH 0x46 receipt confirmed at the MMI_AVRCP layer; the downstream kernel input → AVRCP.kl → KeyEvent → BaseActivity (Patch H) → PlayControllerReceiver (Patch E) path needs to be traced. Bolt's icon toggling without actual pause action suggests a dispatch hole somewhere in the foreground-activity propagation path.
+- **Music-app Settings UI refresh on CT-driven Repeat/Shuffle.** Music-app side observer, not a wire-level issue. Fix needs SharedPreferences listener in the Settings activity or an explicit refresh Intent from PappSetFileObserver.
+

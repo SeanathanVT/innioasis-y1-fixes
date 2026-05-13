@@ -128,6 +128,15 @@
     iput-wide v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
 
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->prepareFilesLocked()V
+
+    # Flush y1-track-info immediately at init so MtkBt's first read returns
+    # the in-memory defaults (Repeat=0x01 OFF, Shuffle=0x01 OFF — valid AVRCP
+    # §5.2.4 Tbl 5.20 / 5.21 values) rather than the zero-fill that an
+    # unwritten file would give. Without this, CTs that subscribe to
+    # PLAYER_APPLICATION_SETTING_CHANGED before B4's first sendNow() can
+    # latch onto file[795..796] = [0,0] (invalid AVRCP enum) and refuse to
+    # follow subsequent CHANGED events.
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 

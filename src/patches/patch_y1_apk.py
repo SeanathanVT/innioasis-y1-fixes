@@ -1894,6 +1894,8 @@ PATCH_B5_INJECT_FILES = [
         "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali"),
     ("com/koensayr/y1/playback/PlaybackStateBridge.smali",
         "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali"),
+    ("com/koensayr/y1/playback/PositionTicker.smali",
+        "smali/com/koensayr/y1/playback/PositionTicker.smali"),
     ("com/koensayr/y1/battery/BatteryReceiver.smali",
         "smali/com/koensayr/y1/battery/BatteryReceiver.smali"),
     ("com/koensayr/y1/papp/PappSetFileObserver.smali",
@@ -2142,6 +2144,7 @@ PATCHED_SMALI_FILES = [
     STATIC_SMALI, PLAYER_SERVICE_SMALI_FOR_B5,
     "smali/com/koensayr/y1/trackinfo/TrackInfoWriter.smali",
     "smali/com/koensayr/y1/playback/PlaybackStateBridge.smali",
+    "smali/com/koensayr/y1/playback/PositionTicker.smali",
     "smali/com/koensayr/y1/battery/BatteryReceiver.smali",
     "smali/com/koensayr/y1/papp/PappSetFileObserver.smali",
     # Patch B6 — AvrcpBridgeService (unused groundwork)
