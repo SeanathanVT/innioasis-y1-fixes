@@ -2992,45 +2992,52 @@ Since the wire shows `0x0D`, the JNI's msg=544 payload at offset `0x1c + 8 = 0x2
 
 Functions `fcn.0x379e0` (M1/M1b/M1c) and `fcn.0x396d0` (M1d) are different code paths — likely AVCTP/L2CAP frame fragmentation or error-reply builders. They write `0x0D` to `[r4, #12]` (offset 12, not 11) of their respective work structs. Even though the offset-12 write would land at packetFrame[0xc] (a different field, possibly packet-type), the wire-side ctype byte read by `fcn.0000ef08` is at offset `0xb`. M1/M1b/M1c/M1d never touch offset `0xb`, never affect the msg=544 RegNotif response chain identified above.
 
-### Two patch options
+### Helper-side analysis (libextavrcp.so)
 
-**Option α — make CHANGED branch emit INTERIM (1-byte patch):**
+Following the chain into the JNI library that actually marshals the IPC payload: each `btmtk_avrcp_send_reg_notievent_*_rsp` helper (e.g. `pos_changed_rsp` at file `0x2588`, `track_changed_rsp` at `0x2458`) has the same shape — `memset(sp+4, 0, 0x28)` then writes specific bytes:
 
-`0x12244: 0d 21 → 0f 21` (`movs r1, 0xd` → `movs r1, 0xf`)
+| sp offset | payload offset | what |
+|---|---|---|
+| `sp+0x9` | byte 5 | status (= `[conn+0x11]`, or 1 if cardinality > 0) |
+| `sp+0xb` | byte 7 | **reasonCode (arg3 = 0x0F INTERIM / 0x0D CHANGED)** |
+| `sp+0xd` | byte 9 | event_id (hardcoded per helper: 2 for track_changed, 5 for pos_changed) |
+| `sp+0x28` | byte 0x24 | data (e.g. play position u32) |
 
-After this, both dispatch branches emit ctype `0x0F`. Bolt sees INTERIM on every RegNotif response. CT will think every value-update is the "initial state" of an active registration and never trigger re-registration. Spec-deviant (§6.7.1 requires CHANGED for value updates), but the Pixel-mirror semantics in T5/T9 already emit unsolicited "CHANGED" events without waiting for re-registration — so the data flow continues regardless.
+`AVRCP_SendMessage` then prepends a 28-byte header and ships the bytes via `BT_SendMessage` with `msg_id = 0x220 = 544`. Mtkbt's `fcn.00067768` parses the IPC frame: the 40-byte payload starts at `msg+0x1c` (matches the JNI's `sp+4` content exactly because `AVRCP_SendMessage` copies sp+4 → sp+0x1c of the full IPC frame).
 
-Trade-off: total CT-side state machine deviation. Strictly-conforming CTs would (theoretically) drop value updates because the "initial value" semantic of INTERIM doesn't carry meaning after the first one. Pixel's actual btsnoop shows it emits `0x0D` for value-change updates and `0x0F` only for the first response per registration. Bolt accepts that pattern.
+**Therefore:**
+- mtkbt's `ctxt[7]` = JNI payload byte 7 = **reasonCode** (`0x0F` or `0x0D`).
+- mtkbt's `ctxt[8]` = JNI payload byte 8 = always 0 (memset; no helper writes here).
+- mtkbt's `ctxt[9]` = JNI payload byte 9 = **event_id** (matches `fcn.00012478`'s tbb dispatch).
 
-**Option β — invert the dispatch (1-byte patch):**
+Stock mtkbt's discriminator at `fcn.0x121d8` reads `ctxt[8]` and compares with 1. **Off-by-one.** Always misses. Always lands on the CHANGED branch. Wire always emits `0x0D` regardless of the JNI's intent.
 
-`0x12230: 01 29 → 00 29` (`cmp r1, 1` → `cmp r1, 0`)
+### The fix (M1a / M1b)
 
-After this:
-- `ctxt[8] == 0` → INTERIM (`0x0F`) [taken when JNI doesn't set the byte]
-- `ctxt[8] != 0` → CHANGED (`0x0D`)
+Two-site, two-byte mtkbt patch:
 
-This inverts the polarity. Since the JNI currently never sets the byte to 1, this makes all current responses INTERIM. But it preserves the *capability* for the JNI side (or a future patch) to mark a specific response as CHANGED by sending `ctxt[8] = nonzero`.
+| offset | before → after | mnemonic before → after |
+|---|---|---|
+| `0x1222e` | `21 7a → e1 79` | `ldrb r1, [r4, 8]` → `ldrb r1, [r4, 7]` |
+| `0x12230` | `01 29 → 0f 29` | `cmp r1, 1` → `cmp r1, 0x0F` |
 
-**Option γ — proper state tracking (multi-byte patch, more invasive):**
+After M1a + M1b, mtkbt's dispatch correctly routes the JNI's reasonCode:
+- `ctxt[7] == 0x0F` → INTERIM branch → wire ctype `0x0F` (T2 / T8 first-response arms in `_trampolines.py`).
+- `ctxt[7] != 0x0F` (i.e., `0x0D` from T5 / T9 edge emits) → CHANGED branch → wire ctype `0x0D`.
 
-Use a free-space code cave to add a "first response after registration" state byte that gates the cmp result. Single-shot INTERIM, subsequent CHANGED. This is spec-correct but requires multi-byte instruction injection. The T2/T8 trampolines in libextavrcp_jni.so already track this; routing that state through the IPC msg=544 byte 0x24 is the JNI-side equivalent.
+Spec-compliant per AVRCP 1.3 §6.7.1 and matches the Pixel-as-TG btsnoop pattern: INTERIM on the first response per registration, CHANGED on subsequent value updates without waiting for re-registration. The Pixel-mirror gate semantics in `_trampolines.py` (T2 / T8 arm state[N]; T5 / T9 read but don't clear) drives the JNI's INTERIM-vs-CHANGED choice; M1a / M1b just routes that intent through to the wire.
 
-### Pixel-Bolt baseline (from `dual-pixel-bolt-*` snoop)
+### Patcher state
 
-Pixel emits INTERIM (`0x0F`) on the first RegNotif response for each event; subsequent value-update notifications use CHANGED (`0x0D`). Bolt accepts both, re-registers within ~20 ms of each CHANGED. So the spec-correct answer is γ (per-registration state), the closest 1-byte approximation is β (which gives the JNI control), and α is the bluntest hammer.
-
-### Recommendation
-
-Option β (`0x12230: 01 29 → 00 29`) is the surgical 1-byte fix that gives the JNI a working "send INTERIM" signal (currently effective because the JNI doesn't set the byte, so the inverted cmp falls through). It also preserves the door for a future JNI-side patch to emit CHANGED by writing a non-zero value to msg=544 byte 0x24.
-
-Drop M1 / M1b / M1c / M1d entirely (all confirmed dead code). Replace with a single M-class patch at `0x12230`.
+- Stock `mtkbt` MD5 `3af1d4ad8f955038186696950430ffda`.
+- Output `mtkbt` MD5 with M1a + M1b applied: `c6ffea0082aae923ec9e7bc64293f848`.
+- The old M1 / M1b / M1c (sites in `fn.0x379e0`) and M1d (site in `fn.0x396d0`) have been removed from `patch_mtkbt.py` — they wrote to offset 0xc of unrelated work structs, never touched the msg=544 RegNotif response chain.
 
 ### Verification plan
 
 After flash:
-1. mtkbt MD5 changes from current `7a9365e2...` to new value (one byte off).
-2. Capture `dual-bolt` and `dual-kia` btsnoop. Inspect wire AV/C ctype byte 0 on RegNotif responses. Expect `0x0F` INTERIM for every event registered.
+1. mtkbt MD5 on device: `c6ffea0082aae923ec9e7bc64293f848`.
+2. Capture `dual-bolt` and `dual-kia` btsnoop. Inspect wire AV/C ctype byte 0 on RegNotif responses. Expect `0x0F` INTERIM on the first response per registration, `0x0D` CHANGED on T5 / T9 edge emits.
 3. Bolt: metadata pane render is the proof. Kia: continued operation, no regression on PlayStatus / position reporting.
 
-If Bolt still doesn't render and wire shows `0x0F`: the issue is downstream of ctype (e.g., the `track_changed` Identifier or the metadata payload format). The §6.7.1 / wire-ctype chain is then fully accounted for.
+If Bolt still doesn't render and wire ctype sequence is correct (0x0F first per event, 0x0D on subsequent edges): the issue is downstream of ctype — TRACK_CHANGED Identifier payload, GetElementAttributes attr-list shape, or PASSTHROUGH command handling. The §6.7.1 / wire-ctype chain is then fully accounted for.

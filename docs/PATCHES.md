@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M1b, M1c** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, AVRCP msg=544 wire ctype 0x0D→0x0F so trampoline-emitted RegNotif INTERIM responses get the spec-correct AV/C ctype). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1a, M1b** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED discriminator retarget so the wire ctype matches the JNI trampoline's reasonCode). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -88,19 +88,20 @@ Patches the same entry-slot swap on the legacy AVRCP 1.0 served record (the fall
 
 Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an unconditional branch to the PASSTHROUGH-emit branch at `0x14528` (which ends with `bl 0x10404`, the function that emits msg 519 CMD_FRAME_IND to the JNI socket). Every AV/C frame flows through the emit path. Cost: VENDOR_DEPENDENT bytes get interpreted in PASSTHROUGH-shaped fields, so mtkbt's mid-stack response may be malformed — but the JNI trampoline chain takes over before that matters.
 
-**M1 / M1b / M1c — AVRCP msg=544 wire ctype 0x0D CHANGED → 0x0F INTERIM** at file `0x37cca`, `0x37d3c`, `0x37dfc` (3 sites, 1 byte each; Rd register encoding unchanged):
+**M1a / M1b — RegNotif INTERIM/CHANGED discriminator: route JNI reasonCode to wire ctype** at file `0x1222e`, `0x12230` (2 sites, 2 bytes each):
 
 | site | bytes (before → after) | mnemonic |
 |---|---|---|
-| `0x37cca` | `0d 23` → `0f 23` | `movs r3, #13` → `movs r3, #15` |
-| `0x37d3c` | `0d 22` → `0f 22` | `movs r2, #13` → `movs r2, #15` |
-| `0x37dfc` | `0d 22` → `0f 22` | `movs r2, #13` → `movs r2, #15` |
+| `0x1222e` | `21 7a` → `e1 79` | `ldrb r1, [r4, 8]` → `ldrb r1, [r4, 7]` |
+| `0x12230` | `01 29` → `0f 29` | `cmp r1, 1` → `cmp r1, 0xF` |
 
-Stock mtkbt's outbound AVRCP response builder at fn `0x379e0` writes a hardcoded AV/C ctype byte of `0x0D` (CHANGED) at three sites within the function — branches of the inbound-dispatch ladder for what was historically the "value-changed CHANGED-emit" path. The function never emits ctype `0x0F` (INTERIM); INTERIM-emitting paths live in a separate function at `0xa655c` that stock JNI only reaches when mtkbt's native dispatcher handles the inbound RegisterNotification itself. The v2.0.0 trampoline bypasses the native dispatcher and routes inbound RegisterNotification through `libextavrcp_jni.so` + msg=544 → fn `0x379e0` → CHANGED-only wire, regardless of the reasonCode the trampoline passes. AVRCP 1.3 §6.7.1 requires INTERIM first per subscription; a strict CT drops CHANGED-without-INTERIM and falls back to ~3 s polling, never rendering metadata. Initial single-site M1 patch at `0x37cca` didn't reach the wire because the dispatch ladder routed inbound responses through the other two branches at `0x37d3c` / `0x37dfc`. All three sites are flipped together.
+Stock mtkbt's RegNotif response packetFrame builder dispatch at fn `0x121d8` selects INTERIM vs CHANGED ctype from the wrong byte of the JNI's IPC msg=544 payload. The JNI's `btmtk_avrcp_send_reg_notievent_*_rsp` helpers (`libextavrcp.so`) marshal the reasonCode (`0x0F` INTERIM / `0x0D` CHANGED) into payload byte 7. Stock mtkbt loads from byte 8 instead — always 0 after the helper's memset — and compares against 1, so the cmp always misses and dispatch falls to the CHANGED branch (`movs r1, 0x0D` at `0x12244`). Wire ctype is `0x0D` for every RegNotif response, regardless of which reasonCode the trampoline passes.
 
-Trade-off: T5 / T9 proactive CHANGED-on-edge emits route through the same fn, so they too become INTERIM on the wire. AVRCP 1.3 §6.7.1 permits repeated INTERIM responses (treated as fresh subscriptions); CTs that previously relied on the CHANGED edge for UI refresh now see state via the INTERIM payload instead.
+M1a retargets the discriminator load from byte 8 to byte 7. M1b widens the cmp constant from 1 to `0x0F` so the discriminator matches the JNI's actual reasonCode encoding. Combined effect: `ctxt[7] == 0x0F` → wire ctype `0x0F` INTERIM (T2 / T8 INTERIM arms in the trampoline chain), `ctxt[7] != 0x0F` → wire ctype `0x0D` CHANGED (T5 / T9 edge emits). Spec-compliant per AVRCP 1.3 §6.7.1 and matches the Pixel-as-TG btsnoop pattern (INTERIM first, CHANGED for subsequent value updates without waiting for re-registration).
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `7a9365e280172548429974935cfb4a29`.
+End-to-end byte chain: IPC msg=544 → `fcn.00067768` (sets ctxt ptr at msg+0x1c) → `fcn.000518ac` case 44 (msg_id - 500 → fcn.00012478) → `fcn.00012478` event_id tbb → per-event response builder → `fcn.000121d8` (M1a / M1b sites at `0x1222e` / `0x12230`) → `fcn.00011894` strb ctype to packetFrame[0xb] → `fcn.0000f0bc` queue → `fcn.0000ef08` strb to wire `buf[0]`. Full radare2 trace in `docs/INVESTIGATION.md` Trace #37.
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `c6ffea0082aae923ec9e7bc64293f848`.
 
 ---
 

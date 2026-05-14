@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "74e94281e67aec4201a73d72e812352e"
+OUTPUT_MD5        = "c6ffea0082aae923ec9e7bc64293f848"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -172,66 +172,47 @@ PATCHES = [
         "after":  bytes([0x1e, 0xe0]),
     },
     {
-        # M1 — msg=544 RegisterNotification response wire ctype: CHANGED (0x0D)
-        # -> INTERIM (0x0F).
+        # M1 — RegisterNotification response wire ctype: route the JNI's
+        # reasonCode through to mtkbt's AV/C ctype emitter.
         #
-        # Stock mtkbt's outbound AVRCP response builder at fn 0x379e0 writes a
-        # hardcoded AV/C ctype byte of 0x0D (CHANGED) at three sites within the
-        # function — branches of the inbound-dispatch ladder. The function
-        # never emits ctype 0x0F (INTERIM); INTERIM-emitting paths live in a
-        # separate function at 0xa655c that stock JNI only reaches when
-        # mtkbt's native dispatcher handles the inbound RegisterNotification
-        # itself. The v2.0 trampoline routes inbound RegisterNotification
-        # through libextavrcp_jni.so + msg=544 -> 0x379e0 -> CHANGED-only
-        # wire, regardless of the reasonCode the trampoline passes. AVRCP 1.3
-        # §6.7.1 requires INTERIM first per subscription; a strict CT
-        # (observed empirically) drops CHANGED-without-INTERIM and falls back
-        # to ~3 s polling, never rendering metadata.
+        # Stock mtkbt reads its INTERIM/CHANGED discriminator from the wrong
+        # byte of the JNI's IPC msg=544 payload. The JNI's
+        # `btmtk_avrcp_send_reg_notievent_*_rsp` helpers (libextavrcp.so)
+        # marshal the reasonCode (0x0F INTERIM / 0x0D CHANGED) into payload
+        # byte 7. mtkbt's per-event response packetFrame builder
+        # (fcn.000121d8 at 0x121d8) loads from byte 8 instead — which is
+        # always 0 after the helper's memset — so the cmp always misses 1
+        # and the dispatch always lands on the CHANGED branch
+        # (movs r1, 0x0D at 0x12244). Wire ctype is 0x0D for every RegNotif
+        # response, INTERIM-emitting paths never reached.
         #
-        # Three 1-byte flips at the three CHANGED-writing sites in fn 0x379e0:
-        # `movs rN, #13` -> `movs rN, #15` (Rd register encoding unchanged).
-        # All three branches now emit ctype 0x0F INTERIM on the wire. T5 / T9
-        # proactive CHANGED-on-edge emits also go through this fn, so they
-        # too become INTERIM on the wire. AVRCP 1.3 §6.7.1 permits repeated
-        # INTERIM responses (treated as fresh subscriptions); CT state refresh
-        # continues via the INTERIM payload.
-        "name":   "[M1] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37cca, r3=#13 branch)",
-        "offset": 0x37cca,
-        "before": bytes([0x0d, 0x23]),
-        "after":  bytes([0x0f, 0x23]),
+        # M1 retargets the discriminator load + cmp to read byte 7 against
+        # 0x0F:
+        #   0x1222e: ldrb r1, [r4, 8]  -> ldrb r1, [r4, 7]
+        #            21 7a              -> e1 79
+        #   0x12230: cmp  r1, 1         -> cmp  r1, 0x0F
+        #            01 29              -> 0f 29
+        # After M1, ctxt[7] == 0x0F → INTERIM ctype 0x0F on the wire (T2 / T8
+        # arms), ctxt[7] != 0x0F → CHANGED ctype 0x0D on the wire (T5 / T9
+        # edge emits). Spec-compliant per AVRCP 1.3 §6.7.1 and matches the
+        # Pixel-as-TG pattern (INTERIM first, CHANGED for subsequent value
+        # updates without waiting for re-registration).
+        #
+        # End-to-end byte chain documented in INVESTIGATION.md Trace #37:
+        # IPC msg=544 → fcn.00067768 → fcn.000518ac case 44 → fcn.00012478
+        # event tbb → per-event response builder → fcn.000121d8 (M1 sites)
+        # → fcn.00011894 strb ctype to packetFrame[0xb] → fcn.0000f0bc
+        # → fcn.0000ef08 strb to wire buf[0].
+        "name":   "[M1a] RegNotif INTERIM/CHANGED discriminator: read ctxt[7] (mtkbt 0x1222e)",
+        "offset": 0x1222e,
+        "before": bytes([0x21, 0x7a]),  # ldrb r1, [r4, 8]
+        "after":  bytes([0xe1, 0x79]),  # ldrb r1, [r4, 7]
     },
     {
-        # M1b — second 0x0D ctype write in the same fn 0x379e0 (branch gated
-        # on r12==2). `movs r2, #13` -> `movs r2, #15`.
-        "name":   "[M1b] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37d3c, r2=#13 branch)",
-        "offset": 0x37d3c,
-        "before": bytes([0x0d, 0x22]),
-        "after":  bytes([0x0f, 0x22]),
-    },
-    {
-        # M1c — third 0x0D ctype write in fn 0x379e0 (third dispatcher branch).
-        # `movs r2, #13` -> `movs r2, #15`.
-        "name":   "[M1c] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37dfc, r2=#13 branch)",
-        "offset": 0x37dfc,
-        "before": bytes([0x0d, 0x22]),
-        "after":  bytes([0x0f, 0x22]),
-    },
-    {
-        # M1d — fourth ctype 0x0D writer in fn 0x396d0 (separate function from
-        # M1/M1b/M1c's fn 0x379e0). Maps internal error code 0x1116 -> AV/C
-        # ctype 0x0D CHANGED at (*global)+12. After M1/M1b/M1c failed to reach
-        # the wire on dual-bolt-20260514-1020 (wire still showed ctype 0x0D
-        # for all 39 RegNotif responses despite deployed mtkbt MD5 matching
-        # 7a9365e2...), 0x39714 is the next plausible candidate — the
-        # `strb r3, [r0, #12]` at offset +2 from this movs writes to the same
-        # buffer-offset-12 pattern fn 0x379e0 uses. If M1/M1b/M1c's three
-        # patches are in dead code, M1d is the active path.
-        #
-        # `movs r3, #13` -> `movs r3, #15`.
-        "name":   "[M1d] AVRCP wire ctype 0x0D -> 0x0F (mtkbt 0x39714, fn 0x396d0 error-code-to-ctype mapper)",
-        "offset": 0x39714,
-        "before": bytes([0x0d, 0x23]),
-        "after":  bytes([0x0f, 0x23]),
+        "name":   "[M1b] RegNotif INTERIM/CHANGED discriminator: cmp against 0x0F (mtkbt 0x12230)",
+        "offset": 0x12230,
+        "before": bytes([0x01, 0x29]),  # cmp r1, 1
+        "after":  bytes([0x0f, 0x29]),  # cmp r1, 0xF
     },
 ]
 
