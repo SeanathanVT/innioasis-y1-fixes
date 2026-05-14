@@ -161,7 +161,7 @@ T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-tramp
 
 Pre-check dispatch table: `0x20 → main`, `0x17 → T_charset`, `0x18 → T_battery`, `0x30 → T6`, `0x40 → T_continuation`, `0x41 → T_continuation`, `0x31+event≠0x02 → T8`, else fall through to "unknow indication".
 
-### T5 — proactive TRACK_CHANGED on Y1 track-change broadcast
+### T5 — proactive track-edge CHANGED burst
 
 In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `notificationTrackChangedNative` at file offset `0x3bc0`:
 
@@ -170,15 +170,19 @@ In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `
 | before | `2D E9 F0 47` | `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` (function prologue) |
 | after  | `[b.w T5 emitted by patcher]` | branch to T5 trampoline |
 
-T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` (full 800 B) and `y1-trampoline-state`, and on track-id divergence emits the AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec order:
+T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` (full 800 B) and `y1-trampoline-state` (21 B), and on track-id divergence emits the Pixel-mirror track-edge CHANGED burst:
 
-1. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by `PlaybackStateBridge.onCompletion`) `== 1`. Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
-2. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=&sentinel_ffx8`. Always.
-3. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Always (every track edge crosses a start-of-new-track boundary).
+1. `reg_notievent_now_playing_content_rsp` (PLT `0x330c`, event 0x09) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`). Gated on `state[20]` (sub_now_playing_content, armed by T8 0x09 INTERIM).
+2. `reg_notievent_pos_changed_rsp` (PLT `0x3360`, event 0x05 — Tbl 5.33) with `r1=0`, `r2=REASON_CHANGED`, `r3=REV(file[780..783])` (current position in host order — `duration_ms` on natural end, `0` on NEXT / PREV). Gated on `state[13]` (sub_pos, armed by T8 0x05 INTERIM).
+3. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by `PlaybackStateBridge.onCompletion`) `== 1` AND `state[17]` (sub_track_reached_end, armed by T8 0x03 INTERIM). Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
+4. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED`, `r3=&sentinel_ffx8`. Gated on `state[16]` (sub_track_changed, armed by extended_T2's INTERIM emit).
+5. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Gated on `state[18]` (sub_track_reached_start, armed by T8 0x04 INTERIM).
 
 Then writes the new track_id back to state and returns `jboolean(1)`.
 
-Fired on every `com.android.music.metachanged` broadcast emitted by the music app (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable. T5's frame is 816 B (16 state + 800 file_buf, mirroring T9's frame shape — needed so T5 can read `file[793]` for the natural-end gate).
+The emit ordering mirrors Pixel-as-TG's wire trace (NowPlayingContent → PlaybackPos → TrackChanged) for events that overlap; 0x03 / 0x04 are AVRCP 1.3 extensions Y1 supports if the CT subscribes (they're not advertised in the current `T1` event set, so the gates are typically `0` and these emits become no-ops).
+
+Fired on every `com.android.music.metachanged` broadcast emitted by the music app (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable. T5's frame is 824 B (24 state + 800 file_buf, with state byte 20 holding sub_now_playing_content).
 
 ### T_charset — InformDisplayableCharacterSet (PDU 0x17)
 
@@ -245,23 +249,25 @@ Events 0x01-0x08 cover AVRCP 1.3 §5.4.2 (Tbls 5.29/5.31/5.32/5.33/5.34/5.36/5.3
 
 All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u16/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Events 0x07 and 0x09-0x0c are INTERIM-only — nothing on Y1 ever changes them. (0x07 SYSTEM_STATUS rationale: see footnote in `docs/BT-COMPLIANCE.md` §2; 0x09-0x0c rationale: Y1 has one player, no Now Playing folder, no UID database.)
 
-### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED + PLAYER_APPLICATION_SETTING_CHANGED
+### T9 — proactive CHANGED on play-state / battery / papp / 1Hz position tick
 
-T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
+T5's structural twin for events 0x01, 0x06, 0x05, 0x08, 0x09. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
 
 | | bytes | mnemonic |
 |---|---|---|
 | before | `2D E9 F3 41` | function prologue |
 | after  | `[b.w T9 emitted by patcher]` | branch to T9 trampoline |
 
-T9 reads `y1-track-info` into its file buffer, then runs four independent edge / cadence checks:
+T9 reads `y1-track-info` into its file buffer and `y1-trampoline-state` (21 B) into the state buffer, then runs five independent edge / cadence checks:
 
-- **play_status:** compare file[792] vs state[9] (`last_play_status`). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Update state[9].
-- **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
-- **papp settings:** compare file[795]/file[796] (repeat_avrcp / shuffle_avrcp) vs state[11]/state[12]. On any inequality, emit `reg_notievent_player_appsettings_changed_rsp` via PLT `0x345c` with `r1=0`, `r2=REASON_CHANGED`, `r3=2`, `sp[0]=&papp_attr_ids` (=`[0x02, 0x03]`), `sp[4]=&file[795]`. Update state[11..12]. The values pointer is just `sp+T9_OFF_FILE_REPEAT` since file_buf already holds `[r, s]` contiguously at 795..796, so no scratch copy is needed.
-- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `now_ms = tv_sec * 1000 + tv_nsec / 1e6` (nsec/1e6 via magic-multiply 0x431BDE83 then high-half >>18), then `live_pos = REV(file[780..783]) + (now_ms - REV(file[784..787]))` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. Both endpoints (`state_change_time_ms` written by `TrackInfoWriter` from `SystemClock.elapsedRealtime()`; `now_ms` from `clock_gettime(CLOCK_BOOTTIME)`) carry full ms precision in the same monotonic-since-boot epoch, so subtraction is bit-exact. T9's frame is 832 B (8 outgoing-args at sp+0..7 for the appsettings call + 16 state + 800 file_buf + 8 timespec).
+- **play_status:** compare file[792] vs state[9] (`last_play_status`). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Gated on `state[14]` (sub_play_status). Then, in the same edge branch, emit `reg_notievent_now_playing_content_rsp` via PLT `0x330c` if `state[20]` (sub_now_playing_content) is armed — Pixel emits NowPlayingContent + PlaybackStatus as a paired burst on play-edge. Update state[9].
+- **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r3=battery_status`. Gated on `state[19]` (sub_battery). Update state[10].
+- **papp settings:** compare file[795]/file[796] (repeat_avrcp / shuffle_avrcp) vs state[11]/state[12]. On any inequality, emit `reg_notievent_player_appsettings_changed_rsp` via PLT `0x345c` with `r3=2`, `sp[0]=&papp_attr_ids` (=`[0x02, 0x03]`), `sp[4]=&file[795]`. Gated on `state[15]` (sub_papp). Update state[11..12]. The values pointer is just `sp+T9_OFF_FILE_REPEAT` since file_buf already holds `[r, s]` contiguously at 795..796.
+- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `now_ms = tv_sec * 1000 + tv_nsec / 1e6` (nsec/1e6 via magic-multiply 0x431BDE83 then high-half >>18), then `live_pos = REV(file[780..783]) + (now_ms - REV(file[784..787]))` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r3=live_pos`. Gated on `state[13]` (sub_pos). Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. Both endpoints (`state_change_time_ms` written by `TrackInfoWriter` from `SystemClock.elapsedRealtime()`; `now_ms` from `clock_gettime(CLOCK_BOOTTIME)`) carry full ms precision in the same monotonic-since-boot epoch, so subtraction is bit-exact. Fires on every `playstatechanged` broadcast while playing — the music app's 1 s position ticker produces the ~1Hz cadence that matches Pixel's PlaybackPos CHANGED rate.
 
-If play, battery, or papp changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, Table 5.33's CHANGED requirement on event-0x05 subscribers, and Table 5.36's CHANGED requirement on event-0x08 subscribers.
+T9's frame is 840 B (8 outgoing-args at sp+0..7 + 24 state + 800 file_buf + 8 timespec).
+
+If play, battery, or papp changed, the state file is written back at offset 9 (4 B: bytes 9..12) — never touches the gate region at bytes 13..20; the position emit is independent and never dirties state. Fires on every `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's on 0x06, Table 5.33's on 0x05, Table 5.36's on 0x08, and AVRCP 1.4 §6.9.5's NowPlayingContentChanged on play-edge for 0x09.
 
 `playstatechanged` is emitted whenever any of the following occurs:
 - play state edge (the music app's `PlayerService` fires `com.android.music.playstatechanged` directly per android.music standard)

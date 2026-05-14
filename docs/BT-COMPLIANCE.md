@@ -106,15 +106,17 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 
 ### Notification events (PDU 0x31 sub-dispatch, AVRCP 1.3 §5.4.2 Tables 5.29–5.37)
 
-The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x09-0x0c are 1.4+ event IDs included to mirror what Pixel-as-TG advertises (strict CT metadata-pane render gates on these being acked even from a 1.3-declared TG). Events 0x03, 0x04, 0x06, 0x07 are no longer advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes despite the absence.
+The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — matches Pixel-as-TG exactly. Events 0x03, 0x04, 0x06, 0x07 are no longer advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes despite the absence.
+
+**Pixel-mirror gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` for the matching event = 1; T5 / T9 read the gate but **never clear**. Once a CT subscribes to an event in a session, every subsequent value change emits CHANGED on that event. The wire ctype is `0x0F` INTERIM regardless of which reasonCode the trampoline passes (M1/M1b/M1c flipped mtkbt's `0x379e0` ctype hardcode to INTERIM). Spec deviation from a strict §6.7.1 reading (which expects single-shot CHANGED per re-registration), but matches what Pixel-as-TG does empirically. CTs in the test matrix accept repeated INTERIM frames; the payload carries the same data CHANGED would.
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play / pause broadcast) |
-| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (reads `y1-track-info[795..796]`) | ✓ T9 (papp block, piggybacked on `playstatechanged`; gated on file[795..796] vs state[11..12] edge) |
-| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (zero/empty payload) | n/a (Y1 has no Now Playing folder) |
+| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 (arms state[14]) | ✓ T9 on play/pause edge (gated on state[14]; session-long) |
+| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 (arms state[16]) | ✓ T5 on track edge (gated on state[16]; session-long) |
+| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 (arms state[13]) | ✓ T9 at ~1Hz while playing + T5 on track edge (gated on state[13]; session-long; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (arms state[15]; reads `y1-track-info[795..796]`) | ✓ T9 on Repeat/Shuffle edge (gated on state[15]; session-long) |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (arms state[20]; zero/empty payload) | ✓ T5 on track edge + T9 on play/pause edge (gated on state[20]; session-long) |
 | 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.9.4 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
 | 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.9.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
 | 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.10.3.3 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |

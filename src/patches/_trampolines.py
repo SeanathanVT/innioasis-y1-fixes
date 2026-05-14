@@ -157,24 +157,36 @@ T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 #   sp+24..823 = y1-track-info file buf (800 B)
 #   sp+824..831 = struct timespec for clock_gettime(CLOCK_BOOTTIME)
 #
-# State byte usage:
+# State byte usage (24 B in-memory; on-disk file grows incrementally from 20
+# to 21 B on first sub_now_playing_content arm — short reads zero-fill the
+# tail bytes via memset, so older files still parse cleanly):
 #   [0..7]  last_seen track_id (T5)
 #   [8]     last RegisterNotification transId (T5)
 #   [9]     last_play_status (T9 edge)
 #   [10]    last_battery_status (T9 edge)
 #   [11]    last_repeat_avrcp (T9 papp edge)
 #   [12]    last_shuffle_avrcp (T9 papp edge)
-#   [13..15] padding
+#   [13..19] per-event subscription gates (see T9_STATE_SUB_*_OFF below)
+#   [20]    sub_now_playing_content (event 0x09 — added for Pixel-mirror)
+#   [21..23] padding (4-B align)
 #
-# T5 / T9 race acknowledgment: both read+modify+write the full 16 B state file,
-# so a concurrent T5+T9 firing can lose one of the updates. In practice T5
-# fires on `metachanged` broadcasts and T9 fires on `playstatechanged`
-# broadcasts -- they overlap rarely, and worst case is a single missed
-# CHANGED edge which recovers on the next event.
-T9_FRAME              = 836        # 8 args + 20 state + 800 file_buf + 8 timespec
+# Pixel-mirror gate semantics: T2 / T8 INTERIM arms a gate byte = 1; T5 / T9
+# CHANGED reads it and emits if armed but DOES NOT clear. Once a CT subscribes
+# to an event in a session, every subsequent value change emits CHANGED. This
+# is the spec deviation Pixel-as-TG empirically gets away with — strict CTs
+# (Bolt) accept unsolicited CHANGED following the first INTERIM. The old
+# §6.7.1 "single-shot per registration" semantic stalled strict CTs that
+# don't reliably re-register between value changes.
+#
+# T5 / T9 race acknowledgment: bytes 9..12 are written by T9 only (4-byte
+# block at offset 9 via lseek+write); bytes 0..8 by T5 only (9-byte block
+# from offset 0); bytes 13..20 by T2/T8 only (single-byte lseek+write). The
+# old read-modify-write race the v2.1.0 implementation had is gone — each
+# region has a single writer.
+T9_FRAME              = 840        # 8 args + 24 state + 800 file_buf + 8 timespec
 T9_OFF_ARGS           = 0
 T9_OFF_STATE          = 8
-T9_OFF_FILE           = 28          # state grew 16→20 for sub_* gates
+T9_OFF_FILE           = 32          # state grew 20→24 for sub_now_playing_content + 4-B align
 T9_OFF_FILE_DURATION   = T9_OFF_FILE + 776   # duration_ms (BE u32, T6 reads same)
 T9_OFF_FILE_POS        = T9_OFF_FILE + 780   # pos_at_state_change_ms (BE u32)
 T9_OFF_FILE_STATE_TIME = T9_OFF_FILE + 784   # state_change_time_ms (BE u32)
@@ -186,21 +198,24 @@ T9_STATE_LAST_PS_OFF      = T9_OFF_STATE + 9   # last_play_status
 T9_STATE_LAST_BATT_OFF    = T9_OFF_STATE + 10  # last_battery_status
 T9_STATE_LAST_REPEAT_OFF  = T9_OFF_STATE + 11  # last_repeat_avrcp (papp edge)
 T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
-# Per-subscription gates for AVRCP §6.7.1's "TG shall notify only once"
-# semantics. T2 / T8 INTERIM emit for a given event sets the matching byte
-# = 1; T5 / T9 CHANGED emit reads + clears the byte. Without these, strict
-# CTs reject CHANGEDs after the first one and freeze their UI mirrors. y1-trampoline-state is 20 bytes; bytes 13..19 hold one byte per
-# event we emit CHANGED for. Bytes 16..19 added 2026-05-13; older 16-byte
-# files degrade gracefully (read returns zero-fill on the new bytes, so
-# the gate evaluates as "not subscribed" and the CT just misses
-# notifications until the file is rebuilt).
-T9_STATE_SUB_POS_OFF      = T9_OFF_STATE + 13  # sub_pos_changed (event 0x05)
-T9_STATE_SUB_PLAY_OFF     = T9_OFF_STATE + 14  # sub_play_status (event 0x01)
-T9_STATE_SUB_PAPP_OFF     = T9_OFF_STATE + 15  # sub_papp (event 0x08)
-T9_STATE_SUB_TRACK_OFF    = T9_OFF_STATE + 16  # sub_track_changed (event 0x02)
-T9_STATE_SUB_REND_OFF     = T9_OFF_STATE + 17  # sub_track_reached_end (event 0x03)
-T9_STATE_SUB_RSTART_OFF   = T9_OFF_STATE + 18  # sub_track_reached_start (event 0x04)
-T9_STATE_SUB_BATT_OFF     = T9_OFF_STATE + 19  # sub_battery (event 0x06)
+# Session-long subscription gates (Pixel-mirror, see "Pixel-mirror gate
+# semantics" above). T2 / T8 INTERIM emit for a given event sets the
+# matching byte = 1; T5 / T9 CHANGED emit reads but does not clear. Once
+# a CT subscribes to an event in a session, every subsequent value change
+# emits CHANGED — matches what Pixel-as-TG empirically gets away with on
+# strict CTs. y1-trampoline-state on disk grows from 20 → 21 bytes on
+# first sub_now_playing_content arm (T8 0x09 INTERIM via lseek+write past
+# EOF zero-extends). Older 16-byte and 20-byte files degrade gracefully
+# (read returns zero-fill on the new bytes; the gate evaluates as "not
+# subscribed" until the file is rebuilt).
+T9_STATE_SUB_POS_OFF       = T9_OFF_STATE + 13  # sub_pos_changed (event 0x05)
+T9_STATE_SUB_PLAY_OFF      = T9_OFF_STATE + 14  # sub_play_status (event 0x01)
+T9_STATE_SUB_PAPP_OFF      = T9_OFF_STATE + 15  # sub_papp (event 0x08)
+T9_STATE_SUB_TRACK_OFF     = T9_OFF_STATE + 16  # sub_track_changed (event 0x02)
+T9_STATE_SUB_REND_OFF      = T9_OFF_STATE + 17  # sub_track_reached_end (event 0x03)
+T9_STATE_SUB_RSTART_OFF    = T9_OFF_STATE + 18  # sub_track_reached_start (event 0x04)
+T9_STATE_SUB_BATT_OFF      = T9_OFF_STATE + 19  # sub_battery (event 0x06)
+T9_STATE_SUB_NOWPLAY_OFF   = T9_OFF_STATE + 20  # sub_now_playing_content (event 0x09)
 # T9's position-emit block needs a struct timespec for clock_gettime(CLOCK_BOOTTIME)
 # to live-extrapolate the playback position (same arithmetic T6 does for
 # GetPlayStatus). Place the 8 B timespec immediately after the file buf.
@@ -212,9 +227,9 @@ T9_OFF_TIMESPEC_NSEC = T9_OFF_TIMESPEC + 4
 # 16 B state buf at sp+0..15 + 800 B y1-track-info file buf at sp+16..815.
 # Same shape as T9. T5 reads enough of y1-track-info to see the natural-end
 # flag at offset 793 (= sp + T5_OFF_FILE_NATURAL_END).
-T5_FRAME              = 820                  # +4 vs original to fit 20-B state
+T5_FRAME              = 824                  # +4 vs prior to fit 24-B state (sub_now_playing_content gate at byte 20)
 T5_OFF_STATE          = 0
-T5_OFF_FILE           = 20                   # state grew 16→20 for sub_* gates
+T5_OFF_FILE           = 24                   # state grew 20→24 for sub_now_playing_content + 4-B align
 T5_OFF_FILE_TID       = T5_OFF_FILE          # 20 - track_id (8 B) at file[0..7]
 T5_OFF_FILE_NATURAL_END = T5_OFF_FILE + 793  # 813 - previous_track_natural_end u8
                                               #       at file[793] (set by the
@@ -834,15 +849,18 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_skip_track_read")
 
-    # ---- read y1-trampoline-state 20 bytes into state buf (sp+0..19) ----
-    # Default 0×20 (state bytes 16..19 hold subscription gates for events
-    # 0x02/0x03/0x04/0x06; zero-fill = "not subscribed").
+    # ---- read y1-trampoline-state 21 bytes into state buf (sp+0..23) ----
+    # Default 0×24 (zero-fill all 24 in-memory bytes; we'll only read 21 from
+    # disk — state bytes 21..23 are 4-B alignment padding). zero-fill means
+    # "not subscribed" for every gate byte, which is the safe default if the
+    # state file is shorter than 21 bytes (older sessions).
     a.movs_imm8(0, 0)
     a.str_sp_imm(0, T5_OFF_STATE + 0)
     a.str_sp_imm(0, T5_OFF_STATE + 4)
     a.str_sp_imm(0, T5_OFF_STATE + 8)
     a.str_sp_imm(0, T5_OFF_STATE + 12)
     a.str_sp_imm(0, T5_OFF_STATE + 16)
+    a.str_sp_imm(0, T5_OFF_STATE + 20)
 
     a.adr_w(0, "path_state")
     a.movs_imm8(1, O_RDONLY)
@@ -854,7 +872,7 @@ def _emit_t5(a: Asm) -> None:
 
     a.mov_lo_lo(0, 5)
     a.add_sp_imm(1, T5_OFF_STATE)             # r1 = state buf
-    a.movs_imm8(2, 20)                        # 20 B: 16 legacy + 4 sub_* bytes
+    a.movs_imm8(2, 21)                        # 21 B: 16 legacy + 5 sub_* bytes
     a.movs_imm8(7, NR_read)
     a.svc(0)
 
@@ -876,12 +894,47 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_changed")
 
+    # ---- emit NowPlayingContentChanged (event 0x09) — Pixel-mirror ----
+    # Pixel emits NowPlayingContent + PlaybackPos + TrackChanged as a 3-frame
+    # burst on every track edge (natural-end, NEXT, PREV). Frame order in this
+    # block matches Pixel's wire ordering. Gate on sub_now_playing_content
+    # (state[20], armed by T8 INTERIM for 0x09); no clear after emit (gate is
+    # session-long per Pixel-mirror).
+    a.ldrb_w(0, 13, T5_OFF_STATE + 20)
+    a.cmp_imm8(0, 0)
+    a.beq("t5_skip_now_playing")
+
+    a.add_imm_t3(0, 4, 8)                     # r0 = conn
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.blx_imm(PLT_reg_notievent_now_playing_content_rsp)
+
+    a.label("t5_skip_now_playing")
+
+    # ---- emit PLAYBACK_POS_CHANGED (event 0x05) on track edge — Pixel-mirror ----
+    # Pixel emits a PlaybackPos CHANGED at every track edge carrying the
+    # current position (= duration_ms on natural end, = 0 on NEXT / PREV).
+    # Reads file[780..783] BE → host. Gate on sub_pos (state[13]) per
+    # Pixel-mirror; no clear.
+    a.ldrb_w(0, 13, T5_OFF_STATE + 13)
+    a.cmp_imm8(0, 0)
+    a.beq("t5_skip_pos_changed")
+
+    a.ldr_sp_imm(3, T5_OFF_FILE + 780)        # r3 = file[780..783] (BE)
+    a.rev_lo_lo(3, 3)                         # → host order
+    a.add_imm_t3(0, 4, 8)                     # r0 = conn
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
+
+    a.label("t5_skip_pos_changed")
+
     # ---- emit TRACK_REACHED_END (event 0x03) only if natural AND subscribed ----
     # AVRCP 1.3 §5.4.2 Table 5.31. ICS Table 7 row 25 (Optional). Two gates:
     #   1. previous-track-natural-end flag at file[793] (set by music app
     #      before metachanged broadcast)
-    #   2. sub_track_reached_end bit at state[17] (set by T8 INTERIM emit,
-    #      cleared here per §6.7.1)
+    #   2. sub_track_reached_end bit at state[17] (armed by T8 INTERIM emit;
+    #      session-long under Pixel-mirror — not cleared)
     a.ldrb_w(0, 13, T5_OFF_FILE_NATURAL_END)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_reached_end")
@@ -895,19 +948,12 @@ def _emit_t5(a: Asm) -> None:
     a.movs_imm8(2, REASON_CHANGED)
     a.blx_imm(PLT_reg_notievent_reached_end_rsp)
 
-    # Clear sub_track_reached_end.
-    # Scratch == target offset: we're clearing the byte we're writing to,
-    # so the 1-B stack scratch can land on the same byte we read 2
-    # instructions ago (r0 already holds the read value if needed elsewhere
-    # — it isn't, here).
-    _emit_subscription_write(a, 0, 17, T5_OFF_STATE + 17, "t5_skip_reached_end")
-
     a.label("t5_skip_reached_end")
 
     # ---- emit TRACK_CHANGED (event 0x02) — gated on subscription ----
     # AVRCP 1.3 §5.4.2 Table 5.30. ICS Table 7 row 24 (Mandatory wire-level).
     # See module docstring for r1=0 / sentinel_ffx8 design rationale.
-    # sub_track_changed bit at state[16].
+    # sub_track_changed bit at state[16] (session-long; not cleared).
     a.ldrb_w(0, 13, T5_OFF_STATE + 16)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_track_changed")
@@ -918,14 +964,11 @@ def _emit_t5(a: Asm) -> None:
     a.adr_w(3, "sentinel_ffx8")
     a.blx_imm(PLT_track_changed_rsp)
 
-    # Clear sub_track_changed.
-    _emit_subscription_write(a, 0, 16, T5_OFF_STATE + 16, "t5_skip_track_changed")
-
     a.label("t5_skip_track_changed")
 
     # ---- emit TRACK_REACHED_START (event 0x04) — gated on subscription ----
     # AVRCP 1.3 §5.4.2 Table 5.32. ICS Table 7 row 26 (Optional).
-    # sub_track_reached_start bit at state[18].
+    # sub_track_reached_start bit at state[18] (session-long; not cleared).
     a.ldrb_w(0, 13, T5_OFF_STATE + 18)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_reached_start")
@@ -934,9 +977,6 @@ def _emit_t5(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
     a.blx_imm(PLT_reg_notievent_reached_start_rsp)
-
-    # Clear sub_track_reached_start.
-    _emit_subscription_write(a, 0, 18, T5_OFF_STATE + 18, "t5_skip_reached_start")
 
     a.label("t5_skip_reached_start")
 
@@ -2035,11 +2075,9 @@ def _emit_t8(a: Asm) -> None:
     _emit_subscription_write(a, 1, 15, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
-    # Events 0x09..0x0c — INTERIM-only, no CHANGED ever. Y1 has one player,
-    # no Now Playing folder, no UID database; nothing here ever changes, so
-    # the INTERIM is the entire lifecycle of the subscription. Advertised in
-    # T1 to mirror Pixel-as-TG, which is what unblocks strict CT metadata-pane
-    # render even though the SDP profile descriptor says 1.3.
+    # Events 0x09..0x0c — INTERIM ack + (for 0x09 only) arm sub_now_playing_content
+    # so T5 / T9 can emit CHANGED on track-edge / play-edge per Pixel-mirror.
+    # 0x0a / 0x0b / 0x0c stay INTERIM-only (Y1 has one player, no UID database).
     a.label("t8_check_9")
     a.cmp_imm8(0, 0x09)
     a.bne("t8_check_a")
@@ -2048,6 +2086,9 @@ def _emit_t8(a: Asm) -> None:
     a.movs_imm8(1, 0)
     a.add_imm_t3(0, 5, 8)
     a.blx_imm(PLT_reg_notievent_now_playing_content_rsp)
+
+    # Arm sub_now_playing_content (state[20]). T5 / T9 CHANGED emits gate on this.
+    _emit_subscription_write(a, 1, 20, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
     a.label("t8_check_a")
@@ -2196,12 +2237,14 @@ def _emit_t9(a: Asm) -> None:
     a.movw(2, 800)
     a.blx_imm(PLT_memset)
 
-    # ---- memset(state_buf, 0, 20) ----
-    # State is 20 B: bytes 0..12 = T5 / T9 track + edge-tracking; bytes
-    # 13..19 = per-event subscription gates (see T9_STATE_SUB_*_OFF).
+    # ---- memset(state_buf, 0, 24) ----
+    # State is 24 B in-memory (4-B aligned): bytes 0..12 = T5 / T9 track +
+    # edge-tracking; bytes 13..20 = per-event subscription gates (see
+    # T9_STATE_SUB_*_OFF); bytes 21..23 = padding. zero-fill defaults every
+    # gate to "not subscribed" if the read returns fewer bytes.
     a.add_sp_imm(0, T9_OFF_STATE)
     a.movs_imm8(1, 0)
-    a.movs_imm8(2, 20)
+    a.movs_imm8(2, 24)
     a.blx_imm(PLT_memset)
 
     # ---- open + read y1-track-info into file_buf ----
@@ -2235,7 +2278,7 @@ def _emit_t9(a: Asm) -> None:
 
     a.mov_lo_lo(0, 5)
     a.add_sp_imm(1, T9_OFF_STATE)             # r1 = state_buf
-    a.movs_imm8(2, 20)                        # 20 B: 16 legacy + 4 sub_* bytes
+    a.movs_imm8(2, 21)                        # 21 B: 16 legacy + 5 sub_* bytes
     a.movs_imm8(7, NR_read)
     a.svc(0)
 
@@ -2262,10 +2305,10 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
-    # has armed sub_play_status (state[14] = 1) since last emit. CTs that
-    # don't re-register won't get phantom CHANGEDs; spec-compliant CTs
-    # that do re-register get a fresh CHANGED per subscription cycle.
+    # Subscription gate (Pixel-mirror session-long): emit CHANGED only if T8
+    # INTERIM has armed sub_play_status (state[14] = 1) at some point in this
+    # session. Gate is not cleared — every play-edge after the first
+    # subscription emits CHANGED. Matches Pixel's behaviour.
     a.ldrb_w(1, 13, T9_STATE_SUB_PLAY_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_play_check")
@@ -2279,8 +2322,18 @@ def _emit_t9(a: Asm) -> None:
     a.ldrb_w(3, 13, T9_OFF_FILE_PLAYFLAG)     # r3 = play_status
     a.blx_imm(PLT_reg_notievent_playback_rsp)
 
-    # Clear sub_play_status (state[14]) — subscription consumed.
-    _emit_subscription_write(a, 0, 14, T9_OFF_TIMESPEC_SEC, "t9_after_play_check")
+    # ---- emit NowPlayingContentChanged CHANGED on play-edge (Pixel-mirror) ----
+    # Pixel emits NowPlayingContent + PlaybackStatus + TrackChanged as a
+    # 3-frame burst on play/pause edge. Same gate semantics as the rest under
+    # Pixel-mirror — set-once at T8 INTERIM, never cleared.
+    a.ldrb_w(1, 13, T9_STATE_SUB_NOWPLAY_OFF)
+    a.cmp_imm8(1, 0)
+    a.beq("t9_after_play_check")
+
+    a.add_imm_t3(0, 4, 8)                     # r0 = conn
+    a.movs_imm8(1, 0)                         # success
+    a.movs_imm8(2, REASON_CHANGED)
+    a.blx_imm(PLT_reg_notievent_now_playing_content_rsp)
 
     a.label("t9_after_play_check")
 
@@ -2300,7 +2353,8 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_BATT_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (AVRCP §6.7.1): emit only if sub_battery armed.
+    # Subscription gate (Pixel-mirror session-long): emit only if sub_battery
+    # ever armed. Not cleared after emit.
     a.ldrb_w(1, 13, T9_STATE_SUB_BATT_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_batt_check")
@@ -2311,9 +2365,6 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(2, REASON_CHANGED)
     a.ldrb_w(3, 13, T9_OFF_FILE_BATTERY)      # r3 = battery_status
     a.blx_imm(PLT_reg_notievent_battery_status_rsp)
-
-    # Clear sub_battery (state[19]) — subscription consumed.
-    _emit_subscription_write(a, 0, 19, T9_OFF_TIMESPEC_SEC, "t9_after_batt_check")
 
     a.label("t9_after_batt_check")
 
@@ -2344,10 +2395,9 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_SHUFFLE_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (AVRCP §6.7.1): emit CHANGED only if T8 INTERIM
-    # has armed sub_papp (state[15] = 1) since last emit. Without this,
-    # strict CTs that don't re-register freeze their PApp UI after the
-    # first CHANGED.
+    # Subscription gate (Pixel-mirror session-long): emit CHANGED only if T8
+    # INTERIM has armed sub_papp (state[15] = 1) at some point in this
+    # session. Not cleared — every PApp edge emits.
     a.ldrb_w(1, 13, T9_STATE_SUB_PAPP_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_papp_check")
@@ -2365,9 +2415,6 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(2, REASON_CHANGED)
     a.movs_imm8(3, 2)                         # n
     a.blx_imm(PLT_reg_notievent_player_appsettings_rsp)
-
-    # Clear sub_papp (state[15]) — subscription consumed.
-    _emit_subscription_write(a, 0, 15, T9_OFF_TIMESPEC_SEC, "t9_after_papp_check")
 
     a.label("t9_after_papp_check")
 
@@ -2425,11 +2472,9 @@ def _emit_t9(a: Asm) -> None:
     a.cmp_imm8(0, 1)                          # 1 = PLAYING (AVRCP §5.4.1 Tbl 5.26)
     a.bne("t9_done")
 
-    # Subscription gate per AVRCP §6.7.1: state[13] = 1 means T8 emitted an
-    # INTERIM for event 0x05 since the last CHANGED. If 0, the previous
-    # CHANGED already consumed the subscription and we must wait for a new
-    # RegisterNotification before emitting again — strict CTs reject
-    # unsolicited CHANGEDs and freeze the playhead display.
+    # Subscription gate (Pixel-mirror session-long): emit only if sub_pos
+    # ever armed (state[13] = 1). Not cleared — every position tick during
+    # playback emits CHANGED. Matches Pixel's ~1Hz tick cadence on Bolt.
     a.ldrb_w(0, 13, T9_STATE_SUB_POS_OFF)
     a.cmp_imm8(0, 0)
     a.beq("t9_done")
@@ -2482,12 +2527,6 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(2, REASON_CHANGED)
     # r3 already = live_pos
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
-
-    # Clear sub_pos_changed (event 0x05) per AVRCP §6.7.1 once-consumed
-    # semantics. Next CHANGED only fires after T8 INTERIM emit re-arms the
-    # bit (CT re-registers). State-writeback block above already ran for
-    # this T9 invocation; dedicated 1-byte write needed here.
-    _emit_subscription_write(a, 0, 13, T9_OFF_TIMESPEC_SEC, "t9_done")
 
     a.label("t9_done")
     # ---- epilogue: return jboolean true ----

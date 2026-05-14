@@ -2872,3 +2872,54 @@ All inbound-dispatch branches now emit ctype `0x0F` INTERIM. OUTPUT_MD5 for `mtk
 ### Open: Kia track-end position unreliability
 
 The `dual-kia-20260514-0837` capture (which was against the M1-only build that didn't reach the wire) showed Kia subscribing in the spec-correct rapid burst pattern (8 RegNotifs in < 300 ms, matching Pixel's pattern), but the user reports "track end position doesn't reliably update." Since M1 didn't change the wire bytes, this regression — if real — must be from something else in the recently flashed stack (Trace #33's T_charset → reject is the most likely candidate, since size=214 reject is visible in the Kia log's charset response). Will re-evaluate after the M1+M1b+M1c flash.
+
+## Trace #36 (2026-05-14) — Pixel-mirror emit semantics in T5 / T9
+
+### Premise
+
+After M1+M1b+M1c flipped mtkbt's wire ctype to INTERIM on every RegNotif response, the question was whether to keep the §6.7.1-strict "single-shot CHANGED per re-registration" semantics in T5 / T9 or to mirror Pixel's "fire whenever the value changes, don't gate-clear" pattern. Two observations drove the decision:
+
+1. The user reported Kia's track-end position not reliably updating. The root cause: T9's `sub_pos` gate clears after the first CHANGED, so subsequent 1Hz position ticks and track-edge transitions never emit unless the CT re-registers between every event. Kia (and most CTs) don't re-register reliably between value changes — they rely on either (a) Pixel-style continuous emits or (b) GetPlayStatus polling.
+
+2. Pixel-as-TG's btsnoop trace shows it preempting §6.7.1: emits CHANGED unsolicited on every value change, doesn't wait for re-registration. Bolt accepts this, re-registers within ~20 ms of each CHANGED. The §6.7.1-strict reading is more rigid than the actual ecosystem expects.
+
+### Implementation (`_trampolines.py`)
+
+**State byte semantics shifted from single-shot to session-long.** T2 / T8 INTERIM still arm the gate bytes (`state[13..20]`); T5 / T9 read but no longer clear after CHANGED emit. Once a CT subscribes in a session, every subsequent value change emits.
+
+**Specific changes:**
+
+- Removed 7 `_emit_subscription_write(a, 0, …)` clear-on-emit calls from T5 (3) and T9 (4).
+- Added `state[20]` = `sub_now_playing_content` (event 0x09). T8 0x09 INTERIM arms it. T5 / T9 gate on it for the new NowPlayingContent emits.
+- T5: added `reg_notievent_now_playing_content_rsp` + `reg_notievent_pos_changed_rsp` calls on every track-edge fire. Order matches Pixel's wire ordering (NowPlayingContent → PlaybackPos → TrackChanged → TrackReachedEnd → TrackReachedStart, with 0x03 / 0x04 gated on their respective sub_* bits which are typically 0 since events 0x03 / 0x04 aren't advertised).
+- T9: added `reg_notievent_now_playing_content_rsp` call on play-status edge (paired with the existing PlaybackStatus CHANGED emit).
+- `T5_FRAME` 820 → 824 (4-B align for 24-byte state buf); `T9_FRAME` 836 → 840 (same).
+- State buf read size 20 → 21 in both T5 and T9.
+
+**On-disk state file** grows from 20 → 21 bytes on first T8 0x09 INTERIM arm (`lseek + write` past EOF zero-extends; older 16-B / 20-B files degrade gracefully — short reads zero-fill the in-memory buffer).
+
+### Pixel-mirror coverage table
+
+What we now emit, compared with the Pixel ↔ Bolt btsnoop trace:
+
+| Trigger | Pixel emits | Y1 emits (post-Pixel-mirror) |
+|---|---|---|
+| ~1Hz tick during playback | PlaybackPosChanged | PlaybackPosChanged (T9 1Hz block; gate session-long) ✓ |
+| play/pause edge | PlaybackStatus + NowPlayingContent + (initial) TrackChanged | PlaybackStatus + NowPlayingContent (T9 play-edge block) ✓ (TrackChanged on play-edge is Pixel's first-play-after-connect specific behaviour for resolving internal track ID 0x0000 → real; Y1 uses 0xFF×8 sentinel so doesn't need this) |
+| track edge (natural / NEXT / PREV) | NowPlayingContent + PlaybackPos + TrackChanged | NowPlayingContent + PlaybackPos + TrackChanged (T5; in spec order) ✓ |
+| Player Application Settings change | PlayerApplicationSettingChanged | PlayerApplicationSettingChanged (T9 papp block) ✓ |
+| Battery edge | n/a (Pixel doesn't advertise 0x06) | n/a (Y1 doesn't advertise either; T9's emit is dead path) |
+
+### Spec deviation
+
+Strict §6.7.1: TG SHALL only send CHANGED in response to an outstanding INTERIM-acked registration; the registration is consumed by the CHANGED. We treat the registration as session-long instead — same deviation Pixel-as-TG ships and Bolt empirically tolerates. CTs that depend strictly on §6.7.1 would see "duplicate" CHANGEDs without re-registration between them; in the test matrix, all observed CTs accept this and update their UI on every frame.
+
+### Wire output
+
+OUTPUT_MD5 for `libextavrcp_jni.so.patched`: `e2d4467…` → `75270ee12a36bbf553ff504746d218fd`.
+
+Blob size 3852 → 3568 B (gate-clear removals freed more bytes than the new emits added; 452 B free in the LOAD #1 padding budget).
+
+### Open
+
+If a future CT in the test matrix rejects unsolicited CHANGED following the first INTERIM, the fallback is to clear `state[13..20]` on the connect_ind edge to scope subscription state to a single CT session. There's no clean trampoline hook for "new CT connected" today — would need to add an entry in mtkbt's IPC dispatch or rely on the music app to clear state files on disconnect.
