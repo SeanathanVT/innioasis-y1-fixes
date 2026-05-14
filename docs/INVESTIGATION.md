@@ -3094,3 +3094,55 @@ Every outbound AV/C frame `fcn.0000ef08` builds emits wire ctype `0x0F` INTERIM 
 - REJECTED responses (per-CT NOT_AVAILABLE etc.): ctype `0x0A` → `0x0F`.
 
 Some strict CTs may reject non-RegNotif responses with INTERIM ctype. This is acceptable for the one-flash diagnostic capture. M2 is removed after the diagnostic question is answered.
+
+## Trace #39 (2026-05-14) — M2 diagnostic outcome: chain confirmed, M1a was wrong, M1b is the correct fix
+
+### M2 outcome
+
+Post-M2 flash (debug build, mtkbt MD5 `4321c84147b5a0a43ab028b9f6ceff1b`, force wire ctype = `0x0F` at `fcn.0000ef08` 0xef5e):
+
+- **Metadata pane RENDERED on Bolt.** Artist / Track / Album visible (Zebrahead track verified by the user).
+- **All Bolt-side PASSTHROUGH buttons broke.** PASSTHROUGH responses (PLAY / PAUSE / NEXT / PREVIOUS command acks) normally carry ctype `0x09` ACCEPTED. M2 forces them to `0x0F` INTERIM, which Bolt interprets as "command pending" rather than "command accepted" — UI feedback never confirms.
+- **Metadata did not update on track skip from the Y1.** T5 / T9 CHANGED-on-edge emits normally carry ctype `0x0D` CHANGED. M2 forces them to `0x0F` INTERIM, so Bolt sees the same registration's "initial state" message repeatedly instead of a value-change notification — no refresh trigger fires.
+
+Both side-effect symptoms are precisely what the spec predicts for ctype overload, confirming that:
+
+1. **`fcn.0000ef08` IS the active wire-emit path** for every outbound AVRCP frame, not just RegNotif responses. The chain `IPC msg=544 → fcn.00067768 → fcn.000518ac → fcn.00012478 → per-event handler → fcn.000121d8 → fcn.00011894 → fcn.0000f0bc → fcn.0000ef08` is correct.
+2. **Wire ctype IS the blocker** for Bolt's metadata pane render. Once 0x0F appeared on the wire, the pane filled in.
+3. **Y1's RegNotif response data payload is correct** as soon as the ctype byte is. Artist / Track / Album bytes flow through `GetElementAttributes` and the metadata structures are well-formed; Bolt parses them happily.
+
+### What M1a got wrong
+
+M1a (commit `aae16de`) retargeted the discriminator load from `[r4, 8]` to `[r4, 7]`. The premise was that the JNI helper's `strb.w r7, [var_bh]` stored the reasonCode at the local-buffer offset that radare2 labelled `var_bh` = "variable at sp+0xb". That label is misleading. The actual instruction bytes `8d f8 0c 70` decode to `strb.w r7, [sp, #0xc]` — sp+12, not sp+11. Combined with the helper's `add r0, sp, 4; memset(r0, 0, 0x28)` (40-byte buffer starts at sp+4), sp+12 maps to **payload byte 8**, not byte 7.
+
+That puts the JNI's reasonCode at `payload[8]` = `ctxt[8]` (in mtkbt's view, after the `ldr r3, [r0+8]` → `ctxt = msg+0x1c` plumbing). Stock mtkbt's `ldrb r1, [r4, 8]` was reading the correct byte. The only bug was the comparison constant.
+
+After M1a + M1b: dispatch reads `ctxt[7]` (always 0 from memset) and compares to `0x0F`. Always fails. Dispatch always lands on CHANGED branch. Wire = `0x0D`. Bolt's pane stays empty.
+
+After **M1b alone** (revert M1a): dispatch reads `ctxt[8]` (= JNI reasonCode = `0x0F` for T2/T8 INTERIM, `0x0D` for T5/T9 CHANGED) and compares to `0x0F`. Matches for INTERIM emits → wire `0x0F`. Mismatches for CHANGED emits → wire `0x0D`. Spec-compliant per AVRCP 1.3 §6.7.1 and matches the Pixel-as-TG behaviour.
+
+### Verified helper offset (libextavrcp.so)
+
+For `btmtk_avrcp_send_reg_notievent_pos_changed_rsp` at file `0x2588`:
+
+| disasm | encoding bytes | actual offset |
+|---|---|---|
+| `strb.w r3, [sp, 9]` | `8d f8 09 30` | sp+9 = payload[5] (= conn[0x11], status) |
+| `strb.w r7, [sp, 0xc]` | `8d f8 0c 70` | sp+12 = **payload[8] = reasonCode** |
+| `strb.w r1, [sp, 0xd]` | `8d f8 0d 10` | sp+13 = payload[9] = event_id (e.g. 5 for PlaybackPos) |
+| `str.w  r8, [sp, 0x28]` | `cd f8 28 80` | sp+40 = payload[0x24] = position u32 |
+
+The radare2 var labels `var_9h`, `var_bh`, `var_dh`, `var_28h` index decimal offset, hex-suffixed (so `var_bh` = sp + 0xb = sp + 11), but the encoded imm12 for the `var_bh` write is `0xc`. The label and instruction disagree by one; trust the bytes.
+
+### Final patch state
+
+| patch | offset | bytes | role |
+|---|---|---|---|
+| **M1** | `0x12230` | `01 29 → 0f 29` | `cmp r1, 1` → `cmp r1, 0x0F`. Stock load `ldrb r1, [r4, 8]` at `0x1222e` left untouched (now correctly reads the JNI reasonCode). |
+
+Rolled back:
+- **M1a** (was `0x1222e: 21 7a → e1 79`, retargeting load to byte 7). Wrong byte.
+- **M2** (debug-only `0xef5e: ea 7a → 0f 22`, force-wire 0x0F). Diagnostic served its purpose; no longer needed.
+- Pre-existing **M1 / M1b / M1c / M1d** in fn.0x379e0 / fn.0x396d0 (removed in commit `aae16de`). Were dead code.
+
+Stock MD5 → M1-only output: `926b8e808693a4c44028ee257b33e898`.

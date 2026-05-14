@@ -24,10 +24,10 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "c6ffea0082aae923ec9e7bc64293f848"
+OUTPUT_MD5        = "926b8e808693a4c44028ee257b33e898"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
-OUTPUT_DEBUG_MD5  = "4321c84147b5a0a43ab028b9f6ceff1b"
+OUTPUT_DEBUG_MD5  = OUTPUT_MD5
 
 EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
@@ -175,92 +175,47 @@ PATCHES = [
         # M1 — RegisterNotification response wire ctype: route the JNI's
         # reasonCode through to mtkbt's AV/C ctype emitter.
         #
-        # Stock mtkbt reads its INTERIM/CHANGED discriminator from the wrong
-        # byte of the JNI's IPC msg=544 payload. The JNI's
-        # `btmtk_avrcp_send_reg_notievent_*_rsp` helpers (libextavrcp.so)
-        # marshal the reasonCode (0x0F INTERIM / 0x0D CHANGED) into payload
-        # byte 7. mtkbt's per-event response packetFrame builder
-        # (fcn.000121d8 at 0x121d8) loads from byte 8 instead — which is
-        # always 0 after the helper's memset — so the cmp always misses 1
-        # and the dispatch always lands on the CHANGED branch
-        # (movs r1, 0x0D at 0x12244). Wire ctype is 0x0D for every RegNotif
-        # response, INTERIM-emitting paths never reached.
+        # Stock mtkbt's per-event RegNotif response packetFrame builder
+        # (fcn.000121d8) reads ctxt[8] and compares against 1 to choose
+        # between INTERIM (ctype 0x0F at 0x12238) and CHANGED (ctype 0x0D
+        # at 0x12244) branches. The JNI's `btmtk_avrcp_send_reg_notievent_*_rsp`
+        # helpers in `libextavrcp.so` marshal the reasonCode argument
+        # (REASON_INTERIM=0x0F / REASON_CHANGED=0x0D) into IPC payload
+        # byte 8 (matches the `strb.w r7, [sp, #12]` at the cardinality=0
+        # path of every helper; sp+12 maps to payload+8 because the helper's
+        # 40-byte buffer sits at sp+4). Stock mtkbt reads the correct byte
+        # but compares against 1, so 0x0F and 0x0D both fail the cmp and
+        # the dispatch always lands on the CHANGED branch — wire ctype is
+        # 0x0D for every RegNotif response, regardless of which reasonCode
+        # the trampoline passes.
         #
-        # M1 retargets the discriminator load + cmp to read byte 7 against
-        # 0x0F:
-        #   0x1222e: ldrb r1, [r4, 8]  -> ldrb r1, [r4, 7]
-        #            21 7a              -> e1 79
-        #   0x12230: cmp  r1, 1         -> cmp  r1, 0x0F
-        #            01 29              -> 0f 29
-        # After M1, ctxt[7] == 0x0F → INTERIM ctype 0x0F on the wire (T2 / T8
-        # arms), ctxt[7] != 0x0F → CHANGED ctype 0x0D on the wire (T5 / T9
-        # edge emits). Spec-compliant per AVRCP 1.3 §6.7.1 and matches the
-        # Pixel-as-TG pattern (INTERIM first, CHANGED for subsequent value
-        # updates without waiting for re-registration).
+        # M1 widens the cmp constant from 1 to 0x0F at file offset 0x12230:
+        #   0x12230: cmp r1, 1   -> cmp r1, 0xF
+        #            01 29        -> 0f 29
+        # After M1:
+        #   ctxt[8] == 0x0F → INTERIM branch → wire ctype 0x0F INTERIM
+        #     (T2 / extended_T2 / T8 first-response arms)
+        #   ctxt[8] != 0x0F → CHANGED branch → wire ctype 0x0D CHANGED
+        #     (T5 / T9 edge emits)
+        # Spec-compliant per AVRCP 1.3 §6.7.1 and matches the Pixel-as-TG
+        # btsnoop pattern (INTERIM on first response per registration,
+        # CHANGED on subsequent value updates without waiting for
+        # re-registration).
         #
-        # End-to-end byte chain documented in INVESTIGATION.md Trace #37:
-        # IPC msg=544 → fcn.00067768 → fcn.000518ac case 44 → fcn.00012478
-        # event tbb → per-event response builder → fcn.000121d8 (M1 sites)
-        # → fcn.00011894 strb ctype to packetFrame[0xb] → fcn.0000f0bc
-        # → fcn.0000ef08 strb to wire buf[0].
-        "name":   "[M1a] RegNotif INTERIM/CHANGED discriminator: read ctxt[7] (mtkbt 0x1222e)",
-        "offset": 0x1222e,
-        "before": bytes([0x21, 0x7a]),  # ldrb r1, [r4, 8]
-        "after":  bytes([0xe1, 0x79]),  # ldrb r1, [r4, 7]
-    },
-    {
-        "name":   "[M1b] RegNotif INTERIM/CHANGED discriminator: cmp against 0x0F (mtkbt 0x12230)",
+        # Earlier M1 / M1b / M1c / M1d sites in fn.0x379e0 and fn.0x396d0
+        # (commits before 2dc1ec6) wrote to offset 0xc of unrelated work
+        # structs — confirmed dead code. An "M1a" load-offset retarget
+        # (commit aae16de) was based on misreading the radare2 var-label
+        # `var_bh` as sp+0xb when the actual encoding is sp+0xc; it made
+        # the dispatch read a byte that's always 0, so the cmp still
+        # missed. Rolled back here. Trace #39 in INVESTIGATION.md.
+        "name":   "[M1] RegNotif INTERIM/CHANGED discriminator: cmp ctxt[8] against 0x0F (mtkbt 0x12230)",
         "offset": 0x12230,
         "before": bytes([0x01, 0x29]),  # cmp r1, 1
         "after":  bytes([0x0f, 0x29]),  # cmp r1, 0xF
     },
 ]
 
-# M2 — wire-side ctype force-INTERIM diagnostic. Debug-only.
-#
-# Forces packetFrame[0xb] (the AV/C ctype byte) to literal 0x0F INTERIM at
-# the actual wire-write site in fcn.0000ef08, bypassing whatever the
-# upstream builder (fcn.000121d8 etc.) wrote into packetFrame[0xb].
-#
-# Purpose: ground-truth verification of whether fcn.0000ef08 IS the active
-# wire-emit path for RegNotif responses. M1a / M1b's failure to change
-# observable behaviour with the verified-deployed binary means either
-# (a) fcn.0000ef08 is NOT on the active path (i.e. a parallel emitter
-# bypasses our chain), or (b) fcn.0000ef08 IS on the path but ctype is
-# not the only blocker for Bolt's metadata-pane render.
-#
-# Bytes: 0xef5e: `ea 7a` (`ldrb r2, [r5, 0xb]`) -> `0f 22` (`movs r2, 0xF`).
-# The instruction at 0xef5e loads packetFrame[0xb] into r2, which is then
-# written to wire buf[0] at 0xef68 (`strb r2, [r4, 0]`). Replacing the
-# load with a constant forces wire ctype = 0x0F unconditionally for every
-# outbound AV/C frame fcn.0000ef08 builds.
-#
-# Verification after flash:
-#   - Bolt's metadata pane renders: confirms (a) fcn.0000ef08 IS the
-#     active wire emitter, and (b) ctype IS the sole blocker (or close
-#     to it). Roll back M2, keep M1a / M1b, investigation is closed.
-#   - Bolt's metadata pane still empty: ctype is not the blocker. The
-#     issue is downstream — TRACK_CHANGED Identifier shape, paramLen,
-#     metadata payload formatting, etc. Roll back M2, pivot.
-#
-# Side effects: every outbound AV/C frame (PASSTHROUGH responses,
-# GetElementAttributes responses, GetPlayStatus responses, etc.) emits
-# ctype 0x0F INTERIM instead of its spec-mandated ctype. ACCEPTED (0x09)
-# / NOT_IMPLEMENTED (0x0C) / CHANGED (0x0D) all become INTERIM. Strict
-# CTs may reject non-RegNotif responses with INTERIM ctype, but this is
-# explicitly a one-flash diagnostic — the patch comes back out after the
-# capture is taken.
-DEBUG_PATCHES = [
-    {
-        "name":   "[M2] DIAG: force wire ctype = 0x0F at fcn.0000ef08 (mtkbt 0xef5e)",
-        "offset": 0xef5e,
-        "before": bytes([0xea, 0x7a]),  # ldrb r2, [r5, 0xb]
-        "after":  bytes([0x0f, 0x22]),  # movs r2, 0xF
-    },
-]
-
-if DEBUG_LOGGING:
-    PATCHES.extend(DEBUG_PATCHES)
 
 
 def md5(data: bytes) -> str:
