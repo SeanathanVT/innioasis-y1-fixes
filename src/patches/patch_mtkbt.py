@@ -131,11 +131,13 @@ PATCHES = [
     {
         # V6 routes the SDP record builder to a different served record whose
         # entry slot at vaddr 0xfa794 advertises attr 0x000d
-        # AdditionalProtocolDescriptorList (Browse PSM 0x001b) — an AVRCP 1.4
-        # feature, not part of strict AVRCP 1.3 §3 SDP record shape. V7 swaps
-        # this slot for a 0x0100 ServiceName entry (analogous to S1 for the
-        # other table) reusing the same "Advanced Audio" string. Net wire:
-        # drops Browse advertisement, restores ServiceName presence.
+        # AdditionalProtocolDescriptorList (Browse PSM 0x001b). The attribute
+        # is introduced in AVRCP 1.4 §8 Table 8.2 (conditional on
+        # SupportedFeatures bit 6 "Supports browsing"); AVRCP 1.3 §6 Table 6.2
+        # does not list it. V7 swaps this slot for a 0x0100 ServiceName entry
+        # (analogous to S1 for the other table) reusing the same "Advanced
+        # Audio" string. Net wire: drops Browse advertisement, restores
+        # ServiceName presence.
         "name":   "[V7] 0x000d Browse PSM -> 0x0100 ServiceName  AVRCP 1.3 record entry slot",
         "offset": 0x0f9798,
         # stock entry: attr=0x000d, len=0x14, ptr=0x0eba12 (-> AdditionalProtocolDescList Browse PSM 0x1b)
@@ -145,11 +147,13 @@ PATCHES = [
     },
     {
         # SupportedFeatures byte stream LSB. V6's served record uses the byte
-        # stream at 0xeba4c (`09 00 21`) — bit 5 set is GroupNavigation, an
-        # AVRCP 1.4 capability. AVRCP 1.3 §6.5 Table 6.10: bits 4-15 are
-        # Reserved (must be 0). V8 clears bit 5 so the advertised mask is
-        # 0x0001 (Category 1: Player/Recorder only), matching strict 1.3.
-        "name":   "[V8] SupportedFeatures 0x0021 -> 0x0001  clear AVRCP 1.4 GroupNavigation bit",
+        # stream at 0xeba4c (`09 00 21`) — bit 5 set is "Group Navigation"
+        # per AVRCP 1.3 §6 Table 6.2 (conditional on bit 0 Cat 1 being set).
+        # Y1 ships no Group Navigation PASSTHROUGH handler, so per Table 6.2's
+        # note ("the bits for supported categories are set to 1; others are
+        # set to 0") this bit should be 0. V8 clears it so the advertised
+        # mask is 0x0001 (Category 1: Player/Recorder only).
+        "name":   "[V8] SupportedFeatures 0x0021 -> 0x0001  clear Group Navigation bit (unimplemented)",
         "offset": 0x0eba4e,
         "before": bytes([0x21]),
         "after":  bytes([0x01]),

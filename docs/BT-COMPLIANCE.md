@@ -114,10 +114,10 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 | 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
 | 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (reads `y1-track-info[795..796]`) | ✓ T9 (papp block, piggybacked on `playstatechanged`; gated on file[795..796] vs state[11..12] edge) |
-| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (zero/empty payload) | n/a (Y1 has no Now Playing folder) |
-| 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
-| 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
-| 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (zero/empty payload) | n/a (Y1 has no Now Playing folder) |
+| 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.9.4 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
+| 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.9.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
+| 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.10.3.3 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |
 
 ---
 

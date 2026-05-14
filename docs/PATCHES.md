@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AVRCP 1.4 attr 0x000d Browse PSM advertisement, clear AVRCP 1.4 GroupNavigation feature bit, ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -20,7 +20,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 Ten byte patches against stock `/system/bin/mtkbt`. Eight reshape the served SDP record so a peer CT engages with AVRCP 1.3 COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values), one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond, and one is a best-effort dispatch alias for AVDTP signal 0x0c.
 
-The mtkbt daemon ships two physical AVRCP TG SDP record templates in `.data.rel.ro`. The internal `activeVersion` field selects which is served on the wire: stock = 10 (legacy 1.0 record), V6 → 14 (AVRCP 1.3 record). V1/V2/S1 patch the legacy record (kept for the fall-through path); V7/V8 patch the AVRCP 1.3 record (where V6 routes the daemon by default) so it conforms to strict AVRCP 1.3 §3 SDP record shape — no Browse PSM advertisement, no 1.4-class feature bits.
+The mtkbt daemon ships two physical AVRCP TG SDP record templates in `.data.rel.ro`. The internal `activeVersion` field selects which is served on the wire: stock = 10 (legacy 1.0 record), V6 → 14 (AVRCP 1.3 record). V1/V2/S1 patch the legacy record (kept for the fall-through path); V7/V8 patch the AVRCP 1.3 record (where V6 routes the daemon by default) so it conforms to AVRCP 1.3 §6 Table 6.2 SDP record shape — no AdditionalProtocolDescriptorList (a 1.4-introduced attribute per AVRCP 1.4 §8 Table 8.2), Group Navigation feature bit cleared (the bit exists in 1.3 §6 Table 6.2 but Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs).
 
 **V1 — AVRCP 1.0 → 1.3** at file `0x0eba58` (1 byte): `0x00` → `0x03`. LSB of the served Group D ProfileDescList Version field.
 
@@ -59,16 +59,16 @@ The stock activation handler at `fcn.00010d00` hardcodes the activeVersion field
 | before | `0d 00 14 00 12 ba 0e 00 00 00 00 00` | attr=`0x000d`, len=`0x14`, ptr=`0x0eba12` (→ AdditionalProtocolDescList: L2CAP / PSM `0x001b` Browse + AVCTP) |
 | after  | `00 01 11 00 ce b9 0e 00 00 00 00 00` | attr=`0x0100`, len=`0x11`, ptr=`0x0eb9ce` (→ `25 0f "Advanced Audio\0"`) |
 
-The stock AVRCP 1.3 served record advertises attribute `0x000d AdditionalProtocolDescriptorList` carrying the AVRCP Browse PSM `0x001b`. Browse is an AVRCP 1.4 feature — the AVRCP 1.3 §3 SDP record shape contains no AdditionalProtocolDescriptorList. V7 swaps this entry slot for a `0x0100 ServiceName` entry pointing at the same "Advanced Audio" string S1 reuses for the legacy record. Net wire effect: drops the 1.4 Browse advertisement, restores ServiceName presence so the served record matches strict AVRCP 1.3 §3 shape.
+The stock AVRCP 1.3 served record advertises attribute `0x000d AdditionalProtocolDescriptorList` carrying the AVRCP Browse PSM `0x001b`. AdditionalProtocolDescriptorList is introduced in AVRCP 1.4 §8 Table 8.2 (conditional on SupportedFeatures bit 6 "Supports browsing"); AVRCP 1.3 §6 Table 6.2 does not list it. V7 swaps this entry slot for a `0x0100 ServiceName` entry pointing at the same "Advanced Audio" string S1 reuses for the legacy record. Net wire effect: drops the Browse advertisement, restores ServiceName presence so the served record matches AVRCP 1.3 §6 Table 6.2 shape.
 
 **V8 — `SupportedFeatures` 0x0021 → 0x0001** at file `0x0eba4e` (1 byte):
 
 | | byte | bits set |
 |---|---|---|
-| before | `21` | bit 0 (Category 1: Player/Recorder) + bit 5 (AVRCP 1.4 GroupNavigation) |
+| before | `21` | bit 0 (Category 1: Player/Recorder) + bit 5 (Group Navigation) |
 | after  | `01` | bit 0 only |
 
-LSB of the AVRCP 1.3 served record's SupportedFeatures `uint16` (byte stream `09 00 21` → `09 00 01` at `0x0eba4c`). AVRCP 1.3 §6.5 Table 6.10 reserves bits 4-15 (must be 0); bit 5 is GroupNavigation, an AVRCP 1.4 capability. V8 clears bit 5 so the advertised mask is strictly AVRCP 1.3-conformant.
+LSB of the AVRCP 1.3 served record's SupportedFeatures `uint16` (byte stream `09 00 21` → `09 00 01` at `0x0eba4c`). AVRCP 1.3 §6 Table 6.2 defines bit 5 as "Group Navigation" (conditional on bit 0 Category 1 being set) with the note "the bits for supported categories are set to 1; others are set to 0." Y1's stock advertises bit 5 set but ships no Group Navigation PASSTHROUGH handler; V8 clears it so the advertised mask is 0x0001 (Category 1 only), matching what's actually implemented. Bits 6-15 are RFA in 1.3 Table 6.2; bit 6 became "Supports browsing" in AVRCP 1.4 §8 Table 8.2.
 
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 
