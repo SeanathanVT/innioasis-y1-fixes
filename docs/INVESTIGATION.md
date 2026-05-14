@@ -10,7 +10,7 @@ Current shipped patches by binary:
 
 | Binary | Patches |
 |---|---|
-| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear AVRCP 1.4 GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001 strict 1.3), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame) |
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 (msg=544 wire ctype 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34) |
 | `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard). T1 advertises `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — events 0x09-0x0c are 1.4+ event IDs INTERIM-acked with zero payload via existing `libextavrcp.so` builders (no CHANGED ever fires; Y1 has one player, no Now Playing folder, no UID database). Mirrors Pixel-as-TG; what unblocks strict CT metadata-pane render (see Trace #32). |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
@@ -2787,3 +2787,54 @@ If the InformDisplayableCharacterSet → ACK was indeed the 3-second stall, the 
 - `GetElementAttributes` (size 45) follows the first RegisterNotification by ~10 ms
 
 If the burst pattern matches Pixel's and the metadata pane still doesn't render, the discriminator is elsewhere (SDP record content, EIR/inquiry response, BR/EDR name regex). If the burst happens but the pane does render, this closes the investigation.
+
+## Trace #34 (2026-05-14) — mtkbt msg=544 wire ctype is hardcoded 0x0D CHANGED; M1 fix
+
+### Direct discriminator finally found at the wire layer
+
+Post-Trace-#33 captures (`dual-bolt-20260513-2207`) parsed at HCI ACL level. AV/C ctype byte counted from all outbound AVRCP frames:
+
+| ctype | name | count |
+|---|---|---|
+| 0x08 | NOT_IMPLEMENTED | 1 (T_charset reject) |
+| 0x09 | ACCEPTED | 7 (PASSTHROUGH PLAY/PAUSE responses) |
+| 0x0C | STABLE | 1 (GetCapabilities response) |
+| 0x0D | CHANGED | **20** (every RegisterNotification response) |
+| 0x0F | INTERIM | **0** |
+
+Every Y1-as-TG response to RegisterNotification has gone out as CHANGED on the wire, never INTERIM, for the entire v2.0 / v2.1 trampoline-chain era. The Pixel capture of the identical Bolt CT shows ctype `0x0F` INTERIM for the first response per subscription, `0x0D` CHANGED on subsequent edges — the spec-correct AVRCP 1.3 §6.7.1 pattern. Bolt drops CHANGED-without-INTERIM and falls back to ~3 s polling, which never delivers the metadata pane render.
+
+### Why no earlier trace caught this
+
+Every prior btlog inspection (Trace #18, #21, #28-31) parsed mtkbt's IPC byte stream (msg=520, msg=540, msg=544) and verified the IPC frame shape; none decoded the actual HCI ACL bytes mtkbt put on the wire. The IPC layer's `reasonCode` byte at IPC frame[8] is exactly what the trampoline passes (0x0F INTERIM for first response per subscription, 0x0D CHANGED for proactive edges). The bug is between mtkbt's IPC reception and HCI emission.
+
+### Root cause in mtkbt
+
+mtkbt's outbound AVRCP wire encoder at file `0x37cca`:
+
+```
+37cb8: ldrb.w r1, [r5, #548]   ; per-conn state byte
+37cbc: and.w  r2, r1, #34       ; mask 0x22 = bits 1, 5
+37cc0: cmp    r2, #2            ; bit 1 set, bit 5 clear ?
+37cc2: bne.n  37cd8
+37cc4: movs   r0, #1
+37cc6: movs   r2, #0
+37cc8: strb   r0, [r4, #25]
+37cca: movs   r3, #13           ; <-- 0x0D CHANGED, HARDCODED
+37cce: strb   r2, [r4, #24]
+37cd0: strb.w r3, [r0, #12]!    ; r4+12 := 0x0D  (wire AV/C ctype byte)
+```
+
+The msg=544 dispatch path reaches this branch unconditionally for every RegisterNotification response (the state byte `r5[548] & 0x22 == 2` matches). The reasonCode byte the trampoline shipped in IPC frame[8] is never consulted. In stock JNI flow this hardcoded CHANGED was correct: msg=544 was only ever invoked by `_Z45BluetoothAvrcpService_registerNotificationCnfNative...` *after* the music app reported a value change. The initial INTERIM came from mtkbt's native dispatcher through a different function at file `0x42abe`, which conditionally writes ctype `0x0F` when its dispatch byte `r5[1]==3`. The v2.0.0 trampoline bypasses the native dispatcher (because cardinality:0 was unresolvable) and routes both INTERIM and CHANGED through msg=544 → CHANGED-only on the wire.
+
+### Fix (M1)
+
+One-byte flip at mtkbt file `0x37cca`: `0d 23` → `0f 23` (`movs r3, #13` → `movs r3, #15`). Net wire: msg=544 emits ctype `0x0F` INTERIM. The trampoline's reasonCode argument is now ignored either way; both first-response and edge-CHANGED emit INTERIM. AVRCP 1.3 §6.7.1 allows the CT to treat repeated INTERIM responses as fresh subscription confirmations, so CTs that previously relied on the CHANGED edge see their state via the INTERIM payload instead.
+
+OUTPUT_MD5 for `mtkbt.patched`: `5d650885...` → `2f4e811632dc61564d527d41cf1da32c`.
+
+### Open: validate against Kia
+
+The trampoline-chain output reaching every CT in the test matrix has been CHANGED-only since v2.0.0. CTs that worked (Kia, etc.) tolerated CHANGED-without-INTERIM. With M1 they get INTERIM-on-edge instead of CHANGED-on-edge — also a §6.7.1-permissible response shape, but a behaviour-shift. Need a fresh `dual-kia-*` capture post-M1 flash to confirm no regression in PLAY / PAUSE / metadata refresh.
+
+If Kia regresses on M1: option C from the deep-analysis discussion remains — patch mtkbt to read the IPC frame[8] reasonCode byte at `0x37cca` and use it as the wire ctype, preserving the INTERIM/CHANGED distinction the trampoline already passes. Requires identifying which register or memory location holds the reasonCode byte at that point in the function (open RE work).
