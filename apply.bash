@@ -608,7 +608,7 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # Modified to properly configure Bluetooth
-ro.bluetooth.class=10487836
+ro.bluetooth.class=5898252
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
 EOF
