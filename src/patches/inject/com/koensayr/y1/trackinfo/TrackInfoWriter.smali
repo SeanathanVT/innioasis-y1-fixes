@@ -442,33 +442,70 @@
 .end method
 
 
-# Track edge: consume the pending natural-end latch, reset position+time, flush.
-# Called from OnPreparedListener (track is now decoded and playable).
+# Track edge: consume the pending natural-end latch, conditionally reset
+# position+time, flush. Called from OnPreparedListener (track is now decoded
+# and playable).
+#
+# Position-anchor reset is gated on the audio_id actually changing. The Y1
+# music app fires OnPreparedListener on every prepareAsync completion,
+# including the re-prepare some player engines do on pause→resume cycles
+# of the same track. Unconditionally resetting mPositionAtStateChange=0
+# and mStateChangeTime=now on every onPrepared made the live-extrapolated
+# position in T6 (GetPlayStatus response) and T9 (1Hz PlaybackPos CHANGED)
+# collapse to "1 second since last reset" on every state toggle instead of
+# advancing from the actual track-start anchor — observed empirically on
+# Kia (poll-driven CT) with 13 play/pause toggles in dual-kia-20260514-1748.
+#
+# Flow: snapshot old mCachedAudioId, call flushLocked (which recomputes
+# and stores the current audio_id), compare. If the audio_id changed,
+# we're at a real track edge — reset position+time and re-flush. Otherwise
+# the first flush already captured the metadata refresh and we keep the
+# existing anchor.
 .method public declared-synchronized onTrackEdge()V
-    .locals 3
+    .locals 5
 
     monitor-enter p0
 
     :try_start_0
+    # Natural-end latch (unchanged).
     iget-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
 
     iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPreviousTrackNaturalEnd:Z
 
-    const/4 v1, 0x0
+    const/4 v0, 0x0
 
-    iput-boolean v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
 
-    const-wide/16 v1, 0x0
+    # Snapshot the previous cached audio_id (from prior flushLocked).
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
 
-    iput-wide v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+    # First flush — recomputes audio_id from PlayerService.getPlayingSong()
+    # and stores it in mCachedAudioId. Also refreshes title/artist/album so
+    # CTs that re-query metadata immediately after the metachanged broadcast
+    # see the new track even if we end up taking the same-track path below.
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    # Compare new audio_id (just written) with snapshot.
+    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    cmp-long v4, v0, v2
+
+    if-eqz v4, :cond_same_track
+
+    # Real track edge — reset position anchor and re-flush.
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
 
     invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
 
-    move-result-wide v1
+    move-result-wide v0
 
-    iput-wide v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
 
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    :cond_same_track
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
