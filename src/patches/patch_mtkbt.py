@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "7a9365e280172548429974935cfb4a29"
+OUTPUT_MD5        = "74e94281e67aec4201a73d72e812352e"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -215,6 +215,23 @@ PATCHES = [
         "offset": 0x37dfc,
         "before": bytes([0x0d, 0x22]),
         "after":  bytes([0x0f, 0x22]),
+    },
+    {
+        # M1d — fourth ctype 0x0D writer in fn 0x396d0 (separate function from
+        # M1/M1b/M1c's fn 0x379e0). Maps internal error code 0x1116 -> AV/C
+        # ctype 0x0D CHANGED at (*global)+12. After M1/M1b/M1c failed to reach
+        # the wire on dual-bolt-20260514-1020 (wire still showed ctype 0x0D
+        # for all 39 RegNotif responses despite deployed mtkbt MD5 matching
+        # 7a9365e2...), 0x39714 is the next plausible candidate — the
+        # `strb r3, [r0, #12]` at offset +2 from this movs writes to the same
+        # buffer-offset-12 pattern fn 0x379e0 uses. If M1/M1b/M1c's three
+        # patches are in dead code, M1d is the active path.
+        #
+        # `movs r3, #13` -> `movs r3, #15`.
+        "name":   "[M1d] AVRCP wire ctype 0x0D -> 0x0F (mtkbt 0x39714, fn 0x396d0 error-code-to-ctype mapper)",
+        "offset": 0x39714,
+        "before": bytes([0x0d, 0x23]),
+        "after":  bytes([0x0f, 0x23]),
     },
 ]
 
