@@ -27,7 +27,7 @@ STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
 OUTPUT_MD5        = "c6ffea0082aae923ec9e7bc64293f848"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
-OUTPUT_DEBUG_MD5  = OUTPUT_MD5
+OUTPUT_DEBUG_MD5  = "4321c84147b5a0a43ab028b9f6ceff1b"
 
 EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
@@ -215,6 +215,52 @@ PATCHES = [
         "after":  bytes([0x0f, 0x29]),  # cmp r1, 0xF
     },
 ]
+
+# M2 — wire-side ctype force-INTERIM diagnostic. Debug-only.
+#
+# Forces packetFrame[0xb] (the AV/C ctype byte) to literal 0x0F INTERIM at
+# the actual wire-write site in fcn.0000ef08, bypassing whatever the
+# upstream builder (fcn.000121d8 etc.) wrote into packetFrame[0xb].
+#
+# Purpose: ground-truth verification of whether fcn.0000ef08 IS the active
+# wire-emit path for RegNotif responses. M1a / M1b's failure to change
+# observable behaviour with the verified-deployed binary means either
+# (a) fcn.0000ef08 is NOT on the active path (i.e. a parallel emitter
+# bypasses our chain), or (b) fcn.0000ef08 IS on the path but ctype is
+# not the only blocker for Bolt's metadata-pane render.
+#
+# Bytes: 0xef5e: `ea 7a` (`ldrb r2, [r5, 0xb]`) -> `0f 22` (`movs r2, 0xF`).
+# The instruction at 0xef5e loads packetFrame[0xb] into r2, which is then
+# written to wire buf[0] at 0xef68 (`strb r2, [r4, 0]`). Replacing the
+# load with a constant forces wire ctype = 0x0F unconditionally for every
+# outbound AV/C frame fcn.0000ef08 builds.
+#
+# Verification after flash:
+#   - Bolt's metadata pane renders: confirms (a) fcn.0000ef08 IS the
+#     active wire emitter, and (b) ctype IS the sole blocker (or close
+#     to it). Roll back M2, keep M1a / M1b, investigation is closed.
+#   - Bolt's metadata pane still empty: ctype is not the blocker. The
+#     issue is downstream — TRACK_CHANGED Identifier shape, paramLen,
+#     metadata payload formatting, etc. Roll back M2, pivot.
+#
+# Side effects: every outbound AV/C frame (PASSTHROUGH responses,
+# GetElementAttributes responses, GetPlayStatus responses, etc.) emits
+# ctype 0x0F INTERIM instead of its spec-mandated ctype. ACCEPTED (0x09)
+# / NOT_IMPLEMENTED (0x0C) / CHANGED (0x0D) all become INTERIM. Strict
+# CTs may reject non-RegNotif responses with INTERIM ctype, but this is
+# explicitly a one-flash diagnostic — the patch comes back out after the
+# capture is taken.
+DEBUG_PATCHES = [
+    {
+        "name":   "[M2] DIAG: force wire ctype = 0x0F at fcn.0000ef08 (mtkbt 0xef5e)",
+        "offset": 0xef5e,
+        "before": bytes([0xea, 0x7a]),  # ldrb r2, [r5, 0xb]
+        "after":  bytes([0x0f, 0x22]),  # movs r2, 0xF
+    },
+]
+
+if DEBUG_LOGGING:
+    PATCHES.extend(DEBUG_PATCHES)
 
 
 def md5(data: bytes) -> str:

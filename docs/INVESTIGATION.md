@@ -3041,3 +3041,56 @@ After flash:
 3. Bolt: metadata pane render is the proof. Kia: continued operation, no regression on PlayStatus / position reporting.
 
 If Bolt still doesn't render and wire ctype sequence is correct (0x0F first per event, 0x0D on subsequent edges): the issue is downstream of ctype — TRACK_CHANGED Identifier payload, GetElementAttributes attr-list shape, or PASSTHROUGH command handling. The §6.7.1 / wire-ctype chain is then fully accounted for.
+
+## Trace #38 (2026-05-14) — M1a/M1b deployed-and-verified (MD5 c6ffea00) but post-flash behaviour unchanged; M2 diagnostic patch
+
+### What happened
+
+Post-M1a/M1b flash: device-side `md5 /system/bin/mtkbt` returned `c6ffea0082aae923ec9e7bc64293f848` (matches patcher output). User reports Bolt's metadata pane still empty. New capture `dual-bolt-20260514-1555` synced.
+
+### Forensics on the post-patch capture
+
+Static analysis of `btlog.bin` from both pre-M1a/M1b (`dual-bolt-20260514-1020`) and post-M1a/M1b (`dual-bolt-20260514-1555`) captures:
+
+- **mtkbt MD5 deployed**: verified by user, matches `c6ffea00...`.
+- **Bytes at M1a/M1b sites in the deployed binary**: `e1 79 0f 29` (post-patch values) — confirmed by patcher reproduction from the same stock + matching MD5.
+- **`btlog.bin` does NOT contain raw wire bytes.** Despite the file size and apparent presence of AV/C-shaped byte patterns (`00 0d 00 ... 00 19 58 31 00 00 05 01`), those patterns are mtkbt's internal log frame formatting (some kind of packed struct dump). Two pieces of evidence:
+  1. The byte patterns are **byte-for-byte identical pre- and post-patch**. If they were wire bytes, M1a/M1b's effect on RegNotif responses would shift at least some ctype values from `0x0D` to `0x0F`.
+  2. The AVRCP profile_id `0x110E` (which every AVCTP-layer frame on AVRCP carries in big-endian wire order) appears only 1-3 times across the entire 2.8 MB btlog — far below the hundreds we'd expect if wire frames were logged.
+- **`[BT]PutByte: len=N` log lines** in `btlog.bin` truncate at ~4 bytes of payload data after the length string — well before reaching the AV/C ctype byte (offset ~12-15 from L2CAP frame start, depending on AVCTP / ACL framing).
+- **`[AVC] L2CAP_SendData channelId:68 packet.headerLen:6 packet.dataLen:N`** log lines exist (~80 in 1020, ~80 in 1555) — Y1 is actively sending L2CAP traffic to Bolt — but mtkbt's log format strings for these lines don't include the AV/C ctype byte. Bytes are gone by the time the log line is emitted.
+- **No `[AVCTP] cmdFrame->ctype:%d ...` log lines** in either capture. That log line lives in `fcn.0006d048` (cmdFrame RECV parser), only fires for AV/C frames mtkbt processes natively (not the trampoline-shortcircuited path the v2.0 design uses).
+
+### What the logs cannot tell us
+
+Whether the wire ctype byte for the post-M1a/M1b RegNotif responses is `0x0F` (M1a/M1b working) or `0x0D` (M1a/M1b on a dead path). The captures don't contain wire-byte evidence.
+
+### M2 diagnostic — force-INTERIM at the wire-write site
+
+**File offset `0xef5e`** in `fcn.0000ef08` (the AV/C wire frame builder) loads the ctype byte from `packetFrame[0xb]` into `r2`, which `strb r2, [r4, 0]` at `0xef68` writes to wire `buf[0]`. M2 replaces the load with `movs r2, 0xF` — every outbound AV/C frame `fcn.0000ef08` builds gets wire ctype `0x0F` INTERIM, regardless of what the upstream builder put in `packetFrame[0xb]`.
+
+| offset | before → after | mnemonic |
+|---|---|---|
+| `0xef5e` | `ea 7a → 0f 22` | `ldrb r2, [r5, 0xb]` → `movs r2, 0xF` |
+
+**Gated behind `KOENSAYR_DEBUG=1`** (the existing `apply.bash --debug` flag). Release builds don't include M2; the patcher's `DEBUG_PATCHES` list is only appended to `PATCHES` when the env var is set. Stock MD5 → M1a/M1b only output `c6ffea00...`; stock MD5 → M1a/M1b + M2 debug output `4321c84147b5a0a43ab028b9f6ceff1b`.
+
+### Diagnostic decision tree
+
+Build with `./apply.bash --avrcp --debug`, flash, pair with Bolt, observe metadata pane:
+
+1. **Pane renders** → `fcn.0000ef08` IS the active wire emitter for RegNotif responses. M1a/M1b's logic is correct; some upstream divergence prevents it from biting. Pivot: find why ctxt[7] isn't carrying the JNI's reasonCode through, OR what other path supplies a different ctype value to `packetFrame[0xb]` before `fcn.0000ef08` reads it. Roll M2 out.
+2. **Pane still empty** → ctype is not the (sole) blocker. Wire ctype is reaching Bolt with whatever the rest of the stack produces but Bolt's pane gates on a downstream field. Investigation pivots completely — TRACK_CHANGED Identifier payload shape, GetElementAttributes attr-list ordering, PASSTHROUGH command handling, paramLen encoding. Roll M2 out.
+
+Either branch is a productive next move, and either branch closes the "ctype on the wire" question for good.
+
+### Side effects of M2 while it's flashed
+
+Every outbound AV/C frame `fcn.0000ef08` builds emits wire ctype `0x0F` INTERIM regardless of spec-mandated value:
+
+- RegNotif responses: `0x0F` INTERIM for first response and for value-change updates (the v2.0 / Pixel-mirror design already emits unsolicited CHANGEDs without re-registration, so the data flow continues).
+- ACCEPTED responses (PASSTHROUGH command acks, GetCapabilities, GetElementAttributes, GetPlayStatus): ctype `0x09` → `0x0F`.
+- NOT_IMPLEMENTED responses (T_charset's PDU 0x17 reject): ctype `0x0C` → `0x0F`.
+- REJECTED responses (per-CT NOT_AVAILABLE etc.): ctype `0x0A` → `0x0F`.
+
+Some strict CTs may reject non-RegNotif responses with INTERIM ctype. This is acceptable for the one-flash diagnostic capture. M2 is removed after the diagnostic question is answered.
