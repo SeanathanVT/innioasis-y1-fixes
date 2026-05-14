@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "2f4e811632dc61564d527d41cf1da32c"
+OUTPUT_MD5        = "7a9365e280172548429974935cfb4a29"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -175,38 +175,46 @@ PATCHES = [
         # M1 — msg=544 RegisterNotification response wire ctype: CHANGED (0x0D)
         # -> INTERIM (0x0F).
         #
-        # Stock mtkbt's outbound AVRCP encoder at file 0x37cca writes a
-        # hardcoded AV/C ctype byte of 0x0D (CHANGED) for every msg=544
-        # RegisterNotification response, regardless of the reasonCode our
-        # libextavrcp_jni.so trampoline passes (which is 0x0F INTERIM for the
-        # first response per subscription, 0x0D CHANGED for proactive emits).
-        # In stock JNI flow msg=544 was only ever called for actual value
-        # changes, so the hardcoded CHANGED was correct; the initial INTERIM
-        # was emitted by mtkbt's native dispatcher through a different
-        # function (file 0x42abe, conditional on r5[1]==3 -> ctype 0x0F).
-        # Our trampoline bypasses the native dispatcher and routes both
-        # INTERIM and CHANGED through msg=544, producing CHANGED-without-
-        # INTERIM on the wire. AVRCP 1.3 §6.7.1 requires INTERIM first; a
-        # strict CT that enforces this drops the response and re-subscribes
-        # at a ~3 s cadence indefinitely (observed against the test matrix
-        # CT whose metadata pane never rendered).
+        # Stock mtkbt's outbound AVRCP response builder at fn 0x379e0 writes a
+        # hardcoded AV/C ctype byte of 0x0D (CHANGED) at three sites within the
+        # function — branches of the inbound-dispatch ladder. The function
+        # never emits ctype 0x0F (INTERIM); INTERIM-emitting paths live in a
+        # separate function at 0xa655c that stock JNI only reaches when
+        # mtkbt's native dispatcher handles the inbound RegisterNotification
+        # itself. The v2.0 trampoline routes inbound RegisterNotification
+        # through libextavrcp_jni.so + msg=544 -> 0x379e0 -> CHANGED-only
+        # wire, regardless of the reasonCode the trampoline passes. AVRCP 1.3
+        # §6.7.1 requires INTERIM first per subscription; a strict CT
+        # (observed empirically) drops CHANGED-without-INTERIM and falls back
+        # to ~3 s polling, never rendering metadata.
         #
-        # The 1-byte flip changes `movs r3, #13` -> `movs r3, #15` at the
-        # one site that wires the ctype byte. Trade-off: T5 / T9 proactive
-        # CHANGED-on-edge emits also go through this path, so they now emit
-        # ctype 0x0F INTERIM on the wire too. AVRCP 1.3 §6.7.1 allows
-        # repeated INTERIM responses (treated as fresh subscriptions); CTs
-        # that previously relied on the CHANGED edge for UI refresh will now
-        # see their state refreshed via the INTERIM payload instead. Strict
-        # CTs that gate on INTERIM-first should be unblocked.
-        #
-        # Thumb T1 encoding for movs r3, #imm8: 0x23 imm8 (LE bytes imm8 0x23).
-        # imm8=0x0D -> bytes `0d 23`; imm8=0x0F -> bytes `0f 23`. One byte
-        # changes; second byte (Rd register encoding) unchanged.
-        "name":   "[M1] AVRCP msg=544 wire ctype 0x0D CHANGED -> 0x0F INTERIM  (mtkbt 0x37cca)",
+        # Three 1-byte flips at the three CHANGED-writing sites in fn 0x379e0:
+        # `movs rN, #13` -> `movs rN, #15` (Rd register encoding unchanged).
+        # All three branches now emit ctype 0x0F INTERIM on the wire. T5 / T9
+        # proactive CHANGED-on-edge emits also go through this fn, so they
+        # too become INTERIM on the wire. AVRCP 1.3 §6.7.1 permits repeated
+        # INTERIM responses (treated as fresh subscriptions); CT state refresh
+        # continues via the INTERIM payload.
+        "name":   "[M1] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37cca, r3=#13 branch)",
         "offset": 0x37cca,
         "before": bytes([0x0d, 0x23]),
         "after":  bytes([0x0f, 0x23]),
+    },
+    {
+        # M1b — second 0x0D ctype write in the same fn 0x379e0 (branch gated
+        # on r12==2). `movs r2, #13` -> `movs r2, #15`.
+        "name":   "[M1b] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37d3c, r2=#13 branch)",
+        "offset": 0x37d3c,
+        "before": bytes([0x0d, 0x22]),
+        "after":  bytes([0x0f, 0x22]),
+    },
+    {
+        # M1c — third 0x0D ctype write in fn 0x379e0 (third dispatcher branch).
+        # `movs r2, #13` -> `movs r2, #15`.
+        "name":   "[M1c] AVRCP msg=544 wire ctype 0x0D -> 0x0F (mtkbt 0x37dfc, r2=#13 branch)",
+        "offset": 0x37dfc,
+        "before": bytes([0x0d, 0x22]),
+        "after":  bytes([0x0f, 0x22]),
     },
 ]
 

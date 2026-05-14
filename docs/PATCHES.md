@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, AVRCP msg=544 wire ctype 0x0D→0x0F so trampoline-emitted RegNotif INTERIM responses get the spec-correct AV/C ctype). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M1b, M1c** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, AVRCP msg=544 wire ctype 0x0D→0x0F so trampoline-emitted RegNotif INTERIM responses get the spec-correct AV/C ctype). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -88,18 +88,19 @@ Patches the same entry-slot swap on the legacy AVRCP 1.0 served record (the fall
 
 Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an unconditional branch to the PASSTHROUGH-emit branch at `0x14528` (which ends with `bl 0x10404`, the function that emits msg 519 CMD_FRAME_IND to the JNI socket). Every AV/C frame flows through the emit path. Cost: VENDOR_DEPENDENT bytes get interpreted in PASSTHROUGH-shaped fields, so mtkbt's mid-stack response may be malformed — but the JNI trampoline chain takes over before that matters.
 
-**M1 — AVRCP msg=544 wire ctype 0x0D CHANGED → 0x0F INTERIM** at file `0x37cca` (1 byte; second byte unchanged):
+**M1 / M1b / M1c — AVRCP msg=544 wire ctype 0x0D CHANGED → 0x0F INTERIM** at file `0x37cca`, `0x37d3c`, `0x37dfc` (3 sites, 1 byte each; Rd register encoding unchanged):
 
-| | bytes | mnemonic |
+| site | bytes (before → after) | mnemonic |
 |---|---|---|
-| before | `0d 23` | `movs r3, #13` (0x0D = AV/C CHANGED) |
-| after  | `0f 23` | `movs r3, #15` (0x0F = AV/C INTERIM) |
+| `0x37cca` | `0d 23` → `0f 23` | `movs r3, #13` → `movs r3, #15` |
+| `0x37d3c` | `0d 22` → `0f 22` | `movs r2, #13` → `movs r2, #15` |
+| `0x37dfc` | `0d 22` → `0f 22` | `movs r2, #13` → `movs r2, #15` |
 
-Stock mtkbt's outbound AVRCP encoder at file `0x37cca` writes a hardcoded AV/C ctype byte of `0x0D` (CHANGED) for every msg=544 RegisterNotification response, regardless of the reasonCode the `libextavrcp_jni.so` trampoline passes. In stock JNI flow msg=544 was only ever called for actual value changes (the initial INTERIM came from mtkbt's native dispatcher via a different function at file `0x42abe`, which conditionally writes ctype `0x0F` when its dispatch byte is 3). The v2.0.0 trampoline bypasses the native dispatcher and routes both INTERIM and CHANGED through msg=544, producing CHANGED-without-INTERIM on the wire. AVRCP 1.3 §6.7.1 requires INTERIM first; a CT that enforces this drops the response and re-subscribes at a ~3 s cadence indefinitely (metadata pane never renders). M1 flips the constant so msg=544 emits ctype `0x0F` on the wire.
+Stock mtkbt's outbound AVRCP response builder at fn `0x379e0` writes a hardcoded AV/C ctype byte of `0x0D` (CHANGED) at three sites within the function — branches of the inbound-dispatch ladder for what was historically the "value-changed CHANGED-emit" path. The function never emits ctype `0x0F` (INTERIM); INTERIM-emitting paths live in a separate function at `0xa655c` that stock JNI only reaches when mtkbt's native dispatcher handles the inbound RegisterNotification itself. The v2.0.0 trampoline bypasses the native dispatcher and routes inbound RegisterNotification through `libextavrcp_jni.so` + msg=544 → fn `0x379e0` → CHANGED-only wire, regardless of the reasonCode the trampoline passes. AVRCP 1.3 §6.7.1 requires INTERIM first per subscription; a strict CT drops CHANGED-without-INTERIM and falls back to ~3 s polling, never rendering metadata. Initial single-site M1 patch at `0x37cca` didn't reach the wire because the dispatch ladder routed inbound responses through the other two branches at `0x37d3c` / `0x37dfc`. All three sites are flipped together.
 
-Trade-off: T5 / T9 proactive CHANGED-on-edge emits route through the same code path, so they now emit INTERIM on the wire too. AVRCP 1.3 §6.7.1 allows repeated INTERIM responses (treated as fresh subscriptions); CTs that previously relied on the CHANGED edge for UI refresh now see state via the INTERIM payload instead. Strict CTs that gate on INTERIM-first should be unblocked.
+Trade-off: T5 / T9 proactive CHANGED-on-edge emits route through the same fn, so they too become INTERIM on the wire. AVRCP 1.3 §6.7.1 permits repeated INTERIM responses (treated as fresh subscriptions); CTs that previously relied on the CHANGED edge for UI refresh now see state via the INTERIM payload instead.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `2f4e811632dc61564d527d41cf1da32c`.
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `7a9365e280172548429974935cfb4a29`.
 
 ---
 

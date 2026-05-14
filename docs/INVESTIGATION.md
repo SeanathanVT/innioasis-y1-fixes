@@ -10,7 +10,7 @@ Current shipped patches by binary:
 
 | Binary | Patches |
 |---|---|
-| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 (msg=544 wire ctype 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34) |
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 / M1b / M1c (three sites in fn 0x379e0 flipped 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34) |
 | `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard). T1 advertises `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — events 0x09-0x0c are 1.4+ event IDs INTERIM-acked with zero payload via existing `libextavrcp.so` builders (no CHANGED ever fires; Y1 has one player, no Now Playing folder, no UID database). Mirrors Pixel-as-TG; what unblocks strict CT metadata-pane render (see Trace #32). |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
@@ -2838,3 +2838,37 @@ OUTPUT_MD5 for `mtkbt.patched`: `5d650885...` → `2f4e811632dc61564d527d41cf1da
 The trampoline-chain output reaching every CT in the test matrix has been CHANGED-only since v2.0.0. CTs that worked (Kia, etc.) tolerated CHANGED-without-INTERIM. With M1 they get INTERIM-on-edge instead of CHANGED-on-edge — also a §6.7.1-permissible response shape, but a behaviour-shift. Need a fresh `dual-kia-*` capture post-M1 flash to confirm no regression in PLAY / PAUSE / metadata refresh.
 
 If Kia regresses on M1: option C from the deep-analysis discussion remains — patch mtkbt to read the IPC frame[8] reasonCode byte at `0x37cca` and use it as the wire ctype, preserving the INTERIM/CHANGED distinction the trampoline already passes. Requires identifying which register or memory location holds the reasonCode byte at that point in the function (open RE work).
+
+## Trace #35 (2026-05-14) — M1 alone didn't reach the wire; fn 0x379e0 has 3 CHANGED branches
+
+Post-M1 flash `dual-bolt-20260514-0852` and `dual-kia-20260514-0837` parsed at HCI ACL level. Wire AV/C ctype byte still 0x0D (CHANGED) across every RegNotif response; zero 0x0F INTERIM frames on the wire. M1 had no observable effect.
+
+### Why
+
+The mtkbt outbound AVRCP response builder lives in fn `0x379e0` and dispatches inbound responses through a multi-branch ladder (a `tbb [pc, r3]` jump table at `0x37c3e` plus several `cmp / bne` chains). The function writes the AV/C ctype byte to `[r4, #12]` from **three different sites**, each in a different dispatch branch:
+
+| site | encoding | mnemonic |
+|---|---|---|
+| `0x37cca` | `0d 23` | `movs r3, #13`  → `strb.w r3, [r0, #12]!` (branch: `r5[548] & 0x22 == 2`) |
+| `0x37d3c` | `0d 22` | `movs r2, #13`  → `strb.w r2, [r0, #12]!` (branch: `r12 == 2`) |
+| `0x37dfc` | `0d 22` | `movs r2, #13`  → `strb.w r2, [r0, #12]!` (third dispatcher branch) |
+
+Initial M1 scan used a too-narrow byte pattern (only matched `r3 = #13` followed by `strb.w r3, ...`). The two `r2 = #13` sites were missed. M1 patched only `0x37cca`; the actual inbound dispatch for msg=544 routes through `0x37d3c` or `0x37dfc`, which kept emitting CHANGED.
+
+The function `0x379e0` also writes ctype values 2, 3, 4, 5, 7 in other branches but never 0x0F (INTERIM). The stock INTERIM-emit path lives in a separate function `0xa655c` (`movs r1, #15; strb r1, [r4, #12]` at `0xa65e2`), reachable only when mtkbt's native dispatcher handles the inbound RegisterNotification itself — exactly the path the v2.0 trampoline bypasses.
+
+### Fix (M1+M1b+M1c)
+
+Three 1-byte flips at all three CHANGED-writing sites in fn `0x379e0`:
+
+| site | before | after |
+|---|---|---|
+| `0x37cca` | `0d 23` | `0f 23` |
+| `0x37d3c` | `0d 22` | `0f 22` |
+| `0x37dfc` | `0d 22` | `0f 22` |
+
+All inbound-dispatch branches now emit ctype `0x0F` INTERIM. OUTPUT_MD5 for `mtkbt.patched`: `2f4e8116...` → `7a9365e280172548429974935cfb4a29`.
+
+### Open: Kia track-end position unreliability
+
+The `dual-kia-20260514-0837` capture (which was against the M1-only build that didn't reach the wire) showed Kia subscribing in the spec-correct rapid burst pattern (8 RegNotifs in < 300 ms, matching Pixel's pattern), but the user reports "track end position doesn't reliably update." Since M1 didn't change the wire bytes, this regression — if real — must be from something else in the recently flashed stack (Trace #33's T_charset → reject is the most likely candidate, since size=214 reject is visible in the Kia log's charset response). Will re-evaluate after the M1+M1b+M1c flash.
