@@ -2923,3 +2923,114 @@ Blob size 3852 → 3568 B (gate-clear removals freed more bytes than the new emi
 ### Open
 
 If a future CT in the test matrix rejects unsolicited CHANGED following the first INTERIM, the fallback is to clear `state[13..20]` on the connect_ind edge to scope subscription state to a single CT session. There's no clean trampoline hook for "new CT connected" today — would need to add an entry in mtkbt's IPC dispatch or rely on the music app to clear state files on disconnect.
+
+## Trace #37 (2026-05-14) — End-to-end mtkbt msg=544 ctype trace; M1/M1b/M1c/M1d confirmed dead; live site is `0x12244`
+
+### Premise
+
+User report after the M1+M1b+M1c flash: Bolt's metadata pane still empty; wire AV/C ctype byte 0 still 0x0D (CHANGED). User-verified deployment MD5 `7a9365e280172548429974935cfb4a29` matches the patcher output — the three sites in fn `0x379e0` ARE in dead code for the msg=544 RegNotif response path. M1d (0x39714, fn `0x396d0`) was a speculative second guess. User directive: "Continue tracing to completion. No more interim iterative stuff."
+
+### Method
+
+Full radare2 walk of the AV/C wire frame builder chain in mtkbt, starting from the wire-byte write and walking up through every layer until reaching a code site whose byte-level diff matches the wire symptom (ctype = 0x0D for RegNotif responses).
+
+### End-to-end chain (verified by `axt` xrefs at every hop)
+
+```
+JNI IPC socket "bt.ext.adp.avrcp" msg_id=544 (0x220)
+  → fcn.0006adec (IPC poll loop, mentioned in earlier traces)
+  → fcn.00067768 (IPC dispatch by msg_id)
+      [0x67776] str r3, [r0, 8]              ; msg[8] = msg+0x1c (ctxt ptr)
+      [0x679da-0x679e4] if 500 <= msg_id <= 612: bl fcn.000518ac
+  → fcn.000518ac (msg_id - 500 jump table, 113 cases, tbh)
+      [0x518b0] ldr r4, [r0, 8]              ; r4 = ctxt (= msg+0x1c)
+      msg=544 → index 44 (=544-500)
+      table @ 0x518c2 + 44*2 = 0x5191a contains 0xf0
+      target = 0x518c2 + 2*0xf0 = 0x51aa2
+      [0x51aa2] mov r0, r4 ; bl fcn.00012478
+  → fcn.00012478 (per-event RegNotif response dispatcher)
+      [0x12490] ldrb r0, [r4, 5]
+      [0x12492] ldrb r3, [r4, 6]              ; gate; must be 0
+      [0x124a0] ldrb r3, [r4, 9]              ; r3 = ctxt[9] = event_id
+      tbb on event_id-1 → per-event handler (fcn.000122cc/e4/24/54/90/270/...)
+  → fcn.00012270 (one of 9 per-event response builders;
+                  others 000122cc/e4/24/54/90 mirror this shape)
+      bl fcn.000121d8 with r0 = unchanged arg1 (the ctxt at msg+0x1c)
+  → fcn.000121d8 (RegNotif response packetFrame builder dispatch)
+      [0x1222e] ldrb r1, [r4, 8]              ; r1 = ctxt[8]
+      [0x12230] cmp  r1, 1
+      [0x12232] bne  0x12240                  ; ctxt[8] != 1 → CHANGED branch
+      ; INTERIM branch:
+      [0x12238] movs r1, 0xF                  ; r1 = 0x0F (INTERIM ctype)
+      ; CHANGED branch:
+      [0x12244] movs r1, 0xD                  ; r1 = 0x0D (CHANGED ctype)
+      [0x1224a] movs r2, 0x31                 ; r2 = PDU 0x31 (RegisterNotification)
+      [0x1224e] bl fcn.00011894               ; build single-packet response
+  → fcn.00011894 (single-packet response builder)
+      [0x1191e] mov r6, r1 = arg2 = ctype
+      [0x11922] strb r6, [r4, 0xb]            ; packetFrame[0xb] = ctype
+  → fcn.0000f0bc (queues packetFrame onto conn[0x310], calls wire builder)
+      [0xf11c] str.w r6, [r4, 0x310]          ; conn[0x310] = packetFrame
+      [0xf198] bl fcn.0000ef08
+  → fcn.0000ef08 (AV/C wire frame builder)
+      [0xef5e] ldrb r2, [r5, 0xb]             ; r2 = packetFrame[0xb] = ctype
+      [0xef68] strb r2, [r4, 0]               ; wire buf[0] = ctype
+  → wire L2CAP/AVCTP frame → air → CT
+```
+
+### The verified write site
+
+**File offset `0x12244`, bytes `0d 21` (`movs r1, 0xd`).** Paired INTERIM site at `0x12238` (`0f 21` = `movs r1, 0xf`). Both branches converge at `0x1224a` (`movs r2, 0x31`, PDU=RegisterNotification) and feed `fcn.00011894` which stores `r1` into `packetFrame[0xb]`. The packetFrame's byte 0xb is read by `fcn.0000ef08` and written to wire `buf[0]`.
+
+The discriminator is `ctxt[8] == 1`:
+- `ctxt[8] == 1` → INTERIM (`0x0F`)
+- `ctxt[8] != 1` → CHANGED (`0x0D`)
+
+Since the wire shows `0x0D`, the JNI's msg=544 payload at offset `0x1c + 8 = 0x24` is reaching mtkbt with a value other than 1.
+
+### Why M1/M1b/M1c/M1d are dead
+
+Functions `fcn.0x379e0` (M1/M1b/M1c) and `fcn.0x396d0` (M1d) are different code paths — likely AVCTP/L2CAP frame fragmentation or error-reply builders. They write `0x0D` to `[r4, #12]` (offset 12, not 11) of their respective work structs. Even though the offset-12 write would land at packetFrame[0xc] (a different field, possibly packet-type), the wire-side ctype byte read by `fcn.0000ef08` is at offset `0xb`. M1/M1b/M1c/M1d never touch offset `0xb`, never affect the msg=544 RegNotif response chain identified above.
+
+### Two patch options
+
+**Option α — make CHANGED branch emit INTERIM (1-byte patch):**
+
+`0x12244: 0d 21 → 0f 21` (`movs r1, 0xd` → `movs r1, 0xf`)
+
+After this, both dispatch branches emit ctype `0x0F`. Bolt sees INTERIM on every RegNotif response. CT will think every value-update is the "initial state" of an active registration and never trigger re-registration. Spec-deviant (§6.7.1 requires CHANGED for value updates), but the Pixel-mirror semantics in T5/T9 already emit unsolicited "CHANGED" events without waiting for re-registration — so the data flow continues regardless.
+
+Trade-off: total CT-side state machine deviation. Strictly-conforming CTs would (theoretically) drop value updates because the "initial value" semantic of INTERIM doesn't carry meaning after the first one. Pixel's actual btsnoop shows it emits `0x0D` for value-change updates and `0x0F` only for the first response per registration. Bolt accepts that pattern.
+
+**Option β — invert the dispatch (1-byte patch):**
+
+`0x12230: 01 29 → 00 29` (`cmp r1, 1` → `cmp r1, 0`)
+
+After this:
+- `ctxt[8] == 0` → INTERIM (`0x0F`) [taken when JNI doesn't set the byte]
+- `ctxt[8] != 0` → CHANGED (`0x0D`)
+
+This inverts the polarity. Since the JNI currently never sets the byte to 1, this makes all current responses INTERIM. But it preserves the *capability* for the JNI side (or a future patch) to mark a specific response as CHANGED by sending `ctxt[8] = nonzero`.
+
+**Option γ — proper state tracking (multi-byte patch, more invasive):**
+
+Use a free-space code cave to add a "first response after registration" state byte that gates the cmp result. Single-shot INTERIM, subsequent CHANGED. This is spec-correct but requires multi-byte instruction injection. The T2/T8 trampolines in libextavrcp_jni.so already track this; routing that state through the IPC msg=544 byte 0x24 is the JNI-side equivalent.
+
+### Pixel-Bolt baseline (from `dual-pixel-bolt-*` snoop)
+
+Pixel emits INTERIM (`0x0F`) on the first RegNotif response for each event; subsequent value-update notifications use CHANGED (`0x0D`). Bolt accepts both, re-registers within ~20 ms of each CHANGED. So the spec-correct answer is γ (per-registration state), the closest 1-byte approximation is β (which gives the JNI control), and α is the bluntest hammer.
+
+### Recommendation
+
+Option β (`0x12230: 01 29 → 00 29`) is the surgical 1-byte fix that gives the JNI a working "send INTERIM" signal (currently effective because the JNI doesn't set the byte, so the inverted cmp falls through). It also preserves the door for a future JNI-side patch to emit CHANGED by writing a non-zero value to msg=544 byte 0x24.
+
+Drop M1 / M1b / M1c / M1d entirely (all confirmed dead code). Replace with a single M-class patch at `0x12230`.
+
+### Verification plan
+
+After flash:
+1. mtkbt MD5 changes from current `7a9365e2...` to new value (one byte off).
+2. Capture `dual-bolt` and `dual-kia` btsnoop. Inspect wire AV/C ctype byte 0 on RegNotif responses. Expect `0x0F` INTERIM for every event registered.
+3. Bolt: metadata pane render is the proof. Kia: continued operation, no regression on PlayStatus / position reporting.
+
+If Bolt still doesn't render and wire shows `0x0F`: the issue is downstream of ctype (e.g., the `track_changed` Identifier or the metadata payload format). The §6.7.1 / wire-ctype chain is then fully accounted for.
