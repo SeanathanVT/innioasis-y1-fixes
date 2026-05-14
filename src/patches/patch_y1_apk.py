@@ -1939,6 +1939,76 @@ with open(ps_path, 'w') as f:
     f.write(ps_src)
 print(f"  Patch B5.2a: PlayerService.setCurrentPosition → PlaybackStateBridge.onSeek")
 
+# -- Patch B5.2b: pre-emit TRACK_CHANGED before prepareAsync completes --------
+# PlayerService.toRestart() contains three setDataSource(newPath) call sites —
+# one for the audiobook IJK path, one for the music IJK path, and one for the
+# music AOSP MediaPlayer path. Each is followed by prepareAsync() (~100-500 ms
+# of decoder warmup) and only then by OnPreparedListener, which is where our
+# existing B5.2 hook fires onTrackEdge + wakeTrackChanged. By the time
+# setDataSource has been called, mPlayingMusic / mPlayingAudiobook is the new
+# song — flushLocked() reads the metadata from PlayerService.getPlayingSong()
+# at that moment and writes it to y1-track-info, so we can fire the
+# track-change notification immediately.
+#
+# Inject `invoke-static onEarlyTrackChange` after each setDataSource. The new
+# helper in PlaybackStateBridge calls TrackInfoWriter.onTrackEdge() (which
+# dedups by audio_id — same-track invocations like resume-from-pause refresh
+# duration without disturbing the live-position baseline) and
+# wakeTrackChanged() (broadcasts metachanged → MMI_AVRCP → T5). Saves up to
+# ~500 ms of perceived metadata-refresh latency on track skip.
+#
+# Anchors: each setDataSource call is uniquely identified by the receiver
+# register (v2 / v0 / v4) and the .line marker that follows it. The 3 sites
+# are the only setDataSource calls in PlayerService.smali — verified by
+# `grep -n setDataSource`.
+TO_RESTART_HOOKS = [
+    # (anchor, replacement) tuples for each setDataSource site in toRestart
+    (
+        # Site 1: audiobook branch (cond_0), IJK engine, receiver = v2.
+        "    invoke-virtual {v2, v1}, Ltv/danmaku/ijk/media/player/IjkMediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    .line 551\n",
+        "    invoke-virtual {v2, v1}, Ltv/danmaku/ijk/media/player/IjkMediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onEarlyTrackChange()V\n"
+        "\n"
+        "    .line 551\n",
+    ),
+    (
+        # Site 2: music branch (cond_2), IJK engine, receiver = v0.
+        "    invoke-virtual {v0, v1}, Ltv/danmaku/ijk/media/player/IjkMediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    .line 528\n",
+        "    invoke-virtual {v0, v1}, Ltv/danmaku/ijk/media/player/IjkMediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onEarlyTrackChange()V\n"
+        "\n"
+        "    .line 528\n",
+    ),
+    (
+        # Site 3: music branch (cond_2), AOSP MediaPlayer engine, receiver = v4.
+        "    invoke-virtual {v4, v1}, Landroid/media/MediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    .line 535\n",
+        "    invoke-virtual {v4, v1}, Landroid/media/MediaPlayer;->setDataSource(Ljava/lang/String;)V\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onEarlyTrackChange()V\n"
+        "\n"
+        "    .line 535\n",
+    ),
+]
+for i, (anchor, replacement) in enumerate(TO_RESTART_HOOKS, 1):
+    if anchor not in ps_src:
+        sys.exit(f"ERROR: Patch B5.2b anchor #{i} not found in PlayerService.smali "
+                 f"(setDataSource site in toRestart). The anchor expects an exact "
+                 f"match including the trailing .line marker.")
+    if replacement in ps_src:
+        continue  # idempotency: already patched
+    ps_src = ps_src.replace(anchor, replacement, 1)
+with open(ps_path, 'w') as f:
+    f.write(ps_src)
+print(f"  Patch B5.2b: PlayerService.toRestart × 3 setDataSource sites → PlaybackStateBridge.onEarlyTrackChange")
+
 # -- Patch B5.3: extend Y1Application.onCreate registration block -------------
 # Insert BEFORE the B4 PappStateBroadcaster registration so TrackInfoWriter is
 # initialised by the time sendNow() runs (sendNow → B5.4 setPapp → flushLocked

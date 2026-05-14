@@ -120,6 +120,59 @@
 .end method
 
 
+# Early track-change hook fired from PlayerService.toRestart() right after
+# IjkMediaPlayer / MediaPlayer setDataSource(newPath) succeeds but BEFORE
+# prepareAsync's decoder warmup completes. By the time toRestart calls
+# setDataSource, the music app has already updated mPlayingMusic /
+# mPlayingAudiobook to the new song, so PlayerService.getPlayingSong()
+# (which TrackInfoWriter.flushLocked() consults) returns the new track's
+# metadata. Firing TrackInfoWriter.onTrackEdge() + wakeTrackChanged() here
+# moves the CT-visible track-change notification ~100-500 ms earlier (the
+# prepareAsync duration), so peers like Bolt see the new Artist/Track/Album
+# while audio decoder is still spinning up.
+#
+# onTrackEdge dedups by audio_id, so same-track toRestart calls (resume-
+# from-pause, screen-on restart, app startup) refresh duration without
+# disturbing the live-position baseline. wakeTrackChanged fires a
+# Context.sendBroadcast that MMI_AVRCP picks up; T5 reads
+# y1-track-info/y1-trampoline-state and edge-detects (file[0..7] vs
+# state[0..7]) — same-track invocations emit nothing on the wire.
+#
+# When prepareAsync eventually completes, OnPreparedListener fires
+# onPrepared() below, which runs onTrackEdge() again. With the audio_id
+# now matching mCachedAudioId, dedup skips the position reset; only a
+# duration refresh runs (helpful if getDuration() became available
+# post-prepare). wakeTrackChanged from onPrepared also fires a second
+# broadcast — harmless, T5 dedups via the state-vs-file audio_id check.
+.method public static onEarlyTrackChange()V
+    .locals 3
+
+    :try_start_e
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onTrackEdge()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
+
+    return-void
+    :try_end_e
+    .catch Ljava/lang/Throwable; {:try_start_e .. :try_end_e} :catch_e
+
+    :catch_e
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
 # OnPreparedListener hook (IJK + MediaPlayer). Track has finished decoder warmup
 # and is now playable — treat as track edge and consume any pending natural-end.
 # After the flush, fire metachanged (wakes T5 → TRACK_CHANGED CHANGED) and
