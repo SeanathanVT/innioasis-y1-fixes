@@ -978,28 +978,33 @@ def _emit_t5(a: Asm) -> None:
 
 
 def _emit_t_charset(a: Asm) -> None:
-    """T_charset: PDU 0x17 InformDisplayableCharacterSet.
+    """T_charset: PDU 0x17 InformDisplayableCharacterSet — reject with
+    AV/C `NOT_IMPLEMENTED` via UNKNOW_INDICATION.
 
-    Branched from T4's pre-check when the inbound PDU byte is 0x17. The CT is
-    declaring its accepted charsets to us; we ack with success and continue
-    sending UTF-8 (which we already do — there's no spec requirement that we
-    actually honor the CT's charset preference, just that we ack the
-    declaration).
+    Spec-permissible per AVRCP 1.3 §5.2.7 (Optional): a TG that doesn't track
+    the CT's advertised charsets MAY reject. Pixel-as-TG does this — its
+    `btsnoop_hci.log` shows Pixel rejecting 0x17 with "Invalid Command" (AV/C
+    ctype NOT_IMPLEMENTED = 0x8), and strict CTs that send 0x17 immediately
+    move on to subscribe events when they receive that reject.
 
-    Response builder layout (libextavrcp.so:0x2138):
-      void btmtk_avrcp_send_inform_charsetset_rsp(
-          void* conn,         // r0
-          uint8_t reject,     // r1 = 0 for success
-          void* unused        // r2 — pushed but never read
-      );
-      // Outbound msg_id=536, 8-byte ack frame (transId from conn[17] at
-      //  offset 5; rest zeroed).
+    Earlier T_charset called `inform_charsetset_rsp(conn, 0)` (msg=536 ACK).
+    The ACK stalled at least one strict CT into a 3-second wait between 0x17
+    and the first RegisterNotification — apparently waiting on a follow-up
+    notification that never came. Switching to the reject path eliminates the
+    wait and the subscription burst lands in <10 ms (matching the Pixel-TG
+    trace).
+
+    We keep sending UTF-8 either way; §5.2.7 doesn't couple the TG's outbound
+    charset to the CT's advertised set (the CT's advertisement is informational
+    only — the TG picks).
+
+    Branched from T4's pre-check when PDU == 0x17. Same calling convention as
+    T_continuation: restore lr canary + r0=conn, tail-jump to t4_to_unknown.
     """
     a.label("T_charset")
-    a.add_imm_t3(0, 5, 8)                     # r0 = conn (= r5+8)
-    a.movs_imm8(1, 0)                         # r1 = 0 (success)
-    a.blx_imm(PLT_inform_charsetset_rsp)
-    a.b_w("t4_to_epilogue")
+    a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
+    a.add_imm_t3(0, 5, 8)                     # add.w r0, r5, #8 (= conn)
+    a.b_w("t4_to_unknown")
 
 
 def _emit_t_battery(a: Asm) -> None:

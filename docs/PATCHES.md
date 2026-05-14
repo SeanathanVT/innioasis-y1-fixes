@@ -170,7 +170,7 @@ Fired on every `com.android.music.metachanged` broadcast emitted by the music ap
 
 ### T_charset — InformDisplayableCharacterSet (PDU 0x17)
 
-Branched from T4's pre-check on PDU 0x17. Calls `inform_charsetset_rsp` via PLT `0x3588` with `r1=0` (success). 14 bytes. Tail-jumps to t4_to_epilogue. AVRCP 1.3 §5.2.7 — strict CTs send this once at connect to declare their charset support; pre-T_charset our TG NACKed, which strict CTs interpret as the TG distrusting subsequent metadata.
+Branched from T4's pre-check on PDU 0x17. Restores lr canary + r0=conn and tail-jumps to UNKNOW_INDICATION (`0x65bc`), which emits an AV/C `NOT_IMPLEMENTED` reject. 12 bytes. Spec-permissible per AVRCP 1.3 §5.2.7 (Optional). Matches Pixel-as-TG behaviour (its `btsnoop_hci.log` shows the same reject). An earlier ACK-via-`inform_charsetset_rsp` variant stalled at least one strict CT into a 3-second wait between 0x17 and the first RegisterNotification — apparently waiting on a follow-up notification that never came; the reject path lets the subscription burst land in <10 ms.
 
 ### T_battery — InformBatteryStatusOfCT (PDU 0x18)
 

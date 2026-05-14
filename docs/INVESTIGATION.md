@@ -2735,3 +2735,55 @@ T8 / T5 / T9 handlers for these four events are retained in the trampoline (a pe
 ### Open: result not yet on the wire
 
 Bolt-Y1 reflash test pending the user's flash cycle. If it works, this trace closes the metadata-pane investigation that's run from Trace #1 (2026-05-02). If it doesn't, the remaining candidates are: (a) some SDP-record-content discriminator (the `BrowseGroupList` / `ServiceName` presence delta, or Pixel's not-yet-RE'd `0x0102 ProviderName`), or (b) the Bolt-side BR/EDR device-name regex or EIR discriminator.
+
+## Trace #33 (2026-05-14) — Bolt's 3-second InformDisplayableCharacterSet stall; T_charset switched to reject
+
+### Wire-level finding from `dual-bolt-20260513-2150` (post-Trace-#32 flash)
+
+After the Trace #32 flash (advertise + INTERIM-ack 0x09-0x0c), Bolt's metadata pane still didn't render. New `dual-bolt-*` capture shows the same wall-clock symptom as every prior Bolt capture, but a tighter inspection of the first few seconds reveals the real discriminator:
+
+```
+21:48:01.299  CMD_FRAME_IND size:9  (GetCapabilities request)
+21:48:01.299  AVRCP_SendMessage len=30  (GetCapabilities response — 8 events)
+21:48:01.360  CMD_FRAME_IND size:11 (InformDisplayableCharacterSet)
+21:48:01.360  AVRCP_SendMessage len=8  (T_charset ACK)
+21:48:04.367  CMD_FRAME_IND size:13 (FIRST RegisterNotification) ← +3.007 s
+```
+
+Compare to `pixel4-bugreport/.../btsnoop_hci.log` (Pixel-as-TG, Bolt-as-CT, same Bolt):
+
+```
+98.773  GetCapabilities request
+98.773  GetCapabilities response — 8 events
+98.785  InformDisplayableCharacterSet
+98.786  Rejected - Status: Invalid Command
+98.792  FIRST RegisterNotification (PlaybackStatusChanged) ← +0.006 s
+98.803  RegisterNotification (TrackChanged)
+98.809  GetElementAttributes
+98.815  RegisterNotification (PlaybackPosChanged)
+98.821  RegisterNotification (NowPlayingContentChanged)
+98.836  RegisterNotification (AvailablePlayersChanged)
+98.852  RegisterNotification (AddressedPlayerChanged)
+98.861  RegisterNotification (UIDsChanged)
+98.868  ListPlayerApplicationSettingAttributes
+```
+
+The single Y1 → Pixel delta in that window: **Y1 ACKs 0x17 via `inform_charsetset_rsp` (success); Pixel rejects 0x17 with AV/C ctype NOT_IMPLEMENTED.** Bolt evidently waits ~3 s for a follow-up notification after the ACK, then falls back to a 3-second polling cadence for RegisterNotification — which is what every prior `dual-bolt-*` capture (going back to Trace #21) actually shows, but it never read as a "stall" before because the wall-clock-equivalent symptom (empty metadata pane) was consistent with several other hypotheses.
+
+### Fix
+
+`T_charset` rewritten 14 B → 12 B: drop the `blx PLT_inform_charsetset_rsp` ACK, restore lr canary + r0=conn, tail-jump to `UNKNOW_INDICATION` (`0x65bc`). Same calling convention as `T_continuation`. Net wire: 0x17 now produces an AV/C `NOT_IMPLEMENTED` reject (msg=520) instead of an ACK (msg=536), matching Pixel-as-TG byte-for-byte at the AV/C ctype level.
+
+Spec-permissible per AVRCP 1.3 §5.2.7 (InformDisplayableCharacterSet is Optional, both as a feature and as a response shape). The TG's outbound charset is decoupled from the CT's advertised set; we continue to emit UTF-8 for metadata regardless. ICS Table 7 row 18 status unchanged (O); the reject is a valid response for an unsupported Optional PDU.
+
+OUTPUT_MD5: `c16a6b78...` → `e2d44674f6f04f2b2d18ff3f633c5dfc`.
+
+### Pre-flash prediction
+
+If the InformDisplayableCharacterSet → ACK was indeed the 3-second stall, the next `dual-bolt-*` capture should show:
+
+- `CMD_FRAME_IND size:13` (first RegisterNotification) within ~10 ms of the 0x17 frame, not +3 s
+- A burst of 5-8 RegisterNotification commands in the first ~100 ms after 0x17 (one per advertised event Bolt cares about), matching Pixel-Bolt's pattern
+- `GetElementAttributes` (size 45) follows the first RegisterNotification by ~10 ms
+
+If the burst pattern matches Pixel's and the metadata pane still doesn't render, the discriminator is elsewhere (SDP record content, EIR/inquiry response, BR/EDR name regex). If the burst happens but the pane does render, this closes the investigation.

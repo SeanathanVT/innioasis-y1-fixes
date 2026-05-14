@@ -65,7 +65,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
 | 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | ✓ T_papp (Repeat + Shuffle, OFF/OFF; Set rejects `0x06 INTERNAL_ERROR` — see §1) | — |
 | 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | ✓ T_papp (UTF-8 "Repeat" / "Shuffle" / "Off") | — |
-| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset | — |
+| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (NOT_IMPLEMENTED reject; spec-permissible for Optional PDU; matches Pixel-as-TG) | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
 | **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime, single packed frame) | — |
 | **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 with live position via `clock_gettime(CLOCK_BOOTTIME)` | — |
@@ -134,7 +134,7 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 |---|---|---|---|
 | **Currently used by shipped trampolines** ||||
 | 0x10 GetCapabilities | get_capabilities_rsp | `0x35dc` | `0x1dac` |
-| 0x17 InformDisplayableCharacterSet | inform_charsetset_rsp | `0x3588` | `0x2138` |
+| 0x17 InformDisplayableCharacterSet | (T_charset rejects via UNKNOW_INDICATION; ACK builder `inform_charsetset_rsp` at PLT `0x3588` / body `0x2138` is no longer called) | — | — |
 | 0x18 InformBatteryStatusOfCT | battery_status_rsp | `0x357c` | `0x2160` |
 | 0x20 GetElementAttributes | get_element_attributes_rsp | `0x3570` | `0x2188` |
 | 0x30 GetPlayStatus | get_playstatus_rsp | `0x3564` | `0x2354` |
