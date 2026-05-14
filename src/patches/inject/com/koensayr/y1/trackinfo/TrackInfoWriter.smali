@@ -63,6 +63,24 @@
 # the playhead display).
 .field private mLastKnownDuration:J
 
+# elapsedRealtime() at the most recent real (audio_id-changed) onTrackEdge
+# fire. onSeek consults this to suppress the music app's
+# PlayerService.playerPrepared() restore-from-saved-progress seek that
+# fires after prepareAsync completes (3 setCurrentPosition sites in
+# stock playerPrepared, lines 1737/1793/1923 — restoreStartTime,
+# Bookmark.startTime, Progress.startTime). Those calls would otherwise
+# overwrite our reset-to-0 from onEarlyTrackChange and leave Bolt/Kia's
+# wire-side playhead showing the user's prior pause point on this track
+# rather than 0:00 for the freshly-skipped track.
+#
+# Suppression window is ~2 s — covers prepareAsync (~50-500 ms) +
+# OnPreparedListener dispatch + the playerPrepared restore call. User-
+# initiated seeks (drag the seek bar) almost always come well after
+# 2 s. Init to 0 — first track-change after boot won't trigger
+# suppression, which is correct since there's no preceding fresh-track
+# reset to protect.
+.field private mLastFreshTrackChangeAt:J
+
 
 # direct methods
 .method static constructor <clinit>()V
@@ -341,12 +359,54 @@
 # Without this, a user-initiated seek (via the music app's seek bar) leaves
 # the anchor at the previous position and the CT's playhead either jumps
 # back to the pre-seek value or freezes until the next state edge.
+#
+# Suppression window: PlayerService.playerPrepared() in stock 3.0.2 calls
+# setCurrentPosition(savedTime) at three sites (lines 1737/1793/1923 —
+# restoreStartTime / Bookmark.startTime / Progress.startTime) right after
+# prepareAsync completes. This is the music app's "resume from saved
+# progress" feature — desirable for the local UI but it overwrites the
+# reset-to-0 our onEarlyTrackChange just stamped, so Bolt/Kia would show
+# the user's prior pause point on the freshly-skipped track instead of
+# 0:00. We suppress onSeek for ~2 s after a fresh-track-change reset to
+# defang exactly those restore calls. User-initiated seeks (drag the
+# seek bar) come well after 2 s so they're unaffected.
 .method public declared-synchronized onSeek(J)V
-    .locals 3
+    .locals 5
 
     monitor-enter p0
 
     :try_start_0
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    const-wide/16 v2, 0x0
+
+    cmp-long v4, v0, v2
+
+    if-eqz v4, :cond_normal
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v2
+
+    sub-long/2addr v2, v0
+
+    const-wide/16 v0, 0x7d0
+
+    cmp-long v4, v2, v0
+
+    if-gez v4, :cond_normal
+
+    # Within ~2 s of a fresh track-change reset — this seek is almost
+    # certainly playerPrepared's restore-from-saved-progress call.
+    # Skip the position update (and the wakePlayStateChanged broadcast,
+    # since nothing changed). Don't clear mLastFreshTrackChangeAt — if
+    # playerPrepared somehow fires a second restore call (e.g. for
+    # bookmark + progress) we want to suppress that too.
+    monitor-exit p0
+
+    return-void
+
+    :cond_normal
     iput-wide p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
 
     invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
@@ -502,6 +562,11 @@
     move-result-wide v0
 
     iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+
+    # Stamp the fresh-track-change time so onSeek can suppress the
+    # music app's playerPrepared() restore-from-saved-progress seek
+    # that fires ~50-500 ms later (after prepareAsync completes).
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
 
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
 
