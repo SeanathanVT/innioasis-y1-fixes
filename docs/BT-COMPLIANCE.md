@@ -106,18 +106,18 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 
 ### Notification events (PDU 0x31 sub-dispatch, AVRCP 1.3 §5.4.2 Tables 5.29–5.37)
 
-The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise events `0x01..0x08`.
+The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x09-0x0c are 1.4+ event IDs included to mirror what Pixel-as-TG advertises (strict CT metadata-pane render gates on these being acked even from a 1.3-declared TG). Events 0x03, 0x04, 0x06, 0x07 are no longer advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes despite the absence.
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
 | 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play / pause broadcast) |
 | 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
-| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on natural-end flag at file[793], set by music app's `PlaybackStateBridge.onCompletion`) |
-| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
 | 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | intentionally INTERIM-only (see §2 footnote) |
 | 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (reads `y1-track-info[795..796]`) | ✓ T9 (papp block, piggybacked on `playstatechanged`; gated on file[795..796] vs state[11..12] edge) |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (zero/empty payload) | n/a (Y1 has no Now Playing folder) |
+| 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
+| 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
+| 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.7.2 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |
 
 ---
 
@@ -145,6 +145,10 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 | 0x31 event 0x05 | reg_notievent_pos_changed_rsp | `0x3360` | `0x2588` |
 | 0x31 event 0x06 | reg_notievent_battery_status_changed_rsp | `0x3354` | `0x25f0` |
 | 0x31 event 0x07 | reg_notievent_system_status_changed_rsp | `0x3348` | `0x2658` |
+| 0x31 event 0x09 | reg_notievent_now_playing_content_changed_rsp | `0x330c` | `0x26c0` |
+| 0x31 event 0x0a | reg_notievent_availplayers_changed_rsp | `0x3324` | `0x27b0` |
+| 0x31 event 0x0b | reg_notievent_addredplayer_changed_rsp | `0x3330` | `0x2810` |
+| 0x31 event 0x0c | reg_notievent_uids_changed_rsp | `0x3318` | `0x2880` |
 | (default reject for unknown PDU including 0x40/0x41) | pass_through_rsp | `0x3624` | n/a (in libextavrcp.so too — reached via UNKNOW_INDICATION fall-through) |
 | **PlayerApplicationSettings (T_papp + T8 event 0x08)** ||||
 | 0x11 | list_player_attrs_rsp | `0x35d0` | `0x1e24` |

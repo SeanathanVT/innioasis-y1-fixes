@@ -41,6 +41,15 @@ PLT_reg_notievent_pos_changed_rsp     = 0x3360
 PLT_reg_notievent_battery_status_rsp  = 0x3354
 PLT_reg_notievent_system_status_rsp   = 0x3348
 PLT_reg_notievent_player_appsettings_rsp = 0x345c
+# Event 0x09/0x0a/0x0b/0x0c response builders (advertised in T1 to match
+# Pixel-as-TG, which empirically is what strict CTs gate metadata-pane
+# render on — even with the SDP profile descriptor saying 1.3). Each
+# emits INTERIM-only with zero/empty payload; no CHANGED ever fires
+# because Y1 has one player, no Now Playing folder, no UID database.
+PLT_reg_notievent_now_playing_content_rsp = 0x330c
+PLT_reg_notievent_uids_changed_rsp        = 0x3318
+PLT_reg_notievent_availplayers_rsp        = 0x3324
+PLT_reg_notievent_addredplayer_rsp        = 0x3330
 
 # PlayerApplicationSettings PDUs 0x11-0x16 (T_papp).
 PLT_list_player_attrs_rsp        = 0x35d0
@@ -1997,7 +2006,7 @@ def _emit_t8(a: Asm) -> None:
 
     a.label("t8_check_8")
     a.cmp_imm8(0, 0x08)
-    a.bne("t8_unknown_event")
+    a.bne("t8_check_9")
     # 0x08 PLAYER_APPLICATION_SETTING_CHANGED INTERIM.
     # reg_notievent_player_appsettings_changed_rsp(
     #     conn, 0, REASON_INTERIM, n, *attr_ids, *values)
@@ -2019,6 +2028,55 @@ def _emit_t8(a: Asm) -> None:
 
     # Arm sub_papp bit (event 0x08) per AVRCP §6.7.1.
     _emit_subscription_write(a, 1, 15, T8_OFF_TIMESPEC_SEC, "t8_done")
+    a.b_w("t8_done")
+
+    # Events 0x09..0x0c — INTERIM-only, no CHANGED ever. Y1 has one player,
+    # no Now Playing folder, no UID database; nothing here ever changes, so
+    # the INTERIM is the entire lifecycle of the subscription. Advertised in
+    # T1 to mirror Pixel-as-TG, which is what unblocks strict CT metadata-pane
+    # render even though the SDP profile descriptor says 1.3.
+    a.label("t8_check_9")
+    a.cmp_imm8(0, 0x09)
+    a.bne("t8_check_a")
+    # 0x09 NOW_PLAYING_CONTENT_CHANGED — no payload.
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_now_playing_content_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_a")
+    a.cmp_imm8(0, 0x0A)
+    a.bne("t8_check_b")
+    # 0x0A AVAILABLE_PLAYERS_CHANGED — no payload.
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_availplayers_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_b")
+    a.cmp_imm8(0, 0x0B)
+    a.bne("t8_check_c")
+    # 0x0B ADDRESSED_PLAYER_CHANGED — PlayerID u16 in r3, UidCounter u16
+    # at sp[0]. Pixel sends 0/0; we mirror.
+    a.movs_imm8(3, 0)
+    a.str_sp_imm(3, 0)                          # sp[0] = uid_counter (0)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_addredplayer_rsp)
+    a.b_w("t8_done")
+
+    a.label("t8_check_c")
+    a.cmp_imm8(0, 0x0C)
+    a.bne("t8_unknown_event")
+    # 0x0C UIDS_CHANGED — UidCounter u16 in r3.
+    a.movs_imm8(3, 0)
+    a.movs_imm8(2, REASON_INTERIM)
+    a.movs_imm8(1, 0)
+    a.add_imm_t3(0, 5, 8)
+    a.blx_imm(PLT_reg_notievent_uids_changed_rsp)
     a.b_w("t8_done")
 
     a.label("t8_unknown_event")

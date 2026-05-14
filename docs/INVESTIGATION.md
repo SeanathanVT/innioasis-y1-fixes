@@ -11,7 +11,7 @@ Current shipped patches by binary:
 | Binary | Patches |
 |---|---|
 | `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear AVRCP 1.4 GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001 strict 1.3), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame) |
-| `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard) |
+| `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard). T1 advertises `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — events 0x09-0x0c are 1.4+ event IDs INTERIM-acked with zero payload via existing `libextavrcp.so` builders (no CHANGED ever fires; Y1 has one player, no Now Playing folder, no UID database). Mirrors Pixel-as-TG; what unblocks strict CT metadata-pane render (see Trace #32). |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
 | `libaudio.a2dp.default.so` | AH1 (skip `a2dp_stop` in `standby_l` so AudioFlinger silence-timeout leaves the AVDTP source stream alive across pauses) |
@@ -2690,8 +2690,48 @@ Despite the wire response now exactly matching the request shape, the Bolt-class
 - **Play/Pause icon stuck after first toggle**: Bolt doesn't re-register after CHANGED. §6.7.1 prevents subsequent CHANGED without re-registration. CT-side spec violation, not fixable on the TG side without re-violating §6.7.1 (which would re-break Kia and other spec-compliant CTs).
 - **Shuffle stuck on**: same root cause as Play/Pause icon — Bolt doesn't re-register after the §6.7.1-compliant CHANGED.
 
-### Conclusion
+### Conclusion (superseded by Trace #32)
 
-The `feature/bluetooth-metadata` branch is at AVRCP 1.3 spec-compliance equilibrium on the Y1 TG side. Strict CTs (Kia-class) work end-to-end. Bolt-class CTs work for control (PASSTHROUGH, play/pause routing) but their metadata pane is blocked by their CT-side reliance on 1.4+ SDP advertisement.
+Trace #31 concluded that Bolt's empty pane was blocked by CT-side reliance on 1.4+ SDP advertisement. Trace #32 refuted that hypothesis: Pixel-as-TG advertises strict AVRCP 1.3 in SDP (profile descriptor 0x0103, SupportedFeatures 0x0001) and Bolt's pane renders against it. The discriminator was the GetCapabilities event list — Pixel advertises four 1.4 event IDs (0x09-0x0c) from a 1.3-declared TG; Y1 (post-Trace-#31) did not.
 
-Next development cycle: separate feature branch scoped to AVRCP 1.4 SDP advertisement (reverse V7+V8, restore the 1.4-class served record, validate no regression on strict 1.3 CTs).
+## Trace #32 (2026-05-14) — Pixel HCI snoop reveals GetCapabilities event-list discriminator; Y1 mirrors
+
+After CoD masquerade attempts (Information bit, full Phone-Smartphone) both failed to unblock the metadata pane, the user provided a Pixel-4 `adb bugreport` containing `btsnoop_hci.log` of a working Pixel↔Bolt connection. Parsed via `tshark`.
+
+### Wire-level Pixel-vs-Y1 deltas at metadata-pane time
+
+| Surface | Pixel-as-TG | Y1-as-TG (pre-Trace-#32) | Material? |
+|---|---|---|---|
+| SDP profile descriptor (0x0009) | AVRCP 1.3 (`0x0103`) | AVRCP 1.3 (`0x0103`) | no — same |
+| SDP SupportedFeatures (0x0311) | `0x0001` (Cat 1 only) | `0x0001` (Cat 1 only) | no — same |
+| SDP BrowseGroupList (0x0005) | absent | present (`0x1002`) | unknown — but Y1's superset is spec-permissible |
+| SDP ServiceName (0x0100) | absent | "Advanced Audio " | unknown — Y1's superset is spec-permissible |
+| GetCapabilities events (count) | 8 | 8 | no — same count |
+| GetCapabilities events (set) | `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` | `{0x01..0x08}` | **yes — Pixel advertises 1.4 event IDs from a 1.3 TG** |
+| `InformDisplayableCharacterSet` (0x17) | rejected as "Invalid Command" | acked via T_charset | unlikely — both spec-permissible |
+| `GetElementAttributes` response shape | drops unsupported attrs entirely | emits unsupported with `len=0` (post-E1) | unlikely — both spec-permissible under §5.3.4 |
+| `RegisterNotification(0x09..0x0c)` | INTERIM with zero/empty payload | not advertised → Bolt never subscribes | **yes — paired with the previous row** |
+| `PASSTHROUGH PLAY` ack | Accepted | Accepted | no — same |
+| Track UID (`TrackChanged` payload) | `0x0000000000000000` ("SELECTED") | `0xFFFFFFFFFFFFFFFF` sentinel | Y1 is spec-strict for 1.3; Pixel uses 1.4+ semantic |
+
+The only Pixel↔Y1 wire delta that maps cleanly to "what Pixel does that Y1 doesn't" is the **GetCapabilities event-list mismatch + the 0x09-0x0c INTERIM acks**. Pixel's response builders for these four events exist in `libextavrcp.so` (verified via objdump — `btmtk_avrcp_send_reg_notievent_now_playing_content_changed_rsp` @ `0x26c0` etc); the PLT stubs are already linked into `libextavrcp_jni.so` (verified via `readelf --dyn-syms` — symbols 10/12/14/16 at PLT `0x330c / 0x3318 / 0x3324 / 0x3330`) though stock JNI never invokes them.
+
+### Implementation
+
+Two surgical patches in `patch_libextavrcp_jni.py`:
+1. **T1 advertised-event bytes** at file `0x7328..0x732f`: `01 02 03 04 05 06 07 08` → `01 02 05 08 09 0a 0b 0c`. Same 8-event count (which matches the existing `movs r2, #8` in T1).
+2. **T8 dispatcher**: 4 new arms for events 0x09 / 0x0a / 0x0b / 0x0c, each calling the existing PLT stub with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), and event-specific payload (zero for 0x09 / 0x0a; PlayerID=0, UidCtr=0 for 0x0b via `r3=0, sp[0]=0`; UidCtr=0 for 0x0c via `r3=0`). No subscription gate is armed for any of the four — no CHANGED ever fires (Y1 has one player, no Now Playing folder, no UID database). New blob size 3852 B (within the 4020-B LOAD #1 padding budget). New `OUTPUT_MD5 = c16a6b7892be2098ac07bef1989c937e`.
+
+### Cost: lost 1.3 event coverage
+
+Dropping events `0x03 / 0x04 / 0x06 / 0x07` from the advertised set to make room for 1.4-event IDs at the spec-mandated 8-element cap means:
+- `0x03 TRACK_REACHED_END`: T5's natural-end emit path is no longer subscribed-to by any CT (event 0x02 TRACK_CHANGED still works; the dedicated end-of-track signal is gone)
+- `0x04 TRACK_REACHED_START`: same — collapsed into 0x02
+- `0x06 BATT_STATUS_CHANGED`: battery-status indicator on CTs that read it is no longer driven (the music app's `BatteryReceiver` still writes `y1-track-info[794]` but no CT subscribes)
+- `0x07 SYSTEM_STATUS_CHANGED`: always-INTERIM-only anyway, no behavioural change
+
+T8 / T5 / T9 handlers for these four events are retained in the trampoline (a permissive CT subscribing to them despite no advertisement still gets handled correctly), but no observed CT does that.
+
+### Open: result not yet on the wire
+
+Bolt-Y1 reflash test pending the user's flash cycle. If it works, this trace closes the metadata-pane investigation that's run from Trace #1 (2026-05-02). If it doesn't, the remaining candidates are: (a) some SDP-record-content discriminator (the `BrowseGroupList` / `ServiceName` presence delta, or Pixel's not-yet-RE'd `0x0102 ProviderName`), or (b) the Bolt-side BR/EDR device-name regex or EIR discriminator.

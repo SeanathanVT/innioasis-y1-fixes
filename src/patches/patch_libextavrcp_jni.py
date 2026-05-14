@@ -47,7 +47,7 @@ NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
-OUTPUT_MD5        = "3454ffe3c28f609d07852435433cf3a8"
+OUTPUT_MD5        = "c16a6b7892be2098ac07bef1989c937e"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
 # Placeholder — when set, future trampoline edits could include
@@ -66,18 +66,19 @@ EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 # ---------------------------------------------------------------- T1
 
 # T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
-# bytes). Advertises every event we actually handle in the trampoline chain:
+# bytes). Advertised set mirrors Pixel-as-TG: strict CT metadata-pane render
+# gates on the four 1.4 events 0x09..0x0c being advertised + INTERIM-acked,
+# even when the SDP profile descriptor says 1.3. Pixel does the same.
 #   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
 #   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4 / T5 CHANGED on edge)
-#   0x03 TRACK_REACHED_END             (T8 INTERIM + T5 CHANGED on natural-end edge)
-#   0x04 TRACK_REACHED_START           (T8 INTERIM + T5 CHANGED on every track edge)
 #   0x05 PLAYBACK_POS_CHANGED          (T8 INTERIM + T9 CHANGED at 1 s cadence while playing)
-#   0x06 BATT_STATUS_CHANGED           (T8 INTERIM from y1-track-info[794] + T9 CHANGED on bucket edge)
-#   0x07 SYSTEM_STATUS_CHANGED         (T8 INTERIM only, canned POWERED_ON — intentional;
-#                                         the canned value IS the real value while trampolines run)
 #   0x08 PLAYER_APPLICATION_SETTING_CHANGED  (T8 INTERIM + T9 CHANGED-on-edge,
-#                                              both reading live (Repeat, Shuffle)
-#                                              from y1-track-info[795..796])
+#                                              reads live Repeat / Shuffle from
+#                                              y1-track-info[795..796])
+#   0x09 NOW_PLAYING_CONTENT_CHANGED   (T8 INTERIM-only; never CHANGED)
+#   0x0a AVAILABLE_PLAYERS_CHANGED     (T8 INTERIM-only; never CHANGED)
+#   0x0b ADDRESSED_PLAYER_CHANGED      (T8 INTERIM-only; PlayerID=0, UidCtr=0)
+#   0x0c UIDS_CHANGED                  (T8 INTERIM-only; UidCounter=0)
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -89,7 +90,7 @@ T1_TRAMPOLINE = bytes([
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,  # advertised events 0x01..0x08
+    0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c,  # advertised events (mirrors Pixel)
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40

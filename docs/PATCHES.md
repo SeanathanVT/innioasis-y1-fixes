@@ -107,9 +107,9 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 ### T1 — GetCapabilities (PDU 0x10) at `0x7308` (40 bytes)
 
-Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 8-element `EventsSupported` array `[0x01..0x08]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
+Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with an 8-element `EventsSupported` array, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events match what we implement: `0x01` PLAYBACK_STATUS, `0x02` TRACK_CHANGED, `0x03` TRACK_REACHED_END, `0x04` TRACK_REACHED_START, `0x05` PLAYBACK_POS, `0x06` BATT_STATUS, `0x07` SYSTEM_STATUS, `0x08` PLAYER_APPLICATION_SETTING_CHANGED.
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). Advertised set: `0x01` PLAYBACK_STATUS, `0x02` TRACK_CHANGED, `0x05` PLAYBACK_POS, `0x08` PLAYER_APPLICATION_SETTING_CHANGED, plus `0x09` NOW_PLAYING_CONTENT_CHANGED, `0x0a` AVAILABLE_PLAYERS_CHANGED, `0x0b` ADDRESSED_PLAYER_CHANGED, `0x0c` UIDS_CHANGED. The four 0x09..0x0c IDs come from AVRCP 1.4+ and are advertised here — even though the SDP profile descriptor is 1.3 — because strict CT metadata-pane render empirically gates on them being acknowledged. Pixel-as-TG does the same. T8 INTERIM-acks all four with zero/empty payload; no CHANGED ever fires (Y1 has one player, no Now Playing folder, no UID database).
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -215,17 +215,23 @@ ICS Table 7 rows 12-15 (C.14 Mandatory if any), 16-17 (Optional), and 30 (event 
 
 In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. Reads `y1-track-info` for events that need payloads (0x01 / 0x05), then dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT entry:
 
-| event_id | name | spec § | PLT | payload |
-|---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | `0x339c` | play_status u8 (from `y1-track-info[792]`) |
-| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | `0x3378` | (none) |
-| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | `0x336c` | (none) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | `0x345c` | n=2 + `[(Repeat, repeat_avrcp), (Shuffle, shuffle_avrcp)]` from `y1-track-info[795..796]` |
+| event_id | name | PLT | payload |
+|---|---|---|---|
+| 0x01 | PLAYBACK_STATUS_CHANGED | `0x339c` | play_status u8 (from `y1-track-info[792]`) |
+| 0x03 | TRACK_REACHED_END | `0x3378` | (none) |
+| 0x04 | TRACK_REACHED_START | `0x336c` | (none) |
+| 0x05 | PLAYBACK_POS_CHANGED | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
+| 0x06 | BATT_STATUS_CHANGED | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
+| 0x07 | SYSTEM_STATUS_CHANGED | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | `0x345c` | n=2 + `[(Repeat, repeat_avrcp), (Shuffle, shuffle_avrcp)]` from `y1-track-info[795..796]` |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | `0x330c` | (none) |
+| 0x0a | AVAILABLE_PLAYERS_CHANGED | `0x3324` | (none) |
+| 0x0b | ADDRESSED_PLAYER_CHANGED | `0x3330` | PlayerID u16 = 0 + UidCounter u16 = 0 |
+| 0x0c | UIDS_CHANGED | `0x3318` | UidCounter u16 = 0 |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
+Events 0x01-0x08 cover AVRCP 1.3 §5.4.2 (Tbls 5.29/5.31/5.32/5.33/5.34/5.36/5.37). Events 0x09-0x0c are 1.4+ event IDs whose response builders are already linked by `libextavrcp_jni.so` (their PLT stubs are present though stock JNI never invokes them); T8 acks each with INTERIM-only zero/empty payload. This matches what Pixel-as-TG does and is what strict CTs empirically gate metadata-pane render on, even when the SDP profile descriptor advertises 1.3.
+
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u16/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Events 0x07 and 0x09-0x0c are INTERIM-only — nothing on Y1 ever changes them. (0x07 SYSTEM_STATUS rationale: see footnote in `docs/BT-COMPLIANCE.md` §2; 0x09-0x0c rationale: Y1 has one player, no Now Playing folder, no UID database.)
 
 ### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED + PLAYER_APPLICATION_SETTING_CHANGED
 
