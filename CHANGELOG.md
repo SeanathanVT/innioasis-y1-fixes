@@ -7,7 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Changed
-- `--bluetooth`'s `ro.bluetooth.class` now advertises the Phone : Smartphone class with the typical phone service-bit set (Audio + Telephony + Object Transfer + Rendering + Networking + Information + Positioning), matching what mainstream phone-class TGs advertise. Stock value advertised Audio/Video : Portable Audio with only the Audio service bit, which strict CTs interpret as a passive audio sink and don't render a full metadata pane for. Cosmetic side effect: pairing dialogs may show a phone icon.
+- `--bluetooth`'s `ro.bluetooth.class` now sets the Information service bit alongside Audio (Portable Audio Major/Minor unchanged). Stock value advertised only the Audio bit, which under-represents the device's TG-side metadata capability. Doesn't fix strict-CT metadata-pane gating on its own (verified — neither this nor a full Phone-class masquerade unblocked it), but is the more honest representation regardless.
 
 ## [2.1.0] - 2026-05-13
 AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller now sees full track metadata, live play status, and play-state changes from the Y1, and can drive Repeat / Shuffle from its own UI. Reference docs: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PATCHES.md`](docs/PATCHES.md). Investigation history: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
