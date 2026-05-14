@@ -442,13 +442,12 @@ def _emit_t4(a: Asm) -> None:
     # track_changed_rsp(conn, 0, REASON_CHANGED, &SENTINEL_FFx8)
     # r1=0 takes the response builder's spec-correct path; r1!=0 hits the
     # reject-shape path that omits the event payload (see extended_T2's
-    # matching comment). The track_id is the 0xFF×8 sentinel rather than
-    # a real synthetic id — see the wire-level track_id discussion in the
-    # module docstring for why.
+    # matching comment). track_id = `track_selected` (0x00×8 — AVRCP 1.4+
+    # SELECTED) instead of a real per-track UID; mirrors Pixel-as-TG.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF) — see top-of-file
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     # Update state in-memory: state[0..7] = file[0..7]
@@ -723,12 +722,13 @@ def _emit_extended_t2(a: Asm) -> None:
     # the spec-correct path that emits reasonCode + event_id + track_id;
     # r1!=0 writes a reject-shape frame that omits the event payload.
     # transId is auto-extracted from conn[17] regardless.
-    # See module docstring for why we use the 0xFF×8 sentinel here rather
-    # than a real synthetic track_id.
+    # track_id = `track_selected` (0x00×8 — AVRCP 1.4+ SELECTED meaning
+    # "the currently playing media is selected"). Pixel-mirror; matches
+    # what strict 1.4+ CTs expect when a track is actually playing.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_INTERIM)
-    a.adr_w(3, "sentinel_ffx8")               # r3 = &(8 bytes 0xFF) — see top-of-file
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     # Arm sub_track_changed (event 0x02) per AVRCP §6.7.1. T5 emits CHANGED
@@ -783,8 +783,8 @@ def _emit_t5(a: Asm) -> None:
              "Notify when reached the end of the track of the playing
              element" — natural-end-only, not skip-driven.
            - event 0x02 TRACK_CHANGED (Table 5.30) — always on edge,
-             with track_id=&sentinel_ffx8 per the wire-level design
-             choice in the module docstring.
+             with track_id = `track_selected` (0x00×8 AVRCP 1.4+ SELECTED;
+             mirrors Pixel-as-TG).
            - event 0x04 TRACK_REACHED_START (Table 5.32) — always on
              edge ("Notify when start of a track is reached"; every
              track edge crosses both an end-of-previous and a
@@ -952,7 +952,8 @@ def _emit_t5(a: Asm) -> None:
 
     # ---- emit TRACK_CHANGED (event 0x02) — gated on subscription ----
     # AVRCP 1.3 §5.4.2 Table 5.30. ICS Table 7 row 24 (Mandatory wire-level).
-    # See module docstring for r1=0 / sentinel_ffx8 design rationale.
+    # r1=0 takes the response builder's spec-correct payload path; track_id
+    # = `track_selected` (0x00×8 AVRCP 1.4+ SELECTED).
     # sub_track_changed bit at state[16] (session-long; not cleared).
     a.ldrb_w(0, 13, T5_OFF_STATE + 16)
     a.cmp_imm8(0, 0)
@@ -961,7 +962,7 @@ def _emit_t5(a: Asm) -> None:
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.adr_w(3, "sentinel_ffx8")
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     a.label("t5_skip_track_changed")
@@ -2575,16 +2576,16 @@ def build() -> tuple[bytes, dict[str, int]]:
     a.asciiz("/data/data/com.innioasis.y1/files/y1-papp-set")
     a.align(4)
 
-    # 0xFF×8 sentinel passed as the track_id pointer to
-    # btmtk_avrcp_send_reg_notievent_track_changed_rsp for both INTERIM and
-    # CHANGED responses. AVRCP 1.3 §5.4.2 Table 5.30 ("If no track currently
-    # selected, then return 0xFFFFFFFF in the INTERIM response"; the field
-    # is 8 bytes — printed text in 1.3 is a typo) + ESR07 §2.2 clarifying
-    # to the 8-byte form 0xFFFFFFFFFFFFFFFF.
-    # Semantic: "this information is not bound to a particular media
-    # element", which keeps the CT in poll-on-each-event mode.
-    a.label("sentinel_ffx8")
-    a.raw(b"\xFF" * 8)
+    # 0x00×8 SELECTED — track_id pointer for both INTERIM and CHANGED
+    # responses of btmtk_avrcp_send_reg_notievent_track_changed_rsp.
+    # AVRCP 1.4+ semantic (§6.7.2 Tbl 6.x): 0x0000000000000000 means
+    # "currently playing media is selected — render its metadata." Distinct
+    # from 0xFFFFFFFFFFFFFFFF which means "no media currently selected"
+    # (AVRCP 1.3 §5.4.2 Tbl 5.30 + ESR07 §2.2). Mirrors what Pixel-as-TG
+    # sends to Bolt; strict 1.4+ CTs reading the 8-byte UID as a special
+    # value won't downgrade the metadata pane to "no track playing."
+    a.label("track_selected")
+    a.raw(b"\x00" * 8)
 
     # PApp data tables (PDU 0x11..0x16). All AVRCP 1.3 §5.2 spec values.
     a.align(4)
