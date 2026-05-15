@@ -100,6 +100,12 @@ STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 #     BaseActivity.dispatchKeyEvent / BasePlayerActivity.dispatchKeyEvent
 #     PlayerService.play / pause / playOrPause / stop
 #     PlayerService.nextSong / prevSong / restartPlay / playerPrepared / toRestart
+#     Y1Application.onCreate (boot init sequence)
+#
+#   Patcher-generated smali (entry-point Log.d traces):
+#     PappSetReceiver.onReceive (B3 — CT-driven Repeat/Shuffle Sets)
+#     PappStateBroadcaster.sendNow + onSharedPreferenceChanged (B4 — local
+#       Repeat/Shuffle changes → AVRCP broadcast)
 #
 #   Inject tree (entry-point Log.d traces):
 #     TrackInfoWriter — init, setPlayStatus, onSeek, markCompletion, markError,
@@ -120,9 +126,25 @@ STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 #     TrackInfoWriter.setPlayStatus    → sPS.from, sPS.to
 #     PlaybackStateBridge.onPlayValue  → oPV.newVal, oPV.reason
 #
-#   Inject tree (trampoline-state byte dump — §6.7.1 gate visibility):
-#     TrackInfoWriter.wakeTrackChanged      → wTC.pre tramp.state[13..19]=…
-#     TrackInfoWriter.wakePlayStateChanged  → wPSC.pre tramp.state[13..19]=…
+#   Inject tree (trampoline-state byte dump — §6.7.1 gate + mirror visibility):
+#     y1-trampoline-state full layout (verified per
+#     architecture_y1_subscription_gating memory):
+#       [0..7]   = audio_id mirror (BE u64) — what T5 last advertised
+#       [8..11]  = position mirror (BE u32) — what T9 last advertised
+#       [12]     = play_status mirror      — what T9 last advertised
+#       [13..19] = §6.7.1 per-subscription gates
+#                  [13]=TRACK_CHANGED [14]=PLAYBACK_STATUS [15]=POS
+#                  [16]=BATT          [17]=PAPP            [18..19]=reserved
+#     Tag pattern (each wake produces both):
+#       TrackInfoWriter.wakeTrackChanged      → wTC.pre tramp.state[0..19]=…
+#                                               wTC.post tramp.state[0..19]=…
+#       TrackInfoWriter.wakePlayStateChanged  → wPSC.pre tramp.state[0..19]=…
+#                                               wPSC.post tramp.state[0..19]=…
+#     The .pre dump fires immediately before sendBroadcast(); the .post dump
+#     is posted to the main looper +50 ms later via DbgPostReadRunnable (a
+#     debug-only injected class). Comparing pre vs post answers "did T5/T9
+#     actually emit CHANGED on the wire?" — the relevant gate byte clears
+#     between pre and post if it did; stays armed if it got gated out.
 #
 # Toggled at build time via the `KOENSAYR_DEBUG` environment variable —
 # `apply.bash --debug` sets it. Omit for release builds (zero runtime
@@ -1529,11 +1551,18 @@ PAPP_RECEIVER_SMALI_BODY = """\
 .end method
 """
 
+papp_receiver_src = PAPP_RECEIVER_SMALI_BODY
+if DEBUG_LOGGING:
+    papp_receiver_src = _inject_log_d(
+        papp_receiver_src,
+        r'onReceive\(Landroid/content/Context;Landroid/content/Intent;\)V',
+        "PappSetReceiver.onReceive entry",
+    )
 papp_receiver_path = os.path.join(UNPACKED_DIR, PAPP_RECEIVER_SMALI)
 os.makedirs(os.path.dirname(papp_receiver_path), exist_ok=True)
 with open(papp_receiver_path, 'w') as f:
-    f.write(PAPP_RECEIVER_SMALI_BODY)
-print(f"  Wrote {PAPP_RECEIVER_SMALI}")
+    f.write(papp_receiver_src)
+print(f"  Wrote {PAPP_RECEIVER_SMALI}{' (+1 entry trace; --debug)' if DEBUG_LOGGING else ''}")
 
 # -- Inject registerReceiver into Y1Application.onCreate ----------------------
 y1app_path = os.path.join(UNPACKED_DIR, Y1APP_SMALI)
@@ -1791,11 +1820,20 @@ PAPP_BROADCASTER_SMALI_BODY = """\
 .end method
 """
 
+papp_broadcaster_src = PAPP_BROADCASTER_SMALI_BODY
+if DEBUG_LOGGING:
+    for sig, msg in (
+        (r'sendNow\(\)V',
+            "PappStateBroadcaster.sendNow entry"),
+        (r'onSharedPreferenceChanged\(Landroid/content/SharedPreferences;Ljava/lang/String;\)V',
+            "PappStateBroadcaster.onSharedPreferenceChanged entry"),
+    ):
+        papp_broadcaster_src = _inject_log_d(papp_broadcaster_src, sig, msg)
 papp_broadcaster_path = os.path.join(UNPACKED_DIR, PAPP_BROADCASTER_SMALI)
 os.makedirs(os.path.dirname(papp_broadcaster_path), exist_ok=True)
 with open(papp_broadcaster_path, 'w') as f:
-    f.write(PAPP_BROADCASTER_SMALI_BODY)
-print(f"  Wrote {PAPP_BROADCASTER_SMALI}")
+    f.write(papp_broadcaster_src)
+print(f"  Wrote {PAPP_BROADCASTER_SMALI}{' (+2 entry traces; --debug)' if DEBUG_LOGGING else ''}")
 
 
 # ============================================================
@@ -1857,6 +1895,17 @@ PATCH_B5_INJECT_FILES = [
         "smali/com/koensayr/y1/ui/NowPlayingRefresher.smali"),
 ]
 
+# DEBUG-only Runnable for post-broadcast trampoline-state reads. Only included
+# when KOENSAYR_DEBUG=1; release builds get no reference to this class anywhere
+# (the calling _dbgPostReadAfter helper + the post-sendBroadcast invoke-static
+# anchors are both gated on the same flag).
+PATCH_B5_INJECT_FILES_DEBUG_ONLY = [
+    ("com/koensayr/y1/trackinfo/DbgPostReadRunnable.smali",
+        "smali/com/koensayr/y1/trackinfo/DbgPostReadRunnable.smali"),
+]
+if DEBUG_LOGGING:
+    PATCH_B5_INJECT_FILES = PATCH_B5_INJECT_FILES + PATCH_B5_INJECT_FILES_DEBUG_ONLY
+
 # --- DEBUG instrumentation for the inject tree (gated on KOENSAYR_DEBUG=1) ---
 # Two layers:
 #   1. Entry-point Log.d traces for every metadata-relevant method across all
@@ -1912,16 +1961,27 @@ DBG_HELPERS_SMALI = """\
     return-void
 .end method
 
-# _dbgLogTrampolineState(String tag) → Log.d("Y1Patch", tag+" tramp.state[13..19]=HH HH …")
+# _dbgLogTrampolineState(String tag) → Log.d("Y1Patch", tag+" tramp.state[0..19]=HH HH …")
 #
-# Reads /data/data/com.innioasis.y1/files/y1-trampoline-state (16/20-byte file)
-# and dumps bytes 13..19 — the AVRCP 1.3 §6.7.1 per-subscription gates
-# (state[13]=TRACK_CHANGED, state[14]=PLAYBACK_STATUS, state[15]=POS,
-# state[16]=BATT, state[17]=PAPP — verified per architecture_y1_subscription_gating
-# memory). Called immediately before wakeTrackChanged / wakePlayStateChanged
-# sendBroadcast(), so successive captures answer: was the gate armed (non-zero
-# byte) when we kicked T5/T9, and did the previous wake actually clear the byte
-# (proving T5/T9 emitted CHANGED on the wire) or not (proving gate exhaustion).
+# Dumps the full 20-byte y1-trampoline-state file with semantic groupings:
+#   bytes [0..7]   = audio_id mirror (BE u64) — what T5 last advertised on the wire
+#   bytes [8..11]  = position mirror (BE u32) — what T9 last advertised
+#   byte  [12]     = play_status mirror — what T9 last advertised (compare against
+#                    fL.ps in the surrounding flushLocked log to detect stale wire)
+#   bytes [13..19] = AVRCP 1.3 §6.7.1 per-subscription gates (state[13]=TRACK_CHANGED,
+#                    state[14]=PLAYBACK_STATUS, state[15]=POS, state[16]=BATT,
+#                    state[17]=PAPP — verified per architecture_y1_subscription_gating
+#                    memory)
+#
+# Called immediately before each wakeTrackChanged / wakePlayStateChanged
+# sendBroadcast() and once per PositionTicker tick. Successive captures answer:
+#   * Was the gate armed (non-zero byte in [13..19]) when we kicked T5/T9?
+#   * Did the previous wake actually clear the gate (proving T5/T9 emitted
+#     CHANGED on the wire) or not (proving gate exhaustion: gate cleared on
+#     a prior CHANGED, CT hasn't re-RegisterNotification'd yet)?
+#   * Does the [0..12] mirror match the current y1-track-info (audio_id /
+#     position / play_status)? Mismatch means T5/T9 hasn't published the
+#     latest state to the wire yet — i.e., the icon-doesn't-update symptom.
 .method public static _dbgLogTrampolineState(Ljava/lang/String;)V
     .locals 8
 
@@ -1965,11 +2025,11 @@ DBG_HELPERS_SMALI = """\
 
     invoke-virtual {v5, p0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
-    const-string v6, " tramp.state[13..19]="
+    const-string v6, " tramp.state[0..19]="
 
     invoke-virtual {v5, v6}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
-    const/16 v4, 0xd
+    const/16 v4, 0x0
 
     :goto_loop
     const/16 v6, 0x14
@@ -2010,6 +2070,42 @@ DBG_HELPERS_SMALI = """\
     return-void
 
     :catch_ts
+    move-exception v0
+
+    return-void
+.end method
+
+# _dbgPostReadAfter(String tag, long delayMs) → schedule a delayed
+# trampoline-state dump on the main looper. Allocates a fresh Handler +
+# DbgPostReadRunnable per call (debug-only path, allocation cost
+# irrelevant). The Runnable logs "{tag}.post tramp.state[0..19]=…" so a
+# tag like "wTC" produces "wTC.pre" (pre-broadcast, immediate) + "wTC.post"
+# (post-broadcast, ~50 ms later) — together they reveal whether T5/T9
+# emitted CHANGED on the wire (the relevant §6.7.1 gate byte cleared
+# between pre and post) or got gated out (byte stayed armed).
+.method public static _dbgPostReadAfter(Ljava/lang/String;J)V
+    .locals 5
+
+    :try_start_pa
+    new-instance v0, Landroid/os/Handler;
+
+    invoke-static {}, Landroid/os/Looper;->getMainLooper()Landroid/os/Looper;
+
+    move-result-object v1
+
+    invoke-direct {v0, v1}, Landroid/os/Handler;-><init>(Landroid/os/Looper;)V
+
+    new-instance v1, Lcom/koensayr/y1/trackinfo/DbgPostReadRunnable;
+
+    invoke-direct {v1, p0}, Lcom/koensayr/y1/trackinfo/DbgPostReadRunnable;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0, v1, p1, p2}, Landroid/os/Handler;->postDelayed(Ljava/lang/Runnable;J)Z
+    :try_end_pa
+    .catch Ljava/lang/Throwable; {:try_start_pa .. :try_end_pa} :catch_pa
+
+    return-void
+
+    :catch_pa
     move-exception v0
 
     return-void
@@ -2282,6 +2378,62 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
         "    # === END DEBUG ===\n"
         "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
         "wakePlayStateChanged.preBroadcast",
+    ),
+    # wakeTrackChanged post-broadcast: schedule a ~50 ms delayed
+    # trampoline-state read so we can compare pre vs post and answer
+    # definitively whether T5 emitted TRACK_CHANGED CHANGED on the wire
+    # (state[13] cleared between pre and post) or got gated out (byte
+    # stayed armed). Anchored on the "album" putExtra line that's unique
+    # to wakeTrackChanged.
+    (
+        "    const-string v2, \"album\"\n"
+        "\n"
+        "    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;\n"
+        "\n"
+        "    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;\n"
+        "\n"
+        "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+        "\n"
+        "    :cond_no_ctx\n",
+        "    const-string v2, \"album\"\n"
+        "\n"
+        "    iget-object v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAlbum:Ljava/lang/String;\n"
+        "\n"
+        "    invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;\n"
+        "\n"
+        "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+        "\n"
+        "    # === DEBUG: schedule post-broadcast trampoline-state read ===\n"
+        "    const-string v2, \"wTC\"\n"
+        "    const-wide/16 v3, 0x32\n"
+        "    invoke-static {v2, v3, v4}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgPostReadAfter(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "\n"
+        "    :cond_no_ctx\n",
+        "wakeTrackChanged.postBroadcast",
+    ),
+    # wakePlayStateChanged post-broadcast: same diagnostic. Anchored on
+    # the "playing" boolean branch unique to wakePlayStateChanged.
+    (
+        "    :cond_playing\n"
+        "    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
+        "\n"
+        "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+        "\n"
+        "    :cond_no_ctx\n",
+        "    :cond_playing\n"
+        "    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
+        "\n"
+        "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
+        "\n"
+        "    # === DEBUG: schedule post-broadcast trampoline-state read ===\n"
+        "    const-string v2, \"wPSC\"\n"
+        "    const-wide/16 v3, 0x32\n"
+        "    invoke-static {v2, v3, v4}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgPostReadAfter(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "\n"
+        "    :cond_no_ctx\n",
+        "wakePlayStateChanged.postBroadcast",
     ),
 ]
 
@@ -2648,10 +2800,17 @@ NEW_Y1APP_B4_HEAD = (
 if OLD_Y1APP_B4_HEAD not in y1app_src:
     sys.exit("ERROR: Patch B5.3 anchor not found (B4 head comment).")
 y1app_src = y1app_src.replace(OLD_Y1APP_B4_HEAD, NEW_Y1APP_B4_HEAD, 1)
+if DEBUG_LOGGING:
+    y1app_src = _inject_log_d(
+        y1app_src,
+        r'onCreate\(\)V',
+        "Y1Application.onCreate entry",
+    )
 with open(y1app_path, 'w') as f:
     f.write(y1app_src)
 print(f"  Patch B5.3: Y1Application.onCreate registers TrackInfoWriter / "
-      f"PappSetFileObserver / BatteryReceiver (before B4 sendNow)")
+      f"PappSetFileObserver / BatteryReceiver (before B4 sendNow)"
+      f"{' [+1 entry trace; --debug]' if DEBUG_LOGGING else ''}")
 
 # -- Patch B5.4: extend PappStateBroadcaster.sendNow ---------------------------
 # After the PAPP_STATE_DID_CHANGE broadcast we (a) call
