@@ -439,16 +439,15 @@ def _emit_t4(a: Asm) -> None:
     a.beq("t4_no_change")
 
     a.label("t4_track_changed")
-    # track_changed_rsp(conn, 0, REASON_CHANGED, &audio_id_BE)
+    # track_changed_rsp(conn, 0, REASON_CHANGED, &SENTINEL_FFx8)
     # r1=0 takes the response builder's spec-correct path; r1!=0 hits the
     # reject-shape path that omits the event payload (see extended_T2's
-    # matching comment). track_id = y1-track-info[0..7] (audio_id BE u64).
-    # Strict 1.4+ CTs cache GetElementAttributes keyed by Identifier; a
-    # per-track id forces refresh on every track edge.
+    # matching comment). track_id = `track_selected` (0x00×8 — AVRCP 1.4+
+    # SELECTED) instead of a real per-track UID; mirrors Pixel-as-TG.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.add_sp_imm(3, T4_OFF_FILE_TID)          # r3 = &file[0..7] = audio_id BE u64
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     # Update state in-memory: state[0..7] = file[0..7]
@@ -723,17 +722,13 @@ def _emit_extended_t2(a: Asm) -> None:
     # the spec-correct path that emits reasonCode + event_id + track_id;
     # r1!=0 writes a reject-shape frame that omits the event payload.
     # transId is auto-extracted from conn[17] regardless.
-    # track_id = audio_id from y1-track-info[0..7] (BE u64; helper memcpy's
-    # raw 8 bytes to wire, which is also BE per AVRCP §5.4.2 Tbl 5.30).
-    # Strict 1.4+ CTs (Bolt-class) cache `GetElementAttributes` keyed by
-    # the TRACK_CHANGED Identifier — sending the same value (e.g. 0x00×8
-    # SELECTED) on every track edge made Bolt's pane only refresh
-    # ~50% of the time. With a real per-track id every CHANGED carries a
-    # distinct cache key, so Bolt invalidates + re-queries on every edge.
+    # track_id = `track_selected` (0x00×8 — AVRCP 1.4+ SELECTED meaning
+    # "the currently playing media is selected"). Pixel-mirror; matches
+    # what strict 1.4+ CTs expect when a track is actually playing.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_INTERIM)
-    a.add_sp_imm(3, T2_OFF_TID)               # r3 = &sp[0] = audio_id (BE u64)
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     # Arm sub_track_changed (event 0x02) per AVRCP §6.7.1. T5 emits CHANGED
@@ -958,9 +953,7 @@ def _emit_t5(a: Asm) -> None:
     # ---- emit TRACK_CHANGED (event 0x02) — gated on subscription ----
     # AVRCP 1.3 §5.4.2 Table 5.30. ICS Table 7 row 24 (Mandatory wire-level).
     # r1=0 takes the response builder's spec-correct payload path; track_id
-    # = y1-track-info[0..7] (audio_id BE u64). Strict 1.4+ CTs cache
-    # GetElementAttributes keyed by the Identifier; a per-track id is what
-    # forces Bolt's pane to refresh on every track edge.
+    # = `track_selected` (0x00×8 AVRCP 1.4+ SELECTED).
     # sub_track_changed bit at state[16] (session-long; not cleared).
     a.ldrb_w(0, 13, T5_OFF_STATE + 16)
     a.cmp_imm8(0, 0)
@@ -969,7 +962,7 @@ def _emit_t5(a: Asm) -> None:
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
-    a.add_sp_imm(3, T5_OFF_FILE_TID)          # r3 = &file[0..7] = audio_id BE u64
+    a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
     a.blx_imm(PLT_track_changed_rsp)
 
     a.label("t5_skip_track_changed")
