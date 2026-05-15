@@ -96,9 +96,15 @@ CTYPE_NAMES = {
 def parse_records(data):
     """Yield (timestamp_ms, payload_text) for each btlog record.
 
-    Layout: sync(0x55 0x00) + 4-B id + 2-B seq + ts(u32 LE) + pad(0a 00 00 00) +
-    payload_len(u16 LE) + 2-B tag + payload_text + 1-B trailer. Anchor on the
-    pad — bytes 6..7 cycle with ID counter, not a fixed version.
+    Layout: sync(0x55 0x00) + 4-B id + 2-B seq + ts(u32 LE) + 4-B header-rest +
+    payload_len(u16 LE) + 2-B tag + payload_text + 1-B trailer.
+
+    The 4 bytes at offset 12..15 vary across firmware (early captures saw
+    "0a 00 00 00", later ones see "00 00 00 00", and individual records
+    drift further), so we can't anchor on them. Instead, accept a record
+    if its declared payload_len is plausible AND the next sync appears
+    within a small trailer window after the consumed record. Wrong
+    alignments fail one or both checks.
     """
     i = data.find(PRELUDE)
     if i >= 0:
@@ -110,14 +116,19 @@ def parse_records(data):
         sync = data.find(SYNC, i)
         if sync < 0 or sync + 20 > len(data):
             return
-        if data[sync + 12 : sync + 16] != b"\x0a\x00\x00\x00":
-            i = sync + 2
-            continue
-        timestamp = struct.unpack_from("<I", data, sync + 8)[0]
         payload_len = struct.unpack_from("<H", data, sync + 16)[0]
         if payload_len > 8192 or sync + 20 + payload_len > len(data):
             i = sync + 2
             continue
+        # Validate alignment: another sync must appear within 16 bytes
+        # after the declared record end (trailer is normally 1 byte).
+        rec_end = sync + 20 + payload_len
+        if rec_end < len(data) - 32:
+            next_sync = data.find(SYNC, rec_end, rec_end + 16)
+            if next_sync < 0:
+                i = sync + 2
+                continue
+        timestamp = struct.unpack_from("<I", data, sync + 8)[0]
         text = data[sync + 20 : sync + 20 + payload_len]
         yield (timestamp, text)
         i = sync + 20 + payload_len + 1  # skip past trailer
