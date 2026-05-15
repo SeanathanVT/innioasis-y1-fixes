@@ -975,9 +975,9 @@ def _emit_t5(a: Asm) -> None:
         # for grep-able correlation with the music app's fL.id debug lines,
         # even though the wire-side Identifier is SELECTED 0x00*8. r6 is
         # unused elsewhere in T5 body, callee-saved across the log blx.
-        # _emit_native_log_u32 push/pops r2/r3 internally so the emit args
+        # _emit_native_log_u32 push/pops r0..r3 internally so the emit args
         # set up just above (r0=conn, r1=0, r2=REASON_CHANGED, r3=&selected)
-        # survive the call.
+        # all survive the call.
         a.ldr_sp_imm(6, T5_OFF_FILE_TID + 4)
         a.rev_lo_lo(6, 6)
         _emit_native_log_u32(a, "log_fmt_t5emit", 6)
@@ -1280,8 +1280,9 @@ def _emit_t6(a: Asm) -> None:
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
     if DEBUG_NATIVE_LOG:
-        # Log duration then position. The log helper push/pops r2/r3 so
-        # both response args are preserved across the two log calls.
+        # Log duration then position. The log helper push/pops r0..r3 so
+        # all four response builder args (conn, success, dur, pos) survive
+        # both log calls.
         _emit_native_log_u32(a, "log_fmt_t6dur", 2)
         _emit_native_log_u32(a, "log_fmt_t6pos", 3)
     a.blx_imm(PLT_get_playstatus_rsp)
@@ -1866,28 +1867,42 @@ def _emit_native_log_u32(a: Asm, fmt_label: str, value_reg: int) -> None:
     response blx. Used by build(debug=True) to record exactly what bytes the
     trampolines are about to ship to the CT.
 
-    Insertion contract: caller has r3 already set to the value to log AND
-    r2/r3 already loaded with the response builder's args. We save r2/r3
-    via the stack, log, then restore. r4-r11 are callee-saved across the
-    blx per AAPCS, so the BluetoothAvrcpService struct ptr survives.
+    Insertion contract: caller has its full r0..r3 arg vector already
+    loaded (r0=conn, r1=0, r2=REASON_CHANGED, r3=payload). The log call
+    clobbers all of r0-r3 — AAPCS only promises r4-r11 callee-saved
+    across the blx. So push/pop all four caller-arg registers around the
+    call to preserve the emit's setup.
 
-    Bytes: 18 (push + 4× movs/adr/mov + blx + pop) + 0 string overhead per
-    call site; format strings consolidated into the data block at end of
-    blob. value_reg must be r0..r7 (low regs).
+    Earlier revision saved only r2/r3, which left r0 (conn pointer) and
+    r1 (success code) corrupted on return — response builders called
+    with garbage conn pointer either crashed silently or wrote to wrong
+    memory, never reaching the AVRCP wire. Symptom: metadata + PSTAT
+    changes invisible to the peer CT (Sonos pane stuck, play/pause icon
+    frozen) despite Y1-side debug logs showing emit-path execution.
+
+    Bytes: 22 (push + ldr if needed + movs/adr/mov + blx + pop). Format
+    strings consolidated into the data block at end of blob. value_reg
+    must be r0..r7 (low regs).
     """
-    # push {r2, r3} so the emit can restore its args after we clobber r0-r3.
-    # Thumb T1 push: 0xB400 | (LR_bit << 8) | regs_r0_r7_bitmask.
-    # push {r2, r3} = 0xB40C  →  bytes 0x0C 0xB4.
-    a.raw(bytes([0x0C, 0xB4]))
+    # push {r0, r1, r2, r3} = 0xB40F  →  bytes [0x0F, 0xB4]. After push,
+    # sp -= 16, with sp[0]=r0, sp[4]=r1, sp[8]=r2, sp[12]=r3.
+    a.raw(bytes([0x0F, 0xB4]))
 
-    a.mov_lo_lo(3, value_reg)                 # r3 = value (varargs slot 1)
+    # If value_reg is one of r0..r3 we must move it into r3 BEFORE
+    # clobbering r0/r1/r2 with prio/tag/fmt. For value_reg=r3 the mov
+    # is a self-move (still encoded but harmless). For value_reg in
+    # r4..r7 the source register is preserved across the push so a
+    # direct mov_lo_lo works either way.
+    if value_reg != 3:
+        a.mov_lo_lo(3, value_reg)
+
     a.movs_imm8(0, 4)                         # r0 = ANDROID_LOG_INFO
     a.adr_w(1, "log_tag")                     # r1 = "Y1T"
     a.adr_w(2, fmt_label)                     # r2 = fmt string
     a.blx_imm(PLT_android_log_print)
 
-    # pop {r2, r3} = 0xBC0C  →  bytes 0x0C 0xBC.
-    a.raw(bytes([0x0C, 0xBC]))
+    # pop {r0, r1, r2, r3} = 0xBC0F  →  bytes [0x0F, 0xBC].
+    a.raw(bytes([0x0F, 0xBC]))
 
 
 def _emit_t8(a: Asm) -> None:

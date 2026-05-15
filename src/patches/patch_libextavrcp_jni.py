@@ -56,7 +56,7 @@ OUTPUT_MD5        = "eb736ab630d4a2719cd8638768206add"
 # Logs go to logcat with tag "Y1T". Adds ~188 B to the trampoline blob;
 # release builds remain byte-identical to the no-debug shape.
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
-OUTPUT_DEBUG_MD5  = "2cf8cc9abd525db22ebfdb5316ea2409"
+OUTPUT_DEBUG_MD5  = "ad549132e5743e378211d195e1547074"
 
 # Effective expected output MD5 for the current invocation — used by all
 # verification below. Routes through DEBUG_LOGGING so a single switch
