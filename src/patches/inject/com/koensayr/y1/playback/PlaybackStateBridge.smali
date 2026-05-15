@@ -126,31 +126,31 @@
 # setDataSource, the music app has already updated mPlayingMusic /
 # mPlayingAudiobook to the new song, so PlayerService.getPlayingSong()
 # (which TrackInfoWriter.flushLocked() consults) returns the new track's
-# metadata. Firing TrackInfoWriter.onTrackEdge() + wakeTrackChanged() here
-# moves the CT-visible track-change notification ~100-500 ms earlier (the
-# prepareAsync duration), so peers like Bolt see the new Artist/Track/Album
-# while audio decoder is still spinning up.
+# metadata. Firing TrackInfoWriter.onFreshTrackChange() + wakeTrackChanged()
+# here moves the CT-visible track-change notification ~100-500 ms earlier
+# (the prepareAsync duration), so peers like Bolt see the new
+# Artist/Track/Album while the audio decoder is still spinning up.
 #
-# onTrackEdge dedups by audio_id, so same-track toRestart calls (resume-
-# from-pause, screen-on restart, app startup) refresh duration without
-# disturbing the live-position baseline. wakeTrackChanged fires a
-# Context.sendBroadcast that MMI_AVRCP picks up; T5 reads
-# y1-track-info/y1-trampoline-state and edge-detects (file[0..7] vs
-# state[0..7]) — same-track invocations emit nothing on the wire.
+# onFreshTrackChange unconditionally resets position-anchor + clears the
+# stale mLastKnownDuration. The audio_id-dedup path doesn't work for this
+# call site because the music app's restartPlay() invokes pause() before
+# toRestart(), and pause's flushLocked already updated mCachedAudioId to
+# the new track's id — so by the time we'd snapshot it, old==new.
 #
-# When prepareAsync eventually completes, OnPreparedListener fires
-# onPrepared() below, which runs onTrackEdge() again. With the audio_id
-# now matching mCachedAudioId, dedup skips the position reset; only a
-# duration refresh runs (helpful if getDuration() became available
-# post-prepare). wakeTrackChanged from onPrepared also fires a second
-# broadcast — harmless, T5 dedups via the state-vs-file audio_id check.
+# When prepareAsync eventually completes the engine fires OnPreparedListener
+# → onPrepared() (which calls the dedup-gated onTrackEdge — handles the
+# resume-from-pause re-prepare case where audio_id is unchanged) and then
+# PlayerService.playerPrepared() runs and sets playerIsPrepared=true. Our
+# B5.2c hook on playerPrepared's tail then fires onPlayerPreparedTail()
+# below, which re-flushes (now with getDuration() valid) and re-broadcasts
+# so the post-prepare duration value reaches the CT.
 .method public static onEarlyTrackChange()V
     .locals 3
 
     :try_start_e
     sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
 
-    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onTrackEdge()V
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onFreshTrackChange()V
 
     invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
 
@@ -159,6 +159,52 @@
     .catch Ljava/lang/Throwable; {:try_start_e .. :try_end_e} :catch_e
 
     :catch_e
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
+# PlayerService.playerPrepared() tail hook (B5.2c). Fires AFTER the
+# `iput-boolean playerIsPrepared = true` in playerPrepared() (both branches:
+# the shutdown-restore branch + the normal prepare branch). At this point
+# PlayerService.getPlayerIsPrepared() returns true, so a fresh flush
+# captures the newly-valid getDuration() value into mLastKnownDuration and
+# y1-track-info[776..779]. Without this hook, flushLocked at OnPreparedListener
+# time runs ~26 ms BEFORE playerIsPrepared flips, so it falls back to the
+# stale prior-track mLastKnownDuration and the new-track duration only
+# reaches the CT on the next state-edge (often ~one track late — verified
+# Kia 2026-05-14: dur=165120 leaked across tracks 1/2/3, dur=126407 across
+# 4/5, etc.).
+#
+# Also re-broadcasts metachanged + playstatechanged so T5 → TRACK_CHANGED
+# CHANGED and T9 → PLAYBACK_POS / STATUS CHANGED carry the now-correct
+# duration on the wire.
+.method public static onPlayerPreparedTail()V
+    .locals 3
+
+    :try_start_pt
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flush()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
+    return-void
+    :try_end_pt
+    .catch Ljava/lang/Throwable; {:try_start_pt .. :try_end_pt} :catch_pt
+
+    :catch_pt
     move-exception v0
 
     const-string v1, "Y1Patch"

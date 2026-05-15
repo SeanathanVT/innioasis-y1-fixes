@@ -103,10 +103,10 @@ STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 #
 #   Inject tree (entry-point Log.d traces):
 #     TrackInfoWriter — init, setPlayStatus, onSeek, markCompletion, markError,
-#       onTrackEdge, setBattery, setPapp, flush, flushLocked, wakeTrackChanged,
-#       wakePlayStateChanged
+#       onFreshTrackChange, onTrackEdge, setBattery, setPapp, flush, flushLocked,
+#       wakeTrackChanged, wakePlayStateChanged
 #     PlaybackStateBridge — onPlayValue, onEarlyTrackChange, onPrepared,
-#       onCompletion, onSeek, onError
+#       onPlayerPreparedTail, onCompletion, onSeek, onError
 #     PositionTicker — start, stop, run (1 s tick)
 #     BatteryReceiver — register, onReceive
 #     PappSetFileObserver — start, onEvent, dispatch
@@ -119,6 +119,10 @@ STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 #                                        onSeek.APPLIED.pos
 #     TrackInfoWriter.setPlayStatus    → sPS.from, sPS.to
 #     PlaybackStateBridge.onPlayValue  → oPV.newVal, oPV.reason
+#
+#   Inject tree (trampoline-state byte dump — §6.7.1 gate visibility):
+#     TrackInfoWriter.wakeTrackChanged      → wTC.pre tramp.state[13..19]=…
+#     TrackInfoWriter.wakePlayStateChanged  → wPSC.pre tramp.state[13..19]=…
 #
 # Toggled at build time via the `KOENSAYR_DEBUG` environment variable —
 # `apply.bash --debug` sets it. Omit for release builds (zero runtime
@@ -1907,6 +1911,109 @@ DBG_HELPERS_SMALI = """\
 
     return-void
 .end method
+
+# _dbgLogTrampolineState(String tag) → Log.d("Y1Patch", tag+" tramp.state[13..19]=HH HH …")
+#
+# Reads /data/data/com.innioasis.y1/files/y1-trampoline-state (16/20-byte file)
+# and dumps bytes 13..19 — the AVRCP 1.3 §6.7.1 per-subscription gates
+# (state[13]=TRACK_CHANGED, state[14]=PLAYBACK_STATUS, state[15]=POS,
+# state[16]=BATT, state[17]=PAPP — verified per architecture_y1_subscription_gating
+# memory). Called immediately before wakeTrackChanged / wakePlayStateChanged
+# sendBroadcast(), so successive captures answer: was the gate armed (non-zero
+# byte) when we kicked T5/T9, and did the previous wake actually clear the byte
+# (proving T5/T9 emitted CHANGED on the wire) or not (proving gate exhaustion).
+.method public static _dbgLogTrampolineState(Ljava/lang/String;)V
+    .locals 8
+
+    :try_start_ts
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    iget-object v0, v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mFilesDir:Ljava/io/File;
+
+    if-nez v0, :cond_have_dir
+
+    return-void
+
+    :cond_have_dir
+    new-instance v1, Ljava/io/File;
+
+    const-string v2, "y1-trampoline-state"
+
+    invoke-direct {v1, v0, v2}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
+
+    new-instance v2, Ljava/io/FileInputStream;
+
+    invoke-direct {v2, v1}, Ljava/io/FileInputStream;-><init>(Ljava/io/File;)V
+
+    const/16 v3, 0x14
+
+    new-array v3, v3, [B
+
+    invoke-virtual {v2, v3}, Ljava/io/FileInputStream;->read([B)I
+
+    move-result v4
+
+    invoke-virtual {v2}, Ljava/io/FileInputStream;->close()V
+
+    const/16 v5, 0x14
+
+    if-lt v4, v5, :cond_short_read
+
+    new-instance v5, Ljava/lang/StringBuilder;
+
+    invoke-direct {v5}, Ljava/lang/StringBuilder;-><init>()V
+
+    invoke-virtual {v5, p0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    const-string v6, " tramp.state[13..19]="
+
+    invoke-virtual {v5, v6}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    const/16 v4, 0xd
+
+    :goto_loop
+    const/16 v6, 0x14
+
+    if-ge v4, v6, :cond_loop_done
+
+    aget-byte v6, v3, v4
+
+    and-int/lit16 v6, v6, 0xff
+
+    invoke-static {v6}, Ljava/lang/Integer;->toHexString(I)Ljava/lang/String;
+
+    move-result-object v6
+
+    invoke-virtual {v5, v6}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    const-string v6, " "
+
+    invoke-virtual {v5, v6}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    add-int/lit8 v4, v4, 0x1
+
+    goto :goto_loop
+
+    :cond_loop_done
+    invoke-virtual {v5}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v5
+
+    const-string v6, "Y1Patch"
+
+    invoke-static {v6, v5}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+
+    :cond_short_read
+    :try_end_ts
+    .catch Ljava/lang/Throwable; {:try_start_ts .. :try_end_ts} :catch_ts
+
+    return-void
+
+    :catch_ts
+    move-exception v0
+
+    return-void
+.end method
 """
 
 PATCH_B5_DEBUG_ENTRY_TRACES = {
@@ -1917,6 +2024,7 @@ PATCH_B5_DEBUG_ENTRY_TRACES = {
         (r'onSeek\(J\)V',                       "TrackInfoWriter.onSeek entry"),
         (r'markCompletion\(\)V',                "TrackInfoWriter.markCompletion"),
         (r'markError\(\)V',                     "TrackInfoWriter.markError"),
+        (r'onFreshTrackChange\(\)V',            "TrackInfoWriter.onFreshTrackChange entry"),
         (r'onTrackEdge\(\)V',                   "TrackInfoWriter.onTrackEdge entry"),
         (r'setBattery\(B\)V',                   "TrackInfoWriter.setBattery entry"),
         (r'setPapp\(II\)V',                     "TrackInfoWriter.setPapp entry"),
@@ -1929,6 +2037,7 @@ PATCH_B5_DEBUG_ENTRY_TRACES = {
         (r'onPlayValue\(II\)V',                 "PlaybackStateBridge.onPlayValue entry"),
         (r'onEarlyTrackChange\(\)V',            "PlaybackStateBridge.onEarlyTrackChange"),
         (r'onPrepared\(\)V',                    "PlaybackStateBridge.onPrepared"),
+        (r'onPlayerPreparedTail\(\)V',          "PlaybackStateBridge.onPlayerPreparedTail"),
         (r'onCompletion\(\)V',                  "PlaybackStateBridge.onCompletion"),
         (r'onSeek\(J\)V',                       "PlaybackStateBridge.onSeek entry"),
         (r'onError\(\)V',                       "PlaybackStateBridge.onError"),
@@ -2128,6 +2237,51 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
         "    # === END DEBUG ===\n"
         "    iget-byte v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n",
         "setPlayStatus.entry",
+    ),
+    # wakeTrackChanged pre-broadcast: dump trampoline-state[13..19] so we can
+    # see the §6.7.1 gates (especially state[13]=TRACK_CHANGED) at the moment
+    # we kick T5. If it stays armed across two consecutive wakes, T5 didn't
+    # emit between them (gated out, no re-RegisterNotification from CT yet).
+    (
+        ".method public wakeTrackChanged()V\n"
+        "    .locals 5\n"
+        "\n"
+        "    :try_start_0\n"
+        "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
+        ".method public wakeTrackChanged()V\n"
+        "    .locals 5\n"
+        "\n"
+        "    :try_start_0\n"
+        "    # === DEBUG: log trampoline-state pre-broadcast ===\n"
+        "    const-string v0, \"wTC.pre\"\n"
+        "    invoke-static {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgLogTrampolineState(Ljava/lang/String;)V\n"
+        "    # === END DEBUG ===\n"
+        "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
+        "wakeTrackChanged.preBroadcast",
+    ),
+    # wakePlayStateChanged pre-broadcast: same diagnostic for state[14]
+    # (PLAYBACK_STATUS) / state[15] (POS) / state[16] (BATT) / state[17]
+    # (PAPP) — the four T9-emitted gates. Critical for diagnosing the
+    # play/pause icon non-update issue: if state[14] stays non-zero across
+    # successive wakes, T9 isn't emitting PLAYBACK_STATUS_CHANGED on the
+    # wire (likely because gate cleared from a prior wake, CT hasn't
+    # re-RegisterNotification'd yet).
+    (
+        ".method public wakePlayStateChanged()V\n"
+        "    .locals 5\n"
+        "\n"
+        "    :try_start_0\n"
+        "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
+        ".method public wakePlayStateChanged()V\n"
+        "    .locals 5\n"
+        "\n"
+        "    :try_start_0\n"
+        "    # === DEBUG: log trampoline-state pre-broadcast ===\n"
+        "    const-string v0, \"wPSC.pre\"\n"
+        "    invoke-static {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgLogTrampolineState(Ljava/lang/String;)V\n"
+        "    # === END DEBUG ===\n"
+        "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
+        "wakePlayStateChanged.preBroadcast",
     ),
 ]
 
@@ -2410,6 +2564,60 @@ for i, (anchor, replacement) in enumerate(TO_RESTART_HOOKS, 1):
 with open(ps_path, 'w') as f:
     f.write(ps_src)
 print(f"  Patch B5.2b: PlayerService.toRestart × 3 setDataSource sites → PlaybackStateBridge.onEarlyTrackChange")
+
+# -- Patch B5.2c: hook PlayerService.playerPrepared() tail ------------------
+# Fires PlaybackStateBridge.onPlayerPreparedTail() after each
+# `iput-boolean playerIsPrepared = true` in playerPrepared(). At that point
+# getPlayerIsPrepared() returns true, so a fresh flushLocked captures the
+# newly-valid getDuration() value; without this hook, flushLocked from
+# OnPreparedListener runs ~26 ms BEFORE the flag flips and falls back to
+# the prior track's stale mLastKnownDuration (verified Kia 2026-05-14:
+# duration leaks one track late on every skip).
+#
+# playerPrepared() has TWO `iput-boolean … playerIsPrepared:Z` sites: one
+# in the shutdown-restore branch (runs play / pause / setCurrentPosition
+# right after) and one at the end of the normal-prepare branch. Hook both
+# so duration capture works on every prepare regardless of which branch
+# runs.
+PLAYER_PREPARED_TAIL_HOOKS = [
+    (
+        # Site 1: shutdown-restore branch — followed by `.line 982` marker.
+        "    .line 981\n"
+        "    iput-boolean v5, p0, Lcom/innioasis/y1/service/PlayerService;->playerIsPrepared:Z\n"
+        "\n"
+        "    .line 982\n",
+        "    .line 981\n"
+        "    iput-boolean v5, p0, Lcom/innioasis/y1/service/PlayerService;->playerIsPrepared:Z\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onPlayerPreparedTail()V\n"
+        "\n"
+        "    .line 982\n",
+    ),
+    (
+        # Site 2: normal-prepare branch — followed by `return-void` at method end.
+        "    .line 1035\n"
+        "    iput-boolean v5, p0, Lcom/innioasis/y1/service/PlayerService;->playerIsPrepared:Z\n"
+        "\n"
+        "    return-void\n",
+        "    .line 1035\n"
+        "    iput-boolean v5, p0, Lcom/innioasis/y1/service/PlayerService;->playerIsPrepared:Z\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->onPlayerPreparedTail()V\n"
+        "\n"
+        "    return-void\n",
+    ),
+]
+for i, (anchor, replacement) in enumerate(PLAYER_PREPARED_TAIL_HOOKS, 1):
+    if anchor not in ps_src:
+        sys.exit(f"ERROR: Patch B5.2c anchor #{i} not found in PlayerService.smali "
+                 f"(playerIsPrepared:=true site in playerPrepared). The anchor "
+                 f"expects an exact match including the .line markers.")
+    if replacement in ps_src:
+        continue  # idempotency: already patched
+    ps_src = ps_src.replace(anchor, replacement, 1)
+with open(ps_path, 'w') as f:
+    f.write(ps_src)
+print(f"  Patch B5.2c: PlayerService.playerPrepared × 2 playerIsPrepared:=true sites → PlaybackStateBridge.onPlayerPreparedTail")
 
 # -- Patch B5.3: extend Y1Application.onCreate registration block -------------
 # Insert BEFORE the B4 PappStateBroadcaster registration so TrackInfoWriter is

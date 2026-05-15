@@ -502,25 +502,79 @@
 .end method
 
 
-# Track edge: consume the pending natural-end latch, conditionally reset
-# position+time, flush. Called from OnPreparedListener (track is now decoded
-# and playable).
+# Unconditional fresh-track reset. Called from PlaybackStateBridge.onEarlyTrackChange
+# (which itself is invoked from PlayerService.toRestart's setDataSource sites — a
+# guaranteed track-load entry). Resets position-anchor, mLastKnownDuration, and
+# stamps mLastFreshTrackChangeAt without consulting audio_id dedup.
 #
-# Position-anchor reset is gated on the audio_id actually changing. The Y1
-# music app fires OnPreparedListener on every prepareAsync completion,
-# including the re-prepare some player engines do on pause→resume cycles
-# of the same track. Unconditionally resetting mPositionAtStateChange=0
-# and mStateChangeTime=now on every onPrepared made the live-extrapolated
-# position in T6 (GetPlayStatus response) and T9 (1Hz PlaybackPos CHANGED)
-# collapse to "1 second since last reset" on every state toggle instead of
-# advancing from the actual track-start anchor — observed empirically on
-# Kia (poll-driven CT) with 13 play/pause toggles in dual-kia-20260514-1748.
+# Why dedup wouldn't work here: the music-app's restartPlay() invokes pause() before
+# toRestart(), and pause()'s setPlayValue → flushLocked already updates mCachedAudioId
+# to the new track's id. By the time onTrackEdge would snapshot mCachedAudioId, it
+# already holds the new value — so old==new and the reset branch never fires
+# (verified on Kia 2026-05-14: EDGE_DETECTED count 0 across 12 skips, position
+# accumulating instead of resetting).
 #
-# Flow: snapshot old mCachedAudioId, call flushLocked (which recomputes
-# and stores the current audio_id), compare. If the audio_id changed,
-# we're at a real track edge — reset position+time and re-flush. Otherwise
-# the first flush already captured the metadata refresh and we keep the
-# existing anchor.
+# Resetting mLastKnownDuration to 0 is critical: flushLocked falls back to the cached
+# duration when getPlayerIsPrepared() is false (i.e., during the prepareAsync gap),
+# so without this reset the file briefly reports the previous track's duration on
+# every track change. Honest 0 ("unknown duration" per AVRCP §5.3.4 / 1.3 attr 0x07)
+# is preferable to a misleading-stale value. The B5.2c playerPrepared-tail hook then
+# runs flush() once getPlayerIsPrepared() flips true, capturing the correct duration.
+.method public declared-synchronized onFreshTrackChange()V
+    .locals 3
+
+    monitor-enter p0
+
+    :try_start_0
+    iget-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPreviousTrackNaturalEnd:Z
+
+    const/4 v0, 0x0
+
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    monitor-exit p0
+
+    return-void
+
+    :catchall_0
+    move-exception v0
+
+    monitor-exit p0
+
+    throw v0
+.end method
+
+
+# Soft track edge: dedup-gated reset for re-prepare paths that may or may not
+# represent a real track change. Called from PlaybackStateBridge.onPrepared
+# (OnPreparedListener fires on every prepareAsync completion, including the
+# re-prepare some player engines do on pause→resume cycles of the same track).
+#
+# Snapshot old mCachedAudioId → flushLocked refreshes it → compare. Only resets
+# position-anchor if audio_id actually changed. Real fresh-track changes are
+# already handled by onFreshTrackChange via onEarlyTrackChange; this method
+# exists so an OnPrepared firing for a same-track re-prepare doesn't disturb
+# the existing live-position baseline.
 .method public declared-synchronized onTrackEdge()V
     .locals 5
 
