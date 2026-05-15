@@ -596,9 +596,9 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   # persist.bluetooth.avrcpversion intentionally unset — mtkbt cannot
   # deliver the claimed version; see docs/INVESTIGATION.md.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
-# ro.bluetooth.class = 0x5A020C (Phone:Smartphone). Portable-Audio CoD
-# makes some CTs skip AVRCP event 0x05 subscription. Re-pair after change.
-ro.bluetooth.class=5898252
+# ro.bluetooth.class = 0xA0041C (Audio + Information services, Audio/Video
+# Major, Portable Audio Minor). Stock CoD lacks the Information service bit.
+ro.bluetooth.class=10486812
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
 EOF
