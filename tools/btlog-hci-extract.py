@@ -20,10 +20,13 @@ import sys
 PRELUDE = b"connected to @btlog, dumping..."
 SYNC = b"\x55\x00"
 
-# Match a btlog record header: sync (0x55 0x00), 4-byte ID, then version
-# (often 0x4803 = "H\x03"), then 4-byte LE timestamp.
+# Match a btlog record header: sync (0x55 0x00) + 4-byte ID + 2-byte
+# upper-ID/seq + 4-byte LE timestamp + 4-byte "0a 00 00 00" pad.
+# The `0a 00 00 00` pad is the stable structural anchor — early
+# parser builds keyed on bytes 6..7 == "0x03 0x00", which only held
+# for a narrow ID range in one capture.
 RECORD_HEADER_RE = re.compile(
-    rb"\x55\x00(.{4})\x03\x00(.{4})\x00\x00\x00\x00", re.DOTALL
+    rb"\x55\x00(.{4})(.{2})(.{4})\x0a\x00\x00\x00", re.DOTALL
 )
 
 # Within a record: text payload starts after a 16-bit length prefix.
@@ -93,8 +96,9 @@ CTYPE_NAMES = {
 def parse_records(data):
     """Yield (timestamp_ms, payload_text) for each btlog record.
 
-    Layout: sync(0x55 0x00) + 4-B id + ver(0x03 0x00) + ts(u32 LE) + 4×0 +
-    payload_len(u16 LE) + 2-B tag + payload_text + 1-B trailer.
+    Layout: sync(0x55 0x00) + 4-B id + 2-B seq + ts(u32 LE) + pad(0a 00 00 00) +
+    payload_len(u16 LE) + 2-B tag + payload_text + 1-B trailer. Anchor on the
+    pad — bytes 6..7 cycle with ID counter, not a fixed version.
     """
     i = data.find(PRELUDE)
     if i >= 0:
@@ -106,14 +110,12 @@ def parse_records(data):
         sync = data.find(SYNC, i)
         if sync < 0 or sync + 20 > len(data):
             return
-        # Sanity-check the "0x03 0x00" version marker at sync+6.
-        if data[sync + 6 : sync + 8] != b"\x03\x00":
+        if data[sync + 12 : sync + 16] != b"\x0a\x00\x00\x00":
             i = sync + 2
             continue
         timestamp = struct.unpack_from("<I", data, sync + 8)[0]
         payload_len = struct.unpack_from("<H", data, sync + 16)[0]
-        if payload_len > 4096 or sync + 20 + payload_len > len(data):
-            # Bogus length — skip past this sync and try again.
+        if payload_len > 8192 or sync + 20 + payload_len > len(data):
             i = sync + 2
             continue
         text = data[sync + 20 : sync + 20 + payload_len]
@@ -214,7 +216,7 @@ def main():
     count = 0
     for ts, direction, claim, bytes_list in parse_byte_records(data):
         avrcp = decode_avrcp(bytes_list)
-        if args.avrcp and avrcp is None:
+        if args.avrcp and (avrcp is None or "non-AVRCP" in avrcp):
             continue
         if args.pdu is not None:
             if not bytes_list or len(bytes_list) <= 18 or bytes_list[18] != args.pdu:
