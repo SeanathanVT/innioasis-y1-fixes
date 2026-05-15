@@ -50,13 +50,13 @@ STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
 OUTPUT_MD5        = "eb736ab630d4a2719cd8638768206add"
 
 # Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
-# Placeholder — when set, future trampoline edits could include
-# `__android_log_print` calls so on-device `adb logcat -s Y1Patch:*` traces
-# show whether each T-trampoline fired. Currently no trampoline emits Log
-# calls so the debug build is byte-identical to the release build; once we
-# wire native instrumentation, pin a separate hash in OUTPUT_DEBUG_MD5.
+# When set, `_trampolines.build(debug=True)` splices __android_log_print
+# calls before T5 TRACK_CHANGED CHANGED, T6 GetPlayStatus response, T9
+# PLAYBACK_STATUS_CHANGED CHANGED, and T9 PLAYBACK_POS_CHANGED CHANGED.
+# Logs go to logcat with tag "Y1T". Adds ~188 B to the trampoline blob;
+# release builds remain byte-identical to the no-debug shape.
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
-OUTPUT_DEBUG_MD5  = OUTPUT_MD5
+OUTPUT_DEBUG_MD5  = "2cf8cc9abd525db22ebfdb5316ea2409"
 
 # Effective expected output MD5 for the current invocation — used by all
 # verification below. Routes through DEBUG_LOGGING so a single switch
@@ -182,7 +182,7 @@ NATIVE_PLAY_STATUS_CHANGED_STOCK_PROLOGUE = bytes([0x2D, 0xE9, 0xF3, 0x41])
 
 def build_patches() -> tuple[list[dict], int]:
     """Build the patch list. Returns (patches, new_load1_size)."""
-    blob, addrs = build_trampolines()
+    blob, addrs = build_trampolines(debug=DEBUG_LOGGING)
     extended_t2_vaddr = addrs["extended_T2"]
     t5_vaddr = addrs["T5"]
     t9_vaddr = addrs["T9"]

@@ -26,6 +26,13 @@ PLT_close                      = 0x33d8
 PLT_strlen                     = 0x34d4
 PLT_memset                     = 0x33fc
 PLT_write                      = 0x3630
+# __android_log_print(int prio, const char *tag, const char *fmt, ...)
+# AAPCS variadic: r0/r1/r2/r3 hold first four 32-bit args; additional args
+# spill to sp[0..]. Only used under build(debug=True); release builds emit
+# no log calls and keep the trampoline blob ~160 B smaller. Resolved by
+# the JNI dynamic linker via the liblog.so DT_NEEDED entry — no patch
+# script changes needed beyond toggling DEBUG_LOGGING.
+PLT_android_log_print          = 0x3300
 PLT_get_element_attributes_rsp = 0x3570
 PLT_track_changed_rsp          = 0x3384
 # Inform PDUs (CT→TG informational acks).
@@ -963,6 +970,17 @@ def _emit_t5(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
     a.adr_w(3, "track_selected")              # r3 = &(8 bytes 0x00) — SELECTED
+    if DEBUG_NATIVE_LOG:
+        # Log the low 32 bits of the internal audio_id (file[4..7] BE → host)
+        # for grep-able correlation with the music app's fL.id debug lines,
+        # even though the wire-side Identifier is SELECTED 0x00*8. r6 is
+        # unused elsewhere in T5 body, callee-saved across the log blx.
+        # _emit_native_log_u32 push/pops r2/r3 internally so the emit args
+        # set up just above (r0=conn, r1=0, r2=REASON_CHANGED, r3=&selected)
+        # survive the call.
+        a.ldr_sp_imm(6, T5_OFF_FILE_TID + 4)
+        a.rev_lo_lo(6, 6)
+        _emit_native_log_u32(a, "log_fmt_t5emit", 6)
     a.blx_imm(PLT_track_changed_rsp)
 
     a.label("t5_skip_track_changed")
@@ -1261,6 +1279,11 @@ def _emit_t6(a: Asm) -> None:
     # r0 = conn buffer (r5+8); r1 = 0 (success); r3 = position (already set)
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
+    if DEBUG_NATIVE_LOG:
+        # Log duration then position. The log helper push/pops r2/r3 so
+        # both response args are preserved across the two log calls.
+        _emit_native_log_u32(a, "log_fmt_t6dur", 2)
+        _emit_native_log_u32(a, "log_fmt_t6pos", 3)
     a.blx_imm(PLT_get_playstatus_rsp)
 
     # ---- restore stack and tail-call epilogue ----
@@ -1838,6 +1861,35 @@ def _emit_subscription_write(a: Asm, byte_value: int, state_byte_offset: int,
     a.blx_imm(PLT_close)
 
 
+def _emit_native_log_u32(a: Asm, fmt_label: str, value_reg: int) -> None:
+    """Emit __android_log_print(INFO, "Y1T", fmt, value_reg) before a wire-side
+    response blx. Used by build(debug=True) to record exactly what bytes the
+    trampolines are about to ship to the CT.
+
+    Insertion contract: caller has r3 already set to the value to log AND
+    r2/r3 already loaded with the response builder's args. We save r2/r3
+    via the stack, log, then restore. r4-r11 are callee-saved across the
+    blx per AAPCS, so the BluetoothAvrcpService struct ptr survives.
+
+    Bytes: 18 (push + 4× movs/adr/mov + blx + pop) + 0 string overhead per
+    call site; format strings consolidated into the data block at end of
+    blob. value_reg must be r0..r7 (low regs).
+    """
+    # push {r2, r3} so the emit can restore its args after we clobber r0-r3.
+    # Thumb T1 push: 0xB400 | (LR_bit << 8) | regs_r0_r7_bitmask.
+    # push {r2, r3} = 0xB40C  →  bytes 0x0C 0xB4.
+    a.raw(bytes([0x0C, 0xB4]))
+
+    a.mov_lo_lo(3, value_reg)                 # r3 = value (varargs slot 1)
+    a.movs_imm8(0, 4)                         # r0 = ANDROID_LOG_INFO
+    a.adr_w(1, "log_tag")                     # r1 = "Y1T"
+    a.adr_w(2, fmt_label)                     # r2 = fmt string
+    a.blx_imm(PLT_android_log_print)
+
+    # pop {r2, r3} = 0xBC0C  →  bytes 0x0C 0xBC.
+    a.raw(bytes([0x0C, 0xBC]))
+
+
 def _emit_t8(a: Asm) -> None:
     """T8: RegisterNotification INTERIM dispatch for events other than
     TRACK_CHANGED (0x02, handled by extended_T2).
@@ -2321,6 +2373,8 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # success
     a.movs_imm8(2, REASON_CHANGED)
     a.ldrb_w(3, 13, T9_OFF_FILE_PLAYFLAG)     # r3 = play_status
+    if DEBUG_NATIVE_LOG:
+        _emit_native_log_u32(a, "log_fmt_t9pstat", 3)
     a.blx_imm(PLT_reg_notievent_playback_rsp)
 
     # ---- emit NowPlayingContentChanged CHANGED on play-edge (Pixel-mirror) ----
@@ -2527,6 +2581,8 @@ def _emit_t9(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # success
     a.movs_imm8(2, REASON_CHANGED)
     # r3 already = live_pos
+    if DEBUG_NATIVE_LOG:
+        _emit_native_log_u32(a, "log_fmt_t9pos", 3)
     a.blx_imm(PLT_reg_notievent_pos_changed_rsp)
 
     a.label("t9_done")
@@ -2537,8 +2593,18 @@ def _emit_t9(a: Asm) -> None:
     a.raw(bytes([0x30, 0xBD]))
 
 
-def build() -> tuple[bytes, dict[str, int]]:
+DEBUG_NATIVE_LOG = False  # toggled by build(debug=True) — controls log-call emission
+
+
+def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
     """Build the LOAD-#1-padding trampoline code blob.
+
+    Args:
+        debug: if True, splice __android_log_print calls before T5/T6/T9
+            wire-side response blx's. Logs go to logcat with tag "Y1T",
+            grep-friendly format `<emit_id>=%08x` (e.g. T5emit, T6pos,
+            T9pos, T9pstat). Adds ~160 B to the blob. Release builds
+            (debug=False) keep blob byte-identical to current shipping.
 
     Returns:
         (bytes, label_addresses)
@@ -2546,6 +2612,9 @@ def build() -> tuple[bytes, dict[str, int]]:
         - label_addresses: dict of name → vaddr (so the patcher can wire the
           T2 stub at 0x72d4 to extended_T2)
     """
+    global DEBUG_NATIVE_LOG
+    DEBUG_NATIVE_LOG = debug
+
     a = Asm(T4_VADDR)
 
     # External landmarks — pre-register so b_w / bl_w resolve to absolute targets.
@@ -2609,6 +2678,31 @@ def build() -> tuple[bytes, dict[str, int]]:
     # y1-track-info[795..796].
     a.raw(bytes([PAPP_REPEAT_OFF, PAPP_SHUFFLE_OFF]))
     a.align(4)
+
+    # Native debug logging strings (only referenced when build(debug=True)).
+    # Tag + per-emit-site format strings. Each fmt is a single %08x arg
+    # so log lines look like `Y1T  : T9pos=0000a3f4` — grep-friendly,
+    # zero-pad-aligned, and avoids variadic 64-bit packing rules.
+    if DEBUG_NATIVE_LOG:
+        a.align(4)
+        a.label("log_tag")
+        a.asciiz("Y1T")
+        a.align(4)
+        a.label("log_fmt_t5emit")
+        a.asciiz("T5emit aid=%08x")
+        a.align(4)
+        a.label("log_fmt_t6pos")
+        a.asciiz("T6resp pos=%u")
+        a.align(4)
+        a.label("log_fmt_t6dur")
+        a.asciiz("T6resp dur=%u")
+        a.align(4)
+        a.label("log_fmt_t9pos")
+        a.asciiz("T9emit pos=%u")
+        a.align(4)
+        a.label("log_fmt_t9pstat")
+        a.asciiz("T9emit pstat=%u")
+        a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).
     a.label("papp_text_repeat")
