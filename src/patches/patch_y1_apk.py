@@ -1963,15 +1963,28 @@ DBG_HELPERS_SMALI = """\
 
 # _dbgLogTrampolineState(String tag) → Log.d("Y1Patch", tag+" tramp.state[0..19]=HH HH …")
 #
-# Dumps the full 20-byte y1-trampoline-state file with semantic groupings:
-#   bytes [0..7]   = audio_id mirror (BE u64) — what T5 last advertised on the wire
-#   bytes [8..11]  = position mirror (BE u32) — what T9 last advertised
-#   byte  [12]     = play_status mirror — what T9 last advertised (compare against
-#                    fL.ps in the surrounding flushLocked log to detect stale wire)
-#   bytes [13..19] = AVRCP 1.3 §6.7.1 per-subscription gates (state[13]=TRACK_CHANGED,
-#                    state[14]=PLAYBACK_STATUS, state[15]=POS, state[16]=BATT,
-#                    state[17]=PAPP — verified per architecture_y1_subscription_gating
-#                    memory)
+# Dumps the full 20-byte y1-trampoline-state file. Authoritative byte semantics
+# from src/patches/_trampolines.py (T9_OFF_STATE = 8 in T9's stack frame, file
+# layout matches):
+#   bytes [0..7] = last-synced track_id (T5 mirror — compared against
+#                  file[0..7] for TRACK_CHANGED edge detection)
+#   byte  [8]    = (unused / pad)
+#   byte  [9]    = last_play_status      — compare against fL.ps to detect
+#                                          stale wire state
+#   byte  [10]   = last_battery_status   — compare against fL.battery
+#   byte  [11]   = last_repeat_avrcp     — papp edge
+#   byte  [12]   = last_shuffle_avrcp    — papp edge
+#   byte  [13]   = sub_pos_changed       (event 0x05 PLAYBACK_POS)
+#   byte  [14]   = sub_play_status       (event 0x01 PLAYBACK_STATUS)
+#   byte  [15]   = sub_papp              (event 0x08 PLAYER_APPLICATION_SETTING)
+#   byte  [16]   = sub_track_changed     (event 0x02 TRACK_CHANGED)
+#   byte  [17]   = sub_track_reached_end (event 0x03)
+#   byte  [18]   = sub_track_reached_start (event 0x04)
+#   byte  [19]   = sub_battery           (event 0x06 BATT_STATUS)
+#   (byte [20]   = sub_now_playing_content event 0x09 — exists if file is 21 B,
+#                  not dumped)
+# Per architecture_y1_subscription_gating + Pixel-mirror gate semantics:
+#   T2 / T8 INTERIM arms a gate byte = 1; T5 / T9 read + (some events) clear.
 #
 # Called immediately before each wakeTrackChanged / wakePlayStateChanged
 # sendBroadcast() and once per PositionTicker tick. Successive captures answer:
