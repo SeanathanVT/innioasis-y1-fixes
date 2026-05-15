@@ -308,8 +308,25 @@
 
 # Public mutator: AVRCP play-status edge. Captures position/time-at-edge.
 # Returns silently if status unchanged (dedupe).
+#
+# Inline track-edge detection (perceived-responsiveness optimisation): if
+# flushLocked recomputes mCachedAudioId to a different value than the
+# pre-flush snapshot, the music-app's internal nextSong/prevSong/restartPlay
+# sequence has already advanced mPlayingMusic to a new track. This pause-
+# flush is the earliest possible point we observe the audio_id change —
+# ~260 ms BEFORE PlayerService.toRestart()'s setDataSource sites where
+# B5.2b's onEarlyTrackChange currently fires. Resetting position +
+# mLastKnownDuration to 0 here and re-flushing keeps the file internally
+# consistent (new audio_id + new title + 0 position + 0 duration) so T4
+# GetElementAttributes responses + T9 POS_CHANGED + T5 TRACK_CHANGED all
+# show the CT a coherent "track just started" state in the same broadcast
+# cycle. Without this, the CT briefly sees new_audio_id + new_title +
+# stale_position (e.g., 15.7 s into a track that "just started"), which
+# stricter CTs latch onto and visibly lag before the next consistent
+# update arrives. Returns silently for resume-from-pause (audio_id
+# unchanged) — no extra work.
 .method public declared-synchronized setPlayStatus(B)V
-    .locals 5
+    .locals 7
 
     monitor-enter p0
 
@@ -337,7 +354,39 @@
 
     iput-byte p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B
 
+    # Snapshot audio_id BEFORE flushLocked. The flush re-reads PlayerService
+    # state which by this point may already reflect a new track (the music
+    # app's nextSong/prevSong/restartPlay flow updates mPlayingMusic before
+    # the pause() call that brings us here).
+    iget-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    # Compare new mCachedAudioId (just written) with snapshot. If different,
+    # this play-status edge is the leading edge of a track change — reset
+    # position + duration to 0 and re-flush so the file is internally
+    # consistent before any T4/T5/T6/T9 response sees it.
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    cmp-long v3, v5, v0
+
+    if-eqz v3, :cond_no_edge
+
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    :cond_no_edge
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 

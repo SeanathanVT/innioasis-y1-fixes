@@ -80,8 +80,20 @@
 
     # State-edge wake: setPlayStatus has flushed y1-track-info[792]/[780..787]
     # synchronously; fire playstatechanged so MtkBt routes through T9 and emits
-    # PLAYBACK_STATUS / POS CHANGED.
+    # PLAYBACK_STATUS / POS CHANGED. Also fire metachanged so MtkBt's Java
+    # mirror picks up the latest AOSP-convention extras (id/track/artist/album);
+    # setPlayStatus may have just detected a fresh-track edge (audio_id changed
+    # since prior flush — the pause-flush leading edge of a nextSong/prevSong
+    # sequence) and reset position+duration to 0. The metachanged wake ensures
+    # T5 sees the new audio_id mirror-vs-file mismatch in the same broadcast
+    # cycle as T9's POS reset emit, so the CT gets a coherent "track just
+    # started" update ~260 ms earlier than B5.2b's toRestart-setDataSource
+    # hook would. wakeTrackChanged is idempotent when no edge is present
+    # (T5 dedups via file[0..7] vs state[0..7]) — safe to fire on every
+    # play-status edge.
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
+    invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
 
     # Drive the 1 s position-tick loop. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the
     # PLAYBACK_POS_CHANGED cadence to the TG; T9 has the live-extrapolated

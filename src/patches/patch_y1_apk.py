@@ -2323,7 +2323,7 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
     # setPlayStatus entry: log from→to play_status transition (pre-dedup).
     (
         ".method public declared-synchronized setPlayStatus(B)V\n"
-        "    .locals 5\n"
+        "    .locals 7\n"
         "\n"
         "    monitor-enter p0\n"
         "\n"
