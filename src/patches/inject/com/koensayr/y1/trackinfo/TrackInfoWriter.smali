@@ -1719,7 +1719,7 @@
 # Call sites: PlaybackStateBridge.onPlayValue (state-edge wake), and
 # PlaybackStateBridge.onPrepared (new-track wake — position resets to 0).
 .method public wakePlayStateChanged()V
-    .locals 6
+    .locals 5
 
     :try_start_0
     iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;
@@ -1733,15 +1733,10 @@
     invoke-direct {v1, v2}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
 
     # AOSP-convention Intent extras: id (long), track / artist / album
-    # (String), playing (boolean), and position (long, ms since track
-    # start). MMI_AVRCP's onReceive logs `update-info playing:<bool>` +
-    # `track-info isPlaying:<bool> id:<long>` from these extras directly.
-    # Without "position", MtkBt's Java mirror's position cache defaults
-    # to 0 and the AVRCP response path may inject 0 instead of using the
-    # trampoline-computed live value from y1-track-info — Kia symptom
-    # (2026-05-15): correct title/artist/album/duration but stuck
-    # playhead. Compute the live position via the same arithmetic T9/T6
-    # use (saved_pos + elapsed-since-state-change when playing).
+    # (String), and playing (boolean). MMI_AVRCP's onReceive logs
+    # `update-info playing:<bool>` + `track-info isPlaying:<bool> id:<long>`
+    # from these extras directly — without them MtkBt's Java mirror stays
+    # at the (false, -1) defaults regardless of actual playback state.
     const-string v2, "id"
 
     iget-wide v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
@@ -1766,28 +1761,18 @@
 
     invoke-virtual {v1, v2, v3}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;
 
-    # position (long ms) — live-extrapolated via computeLivePositionLocked.
-    # Caller holds the monitor; computeLivePositionLocked is monitor-safe.
-    const-string v2, "position"
-
-    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->computeLivePositionLocked()J
-
-    move-result-wide v3
-
-    invoke-virtual {v1, v2, v3, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;J)Landroid/content/Intent;
-
     const-string v2, "playing"
 
     iget-byte v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B
 
-    const/4 v5, 0x1
+    const/4 v4, 0x1
 
-    if-eq v3, v5, :cond_playing
+    if-eq v3, v4, :cond_playing
 
-    const/4 v5, 0x0
+    const/4 v4, 0x0
 
     :cond_playing
-    invoke-virtual {v1, v2, v5}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;
+    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;
 
     invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V
 
