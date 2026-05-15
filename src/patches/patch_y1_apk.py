@@ -91,14 +91,38 @@ APKTOOL_JVM_FLAGS: list = []
 STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 
 # === DEBUG LOGGING TOGGLE ============================================
-# When True, this patcher injects `Log.d("Y1Patch", "<msg>")` calls at
-# the entry of PlayControllerReceiver.onReceive and the key entry-points
-# of PlayerService (play / pause / playOrPause / stop). Shows up in
-# `adb logcat -s Y1Patch:*`.
+# When True, this patcher instruments every metadata-relevant entry point
+# with `Log.d("Y1Patch", ...)` so the full pipeline is observable in
+# `adb logcat -s Y1Patch:*`. Coverage:
+#
+#   Stock (music app smali):
+#     PlayControllerReceiver.onReceive
+#     BaseActivity.dispatchKeyEvent / BasePlayerActivity.dispatchKeyEvent
+#     PlayerService.play / pause / playOrPause / stop
+#     PlayerService.nextSong / prevSong / restartPlay / playerPrepared / toRestart
+#
+#   Inject tree (entry-point Log.d traces):
+#     TrackInfoWriter — init, setPlayStatus, onSeek, markCompletion, markError,
+#       onTrackEdge, setBattery, setPapp, flush, flushLocked, wakeTrackChanged,
+#       wakePlayStateChanged
+#     PlaybackStateBridge — onPlayValue, onEarlyTrackChange, onPrepared,
+#       onCompletion, onSeek, onError
+#     PositionTicker — start, stop, run (1 s tick)
+#     BatteryReceiver — register, onReceive
+#     PappSetFileObserver — start, onEvent, dispatch
+#     NowPlayingRefresher — onResume, onPause, refresh, run
+#
+#   Inject tree (value-bearing inline _dbgKV — surfaces actual runtime values):
+#     TrackInfoWriter.onTrackEdge      → onTE.old, onTE.new, onTE.EDGE_DETECTED
+#     TrackInfoWriter.flushLocked      → fL.id, fL.pos, fL.dur, fL.ps
+#     TrackInfoWriter.onSeek           → onSeek.in, onSeek.SUPPRESSED.dtMs,
+#                                        onSeek.APPLIED.pos
+#     TrackInfoWriter.setPlayStatus    → sPS.from, sPS.to
+#     PlaybackStateBridge.onPlayValue  → oPV.newVal, oPV.reason
 #
 # Toggled at build time via the `KOENSAYR_DEBUG` environment variable —
 # `apply.bash --debug` sets it. Omit for release builds (zero runtime
-# overhead).
+# overhead — no helpers and no log calls are emitted into the smali).
 #
 # Companion flags: same-named constant in src/patches/_trampolines.py,
 # src/patches/patch_libextavrcp_jni.py, src/patches/patch_mtkbt_odex.py
@@ -1059,9 +1083,11 @@ def _inject_log_d(smali, method_signature_re, msg):
     Raises ValueError if the method signature doesn't appear exactly once,
     so silent partial-applies surface as patcher errors rather than
     invisible no-instrumentation builds.
+
+    Bumps `.locals` to 2 if the method declares fewer (snippet uses v0/v1).
     """
     pattern = re.compile(
-        rf'(^\.method[^\n]*\b{method_signature_re}\n    \.locals \d+\n)',
+        rf'(^\.method[^\n]*\b{method_signature_re}\n    \.locals )(\d+)(\n)',
         re.MULTILINE,
     )
     snippet = (
@@ -1079,7 +1105,11 @@ def _inject_log_d(smali, method_signature_re, msg):
             f"_inject_log_d: expected exactly one match for {method_signature_re!r}, "
             f"found {len(matches)}"
         )
-    return pattern.sub(rf'\1{snippet}', smali, count=1)
+    def _repl(m):
+        prefix, n, suffix = m.group(1), int(m.group(2)), m.group(3)
+        bumped = max(n, 2)
+        return f"{prefix}{bumped}{suffix}{snippet}"
+    return pattern.sub(_repl, smali, count=1)
 
 
 if DEBUG_LOGGING:
@@ -1117,11 +1147,20 @@ if DEBUG_LOGGING:
         sys.exit(f"ERROR: Expected smali not found: {player_service_path}")
     with open(player_service_path, 'r') as f:
         player_service_src = f.read()
+    # Track-change + state pipeline entry points. setCurrentPosition entry
+    # is intentionally not instrumented here — its B5.2a hook routes through
+    # PlaybackStateBridge.onSeek which already has its own entry trace, and
+    # adding a Log.d here would invalidate the B5.2a anchor below.
     for sig, msg in (
-        (r'play\(Z\)V',           "PlayerService.play(Z) entry"),
-        (r'pause\(IZ\)V',         "PlayerService.pause(IZ) entry"),
-        (r'playOrPause\(\)V',     "PlayerService.playOrPause() entry"),
-        (r'stop\(\)V',            "PlayerService.stop() entry"),
+        (r'play\(Z\)V',                  "PlayerService.play(Z) entry"),
+        (r'pause\(IZ\)V',                "PlayerService.pause(IZ) entry"),
+        (r'playOrPause\(\)V',            "PlayerService.playOrPause() entry"),
+        (r'stop\(\)V',                   "PlayerService.stop() entry"),
+        (r'nextSong\(\)V',               "PlayerService.nextSong() entry"),
+        (r'prevSong\(\)V',               "PlayerService.prevSong() entry"),
+        (r'restartPlay\(Z\)V',           "PlayerService.restartPlay(Z) entry"),
+        (r'playerPrepared\(\)V',         "PlayerService.playerPrepared() entry"),
+        (r'toRestart\(\)V',              "PlayerService.toRestart() entry"),
     ):
         player_service_src = _inject_log_d(player_service_src, sig, msg)
         print(f"  + PlayerService.{sig.replace(chr(92), '')}")
@@ -1814,14 +1853,377 @@ PATCH_B5_INJECT_FILES = [
         "smali/com/koensayr/y1/ui/NowPlayingRefresher.smali"),
 ]
 
+# --- DEBUG instrumentation for the inject tree (gated on KOENSAYR_DEBUG=1) ---
+# Two layers:
+#   1. Entry-point Log.d traces for every metadata-relevant method across all
+#      inject smali files. Constant-string messages — answers "did this method
+#      fire?" cheaply. Driven by PATCH_B5_DEBUG_ENTRY_TRACES.
+#   2. Value-bearing inline _dbgKV calls at five diagnostic-critical sites
+#      (TrackInfoWriter.onTrackEdge × 3, flushLocked summary, onSeek × 3,
+#      setPlayStatus, PlaybackStateBridge.onPlayValue) — answers "with what
+#      values?" Surfaces actual mCachedAudioId / position / duration /
+#      play_status / seek_pos / suppression_decision in logcat.
+# Helpers (_dbg, _dbgKV) are appended to TrackInfoWriter.smali only when
+# DEBUG_LOGGING is true; release builds get the unmodified inject sources
+# verbatim with zero runtime overhead.
+
+DBG_HELPERS_SMALI = """\
+
+# === DEBUG HELPERS (KOENSAYR_DEBUG=1; --debug) ===
+# _dbg(String msg) → Log.d("Y1Patch", msg)
+.method public static _dbg(Ljava/lang/String;)V
+    .locals 1
+
+    const-string v0, "Y1Patch"
+
+    invoke-static {v0, p0}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+# _dbgKV(String key, long val) → Log.d("Y1Patch", key + "=" + val)
+.method public static _dbgKV(Ljava/lang/String;J)V
+    .locals 3
+
+    new-instance v0, Ljava/lang/StringBuilder;
+
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+
+    invoke-virtual {v0, p0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    const-string v1, "="
+
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v0, p1, p2}, Ljava/lang/StringBuilder;->append(J)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-static {v1, v0}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+"""
+
+PATCH_B5_DEBUG_ENTRY_TRACES = {
+    # file (relative to INJECT_ROOT) → list of (method_signature_re, msg) tuples
+    "com/koensayr/y1/trackinfo/TrackInfoWriter.smali": [
+        (r'init\(Landroid/content/Context;\)V', "TrackInfoWriter.init"),
+        (r'setPlayStatus\(B\)V',                "TrackInfoWriter.setPlayStatus entry"),
+        (r'onSeek\(J\)V',                       "TrackInfoWriter.onSeek entry"),
+        (r'markCompletion\(\)V',                "TrackInfoWriter.markCompletion"),
+        (r'markError\(\)V',                     "TrackInfoWriter.markError"),
+        (r'onTrackEdge\(\)V',                   "TrackInfoWriter.onTrackEdge entry"),
+        (r'setBattery\(B\)V',                   "TrackInfoWriter.setBattery entry"),
+        (r'setPapp\(II\)V',                     "TrackInfoWriter.setPapp entry"),
+        (r'flush\(\)V',                         "TrackInfoWriter.flush"),
+        (r'flushLocked\(\)V',                   "TrackInfoWriter.flushLocked entry"),
+        (r'wakeTrackChanged\(\)V',              "TrackInfoWriter.wakeTrackChanged"),
+        (r'wakePlayStateChanged\(\)V',          "TrackInfoWriter.wakePlayStateChanged"),
+    ],
+    "com/koensayr/y1/playback/PlaybackStateBridge.smali": [
+        (r'onPlayValue\(II\)V',                 "PlaybackStateBridge.onPlayValue entry"),
+        (r'onEarlyTrackChange\(\)V',            "PlaybackStateBridge.onEarlyTrackChange"),
+        (r'onPrepared\(\)V',                    "PlaybackStateBridge.onPrepared"),
+        (r'onCompletion\(\)V',                  "PlaybackStateBridge.onCompletion"),
+        (r'onSeek\(J\)V',                       "PlaybackStateBridge.onSeek entry"),
+        (r'onError\(\)V',                       "PlaybackStateBridge.onError"),
+    ],
+    "com/koensayr/y1/playback/PositionTicker.smali": [
+        (r'start\(\)V',                         "PositionTicker.start"),
+        (r'stop\(\)V',                          "PositionTicker.stop"),
+        (r'run\(\)V',                           "PositionTicker.run (1s tick)"),
+    ],
+    "com/koensayr/y1/battery/BatteryReceiver.smali": [
+        (r'register\(Landroid/content/Context;\)V',
+                                                "BatteryReceiver.register"),
+        (r'onReceive\(Landroid/content/Context;Landroid/content/Intent;\)V',
+                                                "BatteryReceiver.onReceive"),
+    ],
+    "com/koensayr/y1/papp/PappSetFileObserver.smali": [
+        (r'start\(Landroid/content/Context;\)V', "PappSetFileObserver.start"),
+        (r'onEvent\(ILjava/lang/String;\)V',     "PappSetFileObserver.onEvent"),
+        (r'dispatch\(II\)V',                     "PappSetFileObserver.dispatch entry"),
+    ],
+    "com/koensayr/y1/ui/NowPlayingRefresher.smali": [
+        (r'onResume\(Lcom/innioasis/music/MusicPlayerActivity;\)V',
+                                                "NowPlayingRefresher.onResume"),
+        (r'onPause\(Lcom/innioasis/music/MusicPlayerActivity;\)V',
+                                                "NowPlayingRefresher.onPause"),
+        (r'refresh\(\)V',                        "NowPlayingRefresher.refresh"),
+        (r'run\(\)V',                            "NowPlayingRefresher.run"),
+    ],
+}
+
+# Value-bearing inline patches. Each tuple is (anchor, replacement, label).
+# Anchors are exact-match strings; the patcher errors out cleanly if any
+# anchor is missing (so smali shape drift surfaces immediately, not as a
+# silent no-instrumentation build).
+
+DBG_VALUE_PATCHES_TRACKINFOWRITER = [
+    # onTrackEdge: log oldAudioId before flushLocked (snapshot of mCachedAudioId
+    # from prior flush — this is the "before" side of the edge dedup compare).
+    (
+        "    # Snapshot the previous cached audio_id (from prior flushLocked).\n"
+        "    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J\n",
+        "    # Snapshot the previous cached audio_id (from prior flushLocked).\n"
+        "    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J\n"
+        "\n"
+        "    # === DEBUG: log oldAudioId ===\n"
+        "    const-string v4, \"onTE.old\"\n"
+        "    invoke-static {v4, v0, v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n",
+        "onTrackEdge.oldAudioId",
+    ),
+    # onTrackEdge: log newAudioId after flushLocked (mCachedAudioId now holds
+    # the just-recomputed value — this is the "after" side of the edge compare).
+    (
+        "    # Compare new audio_id (just written) with snapshot.\n"
+        "    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J\n",
+        "    # Compare new audio_id (just written) with snapshot.\n"
+        "    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J\n"
+        "\n"
+        "    # === DEBUG: log newAudioId ===\n"
+        "    const-string v4, \"onTE.new\"\n"
+        "    invoke-static {v4, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n",
+        "onTrackEdge.newAudioId",
+    ),
+    # onTrackEdge: log when the EDGE branch fires (audio_ids differed →
+    # we'll reset mPositionAtStateChange to 0 + stamp mLastFreshTrackChangeAt).
+    (
+        "    if-eqz v4, :cond_same_track\n"
+        "\n"
+        "    # Real track edge — reset position anchor and re-flush.\n",
+        "    if-eqz v4, :cond_same_track\n"
+        "\n"
+        "    # === DEBUG: edge detected ===\n"
+        "    const-string v4, \"onTE.EDGE_DETECTED\"\n"
+        "    invoke-static {v4}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbg(Ljava/lang/String;)V\n"
+        "    # === END DEBUG ===\n"
+        "\n"
+        "    # Real track edge — reset position anchor and re-flush.\n",
+        "onTrackEdge.EDGE",
+    ),
+    # flushLocked: 4-line summary just before the FileOutputStream write —
+    # captures exactly what got written to y1-track-info this flush
+    # (audio_id, mPositionAtStateChange, mLastKnownDuration, mPlayStatus).
+    (
+        "    invoke-static {v1, v0, v2, v7}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->putUtf8Padded([BIILjava/lang/String;)V\n"
+        "\n"
+        "    # Atomic write to filesDir/y1-track-info.tmp -> rename to y1-track-info\n"
+        "    new-instance v0, Ljava/io/File;\n",
+        "    invoke-static {v1, v0, v2, v7}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->putUtf8Padded([BIILjava/lang/String;)V\n"
+        "\n"
+        "    # === DEBUG: log final flush state ===\n"
+        "    const-string v0, \"fL.id\"\n"
+        "    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J\n"
+        "    invoke-static {v0, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    const-string v0, \"fL.pos\"\n"
+        "    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J\n"
+        "    invoke-static {v0, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    const-string v0, \"fL.dur\"\n"
+        "    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J\n"
+        "    invoke-static {v0, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    const-string v0, \"fL.ps\"\n"
+        "    iget-byte v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n"
+        "    int-to-long v2, v2\n"
+        "    invoke-static {v0, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "\n"
+        "    # Atomic write to filesDir/y1-track-info.tmp -> rename to y1-track-info\n"
+        "    new-instance v0, Ljava/io/File;\n",
+        "flushLocked.summary",
+    ),
+    # onSeek entry: log input position (pre-suppression check).
+    (
+        ".method public declared-synchronized onSeek(J)V\n"
+        "    .locals 5\n"
+        "\n"
+        "    monitor-enter p0\n"
+        "\n"
+        "    :try_start_0\n"
+        "    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J\n",
+        ".method public declared-synchronized onSeek(J)V\n"
+        "    .locals 5\n"
+        "\n"
+        "    monitor-enter p0\n"
+        "\n"
+        "    :try_start_0\n"
+        "    # === DEBUG: log seek input ===\n"
+        "    const-string v4, \"onSeek.in\"\n"
+        "    invoke-static {v4, p1, p2}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "\n"
+        "    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J\n",
+        "onSeek.entry",
+    ),
+    # onSeek SUPPRESS branch: log when within-2s-of-fresh-track suppression
+    # fires (so we can confirm the suppression hypothesis empirically — the
+    # ms-since-fresh-track value v2/v3 is currently in scope).
+    (
+        "    if-gez v4, :cond_normal\n"
+        "\n"
+        "    # Within ~2 s of a fresh track-change reset — this seek is almost\n"
+        "    # certainly playerPrepared's restore-from-saved-progress call.\n"
+        "    # Skip the position update (and the wakePlayStateChanged broadcast,\n"
+        "    # since nothing changed). Don't clear mLastFreshTrackChangeAt — if\n"
+        "    # playerPrepared somehow fires a second restore call (e.g. for\n"
+        "    # bookmark + progress) we want to suppress that too.\n"
+        "    monitor-exit p0\n",
+        "    if-gez v4, :cond_normal\n"
+        "\n"
+        "    # Within ~2 s of a fresh track-change reset — this seek is almost\n"
+        "    # certainly playerPrepared's restore-from-saved-progress call.\n"
+        "    # Skip the position update (and the wakePlayStateChanged broadcast,\n"
+        "    # since nothing changed). Don't clear mLastFreshTrackChangeAt — if\n"
+        "    # playerPrepared somehow fires a second restore call (e.g. for\n"
+        "    # bookmark + progress) we want to suppress that too.\n"
+        "    # === DEBUG: log suppression with dt ===\n"
+        "    const-string v4, \"onSeek.SUPPRESSED.dtMs\"\n"
+        "    invoke-static {v4, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "    monitor-exit p0\n",
+        "onSeek.SUPPRESSED",
+    ),
+    # onSeek APPLIED branch: log when the seek actually updates the anchor.
+    (
+        "    :cond_normal\n"
+        "    iput-wide p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J\n",
+        "    :cond_normal\n"
+        "    # === DEBUG: log applied seek ===\n"
+        "    const-string v4, \"onSeek.APPLIED.pos\"\n"
+        "    invoke-static {v4, p1, p2}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "    iput-wide p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J\n",
+        "onSeek.APPLIED",
+    ),
+    # setPlayStatus entry: log from→to play_status transition (pre-dedup).
+    (
+        ".method public declared-synchronized setPlayStatus(B)V\n"
+        "    .locals 5\n"
+        "\n"
+        "    monitor-enter p0\n"
+        "\n"
+        "    :try_start_0\n"
+        "    iget-byte v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n",
+        ".method public declared-synchronized setPlayStatus(B)V\n"
+        "    .locals 5\n"
+        "\n"
+        "    monitor-enter p0\n"
+        "\n"
+        "    :try_start_0\n"
+        "    # === DEBUG: log play-status transition ===\n"
+        "    iget-byte v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n"
+        "    int-to-long v2, v0\n"
+        "    const-string v4, \"sPS.from\"\n"
+        "    invoke-static {v4, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    int-to-long v2, p1\n"
+        "    const-string v4, \"sPS.to\"\n"
+        "    invoke-static {v4, v2, v3}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "    iget-byte v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n",
+        "setPlayStatus.entry",
+    ),
+]
+
+DBG_VALUE_PATCHES_PLAYBACKSTATEBRIDGE = [
+    # onPlayValue entry: log raw newValue + reason ints (pre-mapping).
+    (
+        ".method public static onPlayValue(II)V\n"
+        "    .locals 3\n"
+        "\n"
+        "    :try_start_b5\n"
+        "    const/4 v0, -0x1\n",
+        ".method public static onPlayValue(II)V\n"
+        "    .locals 3\n"
+        "\n"
+        "    :try_start_b5\n"
+        "    # === DEBUG: log new play-value + reason ===\n"
+        "    int-to-long v0, p0\n"
+        "    const-string v2, \"oPV.newVal\"\n"
+        "    invoke-static {v2, v0, v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    int-to-long v0, p1\n"
+        "    const-string v2, \"oPV.reason\"\n"
+        "    invoke-static {v2, v0, v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->_dbgKV(Ljava/lang/String;J)V\n"
+        "    # === END DEBUG ===\n"
+        "    const/4 v0, -0x1\n",
+        "onPlayValue.entry",
+    ),
+]
+
+
+def _apply_b5_dbg_value_patches(smali, patches, file_label):
+    """Run a list of (anchor, replacement, label) value-bearing patches.
+
+    Each patch is exact-string anchor → replacement. Errors out cleanly
+    on missing anchor so smali shape drift surfaces immediately rather
+    than as a silent no-instrumentation build.
+    """
+    for anchor, replacement, label in patches:
+        if anchor not in smali:
+            sys.exit(
+                f"ERROR: --debug value patch anchor missing in {file_label}: {label!r}"
+            )
+        if replacement in smali:
+            continue  # idempotent
+        smali = smali.replace(anchor, replacement, 1)
+    return smali
+
+
+def _apply_b5_dbg_instrumentation(src_rel, smali):
+    """Apply entry-trace + value-bearing instrumentation for one inject smali.
+
+    Steps:
+      1. Append _dbg / _dbgKV helper methods (TrackInfoWriter only — other
+         inject files reach helpers via cross-class invoke-static).
+      2. Apply value-bearing patches (TrackInfoWriter, PlaybackStateBridge).
+      3. Inject entry-point Log.d traces for every method in
+         PATCH_B5_DEBUG_ENTRY_TRACES[src_rel].
+
+    Order matters: helpers must be appended before invoke-static calls
+    referencing them, and value-bearing patches must run before entry-traces
+    so the entry-trace insertion (which sits between .locals and the first
+    instruction) doesn't shift line offsets that value-patch anchors depend
+    on.
+    """
+    if src_rel == "com/koensayr/y1/trackinfo/TrackInfoWriter.smali":
+        if DBG_HELPERS_SMALI not in smali:
+            smali = smali.rstrip() + "\n" + DBG_HELPERS_SMALI
+        smali = _apply_b5_dbg_value_patches(
+            smali, DBG_VALUE_PATCHES_TRACKINFOWRITER, src_rel
+        )
+    elif src_rel == "com/koensayr/y1/playback/PlaybackStateBridge.smali":
+        smali = _apply_b5_dbg_value_patches(
+            smali, DBG_VALUE_PATCHES_PLAYBACKSTATEBRIDGE, src_rel
+        )
+
+    for sig, msg in PATCH_B5_DEBUG_ENTRY_TRACES.get(src_rel, []):
+        smali = _inject_log_d(smali, sig, msg)
+    return smali
+
+
 for src_rel, dst_rel in PATCH_B5_INJECT_FILES:
     src = os.path.join(INJECT_ROOT, src_rel)
     dst = os.path.join(UNPACKED_DIR, dst_rel)
     if not os.path.exists(src):
         sys.exit(f"ERROR: Patch B5 source missing: {src}")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(src, dst)
-    print(f"  Wrote {dst_rel}")
+    if DEBUG_LOGGING:
+        with open(src, 'r') as f:
+            smali = f.read()
+        smali = _apply_b5_dbg_instrumentation(src_rel, smali)
+        with open(dst, 'w') as f:
+            f.write(smali)
+        n_traces = len(PATCH_B5_DEBUG_ENTRY_TRACES.get(src_rel, []))
+        print(f"  Wrote {dst_rel}  (+{n_traces} entry traces; --debug)")
+    else:
+        shutil.copyfile(src, dst)
+        print(f"  Wrote {dst_rel}")
 
 # -- Patch B5.1: hook Static.setPlayValue -------------------------------------
 STATIC_SMALI = "smali_classes2/com/innioasis/y1/utils/Static.smali"

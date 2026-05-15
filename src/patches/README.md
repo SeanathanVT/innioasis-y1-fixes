@@ -50,6 +50,10 @@ The bash's `patch_in_place_bytes` helper detects "already patched" exit-0-withou
 - Python 3.8+, stdlib only, for all byte patchers.
 - `patch_y1_apk.py` additionally requires Java 11–21 (apktool 2.9.3's bundled smali assembler can silently drop patches on Java 22+ — the patcher warns at startup and refuses to write the APK if its DEX-signature check fails) and `androguard` (`pip install androguard`). The apktool jar is downloaded once into `tools/apktool-2.9.3.jar` (md5-verified) and reused on subsequent runs. The decoded smali tree + rebuilt DEX live under `staging/y1-apk/` and are retained between runs for inspection; pass `--clean-staging` for a fresh decode. The script also pins the input APK to the stock 3.0.2 md5 by default — pass `--skip-md5` to bypass for diagnostic runs.
 
+## Debug logging
+
+`apply.bash --debug` (or `KOENSAYR_DEBUG=1` in the env) makes `patch_y1_apk.py` emit `Log.d("Y1Patch", …)` traces at every metadata-relevant entry point and inline value-bearing `_dbgKV(key, long)` calls at the diagnostic-critical sites in `TrackInfoWriter` (`onTrackEdge` audio_id compare, `flushLocked` summary, `onSeek` suppression decision, `setPlayStatus` transition) and `PlaybackStateBridge.onPlayValue`. Release builds are byte-identical without the env var (no helpers, no call sites, no `Log.d`). Tail with `adb logcat -s Y1Patch:*`. Full coverage list: [`../../docs/PATCHES.md`](../../docs/PATCHES.md) §"`--debug` instrumentation".
+
 ## Status
 
 Active patchers (wired into the bash):
