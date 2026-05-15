@@ -533,6 +533,8 @@ Existing-file edits (smali prepends, no logic replacement):
 
 State sources, all read live from `PlayerService` accessors via `Y1Application.Companion.getPlayerService()`: `getPlayingMusic()`/`getPlayingSong()` for the current `Song` (title via `getSongName()`, plus `getArtist`/`getAlbum`/`getGenre`/`getPath`); `getDuration()`; `getMusicIndex()+1` for TrackNumber; `getMusicList().size()` for TotalNumberOfTracks. Position-at-state-change is captured at the `setPlayValue` edge with `SystemClock.elapsedRealtime()` for the lockstep clock the trampoline `T6` extrapolation expects.
 
+Duration has a fallback path: `PlayerService.getDuration()` delegates to `IjkMediaPlayer/MediaPlayer.getDuration()` and throws between `setDataSource` and `OnPrepared`, so `flushLocked` gates on `getPlayerIsPrepared()`. The unprepared branch consults `getMmrDurationLocked(path, audio_id)` — a per-`audio_id` cache backed by `MediaMetadataRetriever.setDataSource(path).extractMetadata(METADATA_KEY_DURATION)` (synchronous container-header parse, no MediaPlayer dependency). This guarantees the first T4 `GetElementAttributes` response on every track skip carries a valid `attribute 0x07 PlayingTime`. AVRCP 1.3 has no `DURATION_CHANGED` event, so a CT that caches `dur=0` from a fresh-track T4 would keep it until the next track change — MMR closes that gap.
+
 **Patch B6** — AvrcpBinder smali (unused groundwork).
 
 Two new classes routed to `smali_classes2/` (secondary DEX) because `classes.dex` sits at 99.7% of the 64K method cap after Patch B5:

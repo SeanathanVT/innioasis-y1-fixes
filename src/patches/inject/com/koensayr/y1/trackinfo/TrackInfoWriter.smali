@@ -81,6 +81,24 @@
 # reset to protect.
 .field private mLastFreshTrackChangeAt:J
 
+# MediaMetadataRetriever-derived duration cache. Y1 music app stores no
+# DB-cached duration; PlayerService.getDuration() delegates to
+# IjkMediaPlayer/MediaPlayer.getDuration() which throws before
+# prepareAsync completes. Without an alternate source the first T4
+# GetElementAttributes response on every track skip carries dur=0
+# (attribute 0x07 PlayingTime = "0"), which strict CTs cache as
+# "duration unknown" — AVRCP 1.3 has no DURATION_CHANGED event so a
+# §6.7.1-correct second TRACK_CHANGED CHANGED (same audio_id) cannot
+# refresh it once the real duration arrives via B5.2c's playerPrepared
+# tail ~700 ms later. MediaMetadataRetriever.setDataSource(path) +
+# extractMetadata(METADATA_KEY_DURATION) reads the file's container
+# header synchronously without involving the C++ MediaPlayer, so it's
+# safe to call from any state. Per-audio_id cache keeps the cost to one
+# header parse per track (~10-50 ms for local MP3/M4A).
+.field private mMmrAudioId:J
+
+.field private mMmrDurationMs:J
+
 
 # direct methods
 .method static constructor <clinit>()V
@@ -139,6 +157,10 @@
     const-wide/16 v0, 0x0
 
     iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
 
     return-void
 .end method
@@ -984,7 +1006,10 @@
     # inside its restart sequence BEFORE prepareAsync completes, so flushing here
     # without a guard would nuke the new MediaPlayer mid-prepare and leave the UI
     # stuck at 0:00. Gate on getPlayerIsPrepared (a pure iget-boolean, safe in any
-    # state) and write 0 for unknown duration.
+    # state); when not prepared, fall back to MediaMetadataRetriever (cached per
+    # audio_id) so the first T4 response for a new track carries the real duration
+    # rather than 0. AVRCP 1.3 has no DURATION_CHANGED event — a CT that caches
+    # dur=0 from the first T4 will keep it until the next track change.
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getPlayerIsPrepared()Z
 
     move-result v0
@@ -1004,6 +1029,26 @@
     goto :cond_have_duration
 
     :cond_skip_duration
+    # Pre-prepare path. Try MMR cache first (per-audio_id parse of file
+    # container header — no MediaPlayer involvement). v8 = path string,
+    # v9:v10 = synthetic audio_id long. cmp result goes into v3 (was the
+    # Song object, dead at this point; v2 must remain a PlayerService ref
+    # for the getMusicIndex call after :cond_have_duration).
+    invoke-direct {p0, v8, v9, v10}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->getMmrDurationLocked(Ljava/lang/String;J)J
+
+    move-result-wide v11
+
+    const-wide/16 v0, 0x0
+
+    cmp-long v3, v11, v0
+
+    if-gtz v3, :cond_have_duration
+
+    # MMR returned 0 (failure or unsupported codec) — last-resort fallback
+    # to the legacy cached duration. mLastKnownDuration is reset to 0 by
+    # setPlayStatus's inline edge detection on track changes, so this
+    # typically yields 0 for fresh tracks where MMR also failed; the wire
+    # result is dur=0, same as pre-MMR behaviour.
     iget-wide v11, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
 
     :cond_have_duration
@@ -1253,6 +1298,93 @@
 
 
 # Helpers
+
+# MediaMetadataRetriever-backed duration getter. Per-audio_id cache: only
+# the first call for a given audio_id parses the file container; subsequent
+# calls return the cached value in microseconds. Failures (unreadable file,
+# unsupported codec, malformed metadata) latch a cached 0 for that audio_id
+# so we don't retry on every flush.
+#
+# Caller must hold the TrackInfoWriter monitor.
+.method private getMmrDurationLocked(Ljava/lang/String;J)J
+    .locals 7
+
+    # Cache check: if cached audio_id matches current, return cached duration
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    cmp-long v6, v0, p2
+
+    if-nez v6, :cond_cache_miss
+
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Re-mirror into mLastKnownDuration. setPlayStatus's inline-edge reset
+    # zeroes mLastKnownDuration between the two flushLocked calls; without
+    # this, the second flush would write the cached MMR value via v11:v12
+    # but leave mLastKnownDuration stale at 0 (visible in --debug fL.dur).
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    return-wide v0
+
+    :cond_cache_miss
+    # Latch the audio_id immediately so a failed parse caches 0 and avoids
+    # re-attempting on every subsequent flush during this track.
+    iput-wide p2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    const-wide/16 v3, 0x0
+
+    iput-wide v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Null path → return 0
+    if-eqz p1, :cond_return
+
+    :try_start_mmr
+    new-instance v0, Landroid/media/MediaMetadataRetriever;
+
+    invoke-direct {v0}, Landroid/media/MediaMetadataRetriever;-><init>()V
+
+    invoke-virtual {v0, p1}, Landroid/media/MediaMetadataRetriever;->setDataSource(Ljava/lang/String;)V
+
+    # METADATA_KEY_DURATION = 9 (android.media.MediaMetadataRetriever)
+    const/16 v1, 0x9
+
+    invoke-virtual {v0, v1}, Landroid/media/MediaMetadataRetriever;->extractMetadata(I)Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-virtual {v0}, Landroid/media/MediaMetadataRetriever;->release()V
+
+    if-eqz v2, :cond_return
+
+    invoke-static {v2}, Ljava/lang/Long;->parseLong(Ljava/lang/String;)J
+
+    move-result-wide v0
+
+    cmp-long v5, v0, v3
+
+    if-lez v5, :cond_return
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Mirror into mLastKnownDuration so the legacy fallback path + the
+    # --debug fL.dur log read the same coherent value.
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+    :try_end_mmr
+    .catch Ljava/lang/Throwable; {:try_start_mmr .. :try_end_mmr} :catch_mmr
+
+    :cond_return
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    return-wide v0
+
+    :catch_mmr
+    move-exception v0
+
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    return-wide v0
+.end method
+
 
 .method private static safeStr(Ljava/lang/String;)Ljava/lang/String;
     .locals 1
