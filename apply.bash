@@ -607,9 +607,8 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   # stock PASSTHROUGH. The remaining properties are essential for car / peer
   # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
-# ro.bluetooth.class = 0x5A020C (Phone:Smartphone) — Pixel 4's CoD.
-# Bolt subscribes to the full AVRCP event set on Phone-CoD TGs; Portable
-# Audio CoD makes Bolt skip event 0x05. Re-pair with each CT after change.
+# ro.bluetooth.class = 0x5A020C (Phone:Smartphone). Portable-Audio CoD
+# makes some CTs skip AVRCP event 0x05 subscription. Re-pair after change.
 ro.bluetooth.class=5898252
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
