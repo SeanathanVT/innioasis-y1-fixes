@@ -607,31 +607,9 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   # stock PASSTHROUGH. The remaining properties are essential for car / peer
   # pairing and stay regardless of advertised AVRCP version.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
-# Modified to properly configure Bluetooth.
-# ro.bluetooth.class = 0x5A020C = 5898252 (Phone : Smartphone) — Pixel 4's
-# exact CoD. Earlier revert (01e0fea, 2026-05-14) tested Phone CoD against
-# the strict-CT metadata-pane symptom and judged it inconclusive. The 2026-05-15
-# native-log capture against Bolt with state[13] (sub_pos_changed gate)
-# instrumented showed Bolt registers for only events 0x01 (PLAYBACK_STATUS)
-# and 0x02 (TRACK_CHANGED) — skipping 0x05 (PLAYBACK_POS_CHANGED) entirely
-# (state[13] never armed across 293 wPSC snapshots) despite Y1's T1
-# GetCapabilities advertising all 8 events identically to Pixel-as-TG and
-# Y1's SDP record (post V7+V8+S1) matching Pixel's shape (AVRCP 1.3, AVCTP
-# 1.2, ServiceName present, SupportedFeatures 0x0001, no Browse PSM).
-#
-# On Pixel-as-TG (Phone : Smartphone CoD) Bolt registers all 8 advertised
-# events including 0x05. The remaining visible-to-CT delta is CoD —
-# Y1 still identifies as Audio/Video : Portable Audio (0xA0041C). Bolt's
-# CT-side AVRCP event-subscription strategy likely keys off Major Device
-# Class: a Phone gets the full event set; a Portable Audio gets the
-# "basic notification" subset (PSTAT + TRACK only). This is rigging
-# metadata-pane support into Y1 which the spec-honest CoD classifies as
-# unsupporting it; Pixel-shape CoD is required to unlock Bolt's full
-# AVRCP feature negotiation.
-#
-# Cosmetic side effects: phone icon in pairing dialogs, hosts may try
-# to engage HFP/Telephony (handled silently — no HFP service).
-# Re-pair Y1 with each CT after switching CoD; CTs cache CoD per device.
+# ro.bluetooth.class = 0x5A020C (Phone:Smartphone) — Pixel 4's CoD.
+# Bolt subscribes to the full AVRCP event set on Phone-CoD TGs; Portable
+# Audio CoD makes Bolt skip event 0x05. Re-pair with each CT after change.
 ro.bluetooth.class=5898252
 ro.bluetooth.profiles.a2dp.source.enabled=true
 ro.bluetooth.profiles.avrcp.target.enabled=true
