@@ -21,7 +21,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - `TrackInfoWriter.onSeek()` suppresses the music app's "resume from saved progress" seek that fires post-`prepareAsync`. Real user seeks (drag the seek bar) are unaffected by the 2 s anchor window.
 
 ### Added
-- `--debug` build path (`KOENSAYR_DEBUG=1`): native `__android_log_print` injection at T5/T6/T9 emit sites in `libextavrcp_jni.so` (tag `Y1T`), plus smali-side instrumentation across the metadata pipeline (`TrackInfoWriter`, `PlaybackStateBridge`, `wakePlayStateChanged` / `wakeTrackChanged` state mirrors). Release builds remain byte-identical to non-debug.
+- `--debug` build path (`KOENSAYR_DEBUG=1`): native `__android_log_print` injection at T5/T6/T8/T9 emit sites in `libextavrcp_jni.so` (tag `Y1T`), plus smali-side instrumentation across the metadata pipeline (`TrackInfoWriter`, `PlaybackStateBridge`, `wakePlayStateChanged` / `wakeTrackChanged` state mirrors). T8 logs every incoming `RegisterNotification` event_id so the trampoline-side emit count can be compared against the CT's actual subscription rate. Release builds remain byte-identical to non-debug.
 - `tools/btlog-hci-extract.py` decodes `mtkbt`'s `btlog.bin` as AVRCP frames. `tools/dual-capture.sh` whitelists the `Y1T` tag.
 
 ## [2.1.0] - 2026-05-13

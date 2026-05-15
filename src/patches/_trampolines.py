@@ -1838,6 +1838,8 @@ def _emit_t8(a: Asm) -> None:
 
     # ---- dispatch on event_id (caller's sp+386, post-SUB-SP at T8_EVENT_ID_OFF) ----
     a.ldrb_w(0, 13, T8_EVENT_ID_OFF)          # r0 = event_id
+    if DEBUG_NATIVE_LOG:
+        _emit_native_log_u32(a, "log_fmt_t8reg", 0)
     a.cmp_imm8(0, 0x01)
     a.bne("t8_check_3")
 
@@ -2560,6 +2562,9 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
         a.align(4)
         a.label("log_fmt_t9pstat")
         a.asciiz("T9emit pstat=%u")
+        a.align(4)
+        a.label("log_fmt_t8reg")
+        a.asciiz("T8reg ev=%02x")
         a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).
