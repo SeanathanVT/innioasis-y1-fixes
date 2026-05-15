@@ -133,29 +133,12 @@
 
 
 # Early track-change hook fired from PlayerService.toRestart() right after
-# IjkMediaPlayer / MediaPlayer setDataSource(newPath) succeeds but BEFORE
-# prepareAsync's decoder warmup completes. By the time toRestart calls
-# setDataSource, the music app has already updated mPlayingMusic /
-# mPlayingAudiobook to the new song, so PlayerService.getPlayingSong()
-# (which TrackInfoWriter.flushLocked() consults) returns the new track's
-# metadata. Firing TrackInfoWriter.onFreshTrackChange() + wakeTrackChanged()
-# here moves the CT-visible track-change notification ~100-500 ms earlier
-# (the prepareAsync duration), so peers like Bolt see the new
-# Artist/Track/Album while the audio decoder is still spinning up.
-#
-# onFreshTrackChange unconditionally resets position-anchor + clears the
-# stale mLastKnownDuration. The audio_id-dedup path doesn't work for this
-# call site because the music app's restartPlay() invokes pause() before
-# toRestart(), and pause's flushLocked already updated mCachedAudioId to
-# the new track's id — so by the time we'd snapshot it, old==new.
-#
-# When prepareAsync eventually completes the engine fires OnPreparedListener
-# → onPrepared() (which calls the dedup-gated onTrackEdge — handles the
-# resume-from-pause re-prepare case where audio_id is unchanged) and then
-# PlayerService.playerPrepared() runs and sets playerIsPrepared=true. Our
-# B5.2c hook on playerPrepared's tail then fires onPlayerPreparedTail()
-# below, which re-flushes (now with getDuration() valid) and re-broadcasts
-# so the post-prepare duration value reaches the CT.
+# setDataSource(newPath) succeeds but BEFORE prepareAsync completes. By
+# this point mPlayingMusic / mPlayingAudiobook already point at the new
+# song so flushLocked() writes the new metadata. Moves the CT-visible
+# track-change emit ~100-500 ms earlier than the OnPreparedListener path.
+# Audio_id-dedup doesn't help here: restartPlay() pause()s before
+# toRestart(), and pause's flushLocked has already updated mCachedAudioId.
 .method public static onEarlyTrackChange()V
     .locals 3
 
@@ -186,19 +169,15 @@
 
 
 # PlayerService.playerPrepared() tail hook (B5.2c). Fires AFTER the
-# `iput-boolean playerIsPrepared = true` in playerPrepared() (both branches:
-# the shutdown-restore branch + the normal prepare branch). At this point
-# PlayerService.getPlayerIsPrepared() returns true, so a fresh flush
-# captures the newly-valid getDuration() value into mLastKnownDuration and
-# y1-track-info[776..779]. Without this hook, flushLocked at OnPreparedListener
-# time runs ~26 ms BEFORE playerIsPrepared flips, so it falls back to the
-# stale prior-track mLastKnownDuration and the new-track duration only
-# reaches the CT on the next state-edge (often ~one track late — verified
-# Kia 2026-05-14: dur=165120 leaked across tracks 1/2/3, dur=126407 across
-# 4/5, etc.).
+# `iput-boolean playerIsPrepared = true` (both shutdown-restore + normal
+# prepare branches). getPlayerIsPrepared() is now true, so flushLocked
+# captures the freshly-valid getDuration() into mLastKnownDuration +
+# y1-track-info[776..779]. Without this hook, flushLocked at
+# OnPreparedListener time runs ~26 ms BEFORE playerIsPrepared flips
+# and falls back to the stale prior-track mLastKnownDuration.
 #
 # Also re-broadcasts metachanged + playstatechanged so T5 → TRACK_CHANGED
-# CHANGED and T9 → PLAYBACK_POS / STATUS CHANGED carry the now-correct
+# CHANGED and T9 → PLAYBACK_POS / STATUS CHANGED carry the corrected
 # duration on the wire.
 .method public static onPlayerPreparedTail()V
     .locals 3

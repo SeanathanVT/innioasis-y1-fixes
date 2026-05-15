@@ -163,10 +163,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --artifacts-dir falls back to ./staging/ inside the repo if not given.
-# Lets the common case skip the flag: `cp rom.zip staging/ && ./apply.bash --all`.
-# Power users with artifacts on a different drive / multiple firmwares keep
-# passing --artifacts-dir explicitly.
+# Default --artifacts-dir is ./staging/.
 PATH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "$PATH_ARTIFACTS" ]]; then
   PATH_ARTIFACTS="${PATH_SCRIPT_DIR}/staging"
@@ -189,11 +186,8 @@ if [[ "$FLAG_ANY_SPECIFIED" == false ]]; then
   exit 0
 fi
 
-# Debug-logging toggle. Patch scripts read KOENSAYR_DEBUG from the env to
-# decide whether to inject diagnostic Log.d / __android_log_print calls
-# into the patched binaries. Pass --debug when you want a build that
-# surfaces patch-internal traces under `adb logcat -s Y1Patch:*` etc.;
-# omit for a release build (zero runtime overhead).
+# --debug: patch scripts read KOENSAYR_DEBUG to inject diagnostic
+# Log.d / __android_log_print calls. Release builds: zero runtime overhead.
 if [[ "$FLAG_DEBUG" == true ]]; then
   export KOENSAYR_DEBUG=1
   echo "[debug] KOENSAYR_DEBUG=1 — patches will include diagnostic logging."
@@ -269,10 +263,8 @@ EOM
   echo "$p"
 }
 
-# resolve_python_venv — echoes the path to the venv to source for patcher
-# invocations that need androguard, or empty string if none is configured
-# (in which case the bash falls through to system python3, which is fine
-# if the user has androguard pip-installed globally).
+# resolve_python_venv — echoes the venv path for androguard-needing
+# patchers, or "" to fall through to system python3.
 # Precedence: --python-venv flag > tools/python-venv/.
 resolve_python_venv() {
   if [[ -n "$OVERRIDE_PYTHON_VENV" ]]; then
@@ -601,11 +593,8 @@ if [[ "$FLAG_BLUETOOTH" == true ]]; then
   sudo sed -i '/^scoSocket/d' "${PATH_MOUNT}/etc/bluetooth/blacklist.conf"
 
   echo "Configuring build.prop for Bluetooth fixes.."
-  # persist.bluetooth.avrcpversion is intentionally NOT set — see
-  # docs/INVESTIGATION.md "Conclusion (2026-05-04)". Setting it commits to
-  # an AVRCP version mtkbt cannot actually deliver, regressing the working
-  # stock PASSTHROUGH. The remaining properties are essential for car / peer
-  # pairing and stay regardless of advertised AVRCP version.
+  # persist.bluetooth.avrcpversion intentionally unset — mtkbt cannot
+  # deliver the claimed version; see docs/INVESTIGATION.md.
   sudo tee -a "${PATH_MOUNT}/${FILENAME_BUILD_PROP}" <<EOF > /dev/null
 # ro.bluetooth.class = 0x5A020C (Phone:Smartphone). Portable-Audio CoD
 # makes some CTs skip AVRCP event 0x05 subscription. Re-pair after change.
@@ -621,11 +610,8 @@ if [[ "$FLAG_MUSIC_APK" == true ]]; then
   patch_in_place_y1_apk "app/${FILENAME_MUSIC_APK}"
 fi
 
-# Remove unnecessary APK files. Patterns are passed to `find -name` so they
-# match both flat files (Foo.apk) and subdirectories (Foo/) using shell-glob
-# syntax. Previously these were rm with bash globs, but the path was double-
-# quoted (suppressing expansion), so --remove-apps silently no-op'd. find
-# does its own pattern matching independent of shell quoting.
+# Remove unnecessary APK files via `find -name` (matches both flat files
+# Foo.apk and subdirectories Foo/).
 if [[ "$FLAG_REMOVE_APPS" == true ]]; then
   echo "Removing unnecessary APK files.."
   apps_to_remove=(

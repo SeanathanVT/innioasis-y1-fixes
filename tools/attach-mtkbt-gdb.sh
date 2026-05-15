@@ -1,51 +1,10 @@
 #!/usr/bin/env bash
-# attach-mtkbt-gdb.sh — attach gdbserver to the live mtkbt daemon for
-# breakpoint-driven RE of the AVCTP-RX classifier.
-#
-# Pre-reqs:
-#   - --root flashed (su needs to work via `adb shell su -c ...`)
-#   - gdbserver binary on the host at one of:
-#         tools/gdbserver  (preferred — in-tree)
-#         $GDBSERVER       (env var override)
-#         $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver
-#     Must be ARM 32-bit, statically linked, API 17 / Android 4.2 compatible.
-#     NDK r10e ships a working build at $NDK/prebuilt/android-arm/gdbserver/.
-#     Or pull from AOSP prebuilts/misc/android-arm/gdbserver/.
-#
-# Host side: gdb-multiarch (Debian/Ubuntu) or arm-linux-gnu-gdb (Fedora).
-#
-# What this does:
-#   1. Validates gdbserver and adb device.
-#   2. Finds live mtkbt PID + reads /proc/<pid>/maps to get the PIE base.
-#   3. Pushes gdbserver to /data/local/tmp/.
-#   4. Starts `gdbserver --attach :<port> <pid>` on the device under su.
-#   5. Sets up `adb forward tcp:<port> tcp:<port>`.
-#   6. Generates a gdb command file with breakpoints at the AVCTP-RX
-#      classifier sites (file offsets 0x6db7c / 0x6dc36 / 0x6dc52) + the
-#      msg-id-emit dispatcher arms (0x515ca / 0x51622), translated to
-#      live addresses using the captured PIE base.
-#   7. Prints the one-line command for the user to launch gdb against the
-#      generated command file.
-#
-# Usage:
-#   ./tools/attach-mtkbt-gdb.sh                       # default flow
-#   ./tools/attach-mtkbt-gdb.sh --port 5039           # alternate port
-#   ./tools/attach-mtkbt-gdb.sh --gdbserver /path/to/gdbserver
-#
-# Driving the capture (once gdb is running):
-#   1. Drive a peer-CT session: BT toggle on Y1 → CT reconnect → expect
-#      one inbound VENDOR_DEPENDENT GetCapabilities frame.
-#   2. Press pause on the CT → expect one inbound PASSTHROUGH frame.
-#   3. The gdb command file's `commands` blocks log register + memory state
-#      at each BP and continue automatically.
-#   4. Compare the captured `[r5+5]` values, AV/C op_code bytes, and which
-#      branch each frame takes. That settles which patch site is real.
-#
-# Watch-items:
-#   - Each BP halt freezes mtkbt's RX thread for as long as the BP commands
-#     run. Most peer CTs time out after a few seconds. Keep `commands` blocks
-#     short (silent + printf + continue) so peers don't disconnect mid-capture.
-#   - After detach, mtkbt may be in a wedged state. `BT off → on` resets it.
+# attach-mtkbt-gdb.sh — gdbserver-attach the live mtkbt daemon, set BPs at
+# the AVCTP-RX classifier + msg-id-emit dispatcher, emit a gdb command
+# file. Pre-reqs: --root flashed; gdbserver under tools/, $GDBSERVER,
+# or $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/ (ARM 32-bit
+# static, API 17). Host: gdb-multiarch / arm-linux-gnu-gdb.
+# Run --help for usage.
 
 set -u
 

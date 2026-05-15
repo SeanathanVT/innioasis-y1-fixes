@@ -26,12 +26,7 @@ PLT_close                      = 0x33d8
 PLT_strlen                     = 0x34d4
 PLT_memset                     = 0x33fc
 PLT_write                      = 0x3630
-# __android_log_print(int prio, const char *tag, const char *fmt, ...)
-# AAPCS variadic: r0/r1/r2/r3 hold first four 32-bit args; additional args
-# spill to sp[0..]. Only used under build(debug=True); release builds emit
-# no log calls and keep the trampoline blob ~160 B smaller. Resolved by
-# the JNI dynamic linker via the liblog.so DT_NEEDED entry — no patch
-# script changes needed beyond toggling DEBUG_LOGGING.
+# Resolved via liblog.so DT_NEEDED. Only emitted under build(debug=True).
 PLT_android_log_print          = 0x3300
 PLT_get_element_attributes_rsp = 0x3570
 PLT_track_changed_rsp          = 0x3384
@@ -48,11 +43,8 @@ PLT_reg_notievent_pos_changed_rsp     = 0x3360
 PLT_reg_notievent_battery_status_rsp  = 0x3354
 PLT_reg_notievent_system_status_rsp   = 0x3348
 PLT_reg_notievent_player_appsettings_rsp = 0x345c
-# Event 0x09/0x0a/0x0b/0x0c response builders (advertised in T1 to match
-# Pixel-as-TG, which empirically is what strict CTs gate metadata-pane
-# render on — even with the SDP profile descriptor saying 1.3). Each
-# emits INTERIM-only with zero/empty payload; no CHANGED ever fires
-# because Y1 has one player, no Now Playing folder, no UID database.
+# 1.4 event-ID response builders (T8 INTERIM-only, zero/empty payload —
+# advertised in T1 to unblock strict CT metadata-pane render).
 PLT_reg_notievent_now_playing_content_rsp = 0x330c
 PLT_reg_notievent_uids_changed_rsp        = 0x3318
 PLT_reg_notievent_availplayers_rsp        = 0x3324
@@ -165,31 +157,25 @@ T8_EVENT_ID_OFF    = 386 + T8_FRAME        # caller-frame event_id, post-SUB-SP
 #   sp+824..831 = struct timespec for clock_gettime(CLOCK_BOOTTIME)
 #
 # State byte usage (24 B in-memory; on-disk file grows incrementally from 20
-# to 21 B on first sub_now_playing_content arm — short reads zero-fill the
-# tail bytes via memset, so older files still parse cleanly):
-#   [0..7]  last_seen track_id (T5)
-#   [8]     last RegisterNotification transId (T5)
-#   [9]     last_play_status (T9 edge)
-#   [10]    last_battery_status (T9 edge)
-#   [11]    last_repeat_avrcp (T9 papp edge)
-#   [12]    last_shuffle_avrcp (T9 papp edge)
+# to 21 B on first sub_now_playing_content arm — short reads zero-fill):
+#   [0..7]   last_seen track_id (T5)
+#   [8]      last RegisterNotification transId (T5)
+#   [9]      last_play_status (T9 edge)
+#   [10]     last_battery_status (T9 edge)
+#   [11]     last_repeat_avrcp (T9 papp edge)
+#   [12]     last_shuffle_avrcp (T9 papp edge)
 #   [13..19] per-event subscription gates (see T9_STATE_SUB_*_OFF below)
-#   [20]    sub_now_playing_content (event 0x09 — added for Pixel-mirror)
+#   [20]     sub_now_playing_content (event 0x09)
 #   [21..23] padding (4-B align)
 #
-# Pixel-mirror gate semantics: T2 / T8 INTERIM arms a gate byte = 1; T5 / T9
-# CHANGED reads it and emits if armed but DOES NOT clear. Once a CT subscribes
-# to an event in a session, every subsequent value change emits CHANGED. This
-# is the spec deviation Pixel-as-TG empirically gets away with — strict CTs
-# (Bolt) accept unsolicited CHANGED following the first INTERIM. The old
-# §6.7.1 "single-shot per registration" semantic stalled strict CTs that
-# don't reliably re-register between value changes.
+# Session-long gate semantics: T2 / T8 INTERIM arms a gate byte = 1; T5 / T9
+# CHANGED reads but does not clear. Strict CTs accept unsolicited CHANGED
+# following the first INTERIM; the strict §6.7.1 "single-shot per registration"
+# semantic stalled strict CTs that don't reliably re-register between changes.
 #
-# T5 / T9 race acknowledgment: bytes 9..12 are written by T9 only (4-byte
-# block at offset 9 via lseek+write); bytes 0..8 by T5 only (9-byte block
-# from offset 0); bytes 13..20 by T2/T8 only (single-byte lseek+write). The
-# old read-modify-write race the v2.1.0 implementation had is gone — each
-# region has a single writer.
+# Single-writer regions (no read-modify-write race): T9 writes [9..12]
+# (4-B block at off 9), T5 writes [0..8] (9-B block at off 0), T2/T8 writes
+# [13..20] (single-byte lseek+write).
 T9_FRAME              = 840        # 8 args + 24 state + 800 file_buf + 8 timespec
 T9_OFF_ARGS           = 0
 T9_OFF_STATE          = 8
@@ -205,16 +191,10 @@ T9_STATE_LAST_PS_OFF      = T9_OFF_STATE + 9   # last_play_status
 T9_STATE_LAST_BATT_OFF    = T9_OFF_STATE + 10  # last_battery_status
 T9_STATE_LAST_REPEAT_OFF  = T9_OFF_STATE + 11  # last_repeat_avrcp (papp edge)
 T9_STATE_LAST_SHUFFLE_OFF = T9_OFF_STATE + 12  # last_shuffle_avrcp (papp edge)
-# Session-long subscription gates (Pixel-mirror, see "Pixel-mirror gate
-# semantics" above). T2 / T8 INTERIM emit for a given event sets the
-# matching byte = 1; T5 / T9 CHANGED emit reads but does not clear. Once
-# a CT subscribes to an event in a session, every subsequent value change
-# emits CHANGED — matches what Pixel-as-TG empirically gets away with on
-# strict CTs. y1-trampoline-state on disk grows from 20 → 21 bytes on
-# first sub_now_playing_content arm (T8 0x09 INTERIM via lseek+write past
-# EOF zero-extends). Older 16-byte and 20-byte files degrade gracefully
-# (read returns zero-fill on the new bytes; the gate evaluates as "not
-# subscribed" until the file is rebuilt).
+# Session-long subscription gates. T2 / T8 INTERIM emit arms gate=1; T5 / T9
+# CHANGED reads but never clears. y1-trampoline-state on disk grows 20→21 B
+# on first 0x09 INTERIM arm (lseek+write past EOF zero-extends); older
+# 16-/20-byte files degrade gracefully.
 T9_STATE_SUB_POS_OFF       = T9_OFF_STATE + 13  # sub_pos_changed (event 0x05)
 T9_STATE_SUB_PLAY_OFF      = T9_OFF_STATE + 14  # sub_play_status (event 0x01)
 T9_STATE_SUB_PAPP_OFF      = T9_OFF_STATE + 15  # sub_papp (event 0x08)
@@ -450,7 +430,7 @@ def _emit_t4(a: Asm) -> None:
     # r1=0 takes the response builder's spec-correct path; r1!=0 hits the
     # reject-shape path that omits the event payload (see extended_T2's
     # matching comment). track_id = `track_selected` (0x00×8 — AVRCP 1.4+
-    # SELECTED) instead of a real per-track UID; mirrors Pixel-as-TG.
+    # SELECTED) instead of a real per-track UID.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
     a.movs_imm8(2, REASON_CHANGED)
@@ -730,7 +710,7 @@ def _emit_extended_t2(a: Asm) -> None:
     # r1!=0 writes a reject-shape frame that omits the event payload.
     # transId is auto-extracted from conn[17] regardless.
     # track_id = `track_selected` (0x00×8 — AVRCP 1.4+ SELECTED meaning
-    # "the currently playing media is selected"). Pixel-mirror; matches
+    # "the currently playing media is selected"). Matches the
     # what strict 1.4+ CTs expect when a track is actually playing.
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
     a.movs_imm8(1, 0)                         # r1 = 0 (success)
@@ -751,64 +731,14 @@ def _emit_extended_t2(a: Asm) -> None:
 
 
 def _emit_t5(a: Asm) -> None:
-    """T5: proactive CHANGED-emit trampoline.
+    """T5: proactive CHANGED emit on track-edge.
 
-    Entered via `b.w T5` from the patched libextavrcp_jni.so::
-    notificationTrackChangedNative stub at file offset 0x3bc0. Java's
-    handleKeyMessage path (with the cardinality if-eqz NOPed in MtkBt.odex)
-    invokes the native method on every track-change broadcast from the music
-    app — this lands here, asynchronously to any inbound AVRCP command from
-    permissive CTs.
-
-    On entry:
-      - r0 = JNIEnv*  (Java native arg 0)
-      - r1 = jobject this  (BluetoothAvrcpService instance)
-      - r2..r3 = jbyte arg1, arg2  (ignored — Java passes 0, 0)
-      - sp[0..7] = jlong arg3  (ignored — Java passes sMusicId, but we read
-                                 the canonical track_id from y1-track-info)
-      - lr = caller's return address (Java framework / interpreter)
-
-    Returns: jboolean in r0 (always 1 — JNI return value, but the caller
-    ignores it per the smali at sswitch_1a3).
-
-    Logic:
-      1. Call the same JNI helper at 0x36c0 the original native used to
-         obtain the BluetoothAvrcpService's per-conn struct (used for the
-         conn buffer at +8).
-      2. Read 800 B of y1-track-info into file_buf @ sp+16..815. file[0..7]
-         is the current track_id; file[793] is the
-         `previous_track_natural_end` flag set by the music app before the
-         metachanged broadcast that landed us here.
-      3. Read y1-trampoline-state 16 bytes into state_buf @ sp+0..15
-         (state[0..7] = last-synced track_id; state[8] = last
-         RegisterNotification transId).
-      4. If state[0..7] != file[0..7] (track edge detected), emit the
-         AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec-defined order:
-           - event 0x03 TRACK_REACHED_END (Table 5.31) — only when
-             file[793] == 1 (previous track ended naturally rather than
-             being skipped). Strict spec semantic: §5.4.2 Tbl 5.31 is
-             "Notify when reached the end of the track of the playing
-             element" — natural-end-only, not skip-driven.
-           - event 0x02 TRACK_CHANGED (Table 5.30) — always on edge,
-             with track_id = `track_selected` (0x00×8 AVRCP 1.4+ SELECTED;
-             mirrors Pixel-as-TG).
-           - event 0x04 TRACK_REACHED_START (Table 5.32) — always on
-             edge ("Notify when start of a track is reached"; every
-             track edge crosses both an end-of-previous and a
-             start-of-new boundary).
-         Then write file[0..7] back to state[0..7] in y1-trampoline-state
-         so we don't re-emit until the track moves again.
-
-    Closes ICS Table 7 rows 25 (TRACK_REACHED_END) and 26
-    (TRACK_REACHED_START) with real-data CHANGED-on-edge alongside T8's
-    INTERIM coverage — both Optional rows. Pairs with the music app's
-    natural-end detection in PlaybackStateBridge.onCompletion(): the music
-    app marks the previous track's completion via TrackInfoWriter and writes
-    file[793] before the metachanged broadcast.
-
-    The 16-byte state buf and 800-byte file buf live in T5's own stack
-    frame — no shared memory with the reactive T4 trampoline (they read
-    the same files independently).
+    Entered via `b.w T5` from `notificationTrackChangedNative` (jni 0x3bc0).
+    Returns jboolean=1 (caller ignores it). On track-edge (state[0..7] !=
+    file[0..7]) emits the §5.4.2 track-edge 3-tuple: 0x03 TRACK_REACHED_END
+    (gated on file[793] natural-end flag), 0x02 TRACK_CHANGED with SELECTED
+    payload, 0x04 TRACK_REACHED_START. Each emit is per-event gated; see
+    state[13..20] in the schema above.
     """
     a.label("T5")
 
@@ -901,12 +831,11 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_changed")
 
-    # ---- emit NowPlayingContentChanged (event 0x09) — Pixel-mirror ----
-    # Pixel emits NowPlayingContent + PlaybackPos + TrackChanged as a 3-frame
+    # ---- emit NowPlayingContentChanged (event 0x09) ----
+    # NowPlayingContent + PlaybackPos + TrackChanged emitted as a 3-frame
     # burst on every track edge (natural-end, NEXT, PREV). Frame order in this
-    # block matches Pixel's wire ordering. Gate on sub_now_playing_content
-    # (state[20], armed by T8 INTERIM for 0x09); no clear after emit (gate is
-    # session-long per Pixel-mirror).
+    # burst on track edge. Gate on sub_now_playing_content (state[20],
+    # armed by T8 INTERIM for 0x09); no clear after emit.
     a.ldrb_w(0, 13, T5_OFF_STATE + 20)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_now_playing")
@@ -918,11 +847,10 @@ def _emit_t5(a: Asm) -> None:
 
     a.label("t5_skip_now_playing")
 
-    # ---- emit PLAYBACK_POS_CHANGED (event 0x05) on track edge — Pixel-mirror ----
-    # Pixel emits a PlaybackPos CHANGED at every track edge carrying the
-    # current position (= duration_ms on natural end, = 0 on NEXT / PREV).
-    # Reads file[780..783] BE → host. Gate on sub_pos (state[13]) per
-    # Pixel-mirror; no clear.
+    # ---- emit PLAYBACK_POS_CHANGED (event 0x05) on track edge ----
+    # Carries the current position (= duration_ms on natural end, = 0 on
+    # NEXT / PREV). Reads file[780..783] BE → host. Gate on sub_pos
+    # (state[13]); no clear.
     a.ldrb_w(0, 13, T5_OFF_STATE + 13)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_pos_changed")
@@ -941,7 +869,7 @@ def _emit_t5(a: Asm) -> None:
     #   1. previous-track-natural-end flag at file[793] (set by music app
     #      before metachanged broadcast)
     #   2. sub_track_reached_end bit at state[17] (armed by T8 INTERIM emit;
-    #      session-long under Pixel-mirror — not cleared)
+    #      session-long — not cleared)
     a.ldrb_w(0, 13, T5_OFF_FILE_NATURAL_END)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_reached_end")
@@ -1037,28 +965,14 @@ def _emit_t5(a: Asm) -> None:
 
 
 def _emit_t_charset(a: Asm) -> None:
-    """T_charset: PDU 0x17 InformDisplayableCharacterSet — reject with
-    AV/C `NOT_IMPLEMENTED` via UNKNOW_INDICATION.
+    """T_charset: PDU 0x17 reject with AV/C NOT_IMPLEMENTED via UNKNOW_INDICATION.
 
-    Spec-permissible per AVRCP 1.3 §5.2.7 (Optional): a TG that doesn't track
-    the CT's advertised charsets MAY reject. Pixel-as-TG does this — its
-    `btsnoop_hci.log` shows Pixel rejecting 0x17 with "Invalid Command" (AV/C
-    ctype NOT_IMPLEMENTED = 0x8), and strict CTs that send 0x17 immediately
-    move on to subscribe events when they receive that reject.
-
-    Earlier T_charset called `inform_charsetset_rsp(conn, 0)` (msg=536 ACK).
-    The ACK stalled at least one strict CT into a 3-second wait between 0x17
-    and the first RegisterNotification — apparently waiting on a follow-up
-    notification that never came. Switching to the reject path eliminates the
-    wait and the subscription burst lands in <10 ms (matching the Pixel-TG
-    trace).
-
-    We keep sending UTF-8 either way; §5.2.7 doesn't couple the TG's outbound
-    charset to the CT's advertised set (the CT's advertisement is informational
-    only — the TG picks).
-
-    Branched from T4's pre-check when PDU == 0x17. Same calling convention as
-    T_continuation: restore lr canary + r0=conn, tail-jump to t4_to_unknown.
+    Spec-permissible per AVRCP 1.3 §5.2.7 (Optional). Acking via
+    inform_charsetset_rsp stalls at least one strict CT into a 3 s wait
+    between 0x17 and the first RegisterNotification; reject lets the
+    subscription burst land in <10 ms. We keep sending UTF-8 either way —
+    §5.2.7 doesn't couple the TG's outbound charset to the CT's advertised
+    set.
     """
     a.label("T_charset")
     a.ldrh_w(14, 13, T4_LR_CANARY_OFF_ENTRY)  # ldrh.w lr, [sp, #374]
@@ -1067,15 +981,10 @@ def _emit_t_charset(a: Asm) -> None:
 
 
 def _emit_t_battery(a: Asm) -> None:
-    """T_battery: PDU 0x18 InformBatteryStatusOfCT.
+    """T_battery: PDU 0x18 InformBatteryStatusOfCT — ack via battery_status_rsp.
 
-    Branched from T4's pre-check when the inbound PDU byte is 0x18. The CT is
-    notifying us of its current battery state; we ack. We don't surface this
-    state anywhere — Y1 doesn't have a CT-battery API to feed.
-
-    Response builder at libextavrcp.so:0x2160 is structurally identical to
-    inform_charsetset_rsp (same 8-byte ack frame, same r1 dispatch on success
-    vs reject); only the outbound msg_id differs (538 vs 536).
+    The CT advertises its battery state to us; we ack but surface it nowhere
+    (no CT-battery API on Y1).
     """
     a.label("T_battery")
     a.add_imm_t3(0, 5, 8)                     # r0 = conn
@@ -1085,28 +994,12 @@ def _emit_t_battery(a: Asm) -> None:
 
 
 def _emit_t_continuation(a: Asm) -> None:
-    """T_continuation: PDU 0x40 RequestContinuingResponse /
-    0x41 AbortContinuingResponse explicit reject.
+    """T_continuation: PDU 0x40 / 0x41 explicit reject.
 
-    Per AVRCP 1.3 §4.7.7 / §5.5 + ICS Table 7 rows 31-32 (M C.2: M IF
-    GetElementAttributes Response). Continuation is initiated by TG
-    setting `Packet Type=01` (start) in a response — the CT only sends
-    0x40 in reply to a previously-fragmented response. T4 ships responses
-    as a single non-fragmented AVRCP packet (mtkbt fragments below at
-    the AVCTP layer transparently), so a spec-conforming CT never sends
-    0x40 against us.
-
-    Reject shape: AVRCP 1.3 §6.15.2 specifies AV/C `INVALID PARAMETER`
-    (status 0x05) as the spec-correct response when receiving 0x40
-    without having previously sent packet_type=01. The pre-existing
-    UNKNOW_INDICATION path emits AV/C `NOT_IMPLEMENTED` (msg=520) — a
-    different but spec-acceptable reject for an unsupported PDU,
-    functionally indistinguishable to the CT (both are reject frames;
-    the CT abandons continuation either way).
-
-    Branched from T4's pre-check when PDU == 0x40 or 0x41. Restores the
-    same lr canary + r0=conn entry state UNKNOW_INDICATION expects, then
-    tail-jumps.
+    Spec strict-reject is AV/C INVALID_PARAMETER (§6.15.2); UNKNOW_INDICATION
+    emits AV/C NOT_IMPLEMENTED — both are reject frames and the CT abandons
+    continuation either way. T4 never fragments (mtkbt fragments below at
+    AVCTP), so a spec-conforming CT never sends 0x40 against us.
     """
     a.label("T_continuation")
     # Restore lr canary + r0 to match UNKNOW_INDICATION's expected entry state.
@@ -1118,51 +1011,16 @@ def _emit_t_continuation(a: Asm) -> None:
 def _emit_t6(a: Asm) -> None:
     """T6: PDU 0x30 GetPlayStatus.
 
-    Branched from T4's pre-check when the inbound PDU byte is 0x30. Returns
-    the current track's duration / playback position / play_status in a
-    spec-conformant `GetPlayStatus` response per AVRCP 1.3 §5.4.1
-    (Tables 5.25/5.26).
+    Calls btmtk_avrcp_send_get_playstatus_rsp(conn, 0, dur_ms, pos_ms,
+    play_status). When playing_flag == 1, position is live-extrapolated via
+    clock_gettime(CLOCK_BOOTTIME) and `live_pos = pos_at_state_change +
+    (now_ms - state_change_ms)` — same monotonic-since-boot epoch as the
+    music app's SystemClock.elapsedRealtime, so subtraction is bit-exact.
+    tv_nsec/1e6 uses the standard GCC reciprocal magic-multiply 0x431BDE83.
+    Stopped/paused freezes at the saved position.
 
-    Response builder layout (libextavrcp.so:0x2354):
-      btmtk_avrcp_send_get_playstatus_rsp(
-          void* conn,             // r0 = r5+8
-          uint8_t reject_code,    // r1 = 0 for success
-          uint32_t song_length,   // r2 = duration ms
-          uint32_t song_position, // r3 = position ms
-          uint8_t  play_status    // sp[0]: 0=STOPPED, 1=PLAYING, 2=PAUSED,
-                                  //        3=FWD_SEEK, 4=REV_SEEK, 0xFF=ERROR
-      );
-      // Outbound msg_id=542, 20 B IPC frame.
-
-    Stack frame: T6_FRAME B (16 outgoing args + 800 file_buf). Read the
-    full y1-track-info into file_buf so the existing 776-byte schema fields
-    (track_id + title / artist / album) stay intact for any concurrent reader,
-    even though T6 itself only consumes the GetPlayStatus block at
-    offsets 776+.
-
-    Live position extrapolation: when playing_flag == 1 (PLAYING), T6
-    calls clock_gettime(CLOCK_BOOTTIME, &timespec) and computes
-    `live_pos = saved_pos_ms + (now_ms - state_change_ms)`. now_ms =
-    tv_sec * 1000 + tv_nsec / 1e6, computed in-trampoline. When stopped
-    / paused the position field stays at the saved freeze point.
-    CLOCK_BOOTTIME parity with TrackInfoWriter's SystemClock.elapsedRealtime
-    is what makes this arithmetic correct, and full ms precision on both
-    endpoints means the wire position is bit-exact, no ±1 s lurch on
-    state edges.
-
-    tv_nsec / 1_000_000 is computed via magic-multiply: the high half of
-    (tv_nsec * 0x431BDE83) right-shifted 18 yields floor(tv_nsec / 1e6)
-    bit-exact for tv_nsec in [0, 1e9). Standard GCC reciprocal — see
-    Hacker's Delight ch.10 for the derivation.
-
-    The y1-track-info schema fields T6 reads (the music app's TrackInfoWriter
-    writes these as big-endian; T6 byte-swaps to host-LE via REV before passing to the
-    response builder, which expects register-native order):
-      file[776..779]: duration_ms u32 BE
-      file[780..783]: position_at_state_change_ms u32 BE
-      file[784..787]: state_change_time_ms u32 BE
-      file[792]:      playing_flag u8 (0=stopped / 1=playing / 2=paused;
-                                       maps directly to AVRCP play_status)
+    Reads (BE u32 / u8): file[776..779] dur_ms; [780..783] pos_at_state_change;
+    [784..787] state_change_time; [792] playing_flag.
     """
     a.label("T6")
 
@@ -1873,13 +1731,6 @@ def _emit_native_log_u32(a: Asm, fmt_label: str, value_reg: int) -> None:
     across the blx. So push/pop all four caller-arg registers around the
     call to preserve the emit's setup.
 
-    Earlier revision saved only r2/r3, which left r0 (conn pointer) and
-    r1 (success code) corrupted on return — response builders called
-    with garbage conn pointer either crashed silently or wrote to wrong
-    memory, never reaching the AVRCP wire. Symptom: metadata + PSTAT
-    changes invisible to the peer CT (Sonos pane stuck, play/pause icon
-    frozen) despite Y1-side debug logs showing emit-path execution.
-
     Bytes: 22 (push + ldr if needed + movs/adr/mov + blx + pop). Format
     strings consolidated into the data block at end of blob. value_reg
     must be r0..r7 (low regs).
@@ -2143,9 +1994,9 @@ def _emit_t8(a: Asm) -> None:
     _emit_subscription_write(a, 1, 15, T8_OFF_TIMESPEC_SEC, "t8_done")
     a.b_w("t8_done")
 
-    # Events 0x09..0x0c — INTERIM ack + (for 0x09 only) arm sub_now_playing_content
-    # so T5 / T9 can emit CHANGED on track-edge / play-edge per Pixel-mirror.
-    # 0x0a / 0x0b / 0x0c stay INTERIM-only (Y1 has one player, no UID database).
+    # Events 0x09..0x0c — INTERIM ack; only 0x09 arms its gate
+    # (sub_now_playing_content). 0x0a / 0x0b / 0x0c stay INTERIM-only
+    # (Y1 has one player, no UID database).
     a.label("t8_check_9")
     a.cmp_imm8(0, 0x09)
     a.bne("t8_check_a")
@@ -2173,7 +2024,7 @@ def _emit_t8(a: Asm) -> None:
     a.cmp_imm8(0, 0x0B)
     a.bne("t8_check_c")
     # 0x0B ADDRESSED_PLAYER_CHANGED — PlayerID u16 in r3, UidCounter u16
-    # at sp[0]. Pixel sends 0/0; we mirror.
+    # at sp[0]. Both = 0 (Y1 has one player, no UID database).
     a.movs_imm8(3, 0)
     a.str_sp_imm(3, 0)                          # sp[0] = uid_counter (0)
     a.movs_imm8(2, REASON_INTERIM)
@@ -2373,10 +2224,10 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_PS_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (Pixel-mirror session-long): emit CHANGED only if T8
-    # INTERIM has armed sub_play_status (state[14] = 1) at some point in this
-    # session. Gate is not cleared — every play-edge after the first
-    # subscription emits CHANGED. Matches Pixel's behaviour.
+    # Subscription gate (session-long): emit CHANGED only if T8 INTERIM has
+    # armed sub_play_status (state[14] = 1) at some point in this session.
+    # Gate is not cleared — every play-edge after the first subscription
+    # emits CHANGED.
     a.ldrb_w(1, 13, T9_STATE_SUB_PLAY_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_play_check")
@@ -2392,10 +2243,9 @@ def _emit_t9(a: Asm) -> None:
         _emit_native_log_u32(a, "log_fmt_t9pstat", 3)
     a.blx_imm(PLT_reg_notievent_playback_rsp)
 
-    # ---- emit NowPlayingContentChanged CHANGED on play-edge (Pixel-mirror) ----
-    # Pixel emits NowPlayingContent + PlaybackStatus + TrackChanged as a
-    # 3-frame burst on play/pause edge. Same gate semantics as the rest under
-    # Pixel-mirror — set-once at T8 INTERIM, never cleared.
+    # ---- emit NowPlayingContentChanged CHANGED on play-edge ----
+    # Paired with PlaybackStatus + TrackChanged as a 3-frame burst on
+    # play/pause edge. Gate is set-once at T8 INTERIM, never cleared.
     a.ldrb_w(1, 13, T9_STATE_SUB_NOWPLAY_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_play_check")
@@ -2423,7 +2273,7 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_BATT_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (Pixel-mirror session-long): emit only if sub_battery
+    # Subscription gate (session-long): emit only if sub_battery
     # ever armed. Not cleared after emit.
     a.ldrb_w(1, 13, T9_STATE_SUB_BATT_OFF)
     a.cmp_imm8(1, 0)
@@ -2465,9 +2315,9 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_SHUFFLE_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (Pixel-mirror session-long): emit CHANGED only if T8
-    # INTERIM has armed sub_papp (state[15] = 1) at some point in this
-    # session. Not cleared — every PApp edge emits.
+    # Subscription gate (session-long): emit CHANGED only if T8 INTERIM has
+    # armed sub_papp (state[15] = 1) at some point in this session. Not
+    # cleared — every PApp edge emits.
     a.ldrb_w(1, 13, T9_STATE_SUB_PAPP_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_papp_check")
@@ -2542,9 +2392,9 @@ def _emit_t9(a: Asm) -> None:
     a.cmp_imm8(0, 1)                          # 1 = PLAYING (AVRCP §5.4.1 Tbl 5.26)
     a.bne("t9_done")
 
-    # Subscription gate (Pixel-mirror session-long): emit only if sub_pos
-    # ever armed (state[13] = 1). Not cleared — every position tick during
-    # playback emits CHANGED. Matches Pixel's ~1Hz tick cadence on Bolt.
+    # Subscription gate (session-long): emit only if sub_pos ever armed
+    # (state[13] = 1). Not cleared — every position tick during playback
+    # emits CHANGED.
     a.ldrb_w(0, 13, T9_STATE_SUB_POS_OFF)
     a.cmp_imm8(0, 0)
     a.beq("t9_done")
@@ -2665,9 +2515,8 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
     # AVRCP 1.4+ semantic (§6.7.2 Tbl 6.x): 0x0000000000000000 means
     # "currently playing media is selected — render its metadata." Distinct
     # from 0xFFFFFFFFFFFFFFFF which means "no media currently selected"
-    # (AVRCP 1.3 §5.4.2 Tbl 5.30 + ESR07 §2.2). Mirrors what Pixel-as-TG
-    # sends to Bolt; strict 1.4+ CTs reading the 8-byte UID as a special
-    # value won't downgrade the metadata pane to "no track playing."
+    # (AVRCP 1.3 §5.4.2 Tbl 5.30 + ESR07 §2.2). Strict 1.4+ CTs read the
+    # latter as "nothing playing" and suppress the metadata pane.
     a.label("track_selected")
     a.raw(b"\x00" * 8)
 

@@ -189,7 +189,7 @@ PATCHES = [
         # 0x0D for every RegNotif response, regardless of which reasonCode
         # the trampoline passes.
         #
-        # M1 widens the cmp constant from 1 to 0x0F at file offset 0x12230:
+        # M1 widens the cmp from 1 to 0x0F at file offset 0x12230:
         #   0x12230: cmp r1, 1   -> cmp r1, 0xF
         #            01 29        -> 0f 29
         # After M1:
@@ -197,18 +197,9 @@ PATCHES = [
         #     (T2 / extended_T2 / T8 first-response arms)
         #   ctxt[8] != 0x0F → CHANGED branch → wire ctype 0x0D CHANGED
         #     (T5 / T9 edge emits)
-        # Spec-compliant per AVRCP 1.3 §6.7.1 and matches the Pixel-as-TG
-        # btsnoop pattern (INTERIM on first response per registration,
-        # CHANGED on subsequent value updates without waiting for
-        # re-registration).
-        #
-        # Earlier M1 / M1b / M1c / M1d sites in fn.0x379e0 and fn.0x396d0
-        # (commits before 2dc1ec6) wrote to offset 0xc of unrelated work
-        # structs — confirmed dead code. An "M1a" load-offset retarget
-        # (commit aae16de) was based on misreading the radare2 var-label
-        # `var_bh` as sp+0xb when the actual encoding is sp+0xc; it made
-        # the dispatch read a byte that's always 0, so the cmp still
-        # missed. Rolled back here. Trace #39 in INVESTIGATION.md.
+        # Spec-compliant per AVRCP 1.3 §6.7.1: INTERIM on first response per
+        # registration, CHANGED on subsequent value updates without
+        # re-registration.
         "name":   "[M1] RegNotif INTERIM/CHANGED discriminator: cmp ctxt[8] against 0x0F (mtkbt 0x12230)",
         "offset": 0x12230,
         "before": bytes([0x01, 0x29]),  # cmp r1, 1

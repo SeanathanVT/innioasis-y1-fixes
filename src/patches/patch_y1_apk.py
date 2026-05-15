@@ -91,70 +91,25 @@ APKTOOL_JVM_FLAGS: list = []
 STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
 
 # === DEBUG LOGGING TOGGLE ============================================
-# When True, this patcher instruments every metadata-relevant entry point
-# with `Log.d("Y1Patch", ...)` so the full pipeline is observable in
-# `adb logcat -s Y1Patch:*`. Coverage:
+# When True, instruments every metadata-relevant entry point with
+# `Log.d("Y1Patch", ...)` (tail with `adb logcat -s Y1Patch:*`).
 #
-#   Stock (music app smali):
-#     PlayControllerReceiver.onReceive
-#     BaseActivity.dispatchKeyEvent / BasePlayerActivity.dispatchKeyEvent
-#     PlayerService.play / pause / playOrPause / stop
-#     PlayerService.nextSong / prevSong / restartPlay / playerPrepared / toRestart
-#     Y1Application.onCreate (boot init sequence)
+# Coverage:
+#   - Stock music-app: PlayControllerReceiver.onReceive, BaseActivity /
+#     BasePlayerActivity.dispatchKeyEvent, PlayerService.play / pause /
+#     playOrPause / stop / nextSong / prevSong / restartPlay /
+#     playerPrepared / toRestart, Y1Application.onCreate.
+#   - Patcher-emitted: PappSetReceiver, PappStateBroadcaster.
+#   - Inject tree: TrackInfoWriter, PlaybackStateBridge, PositionTicker,
+#     BatteryReceiver, PappSetFileObserver, NowPlayingRefresher.
+#   - Inline _dbgKV value traces at the diagnostic-critical sites
+#     (onTrackEdge id compare, flushLocked summary, onSeek decision,
+#     setPlayStatus, onPlayValue).
+#   - y1-trampoline-state byte dump before/after each wake (DbgPostReadRunnable
+#     posts +50 ms) — pre/post diff reveals whether T5/T9 emitted CHANGED.
 #
-#   Patcher-generated smali (entry-point Log.d traces):
-#     PappSetReceiver.onReceive (B3 — CT-driven Repeat/Shuffle Sets)
-#     PappStateBroadcaster.sendNow + onSharedPreferenceChanged (B4 — local
-#       Repeat/Shuffle changes → AVRCP broadcast)
-#
-#   Inject tree (entry-point Log.d traces):
-#     TrackInfoWriter — init, setPlayStatus, onSeek, markCompletion, markError,
-#       onFreshTrackChange, onTrackEdge, setBattery, setPapp, flush, flushLocked,
-#       wakeTrackChanged, wakePlayStateChanged
-#     PlaybackStateBridge — onPlayValue, onEarlyTrackChange, onPrepared,
-#       onPlayerPreparedTail, onCompletion, onSeek, onError
-#     PositionTicker — start, stop, run (1 s tick)
-#     BatteryReceiver — register, onReceive
-#     PappSetFileObserver — start, onEvent, dispatch
-#     NowPlayingRefresher — onResume, onPause, refresh, run
-#
-#   Inject tree (value-bearing inline _dbgKV — surfaces actual runtime values):
-#     TrackInfoWriter.onTrackEdge      → onTE.old, onTE.new, onTE.EDGE_DETECTED
-#     TrackInfoWriter.flushLocked      → fL.id, fL.pos, fL.dur, fL.ps
-#     TrackInfoWriter.onSeek           → onSeek.in, onSeek.SUPPRESSED.dtMs,
-#                                        onSeek.APPLIED.pos
-#     TrackInfoWriter.setPlayStatus    → sPS.from, sPS.to
-#     PlaybackStateBridge.onPlayValue  → oPV.newVal, oPV.reason
-#
-#   Inject tree (trampoline-state byte dump — §6.7.1 gate + mirror visibility):
-#     y1-trampoline-state full layout (verified per
-#     architecture_y1_subscription_gating memory):
-#       [0..7]   = audio_id mirror (BE u64) — what T5 last advertised
-#       [8..11]  = position mirror (BE u32) — what T9 last advertised
-#       [12]     = play_status mirror      — what T9 last advertised
-#       [13..19] = §6.7.1 per-subscription gates
-#                  [13]=TRACK_CHANGED [14]=PLAYBACK_STATUS [15]=POS
-#                  [16]=BATT          [17]=PAPP            [18..19]=reserved
-#     Tag pattern (each wake produces both):
-#       TrackInfoWriter.wakeTrackChanged      → wTC.pre tramp.state[0..19]=…
-#                                               wTC.post tramp.state[0..19]=…
-#       TrackInfoWriter.wakePlayStateChanged  → wPSC.pre tramp.state[0..19]=…
-#                                               wPSC.post tramp.state[0..19]=…
-#     The .pre dump fires immediately before sendBroadcast(); the .post dump
-#     is posted to the main looper +50 ms later via DbgPostReadRunnable (a
-#     debug-only injected class). Comparing pre vs post answers "did T5/T9
-#     actually emit CHANGED on the wire?" — the relevant gate byte clears
-#     between pre and post if it did; stays armed if it got gated out.
-#
-# Toggled at build time via the `KOENSAYR_DEBUG` environment variable —
-# `apply.bash --debug` sets it. Omit for release builds (zero runtime
-# overhead — no helpers and no log calls are emitted into the smali).
-#
-# Companion flags: same-named constant in src/patches/_trampolines.py,
-# src/patches/patch_libextavrcp_jni.py, src/patches/patch_mtkbt_odex.py
-# (currently placeholders; will be wired up as needed when we extend
-# the diagnostic to native trampolines or the AVRCP Java dispatcher).
-# Y1Bridge already uses Log.d freely; no toggle needed there.
+# Toggle via env KOENSAYR_DEBUG=1 (apply.bash --debug sets it). Release
+# builds are byte-identical: no helpers, no log calls.
 DEBUG_LOGGING = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 
 ARTISTS_SMALI = "smali_classes2/com/innioasis/music/ArtistsActivity.smali"
@@ -384,37 +339,12 @@ print(f"\n[3/4] Patching smali files...")
 # ============================================================
 # Patch A: ArtistsActivity.smali
 # ============================================================
+# In confirm() (artist tap, !isMultiSelect), replace the
+# switchSongSortType()+ShufflePlaylistItemView.show() block (.line 107-109
+# + goto) with an Intent to AlbumsActivity carrying p0.artist.
 #
-# In confirm(), when the user taps an artist (isShowArtists==true,
-# isMultiSelect==false), the original code block is:
-#
-#   .line 107
-#   sget-object v0, Y1Repository$SongSortType;->Companion ...
-#   sget-object v1, SharedPreferencesUtils;->INSTANCE ...
-#   invoke-virtual {v1}, ...getSortArtistSong()I
-#   move-result v1
-#   invoke-virtual {v0, v1}, ...fromType(I)...SongSortType;
-#   move-result-object v0
-#   .line 108
-#   iget-object v1, p0, ArtistsActivity;->artist:Ljava/lang/String;
-#   invoke-direct {p0, v1, v0}, ...switchSongSortType(String SongSortType)V
-#   .line 109
-#   invoke-virtual {p0}, ...getVb()...
-#   move-result-object v0
-#   check-cast v0, ActivityArtistsBinding;
-#   iget-object v0, v0, ActivityArtistsBinding;->spv ...
-#   invoke-virtual {v0}, ShufflePlaylistItemView;->show()V
-#   goto :goto_1
-#
-# We replace this entire block (lines 107-109 + goto) with an Intent
-# to AlbumsActivity. The artist name is already in p0.artist at this point.
-#
-# Register usage (registers_size=5, p0=this=v4 in Dalvik calling convention,
-# but apktool smali uses p0 notation for parameters):
-#   v0 = new Intent instance
-#   v1 = Context (from getContext())
-#   v2 = Class literal (AlbumsActivity.class) / artist string
-#   p0 = this
+# Registers (registers_size=5): v0 Intent / target Class, v1 Context /
+# artist string, v2 scratch, p0 this.
 
 artists_path = os.path.join(UNPACKED_DIR, ARTISTS_SMALI)
 if not os.path.exists(artists_path):
@@ -804,116 +734,25 @@ print("  Patch C: Y1Repository -- songDao field changed from private to public")
 # Patch E: PlayControllerReceiver.smali — discrete PLAY/PAUSE/STOP coverage
 # ============================================================
 #
-# Background
-# ----------
-# AVRCP 1.3 §4.6.1 (PASS THROUGH command — actual op-code table and
-# press/release semantics defined in AV/C Panel Subunit Specification, ref
-# [2] of AVRCP 1.3) gives distinct codes for PLAY (0x44), STOP (0x45), and
-# PAUSE (0x46), separate from any toggle abstraction. AVRCP 1.3 §19.3
-# (Appendix D, informative) shows a concrete PASSTHROUGH PLAY frame with
-# operation_ID 0x44 and confirms `state_flag = 0` (press) / `1` (release).
-# CTs that issue discrete codes from separate UI elements are spec-conformant;
-# CTs that only ever issue 0x46 (and rely on the TG to interpret it as a
-# toggle when already paused) are also common in practice.
+# AVRCP 1.3 §4.6.1 + ICS Table 8: PLAY (0x44) and STOP (0x45) are Mandatory
+# for any TG advertising PASS THROUGH Cat 1 (which we do via V1 SDP);
+# PAUSE (0x46), NEXT (0x4B), PREVIOUS (0x4C) are Optional. Stock
+# PlayControllerReceiver only handles KEY_PLAY (85, KEYCODE_MEDIA_PLAY_PAUSE)
+# and silently drops the discrete codes a CT issues through avrcp_input_sendkey
+# → /dev/uinput → AVRCP.kl.
 #
-# Per the AVRCP ICS Table 8 (operation_id of category 1 for TG, see
-# `docs/spec/AVRCP 1.3/AVRCP.ICS.p17.pdf` §1.5), op_ids 0x44 PLAY (item 19) and 0x45
-# STOP (item 20) are **Mandatory** for any TG advertising PASS THROUGH
-# Cat 1 (which we do via the V1 SDP record patch). 0x46 PAUSE (item 21)
-# and 0x4B/0x4C FORWARD/BACKWARD (items 26/27) are Optional.
+# Routing post-patch:
+#   85  KEY_PLAY            → playOrPause() (toggle — physical key)
+#   126 KEYCODE_MEDIA_PLAY  → play(true), or playOrPause() if already playing
+#                             (some non-spec CTs map their pause button to
+#                             PASSTHROUGH PLAY and rely on TG-side toggle)
+#   127 KEYCODE_MEDIA_PAUSE → pause(0x12, true) — reason 0x12 is a fresh
+#                             Timber tag for the PASSTHROUGH path
+#   86  KEYCODE_MEDIA_STOP  → stop()  (IjkMediaPlayer.stop + reset + MP.stop)
+#   87  KEYCODE_MEDIA_NEXT  → nextSong()  (AV/C 0x4B)
+#   88  KEYCODE_MEDIA_PREV  → prevSong()  (AV/C 0x4C)
 #
-# A spec-compliant TG must therefore handle:
-#   - 0x44 PLAY  : transition to PLAYING from any state (no-op if already PLAYING)  [M]
-#   - 0x45 STOP  : transition to STOPPED state (release media position)             [M]
-#   - 0x46 PAUSE : transition to PAUSED from any state (no-op if already PAUSED)    [O]
-#   - 0x46 sent as a toggle by the CT: TG state-flip                                [O, observed]
-#
-# Key-injection path inside libextavrcp_jni.so (`avrcp_input_sendkey` →
-# /dev/uinput) maps these to the Linux input event keycodes (verified against
-# /system/usr/keylayout/AVRCP.kl):
-#   - 0x44 PLAY  → Linux KEY_PLAYCD (200)  → Android KEYCODE_MEDIA_PLAY (126)
-#   - 0x45 STOP  → Linux KEY_STOPCD (166)  → Android KEYCODE_MEDIA_STOP (86)
-#   - 0x46 PAUSE → Linux KEY_PAUSECD (201) → Android KEYCODE_MEDIA_PLAY_PAUSE (85)
-#
-# Y1's PlayControllerReceiver (the registered ACTION_MEDIA_BUTTON receiver)
-# stock-only matches against `KeyMap.KEY_PLAY` (= 85, KEYCODE_MEDIA_PLAY_PAUSE).
-# When a CT issues a discrete PLAY (PASSTHROUGH 0x44 → uinput KEY_PLAYCD →
-# KEYCODE_MEDIA_PLAY 126), the receiver's `if-ne v2, KEY_PLAY` check fails,
-# no action runs, and the music app silently drops the command.
-#
-# The fix
-# -------
-# Distinguish four cases in the receiver and route each to the *correct*
-# PlayerService method:
-#
-#   - KEY_PLAY (85, KEYCODE_MEDIA_PLAY_PAUSE):
-#       call `playOrPause()V` (toggle).
-#       The legacy ACTION_MEDIA_BUTTON broadcast Intent always uses 85, and
-#       toggle is the right semantics for a single physical play/pause key.
-#
-#   - KEYCODE_MEDIA_PLAY (0x7e, 126):
-#       If `isPlaying()` → `playOrPause()V` (effectively pause). Else
-#       → `play(Z)V` with bool=true (start playback).
-#       Per AVRCP 1.3 §4.6 PLAY is "begin/continue playing" (no toggle),
-#       but some non-spec CTs map their on-screen pause button to
-#       PASSTHROUGH PLAY and rely on the TG to toggle. Treating PLAY-
-#       while-already-playing as pause matches what AOSP-based players
-#       do in practice. Spec-compliant CTs never send PLAY against a
-#       playing TG, so this branch only fires for the non-compliant case.
-#       The play(true) branch's boolean runs `Static.setPlayValue(1, ...)`
-#       after player start(), propagating the resume edge to UI / RCC /
-#       AudioFocus.
-#
-#   - KEYCODE_MEDIA_PAUSE (0x7f, 127) → `pause(IZ)V` with reason=0x12,
-#     flag=true. reason is a diagnostic Timber tag (stock spans 0xc-0x11);
-#     0x12 is a fresh tag for the PASSTHROUGH path. flag=true matches
-#     Kotlin's pause$default behaviour.
-#
-#   - KEYCODE_MEDIA_STOP (0x56, 86) → `stop()V`. PlayerService.stop()
-#     calls IjkMediaPlayer.stop() + reset() + MediaPlayer.stop().
-#     Spec-mandated per AVRCP ICS Table 8 item 20.
-#
-#   - KEYCODE_MEDIA_NEXT (0x57, 87) → `nextSong()V`, AV/C op 0x4B.
-#   - KEYCODE_MEDIA_PREVIOUS (0x58, 88) → `prevSong()V`, AV/C op 0x4C.
-#     Reached via Patch H/H′ propagation; AVRCP 1.3 §4.6.1 separates
-#     NEXT/PREV from FAST_FORWARD/REWIND (op 0x49/0x48).
-#
-# Per-keycode split (vs. routing everything to playOrPause toggle)
-# matters for strict CTs that issue discrete PLAY against an already-
-# PLAYING TG — toggle would invert the CT's intent on each press.
-#
-# Stock smali at PlayControllerReceiver.smali:cond_c:
-#   :cond_c
-#   sget-object p1, KeyMap;->INSTANCE
-#   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
-#   move-result p1
-#   if-ne v2, p1, :cond_e
-#   ... (playOrPause action — single arm)
-#
-# Patched:
-#   :cond_c
-#   sget-object p1, KeyMap;->INSTANCE
-#   invoke-virtual {p1}, KeyMap;->getKEY_PLAY()I
-#   move-result p1
-#   if-eq v2, p1, :cond_play_pause_toggle    # KEY_PLAY (85) → toggle
-#   const/16 p1, 0x7e
-#   if-eq v2, p1, :cond_play_strict          # MEDIA_PLAY (126) → play(true)
-#   const/16 p1, 0x7f
-#   if-eq v2, p1, :cond_pause_strict         # MEDIA_PAUSE (127) → pause()
-#   const/16 p1, 0x56
-#   if-eq v2, p1, :cond_stop_strict          # MEDIA_STOP (86) → stop()
-#   const/16 p1, 0x57
-#   if-eq v2, p1, :cond_next_strict          # MEDIA_NEXT (87) → nextSong()
-#   const/16 p1, 0x58
-#   if-eq v2, p1, :cond_prev_strict          # MEDIA_PREVIOUS (88) → prevSong()
-#   goto :cond_e                             # nothing matched, keep walking
-#
-# Each :cond_*_strict arm follows the same pattern: fetch PlayerService
-# via Y1Application$Companion, null-check, invoke the discrete method,
-# `goto :goto_5`. v0 and v3 are scratch (the .locals 6 onReceive method
-# has v0..v5; the keyCode lives in v2 throughout). apktool will renumber
-# the user-defined :cond_*_strict labels to alphanumeric :cond_X on
-# reassembly — that's expected and fine.
+# apktool renumbers the :cond_*_strict labels on reassembly — expected.
 
 PLAY_CONTROLLER_RECEIVER_SMALI = (
     "smali_classes2/com/innioasis/y1/receiver/PlayControllerReceiver.smali"
@@ -1439,37 +1278,18 @@ print(
 
 
 # ============================================================
-# Patch B3: PappSetReceiver — apply CT-driven Repeat/Shuffle Sets from AVRCP
+# Patch B3: PappSetReceiver — CT-driven Repeat/Shuffle Sets from AVRCP
 # ============================================================
+# Adds `com.koensayr.PappSetReceiver` to the music app. Listens for
+#   com.koensayr.y1.bridge.SET_REPEAT_MODE  EXTRA "value":I
+#   com.koensayr.y1.bridge.SET_IS_SHUFFLE   EXTRA "value":Z
+# and calls `SharedPreferencesUtils.setMusicRepeatMode` / `setMusicIsShuffle`.
+# The live path runs through B5's PappSetFileObserver (T_papp 0x14 writes
+# y1-papp-set, PappSetFileObserver applies it directly — no Intent hop);
+# this receiver is a no-op safety net.
 #
-# Adds a new BroadcastReceiver `com.koensayr.PappSetReceiver` to the music
-# app. The receiver listens for two intents:
-#
-#   ACTION_SET_REPEAT_MODE  (com.koensayr.y1.bridge.SET_REPEAT_MODE, EXTRA "value":I)
-#   ACTION_SET_IS_SHUFFLE   (com.koensayr.y1.bridge.SET_IS_SHUFFLE,  EXTRA "value":Z)
-#
-# On receipt, it calls `SharedPreferencesUtils.INSTANCE.setMusicRepeatMode(I)`
-# or `setMusicIsShuffle(Z)` — the same setters the in-app Settings screen
-# calls when the Y1 user toggles Repeat / Shuffle. PlayerService re-reads
-# the SharedPreferences at track-end, so the change propagates without a
-# music-app restart.
-#
-# The live CT-Set path runs through B5's PappSetFileObserver: T_papp 0x14 in
-# libextavrcp_jni.so writes y1-papp-set in the music-app dir directly, and
-# PappSetFileObserver applies it via SharedPreferencesUtils — no Intent hop.
-# This receiver stays in tree as a no-op safety net.
-#
-# Two parts:
-#   1. Write a brand-new smali file (PappSetReceiver.smali) into the
-#      apk's smali tree. apktool re-compiles all smali files when it
-#      reassembles the DEX, so the new class is included automatically.
-#   2. Inject a `registerReceiver(...)` call at the end of
-#      Y1Application.onCreate() so the receiver is live as soon as the
-#      app process is up. We don't need a manifest entry because dynamic
-#      registration covers it.
-#
-# Receiver class lives under `com.koensayr` so the new class name doesn't
-# collide with anything in the existing `com.innioasis.y1.*` namespace.
+# Two parts: emit the new smali (apktool picks it up at DEX reassembly)
+# and inject `registerReceiver(...)` at Y1Application.onCreate's tail.
 
 print(f"\nPatch B3: PappSetReceiver in music app")
 
@@ -1642,31 +1462,22 @@ print("  Patch B3: Y1Application.onCreate registers PappSetReceiver")
 
 
 # ============================================================
-# Patch B4: PappStateBroadcaster — push Y1-side Repeat/Shuffle edges to
-# y1-track-info + fire playstatechanged so T9 emits AVRCP event 0x08 CHANGED
+# Patch B4: PappStateBroadcaster — Y1-side Repeat/Shuffle edges → wire
 # ============================================================
-#
 # OnSharedPreferenceChangeListener fires for any write to the "settings"
-# SharedPreferences — covers both AVRCP-driven Sets (PappSetFileObserver from
-# Patch B5) and Y1-UI toggles uniformly. On a key match for "musicRepeatMode"
-# or "musicIsShuffle", reads the live values via SharedPreferencesUtils, maps
-# to AVRCP §5.2.4 enum bytes, calls TrackInfoWriter.setPapp() to update
-# y1-track-info[795..796], and fires com.android.music.playstatechanged so
-# MtkBt's BluetoothAvrcpReceiver wakes notificationPlayStatusChangedNative
-# → T9 → AVRCP §5.4.2 Tbl 5.36 PLAYER_APPLICATION_SETTING_CHANGED CHANGED.
+# SharedPreferences — covers both CT-driven Sets (B5's PappSetFileObserver)
+# and Y1-UI toggles uniformly. On "musicRepeatMode" / "musicIsShuffle"
+# match, maps to AVRCP §5.2.4 enum bytes, calls TrackInfoWriter.setPapp()
+# (updates y1-track-info[795..796]), and fires playstatechanged so T9
+# emits §5.4.2 Tbl 5.36 PLAYER_APPLICATION_SETTING_CHANGED CHANGED.
 #
-# The ACTION_PAPP_STATE_DID_CHANGE broadcast is retained as a no-op safety
-# net — Y1Bridge.apk does not consume it; the file write to y1-track-info
-# is the live path.
+# §5.2.4 mapping:
+#   Repeat  musicRepeatMode 0/1/2  → AVRCP 0x01/0x02/0x03 (OFF/SINGLE/ALL)
+#   Shuffle musicIsShuffle false/true → AVRCP 0x01/0x02 (OFF/ALL_TRACK)
 #
-# AVRCP §5.2.4 mapping (see INVESTIGATION.md Trace #18):
-#   Repeat:  Y1 musicRepeatMode 0/1/2 → AVRCP 0x01/0x02/0x03 (OFF/SINGLE/ALL)
-#   Shuffle: Y1 musicIsShuffle false/true → AVRCP 0x01/0x02 (OFF/ALL_TRACK)
-#
-# Self-rooted via a static field so the GC doesn't reclaim the listener
-# (SharedPreferences holds OnSharedPreferenceChangeListener via weak ref).
-# Y1Application.onCreate also calls sendNow() once on registration so the
-# music-app y1-track-info[795..796] bytes are seeded at startup.
+# Static-field rooted so SharedPreferences' weak-ref listener doesn't get
+# GC'd. Y1Application.onCreate calls sendNow() once at registration to
+# seed y1-track-info.
 
 print(f"\nPatch B4: PappStateBroadcaster in music app")
 
@@ -1963,35 +1774,19 @@ DBG_HELPERS_SMALI = """\
 
 # _dbgLogTrampolineState(String tag) → Log.d("Y1Patch", tag+" tramp.state[0..19]=HH HH …")
 #
-# Dumps the full 20-byte y1-trampoline-state file. Authoritative byte semantics
-# from src/patches/_trampolines.py (T9_OFF_STATE = 8 in T9's stack frame, file
-# layout matches):
-#   bytes [0..7] = last-synced track_id (T5 mirror — compared against
-#                  file[0..7] for TRACK_CHANGED edge detection)
-#   byte  [8]    = (unused / pad)
-#   byte  [9]    = last_play_status      — compare against fL.ps to detect
-#                                          stale wire state
-#   byte  [10]   = last_battery_status   — compare against fL.battery
-#   byte  [11]   = last_repeat_avrcp     — papp edge
-#   byte  [12]   = last_shuffle_avrcp    — papp edge
-#   byte  [13]   = sub_pos_changed       (event 0x05 PLAYBACK_POS)
-#   byte  [14]   = sub_play_status       (event 0x01 PLAYBACK_STATUS)
-#   byte  [15]   = sub_papp              (event 0x08 PLAYER_APPLICATION_SETTING)
-#   byte  [16]   = sub_track_changed     (event 0x02 TRACK_CHANGED)
-#   byte  [17]   = sub_track_reached_end (event 0x03)
-#   byte  [18]   = sub_track_reached_start (event 0x04)
-#   byte  [19]   = sub_battery           (event 0x06 BATT_STATUS)
-#   (byte [20]   = sub_now_playing_content event 0x09 — exists if file is 21 B,
-#                  not dumped)
-# Per architecture_y1_subscription_gating + Pixel-mirror gate semantics:
-#   T2 / T8 INTERIM arms a gate byte = 1; T5 / T9 read + (some events) clear.
+# Dumps 20 B of y1-trampoline-state. Layout (authoritative source:
+# _trampolines.py T9_OFF_STATE):
+#   [0..7]   last-synced track_id (T5 mirror)
+#   [8]      pad
+#   [9..12]  last_play_status / battery / repeat / shuffle (T9 edge memo)
+#   [13..19] per-event subscription gates
+#       13=sub_pos 14=sub_play 15=sub_papp 16=sub_track 17=sub_reached_end
+#       18=sub_reached_start 19=sub_battery
+#   ([20] sub_now_playing_content only present if file is 21 B; not dumped)
 #
 # Called immediately before each wakeTrackChanged / wakePlayStateChanged
-# sendBroadcast() and once per PositionTicker tick. Successive captures answer:
-#   * Was the gate armed (non-zero byte in [13..19]) when we kicked T5/T9?
-#   * Did the previous wake actually clear the gate (proving T5/T9 emitted
-#     CHANGED on the wire) or not (proving gate exhaustion: gate cleared on
-#     a prior CHANGED, CT hasn't re-RegisterNotification'd yet)?
+# sendBroadcast() and once per PositionTicker tick. pre/post diff reveals
+# whether T5 / T9 emitted CHANGED on the wire.
 #   * Does the [0..12] mirror match the current y1-track-info (audio_id /
 #     position / play_status)? Mismatch means T5/T9 hasn't published the
 #     latest state to the wire yet — i.e., the icon-doesn't-update symptom.
@@ -2661,27 +2456,16 @@ with open(ps_path, 'w') as f:
 print(f"  Patch B5.2a: PlayerService.setCurrentPosition → PlaybackStateBridge.onSeek")
 
 # -- Patch B5.2b: pre-emit TRACK_CHANGED before prepareAsync completes --------
-# PlayerService.toRestart() contains three setDataSource(newPath) call sites —
-# one for the audiobook IJK path, one for the music IJK path, and one for the
-# music AOSP MediaPlayer path. Each is followed by prepareAsync() (~100-500 ms
-# of decoder warmup) and only then by OnPreparedListener, which is where our
-# existing B5.2 hook fires onTrackEdge + wakeTrackChanged. By the time
-# setDataSource has been called, mPlayingMusic / mPlayingAudiobook is the new
-# song — flushLocked() reads the metadata from PlayerService.getPlayingSong()
-# at that moment and writes it to y1-track-info, so we can fire the
-# track-change notification immediately.
+# PlayerService.toRestart() has three setDataSource(newPath) sites
+# (audiobook IJK, music IJK, music AOSP MediaPlayer). After setDataSource,
+# mPlayingMusic / mPlayingAudiobook already holds the new song, so we
+# inject onEarlyTrackChange at each site to fire flush + wakeTrackChanged
+# ~100-500 ms before OnPreparedListener would. Same-track invocations
+# (resume-from-pause) hit the audio_id dedup, no spurious wire CHANGED.
 #
-# Inject `invoke-static onEarlyTrackChange` after each setDataSource. The new
-# helper in PlaybackStateBridge calls TrackInfoWriter.onTrackEdge() (which
-# dedups by audio_id — same-track invocations like resume-from-pause refresh
-# duration without disturbing the live-position baseline) and
-# wakeTrackChanged() (broadcasts metachanged → MMI_AVRCP → T5). Saves up to
-# ~500 ms of perceived metadata-refresh latency on track skip.
-#
-# Anchors: each setDataSource call is uniquely identified by the receiver
-# register (v2 / v0 / v4) and the .line marker that follows it. The 3 sites
-# are the only setDataSource calls in PlayerService.smali — verified by
-# `grep -n setDataSource`.
+# Each setDataSource is uniquely identified by receiver register + the
+# following .line marker (verified: only 3 setDataSource calls in
+# PlayerService.smali).
 TO_RESTART_HOOKS = [
     # (anchor, replacement) tuples for each setDataSource site in toRestart
     (
@@ -2736,8 +2520,7 @@ print(f"  Patch B5.2b: PlayerService.toRestart × 3 setDataSource sites → Play
 # getPlayerIsPrepared() returns true, so a fresh flushLocked captures the
 # newly-valid getDuration() value; without this hook, flushLocked from
 # OnPreparedListener runs ~26 ms BEFORE the flag flips and falls back to
-# the prior track's stale mLastKnownDuration (verified Kia 2026-05-14:
-# duration leaks one track late on every skip).
+# the prior track's stale mLastKnownDuration.
 #
 # playerPrepared() has TWO `iput-boolean … playerIsPrepared:Z` sites: one
 # in the shutdown-restore branch (runs play / pause / setCurrentPosition

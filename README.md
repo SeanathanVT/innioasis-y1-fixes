@@ -10,7 +10,7 @@
 - **Bluetooth pairing** — audio.conf / auto_pairing.conf / blacklist.conf / build.prop edits for car and headset pairing.
 - **System config** — enable ADB debugging, remove preinstalled bloatware.
 - **Root** — install `/system/xbin/su` (setuid, mode 06755) for `adb shell /system/xbin/su` escalation. Stock `/sbin/adbd` stays untouched.
-- **AVRCP 1.3 metadata + control over Bluetooth** — peer Bluetooth Controller sees Title / Artist / Album / Genre / TrackNumber / TotalNumberOfTracks / PlayingTime, live play status with millisecond-precision playhead, track-change + battery notifications, and bidirectional Repeat / Shuffle. Spec-compliant 1.3 TG behaviour throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit §5.3.4).
+- **AVRCP 1.3 metadata + control over Bluetooth** — peer Controller sees full track metadata, ms-precision playhead, track / battery notifications, and bidirectional Repeat / Shuffle. Spec-compliant 1.3 TG (§6.7.1 / §6.6.1 / §5.3.4).
 - **Investigation tooling** — diagnostic scripts (`@btlog` tap, dual-capture, post-root probe, gdbserver attach). Not invoked by the patch flow — see [Diagnostics](#diagnostics).
 
 Compatibility is defined by [`KNOWN_FIRMWARES`](#stock-firmware-manifest) in `apply.bash`; add a row to enrol a new build.
@@ -49,9 +49,9 @@ cp /path/to/rom.zip staging/
 
 The bash extracts `system.img` from `rom.zip`, loop-mounts it, applies the patches in-place, unmounts, and flashes via MTKClient. Subdirectory build outputs and `tools/` contents are picked up automatically.
 
-Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip` if you'd rather not re-download. Pass `--artifacts-dir <path>` to point at a different staging location instead (e.g., on a separate drive, shared between checkouts, or outside the repo).
+Anything under `staging/` other than its tracked README is `.gitignore`d. **`git clean -dfx` will nuke staged firmware** along with build artifacts — keep a backup of `rom.zip`, or pass `--artifacts-dir <path>` to stage elsewhere.
 
-Override the bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env) if you have those installed elsewhere.
+Override bundled tooling with `--mtkclient-dir <path>` / `--python-venv <path>` (or `MTKCLIENT_DIR` env).
 
 ### Flags
 
@@ -79,9 +79,7 @@ Background on the failed alternatives these tools replace: [`docs/INVESTIGATION.
 
 ## Status
 
-`--all` produces a working device — Bluetooth pairing, A2DP audio, full AVRCP 1.3 metadata + control over Bluetooth, `--root`, `--music-apk` / `--remove-apps` / `--adb`.
-
-The AVRCP 1.3 TG implementation is spec-compliant throughout (per-subscription gating §6.7.1, request-shape compliance §6.6.1, zero-length emit for unsupported attributes §5.3.4). Every Mandatory and Optional ICS Table 7 (Target Features) row closes. Per-row scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+`--all` produces a working device: Bluetooth pairing, A2DP audio, AVRCP 1.3 metadata + control, `--root`, `--music-apk` / `--remove-apps` / `--adb`. Every Mandatory and Optional ICS Table 7 (Target Features) row closes. Per-row scorecard: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Stock firmware manifest
 
@@ -100,8 +98,8 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - Python 3.8+ with `venv` module. Patcher byte-level scripts are stdlib-only; `patch_y1_apk.py` needs `androguard`, which `tools/setup.sh` installs into `tools/python-venv/`. Java 11+ also required for `--music-apk` (apktool's smali assembler; apktool itself is downloaded by `patch_y1_apk.py` on first invocation).
 - `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
 - `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora / RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian / Ubuntu), `pacman -S android-tools` (Arch).
-- For `--root` only: prebuilt `src/su/build/su`. Build via `cd src/su && make`. Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or the equivalent `gcc-arm-linux-gnueabi` package on Debian/Ubuntu.
-- For `--avrcp` only: Android SDK + JDK 17+. Gradle is bootstrapped by the in-tree wrapper at `src/Y1Bridge/gradlew`. The repo's `tools/install-android-sdk.sh` auto-installs the SDK into `tools/android-sdk/` (~1.5 GB; idempotent, short-circuits on existing `ANDROID_HOME`). Manual install instructions in [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
+- For `--root` only: prebuilt `src/su/build/su` (`cd src/su && make`). Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or `gcc-arm-linux-gnueabi` on Debian/Ubuntu.
+- For `--avrcp` only: Android SDK + JDK 17+. `tools/install-android-sdk.sh` auto-installs into `tools/android-sdk/` (~1.5 GB, idempotent). Manual instructions: [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 
 ## Documentation
 
@@ -114,7 +112,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 
 ## Deployment notes
 
-The patched music-player APK must land directly on `/system/app/`, not via `adb install` or PackageManager — the stale META-INF block satisfies parseable-signature requirements only when filesystem-deployed at boot. `apply.bash --music-apk` handles this. Manual ADB push:
+The patched music-player APK must land in `/system/app/`, not via `adb install` / PackageManager — its stale META-INF only satisfies the parseable-signature requirement when filesystem-deployed at boot. `apply.bash --music-apk` handles this. Manual ADB push:
 
 ```bash
 adb root && adb remount

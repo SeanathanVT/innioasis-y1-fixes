@@ -1,22 +1,9 @@
 #!/usr/bin/env bash
 #
-# tools/install-android-sdk.sh — auto-install Android cmdline-tools and the
-# components needed to build src/Y1Bridge/ via gradle. Re-runnable;
-# safe to run after a partial first run (still writes local.properties +
-# env file at the end so any prior partial state is healed).
-#
-# Wires the result into:
-#   - src/Y1Bridge/local.properties (sdk.dir=…) — gradle reads this
-#     directly; gradle builds work without ANDROID_HOME in your shell.
-#   - tools/android-sdk-env.sh — sourceable by the user; exports
-#     ANDROID_HOME and adds adb / sdkmanager to PATH for interactive use.
-#
-# Prereqs:  JDK 17+, curl, unzip
-# Disk:     ~1.5–2 GB
-# Network:  ~1.7 GB total
-#
-# By running this script you implicitly accept Google's Android SDK license
-# — it gets piped "yes" for every component.
+# install-android-sdk.sh — install Android cmdline-tools and components
+# needed by src/Y1Bridge/. Idempotent. Writes src/Y1Bridge/local.properties
+# (sdk.dir=…) and tools/android-sdk-env.sh. Prereqs: JDK 17+, curl, unzip.
+# Disk ~1.5-2 GB, network ~1.7 GB. Pipes "yes" to the Android SDK license.
 
 set -euo pipefail
 
@@ -83,16 +70,9 @@ EOF
         ;;
 esac
 
-# --- Decide which SDK to wire up -----------------------------------------
-# Three cases. In every case the local.properties + env-file write at the
-# end always runs — re-running this script heals missing config files.
-#
-# sdk_complete <root>: returns 0 iff <root> has all three required
-# components (platforms/, build-tools/, platform-tools/). Without checking
-# all three, a prior run that installed `platforms;android-34` but failed
-# on `build-tools;X.Y.Z` would leave the platforms dir in place; the next
-# run would skip the install entirely (gating only on platforms) and the
-# user would discover the missing build-tools at gradle build time.
+# sdk_complete: returns 0 iff <root> has platforms/, build-tools/, and
+# platform-tools/ — gating on all three so partial-install failures don't
+# silently short-circuit on the next run.
 sdk_complete() {
     local root="$1"
     [[ -d "${root}/platforms/${ANDROID_PLATFORM}" ]] && \

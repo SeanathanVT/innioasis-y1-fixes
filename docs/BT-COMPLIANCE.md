@@ -65,7 +65,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
 | 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | ✓ T_papp (Repeat + Shuffle, OFF/OFF; Set rejects `0x06 INTERNAL_ERROR` — see §1) | — |
 | 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | ✓ T_papp (UTF-8 "Repeat" / "Shuffle" / "Off") | — |
-| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (NOT_IMPLEMENTED reject; spec-permissible for Optional PDU; matches Pixel-as-TG) | — |
+| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (NOT_IMPLEMENTED reject; spec-permissible for Optional PDU) | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
 | **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime, single packed frame) | — |
 | **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 with live position via `clock_gettime(CLOCK_BOOTTIME)` | — |
@@ -106,9 +106,9 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 
 ### Notification events (PDU 0x31 sub-dispatch, AVRCP 1.3 §5.4.2 Tables 5.29–5.37)
 
-The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — matches Pixel-as-TG exactly. Events 0x03, 0x04, 0x06, 0x07 are no longer advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes despite the absence.
+The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x03, 0x04, 0x06, 0x07 are not advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes anyway.
 
-**Pixel-mirror gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` for the matching event = 1; T5 / T9 read the gate but **never clear**. Once a CT subscribes to an event in a session, every subsequent value change emits CHANGED on that event. M1 widens the cmp constant in mtkbt's RegNotif response dispatch (`fcn.0x121d8` at `0x12230`) from 1 to `0x0F`, so the dispatch correctly routes the JNI's reasonCode byte (at IPC payload offset 8 = `ctxt[8]` in mtkbt) to the matching wire ctype: INTERIM (`0x0F`) for T2 / T8 first-response arms, CHANGED (`0x0D`) for T5 / T9 edge emits. Pixel-as-TG mirrors this pattern (INTERIM on first response per registration, CHANGED on subsequent value updates without waiting for re-registration); CTs in the test matrix accept it.
+**Session-long gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` = 1; T5 / T9 read the gate but **never clear**. Once a CT subscribes in a session, every subsequent value change emits CHANGED. M1 widens the cmp constant in mtkbt's RegNotif response dispatch (`fcn.0x121d8` at `0x12230`) from 1 to `0x0F`, so the dispatcher routes the JNI's reasonCode byte (IPC offset 8 = `ctxt[8]`) to the matching wire ctype: INTERIM (`0x0F`) for first-response arms, CHANGED (`0x0D`) for edge emits.
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
@@ -440,7 +440,7 @@ Table 16 (Message Error Handling): Reporting Capability Error (M) ✓ via `[AVDT
 
 **Handler verification for AVDTP 1.3 additions (sig_id 0x0c GET_ALL_CAPABILITIES + 0x0d DELAYREPORT):**
 
-The AVDTP signal dispatcher at file `0xaa72c` (see `INVESTIGATION.md` Trace #13c for the disassembly walk-through) has a TBH jump table at `0xaa81e` with explicit entries for both sig 0x0c (target `0xab4de`) and sig 0x0d (target `0xab540`). Sig 0x0d DELAYREPORT has substantive handler logic. Sig 0x0c GET_ALL_CAPABILITIES is a stub at `0xab4de` that always falls through to the BAD_LENGTH error path — peer receives an error response, not a General Reject.
+The AVDTP signal dispatcher at file `0xaa72c` (full disassembly in `INVESTIGATION.md`) has a TBH jump table at `0xaa81e` with explicit entries for both sig 0x0c (target `0xab4de`) and sig 0x0d (target `0xab540`). Sig 0x0d DELAYREPORT has substantive handler logic. Sig 0x0c GET_ALL_CAPABILITIES is a stub at `0xab4de` that always falls through to the BAD_LENGTH error path — peer receives an error response, not a General Reject.
 
 V5 patches the jump-table entry for sig 0x0c to redirect to the sig 0x02 GET_CAPABILITIES handler at `0xaa924`. This is a structural workaround, not a real handler — but per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible subset of the sig 0x0c response, which suffices for an SBC-only Source.
 
@@ -510,7 +510,7 @@ Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 
 **Status: Option C shipped — V3 + V4 + V5 landed together.** V3 + V4 bump A2DP/AVDTP advertisement to 1.3; V5 is the structural workaround for sig 0x0c — it aliases the dispatcher's TBH jump-table entry from the BAD_LENGTH stub at `0xab4de` to the existing GET_CAPABILITIES handler at `0xaa924`. Per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities), which is exactly what our SBC-only Source advertises anyway.
 
-**V5 is wire-correct by decoupling.** The AVDTP wire-frame TX site is `fcn.000ae418` (calls `L2CAP_SendData` at file offset `0xae58e`). Byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]`, where `txn = *(channel + 0x10)` is the per-channel transaction state populated by the request parser at signal-RX time. The dispatcher (TBH at `0xaa81e`) and per-signal handlers (e.g. `0xaa924`) do not write `txn->[0xe]`. When a peer issues sig 0x0c the parser stores 0x0c in `txn->[0xe]`, V5 routes dispatch through the GET_CAPABILITIES handler, the handler updates state, and `fcn.000ae418` reads `txn->[0xe]=0x0c` and emits a response with `sig_id=0x0c`. See `INVESTIGATION.md` Trace #16 for the full walk-through.
+**V5 is wire-correct by decoupling.** The AVDTP wire-frame TX site is `fcn.000ae418` (calls `L2CAP_SendData` at file offset `0xae58e`). Byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]`, where `txn = *(channel + 0x10)` is the per-channel transaction state populated by the request parser at signal-RX time. The dispatcher (TBH at `0xaa81e`) and per-signal handlers (e.g. `0xaa924`) do not write `txn->[0xe]`. When a peer issues sig 0x0c the parser stores 0x0c in `txn->[0xe]`, V5 routes dispatch through the GET_CAPABILITIES handler, the handler updates state, and `fcn.000ae418` reads `txn->[0xe]=0x0c` and emits a response with `sig_id=0x0c`. Full walk-through in `INVESTIGATION.md`.
 
 `patch_mtkbt.py` `OUTPUT_MD5` reflects V1+V2+V3+V4+V5+S1+P1.
 

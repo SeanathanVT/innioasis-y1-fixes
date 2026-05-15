@@ -1,35 +1,12 @@
 #!/usr/bin/env bash
-# release.sh — bump the bash's # Version: header, fold [Unreleased] CHANGELOG
-# entries into a new version section, commit, and tag.
-#
-# What it does (in order):
-#   1. Validate args: $1 is a semver (X.Y.Z); --push is optional.
-#   2. Check the working tree is clean (+ git config user.name/.email set,
-#      + python3 available — both used later).
-#   3. Check no tag named v$VERSION already exists.
-#   4. Check CHANGELOG.md has a [Unreleased] section with at least one bullet
-#      under it (refuse to release an empty CHANGELOG entry).
-#   5. Verify apply.bash's `# Version:` header matches the expected regex
-#      (so step 7a's sed doesn't fail mid-flight).
-#   6. Rename `## [Unreleased]` to `## [$VERSION] - YYYY-MM-DD` in CHANGELOG.md
-#      and prepend a fresh empty `## [Unreleased]` block above it. (This step
-#      is the more-likely-to-fail of the two mutations, so it runs first —
-#      if it fails, apply.bash hasn't been touched yet.)
-#   7a. Update the bash's `# Version:` header in-place.
-#   7b. Commit both files with message "Release v$VERSION" + the new CHANGELOG section body.
-#   8. Create annotated tag `v$VERSION` at HEAD with the same message.
-#   9. If --push given: push the commit and the tag together. Otherwise print
-#      the commands you'd run to push later.
-#
-# Exits non-zero on any precondition failure; never partial-applies.
+# release.sh — bump apply.bash's # Version: header, fold [Unreleased]
+# into a fresh CHANGELOG section, commit, tag, and (with --push) push.
+# Validates preconditions up front; exits non-zero on failure without
+# partial-applying.
 #
 # Usage:
 #   ./tools/release.sh 2.0.0
 #   ./tools/release.sh 2.0.0 --push
-#
-# After:
-#   git log --oneline --decorate=short --simplify-by-decoration | head
-#   # → shows v2.0.0 alongside the rest of the version anchors
 
 set -euo pipefail
 

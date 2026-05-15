@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
-"""
-btlog-hci-extract.py — reconstruct HCI byte streams from mtkbt's btlog.bin.
+"""Reconstruct AVRCP frames from mtkbt's btlog.bin PutByte/GetByte text records.
 
-mtkbt logs every UART byte transfer to /sys/kernel/debug/mtkbt-uart via
-the @btlog socket as text records of the form:
-  "[BT]PutByte: len=N"   (TX: host → BT chip)
-  "[BT]GetByte: len=N"   (RX: BT chip → host)
-followed by a paired "[BT] , h, h, h, ..." line containing the actual
-bytes as comma-separated hex values WITHOUT 0x prefix.
-
-The btlog truncates each record's byte-trace at ~20 bytes regardless
-of the claimed `len`, so long packets (e.g. GetElementAttributes
-responses with full Title/Artist/Album strings) are partial in the
-log. Still enough to identify:
-  - HCI ACL header (5 bytes: type + handle + length)
-  - L2CAP header (4 bytes: length + CID)
-  - AVCTP header (3 bytes: TL/PT/CR + PID 0x110e)
-  - AV/C header (3 bytes: ctype + subunit + opcode)
-  - Vendor (3 bytes: BT-SIG 0x001958)
-  - PDU ID + reserved + param length (4 bytes)
-  - First ~3 bytes of PDU payload
-
-That's plenty to identify which AVRCP PDU each transaction is and
-the event_id / reason_code / first-payload-byte. Pair with the
-Y1Patch native log (T5emit/T6resp/T9emit) for the full picture.
+btlog truncates the byte-trace per record (~20 B regardless of claimed
+`len`), so long PDU payloads (e.g. GetElementAttributes strings) are
+partial. Still enough to identify PDU id, event id, reason code, and
+the first few bytes of the param payload.
 
 Usage:
-  btlog-hci-extract.py <btlog.bin>                # all frames, human-readable
-  btlog-hci-extract.py <btlog.bin> --avrcp        # only AVRCP-recognized frames
-  btlog-hci-extract.py <btlog.bin> --pdu 0x31     # only RegisterNotification frames
+  btlog-hci-extract.py <btlog.bin>                # all frames
+  btlog-hci-extract.py <btlog.bin> --avrcp        # only AVRCP-recognized
+  btlog-hci-extract.py <btlog.bin> --pdu 0x31     # only RegisterNotification
 """
 
 import argparse
@@ -112,16 +93,8 @@ CTYPE_NAMES = {
 def parse_records(data):
     """Yield (timestamp_ms, payload_text) for each btlog record.
 
-    Record layout (reverse-engineered from hex dumps of dual-bolt-* captures):
-       0..1   sync = 0x55 0x00 ('U\\0')
-       2..5   4-byte ID (often "FbUH" or "%`VH" — sequence/source-id mix)
-       6..7   "0x03 0x00" version
-       8..11  timestamp (u32 LE, monotonic ms since process start)
-      12..15  4 zero bytes
-      16..17  payload_len (u16 LE) — length of text payload
-      18..19  tag/category (often 0x15 0x40 or 0x14 0x40)
-      20..    payload text (length = payload_len)
-       +1     trailer byte (often 0xf8 or similar)
+    Layout: sync(0x55 0x00) + 4-B id + ver(0x03 0x00) + ts(u32 LE) + 4×0 +
+    payload_len(u16 LE) + 2-B tag + payload_text + 1-B trailer.
     """
     i = data.find(PRELUDE)
     if i >= 0:

@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Y1 post-root probe pack v2 — Trace #8 follow-up.
-#
-# v1 hit two problems on stock Y1 Android 4.2.2:
-#   - toybox is missing pidof/head/tail (ENOSYS-equivalent)
-#   - `adb shell "su -c '...'"` mangled multi-pipe commands
-# v2 fix: push a single self-contained on-device script and exec it as root.
-# All probe logic lives in tools/probe-postroot-device.sh.
+# probe-postroot.sh — push tools/probe-postroot-device.sh and exec it
+# under su. (Self-contained on-device script avoids toybox gaps in
+# Android 4.2.2 and adb's multi-pipe command mangling.)
 #
 # Usage:
 #   ./tools/probe-postroot.sh                   # runs everything

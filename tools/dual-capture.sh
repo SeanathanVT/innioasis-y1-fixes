@@ -1,28 +1,7 @@
 #!/usr/bin/env bash
-# dual-capture — capture mtkbt's @btlog stream AND logcat simultaneously,
-# with per-line timestamps in both so they can be correlated post-hoc.
-#
-# Output layout:
-#   <out_dir>/btlog.bin        — raw @btlog stream (parse with tools/btlog-parse.py)
-#   <out_dir>/logcat.txt       — `logcat -v threadtime` against -b main -b system -b radio
-#                                (Android 4.2.2 doesn't support `-b all`)
-#   <out_dir>/getevent.txt     — `getevent -lt` raw kernel input events with
-#                                timestamps (KEY_DOWN/KEY_UP/auto-repeat visible)
-#   <out_dir>/dumpsys-input.txt — `dumpsys input` polled every 0.5s, each snapshot
-#                                prefixed with its timestamp; shows InputDispatcher
-#                                held-key state and pending events
-#   <out_dir>/dmesg-before.txt — kernel ring buffer at start
-#   <out_dir>/dmesg-after.txt  — kernel ring buffer at stop
-#   <out_dir>/getprop.txt      — getprop snapshot
-#
-# Usage:
-#   ./tools/dual-capture.sh                              # interactive — Ctrl-C to stop
-#   ./tools/dual-capture.sh <out_dir>                    # custom output dir
-#
-# Default <out_dir>: /tmp/koensayr-dual-<UTC-timestamp>/
-#
-# While capturing: drive the AVRCP scenario on the device (toggle BT off/on,
-# pair/connect, change tracks, etc.). Pre-req: --root flashed.
+# dual-capture — capture mtkbt @btlog + logcat + getevent + dumpsys input
+# simultaneously, with per-line timestamps for post-hoc correlation.
+# Pre-req: --root flashed. Run --help for output layout and flags.
 
 set -u
 
@@ -102,10 +81,8 @@ adb shell getprop > "$OUT/getprop.txt" 2>&1
 adb push "$TOOL_BIN" /data/local/tmp/btlog-dump >/dev/null
 adb shell 'chmod 755 /data/local/tmp/btlog-dump'
 
-# Clean logcat buffers so we capture only this session.
-# Android 4.2.2 doesn't support `-b all` (no /dev/log/all); list buffers explicitly.
-# `-b main` is the default (BT framework + AVRCP tags land here); add system/radio
-# for completeness. `events` is binary-only, skip it.
+# Clean buffers; Android 4.2.2 has no `-b all`, list explicitly. Skip
+# `events` (binary-only).
 adb logcat -b main -b system -b radio -c 2>/dev/null
 
 echo
@@ -113,16 +90,10 @@ echo "Starting dual capture. Run the AVRCP scenario now."
 echo "When done, press Ctrl-C to stop."
 echo
 
-# Start logcat in background. -v threadtime → per-line timestamps for cross-stream
-# correlation. Default tag filter: AVRCP-related tags + Bluetooth framework
-# + Y1Bridge + Y1Patch (the diagnostic tag emitted from the music app
-# Java side) + Y1T (the diagnostic tag emitted from inside the
-# libextavrcp_jni.so T5/T6/T9 trampolines), all enabled by patches
-# built with apply.bash --debug / KOENSAYR_DEBUG=1; everything else
-# silenced by '*:S'. The music app's `DebugY1  <Class>` Timber tags can't
-# be filter-matched here because the tag string contains two embedded
-# spaces and adb's shell layer collapses them on the way to logcat —
-# pass --unfiltered to capture them (and everything else).
+# Default filter: AVRCP / Bluetooth tags + Y1Patch/Y1Bridge/Y1T (debug
+# tags from --debug / KOENSAYR_DEBUG=1 builds). --unfiltered drops the
+# filter (also needed for the music app's `DebugY1  <Class>` Timber
+# tags, whose embedded whitespace adb's shell layer collapses).
 if [ "$UNFILTERED" = "1" ]; then
     adb logcat -v threadtime -b main -b system -b radio \
         > "$OUT/logcat.txt" 2>&1 &
@@ -137,24 +108,19 @@ else
 fi
 LOGCAT_PID=$!
 
-# Start btlog capture. The remote `su -c /path/to/btlog-dump` runs under the
-# adb-shell session; killing the local adb child closes the remote shell which
-# kills the chain. We do NOT use `pkill` for cleanup — it's missing on the
-# Y1's stock toolbox. If the remote process leaks, it dies on next BT toggle
-# or reboot (both small impacts).
+# btlog: killing the local adb child closes the remote shell, killing the
+# chain. No pkill on the device toolbox; leaked dumpers die on next BT
+# toggle / reboot.
 adb shell 'su -c /data/local/tmp/btlog-dump' > "$OUT/btlog.bin" 2>"$OUT/btlog.err" &
 BTLOG_PID=$!
 
-# Start getevent capture. -l = symbolic names (KEY_PLAYPAUSE etc), -t =
-# kernel-side timestamps. Streams every input event from every /dev/input/event*
-# node. For diagnosing AVRCP-injected ACTION_DOWN-without-ACTION_UP and InputDispatcher
-# auto-repeat behavior, this is the ground-truth view of what the system sees.
+# getevent -lt: symbolic-name kernel input events with timestamps —
+# ground truth for KEY_DOWN/UP/auto-repeat behaviour.
 adb shell 'su -c "getevent -lt"' > "$OUT/getevent.txt" 2>>"$OUT/btlog.err" &
 GETEVENT_PID=$!
 
-# Poll dumpsys input every 500ms. Each snapshot is prefixed with a UTC ISO
-# timestamp so it can be aligned against the streaming captures. Held-key
-# state, pending event queue, and key-repeat-timeout settings all live here.
+# Snapshot `dumpsys input` every 500 ms with a UTC prefix for cross-stream
+# alignment; surfaces InputDispatcher held-key state + pending queue.
 (
     while true; do
         printf '\n===== %s =====\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
@@ -172,8 +138,7 @@ kill $BTLOG_PID    2>/dev/null
 kill $GETEVENT_PID 2>/dev/null
 kill $DUMPSYS_PID  2>/dev/null
 sleep 1
-# Kill any lingering on-device dumper/getevent via /proc walk (no pkill on device).
-# Pure shell, no external utils.
+# /proc walk reap — no pkill on device.
 adb shell "su -c \"for d in /proc/[0-9]*; do n=\\\$(cat \\\$d/comm 2>/dev/null); if [ \\\"\\\$n\\\" = btlog-dump ] || [ \\\"\\\$n\\\" = getevent ]; then kill \\\${d#/proc/} 2>/dev/null; fi; done\"" 2>/dev/null
 wait 2>/dev/null
 adb shell "su -c dmesg" > "$OUT/dmesg-after.txt" 2>&1

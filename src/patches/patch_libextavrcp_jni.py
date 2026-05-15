@@ -30,55 +30,32 @@ from _trampolines import build as build_trampolines, T4_VADDR
 from _thumb2asm import _encode_t4_branch  # noqa: F401 (used to build T2 stub)
 from _thumb2asm import Asm
 
-# notificationTrackChangedNative lives at vaddr 0x3bc0 in libextavrcp_jni.so.
-# Java's BTAvrcpMusicAdapter.handleKeyMessage (with the cardinality if-eqz
-# NOPed by patch_mtkbt_odex.py's TRACK_CHANGED entry) calls this native on
-# every track-change broadcast from the music app. We replace its entry
-# instruction with `b.w T5` so it lands in our state-aware trampoline.
+# Entry of notificationTrackChangedNative — replaced with `b.w T5`.
+# Paired with MtkBt.odex's sswitch_1a3 cardinality NOP; runs on every
+# `metachanged` broadcast.
 NATIVE_TRACK_CHANGED_VADDR = 0x3bc0
 
-# notificationPlayStatusChangedNative at vaddr 0x3c88. Same shape as the
-# TRACK_CHANGED hook above, paired with the cardinality NOP at 0x3c4fe in
-# MtkBt.odex (sswitch_18a / event 0x01 case in handleKeyMessage's nested
-# sparse-switch). Replace entry instruction with `b.w T9` so every
-# `playstatechanged` broadcast emitted by the music app lands in T9, which fires
-# PLAYBACK_STATUS_CHANGED CHANGED via PLT_reg_notievent_playback_rsp on edge.
-# Closes the AVRCP 1.3 §5.4.2 spec gap that would otherwise be INTERIM-only.
+# Entry of notificationPlayStatusChangedNative — replaced with `b.w T9`.
+# Paired with MtkBt.odex's sswitch_18a cardinality NOP; runs on every
+# `playstatechanged` broadcast.
 NATIVE_PLAY_STATUS_CHANGED_VADDR = 0x3c88
 
 STOCK_MD5         = "fd2ce74db9389980b55bccf3d8f15660"
 OUTPUT_MD5        = "eb736ab630d4a2719cd8638768206add"
 
-# Build-time debug toggle. `apply.bash --debug` exports KOENSAYR_DEBUG=1.
-# When set, `_trampolines.build(debug=True)` splices __android_log_print
-# calls before T5 TRACK_CHANGED CHANGED, T6 GetPlayStatus response, T9
-# PLAYBACK_STATUS_CHANGED CHANGED, and T9 PLAYBACK_POS_CHANGED CHANGED.
-# Logs go to logcat with tag "Y1T". Adds ~188 B to the trampoline blob;
-# release builds remain byte-identical to the no-debug shape.
+# --debug: splices __android_log_print calls into T5/T6/T9 emit sites
+# (tag "Y1T"). Release builds remain byte-identical without the env var.
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = "ad549132e5743e378211d195e1547074"
-
-# Effective expected output MD5 for the current invocation — used by all
-# verification below. Routes through DEBUG_LOGGING so a single switch
-# governs both what's emitted and what's expected.
 EXPECTED_OUTPUT_MD5 = OUTPUT_DEBUG_MD5 if DEBUG_LOGGING else OUTPUT_MD5
 
 # ---------------------------------------------------------------- T1
 
-# T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of 48
-# bytes). Advertised set mirrors Pixel-as-TG: strict CT metadata-pane render
-# gates on the four 1.4 events 0x09..0x0c being advertised + INTERIM-acked,
-# even when the SDP profile descriptor says 1.3. Pixel does the same.
-#   0x01 PLAYBACK_STATUS_CHANGED       (T8 INTERIM + T9 CHANGED on edge)
-#   0x02 TRACK_CHANGED                 (extended_T2 INTERIM + T4 / T5 CHANGED on edge)
-#   0x05 PLAYBACK_POS_CHANGED          (T8 INTERIM + T9 CHANGED at 1 s cadence while playing)
-#   0x08 PLAYER_APPLICATION_SETTING_CHANGED  (T8 INTERIM + T9 CHANGED-on-edge,
-#                                              reads live Repeat / Shuffle from
-#                                              y1-track-info[795..796])
-#   0x09 NOW_PLAYING_CONTENT_CHANGED   (T8 INTERIM-only; never CHANGED)
-#   0x0a AVAILABLE_PLAYERS_CHANGED     (T8 INTERIM-only; never CHANGED)
-#   0x0b ADDRESSED_PLAYER_CHANGED      (T8 INTERIM-only; PlayerID=0, UidCtr=0)
-#   0x0c UIDS_CHANGED                  (T8 INTERIM-only; UidCounter=0)
+# T1 — GetCapabilities trampoline at 0x7308 (overwrites testparmnum, 40 of
+# 48 bytes). Advertised set: 0x01 PLAYBACK_STATUS, 0x02 TRACK_CHANGED,
+# 0x05 PLAYBACK_POS, 0x08 PLAYER_APPLICATION_SETTING_CHANGED, plus 1.4
+# IDs 0x09..0x0c (T8 INTERIM-only, no CHANGED). Strict CTs gate their
+# metadata-pane render on the 1.4 IDs being acked even from a 1.3 TG.
 T1_TRAMPOLINE = bytes([
     0x9D, 0xF8, 0x7E, 0x01,                  # ldrb.w r0, [sp, #382]
     0x10, 0x28,                               # cmp r0, #0x10
@@ -90,7 +67,7 @@ T1_TRAMPOLINE = bytes([
     0xFC, 0xF7, 0x60, 0xE9,                  # blx 0x35dc (PLT: get_capabilities_rsp)
     0xFF, 0xF7, 0x04, 0xBF,                  # b.w 0x712a (epilogue)
     0x00, 0xBF,                               # nop
-    0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c,  # advertised events (mirrors Pixel)
+    0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c,  # advertised events
     0xFF, 0xF7, 0xD2, 0xBF,                  # b.w 0x72d4 (T2 stub)
 ])
 assert len(T1_TRAMPOLINE) == 40

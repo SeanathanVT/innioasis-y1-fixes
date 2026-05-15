@@ -64,21 +64,15 @@
 .field private mLastKnownDuration:J
 
 # elapsedRealtime() at the most recent real (audio_id-changed) onTrackEdge
-# fire. onSeek consults this to suppress the music app's
-# PlayerService.playerPrepared() restore-from-saved-progress seek that
-# fires after prepareAsync completes (3 setCurrentPosition sites in
-# stock playerPrepared, lines 1737/1793/1923 — restoreStartTime,
-# Bookmark.startTime, Progress.startTime). Those calls would otherwise
-# overwrite our reset-to-0 from onEarlyTrackChange and leave Bolt/Kia's
-# wire-side playhead showing the user's prior pause point on this track
-# rather than 0:00 for the freshly-skipped track.
+# fire. onSeek consults this to suppress the music app's playerPrepared()
+# restore-from-saved-progress seek (3 setCurrentPosition sites in stock
+# playerPrepared, lines 1737/1793/1923) — without it, those calls
+# overwrite our reset-to-0 from onEarlyTrackChange and the wire-side
+# playhead resumes from the user's prior pause point on the new track.
 #
-# Suppression window is ~2 s — covers prepareAsync (~50-500 ms) +
-# OnPreparedListener dispatch + the playerPrepared restore call. User-
-# initiated seeks (drag the seek bar) almost always come well after
-# 2 s. Init to 0 — first track-change after boot won't trigger
-# suppression, which is correct since there's no preceding fresh-track
-# reset to protect.
+# 2 s suppression window covers prepareAsync + OnPreparedListener + the
+# playerPrepared restore. User-initiated seeks (seek-bar drag) come well
+# after, so they're not affected.
 .field private mLastFreshTrackChangeAt:J
 
 # MediaMetadataRetriever-derived duration cache. Y1 music app stores no
@@ -434,13 +428,11 @@
 # Suppression window: PlayerService.playerPrepared() in stock 3.0.2 calls
 # setCurrentPosition(savedTime) at three sites (lines 1737/1793/1923 —
 # restoreStartTime / Bookmark.startTime / Progress.startTime) right after
-# prepareAsync completes. This is the music app's "resume from saved
-# progress" feature — desirable for the local UI but it overwrites the
-# reset-to-0 our onEarlyTrackChange just stamped, so Bolt/Kia would show
-# the user's prior pause point on the freshly-skipped track instead of
-# 0:00. We suppress onSeek for ~2 s after a fresh-track-change reset to
-# defang exactly those restore calls. User-initiated seeks (drag the
-# seek bar) come well after 2 s so they're unaffected.
+# prepareAsync completes. Desirable for the local UI but overwrites the
+# reset-to-0 our onEarlyTrackChange stamped — wire-side playhead would
+# resume from the prior pause point on the freshly-skipped track. Suppress
+# onSeek for ~2 s after a fresh-track-change reset; user-initiated seeks
+# (seek-bar drag) come well after.
 .method public declared-synchronized onSeek(J)V
     .locals 5
 
@@ -574,23 +566,19 @@
 
 
 # Unconditional fresh-track reset. Called from PlaybackStateBridge.onEarlyTrackChange
-# (which itself is invoked from PlayerService.toRestart's setDataSource sites — a
-# guaranteed track-load entry). Resets position-anchor, mLastKnownDuration, and
-# stamps mLastFreshTrackChangeAt without consulting audio_id dedup.
+# (invoked from PlayerService.toRestart's setDataSource sites — a guaranteed
+# track-load entry). Resets position-anchor + mLastKnownDuration + stamps
+# mLastFreshTrackChangeAt; bypasses audio_id dedup.
 #
-# Why dedup wouldn't work here: the music-app's restartPlay() invokes pause() before
-# toRestart(), and pause()'s setPlayValue → flushLocked already updates mCachedAudioId
-# to the new track's id. By the time onTrackEdge would snapshot mCachedAudioId, it
-# already holds the new value — so old==new and the reset branch never fires
-# (verified on Kia 2026-05-14: EDGE_DETECTED count 0 across 12 skips, position
-# accumulating instead of resetting).
+# Dedup wouldn't work here: restartPlay() pauses before toRestart(), and pause's
+# setPlayValue → flushLocked has already updated mCachedAudioId — by the time
+# onTrackEdge would snapshot it, old==new.
 #
-# Resetting mLastKnownDuration to 0 is critical: flushLocked falls back to the cached
-# duration when getPlayerIsPrepared() is false (i.e., during the prepareAsync gap),
-# so without this reset the file briefly reports the previous track's duration on
-# every track change. Honest 0 ("unknown duration" per AVRCP §5.3.4 / 1.3 attr 0x07)
-# is preferable to a misleading-stale value. The B5.2c playerPrepared-tail hook then
-# runs flush() once getPlayerIsPrepared() flips true, capturing the correct duration.
+# mLastKnownDuration reset is critical: flushLocked falls back to the cached
+# duration when getPlayerIsPrepared() is false (the prepareAsync gap). Without
+# the reset, the file briefly reports the previous track's duration. 0 reads
+# as "unknown" per AVRCP §5.3.4 / 1.3 attr 0x07; the B5.2c playerPrepared-tail
+# hook re-flushes once getPlayerIsPrepared() flips true.
 .method public declared-synchronized onFreshTrackChange()V
     .locals 3
 
