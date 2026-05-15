@@ -1031,18 +1031,28 @@
     :cond_skip_duration
     # Pre-prepare path. Try MMR cache first (per-audio_id parse of file
     # container header — no MediaPlayer involvement). v8 = path string,
-    # v9:v10 = synthetic audio_id long. cmp result goes into v3 (was the
-    # Song object, dead at this point; v2 must remain a PlayerService ref
-    # for the getMusicIndex call after :cond_have_duration).
+    # v9:v10 = synthetic audio_id long. Result lands in v11:v12 (long).
+    #
+    # Register-type discipline at :cond_have_duration: the "true" branch
+    # above wrote v0 as int (boolean from getPlayerIsPrepared move-result)
+    # and we reach the merge via goto. Dalvik 4.x's verifier joins
+    # register types at the merge — if THIS branch writes v0 as long
+    # (e.g., const-wide/16 v0, 0x0 for a cmp-long), the join becomes
+    # int|long-low → conflict, and the class fails verification with
+    # VerifyError at Y1Application.onCreate even though v0 is later
+    # overwritten (Dalvik 4.x is strict about conflict-state merges).
+    #
+    # Use long-to-int instead to derive a sign-test int without touching
+    # v0 as long. AVRCP duration is u32 in the file schema (max ~4.3 B ms
+    # = ~50 days, well beyond any real track), so v11 alone (the low half
+    # of the long pair) is a safe int representation for the sign check.
     invoke-direct {p0, v8, v9, v10}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->getMmrDurationLocked(Ljava/lang/String;J)J
 
     move-result-wide v11
 
-    const-wide/16 v0, 0x0
+    long-to-int v0, v11
 
-    cmp-long v3, v11, v0
-
-    if-gtz v3, :cond_have_duration
+    if-gtz v0, :cond_have_duration
 
     # MMR returned 0 (failure or unsupported codec) — last-resort fallback
     # to the legacy cached duration. mLastKnownDuration is reset to 0 by
