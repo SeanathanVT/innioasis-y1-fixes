@@ -129,13 +129,13 @@ T2 stub at `0x72d0` (8 bytes) overwrites `classInitNative` with `movs r0, #0; bx
 
 1. Read `y1-track-info[0..7]` (track_id) into a stack buffer.
 2. Write `[track_id || transId || pad]` to `y1-trampoline-state` so T4 can detect track-id edges later.
-3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&track_selected`.
+3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&audio_id` (per-track BE u64 from `y1-track-info[0..7]`).
 
 Other PDU / event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x40 / 0x41 → T_continuation, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
 
 `r1=0` matters: response builders dispatch on r1 — `r1==0` writes the spec-correct event payload (reasonCode + event_id + 8-byte track_id memcpy per AVRCP 1.3 §5.4.2 Table 5.30); `r1!=0` writes a reject-shape frame. We pass `r1=0` everywhere.
 
-**Track_id payload** = `0x0000000000000000` (8 bytes of 0x00), the AVRCP 1.4+ SELECTED value meaning "the currently playing media is selected — render its metadata." Distinct from `0xFFFFFFFFFFFFFFFF` ("no media currently selected" per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 clarifying the field is 8 bytes) — strict 1.4+ CTs treat that sentinel as "nothing playing" and suppress the metadata pane. Y1 always has a track loaded when a CT is connected (the music app is running), so SELECTED is the honest signal. `y1-trampoline-state[0..7]` still holds the real per-track UID internally so T4 / T5 detect edges and emit CHANGED proactively.
+**Track_id payload** = the per-track audio_id (BE u64) read from `y1-track-info[0..7]`. Strict 1.4+ CTs cache `GetElementAttributes` keyed by the TRACK_CHANGED Identifier; an unchanging value (e.g. `0x0000000000000000` SELECTED) means the CT dedups every re-query after the first one and the metadata pane stays stale on track skip. A per-track id forces cache invalidation + re-query on every track edge. `y1-trampoline-state[0..7]` holds the previous audio_id so T4 / T5 detect real-id edges before emitting CHANGED.
 
 ### T4 — GetElementAttributes (PDU 0x20)
 
@@ -175,7 +175,7 @@ T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper
 1. `reg_notievent_now_playing_content_rsp` (PLT `0x330c`, event 0x09) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`). Gated on `state[20]` (sub_now_playing_content, armed by T8 0x09 INTERIM).
 2. `reg_notievent_pos_changed_rsp` (PLT `0x3360`, event 0x05 — Tbl 5.33) with `r1=0`, `r2=REASON_CHANGED`, `r3=REV(file[780..783])` (current position in host order — `duration_ms` on natural end, `0` on NEXT / PREV). Gated on `state[13]` (sub_pos, armed by T8 0x05 INTERIM).
 3. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by `PlaybackStateBridge.onCompletion`) `== 1` AND `state[17]` (sub_track_reached_end, armed by T8 0x03 INTERIM). Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
-4. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED`, `r3=&track_selected`. Gated on `state[16]` (sub_track_changed, armed by extended_T2's INTERIM emit).
+4. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED`, `r3=&audio_id` (per-track BE u64 from `y1-track-info[0..7]`). Gated on `state[16]` (sub_track_changed, armed by extended_T2's INTERIM emit).
 5. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Gated on `state[18]` (sub_track_reached_start, armed by T8 0x04 INTERIM).
 
 Then writes the new track_id back to state and returns `jboolean(1)`.
