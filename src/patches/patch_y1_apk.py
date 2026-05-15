@@ -2330,7 +2330,7 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
         "    :try_start_0\n"
         "    iget-byte v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B\n",
         ".method public declared-synchronized setPlayStatus(B)V\n"
-        "    .locals 5\n"
+        "    .locals 7\n"
         "\n"
         "    monitor-enter p0\n"
         "\n"
