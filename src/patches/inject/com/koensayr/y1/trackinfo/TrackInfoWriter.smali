@@ -1338,11 +1338,19 @@
     # Null path → return 0
     if-eqz p1, :cond_return
 
-    :try_start_mmr
+    # Construct the MediaMetadataRetriever OUTSIDE the try block. Dalvik
+    # 4.x's verifier rejects code where a catch handler is reachable while
+    # any register holds an uninitialized reference — `new-instance` produces
+    # an uninit ref and `invoke-direct <init>` only marks it initialized on
+    # successful return. If either of those instructions were inside the try
+    # range, the catch handler entry would observe v0 as "uninit MMR", which
+    # is a verify-time error (the stock `com/innioasis/music/util/Other`'s
+    # `getAlbumCover` uses the same out-of-try construction pattern).
     new-instance v0, Landroid/media/MediaMetadataRetriever;
 
     invoke-direct {v0}, Landroid/media/MediaMetadataRetriever;-><init>()V
 
+    :try_start_mmr
     invoke-virtual {v0, p1}, Landroid/media/MediaMetadataRetriever;->setDataSource(Ljava/lang/String;)V
 
     # METADATA_KEY_DURATION = 9 (android.media.MediaMetadataRetriever)
@@ -1358,17 +1366,22 @@
 
     invoke-static {v2}, Ljava/lang/Long;->parseLong(Ljava/lang/String;)J
 
-    move-result-wide v0
+    move-result-wide v5
 
-    cmp-long v5, v0, v3
+    # cmp result into v1 (kept int across the try), not v0 (kept MMR object
+    # across the try). The verifier joins register types at catch entry over
+    # every throwing instruction in the try region; writing v0 as int late
+    # in the try would make catch-entry v0 a conflict (MMR vs int), which
+    # Dalvik 4.x rejects even though move-exception immediately overwrites.
+    cmp-long v1, v5, v3
 
-    if-lez v5, :cond_return
+    if-lez v1, :cond_return
 
-    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+    iput-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
 
     # Mirror into mLastKnownDuration so the legacy fallback path + the
     # --debug fL.dur log read the same coherent value.
-    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+    iput-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
     :try_end_mmr
     .catch Ljava/lang/Throwable; {:try_start_mmr .. :try_end_mmr} :catch_mmr
 
