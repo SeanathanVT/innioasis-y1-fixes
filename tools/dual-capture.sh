@@ -115,8 +115,10 @@ echo
 
 # Start logcat in background. -v threadtime → per-line timestamps for cross-stream
 # correlation. Default tag filter: AVRCP-related tags + Bluetooth framework
-# + Y1Bridge + Y1Patch (the diagnostic-logging tag emitted by patches
-# built with apply.bash --debug / KOENSAYR_DEBUG=1), with everything else
+# + Y1Bridge + Y1Patch (the diagnostic tag emitted from the music app
+# Java side) + Y1T (the diagnostic tag emitted from inside the
+# libextavrcp_jni.so T5/T6/T9 trampolines), all enabled by patches
+# built with apply.bash --debug / KOENSAYR_DEBUG=1; everything else
 # silenced by '*:S'. The music app's `DebugY1  <Class>` Timber tags can't
 # be filter-matched here because the tag string contains two embedded
 # spaces and adb's shell layer collapses them on the way to logcat —
@@ -126,7 +128,7 @@ if [ "$UNFILTERED" = "1" ]; then
         > "$OUT/logcat.txt" 2>&1 &
 else
     adb logcat -v threadtime -b main -b system -b radio \
-        Y1Patch:V Y1Bridge:V \
+        Y1Patch:V Y1Bridge:V Y1T:V \
         MMI_AVRCP:V JNI_AVRCP:V EXT_AVRCP:V BWS_AVRCP:V EXTADP_AVRCP:V \
         BluetoothAvrcpService:V BluetoothAvrcpServiceJni:V \
         Bluetooth:V BluetoothManagerService:V BluetoothAdapterService:V \
