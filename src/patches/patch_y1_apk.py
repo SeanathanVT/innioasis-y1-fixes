@@ -2377,12 +2377,12 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
     # re-RegisterNotification'd yet).
     (
         ".method public wakePlayStateChanged()V\n"
-        "    .locals 5\n"
+        "    .locals 6\n"
         "\n"
         "    :try_start_0\n"
         "    iget-object v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mContext:Landroid/content/Context;\n",
         ".method public wakePlayStateChanged()V\n"
-        "    .locals 5\n"
+        "    .locals 6\n"
         "\n"
         "    :try_start_0\n"
         "    # === DEBUG: log trampoline-state pre-broadcast ===\n"
@@ -2429,13 +2429,13 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
     # the "playing" boolean branch unique to wakePlayStateChanged.
     (
         "    :cond_playing\n"
-        "    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
+        "    invoke-virtual {v1, v2, v5}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
         "\n"
         "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
         "\n"
         "    :cond_no_ctx\n",
         "    :cond_playing\n"
-        "    invoke-virtual {v1, v2, v4}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
+        "    invoke-virtual {v1, v2, v5}, Landroid/content/Intent;->putExtra(Ljava/lang/String;Z)Landroid/content/Intent;\n"
         "\n"
         "    invoke-virtual {v0, v1}, Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V\n"
         "\n"
