@@ -3386,3 +3386,43 @@ But neither matches the empirical data. The capture shows neither `cbz r6` trip 
 
 The `T9connfd=` and `T9rsprc=` instrumentation was load-bearing here: without it, I would have committed to the wrong fix layer based on plausible-but-wrong RE.
 
+
+### Additional context: 18% delivery is system-wide, not pstat-specific
+
+Same `dual-kia-20260515-2215` capture across all events:
+
+| Event | T9emit count | Wire CHANGED count (TX) | Delivery rate |
+|---|---|---|---|
+| 0x01 PSTAT (L2CAP=15) | 44 | 8 | 18% |
+| 0x05 POS (L2CAP=18) | 193 | 17 | 9% |
+| 0x03/0x04 REACHED_END/START (L2CAP=14) | n/a (T5-driven) | 9 | n/a |
+
+The pattern isn't strict §6.7.1 one-shot (would predict 2 wire CHANGED for event 0x01 = matching 2 subs; we see 8). It's not TL contention (all wire frames carry TL=0; AVCTP allows queueing). It's not IPC overflow (`T9rsprc=0` always). It's not `cbz` guard (`T9connfd=0x2f` always non-zero).
+
+The empirical signature is **rate-limit-shaped** — roughly the same ~10-20% delivery across event types, regardless of how many subs the CT issued or how many emits we attempted. Most likely candidates for the actual gate:
+
+1. mtkbt has an **internal per-event rate limit** (e.g., max 1 wire frame per N ms per event_id) to prevent flooding the BT chip's AVCTP outbound queue. Our session-long T9 emits at the music-app's broadcast rate (multiple per play/pause cycle), exceeding the limit.
+
+2. mtkbt has an **AVCTP transaction-state queue** (limited entries) and drops frames when the queue is full. Our trampolines emit too fast for the queue to drain.
+
+3. mtkbt's **mPlayStatus / mTrackInfo dedup** at the per-event handler — checks "is the value being emitted different from the last one I sent on the wire?" and drops if not. (Less likely given pos varies continuously.)
+
+Either way, the drop is **inside mtkbt's TG state machine, downstream of `send()` / IPC recv**. Finding the exact byte-level gate requires RE'ing mtkbt's per-event handlers (`fcn.0x122cc` for event 0x01, `fcn.0x12354` for event 0x05, etc.) and the wire-write chain (`fcn.0xf0bc` → `fcn.0xef08`).
+
+### Open RE next steps
+
+- Find the byte sequence in mtkbt's chain that gates wire emission. Candidate sites:
+  - `fcn.0x12478` per-event dispatch entry
+  - `fcn.0x121d8` ctype dispatch (the M1 patch site)
+  - `fcn.0x11894` middle-layer (calls fcn.0xf0bc)
+  - `fcn.0xf0bc` writes to `[r4, 0x310]` (look like queue-manager) and checks `[r4, 0x528]` — possible drop check
+  - `fcn.0xef08` wire-write last layer
+- Empirical verification: if mtkbt has a debug build / tracing that we can enable, we could see the drop directly.
+- Alternative: instrument our trampolines to send ZERO emits for a period and observe whether mtkbt stops sending wire CHANGEDs immediately or has a queued-up backlog. Tells us if the gate is at IPC-queue level or per-frame.
+
+### Strategic update
+
+The strict-gate cherry-pick (`6503c87`) is **not the fix** for this regression — mtkbt drops at its own layer regardless of our emit rate. But strict-gate is still **good hygiene**: emitting ~28 attempts when mtkbt only forwards 4 wastes IPC bandwidth and slows the response builder under play/pause bursts. Worth applying eventually for spec correctness, but it doesn't unstick Kia's button.
+
+The unstick fix has to be at the mtkbt layer — same precedent as the M1 patch family.
+
