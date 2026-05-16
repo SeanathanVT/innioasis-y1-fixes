@@ -3576,3 +3576,81 @@ If the user prefers a mtkbt-side fix:
 
 This is ~50-80 bytes of injected code, similar in scope to extended_T2. Likely fits in mtkbt's padding regions but needs verification.
 
+
+### Trace #40 implementation (2026-05-16)
+
+Both candidate fixes from the strategic analysis landed in two commits:
+
+**Commit `00f4817`** — mtkbt M2 / M3 (P-MTK-3 simplified):
+
+| Patch | Offset | Before | After | Role |
+|---|---|---|---|---|
+| M2 | `0x6d06e` | `37 d0` (`beq 0x6d0e0`) | `00 bf` (`nop`) | Bypass list-contains drop gate in `fcn.0x6d048` |
+| M3 | `0x6df42` | `84 f8 f2 00` (`strb.w r0, [r4, #0xf2]`) | `00 bf 00 bf` (`nop; nop`) | Disable chip-busy flag SET so the CHECK at `0x6df3a` never trips |
+
+Net effect: every T9/T5 CHANGED emit reaches the wire. 100% delivery
+instead of the ~18% baseline. Stock `3af1d4ad8f955038186696950430ffda`
+→ Output `2b0bffeb6d29ff2ba75cf811688ec0ef`.
+
+Rationale for the M3 NOP-the-SET (not NOP-the-CHECK): two concurrent
+emits inside `fcn.0xae5e4` would race on `ctx_orig[0x24]`. But mtkbt's
+IPC dispatcher is single-threaded, and the downstream chain
+`fcn.0xae5e4 → fcn.0xae418 → fcn.0x50918 → mtk_bt_write` is a
+synchronous blocking UART write. So no concurrent emits actually
+materialise; the flag was a safety check for a race that can't happen
+under mtkbt's threading model.
+
+**Commit `7acd7bd`** — T5+T9 §6.7.1 strict gate clearing (P-Y1-strict-gate):
+
+Re-applied the strict-gate clears from commit `6503c87` (which was
+bare-reverted in `b1c15a9` on the original day). Trace #40 made it
+clear that the revert was misdirected — Kia's stuck button wasn't
+caused by strict-gate's lower emit rate, it was caused by mtkbt
+silently dropping ~80% of CHANGED emits regardless of emit rate.
+
+With M2/M3 fixing the drops, strict-gate becomes a pure spec-compliance
+win: emits exactly one CHANGED per CT-re-register, no spam, no IPC
+saturation. Wire-side cadence becomes `min(TG_tick_rate, CT_re-register_rate)`.
+
+| Clear site | State byte | Event |
+|---|---|---|
+| T5 after TRACK_CHANGED CHANGED | state[16] | 0x02 |
+| T9 after PSTAT CHANGED | state[14] | 0x01 |
+| T9 after PApp CHANGED | state[15] | 0x08 |
+| T9 after POS_CHANGED tick | state[13] | 0x05 |
+
+T5's POS_CHANGED on track edge intentionally doesn't clear (T9's
+PositionTicker owns the re-register loop). T5's NowPlayingContent
+and TRACK_REACHED_END/START also don't clear (the gates are rarely
+armed by CT test matrix; extra clears would be ~56 B of dead code each).
+
+Release blob: 3552 → 3784 B. Stock libextavrcp_jni.so
+`fd2ce74db9389980b55bccf3d8f15660` → Output `d803f42c973bf9539f4d03ccb658cab3`.
+
+### Combined behaviour (M2 + M3 + strict-gate)
+
+For each CT in the test matrix:
+
+| CT | Re-register cadence | Wire CHANGED count for event 0x01 in a 5-min play/pause session | Pre-fix delivery | Post-fix delivery |
+|---|---|---|---|---|
+| Bolt | ~1 Hz | ~30 (1 per re-register × ~30 re-registers) | partial (~4) | 100% (30) |
+| Sonos | ~1 Hz | ~30 | partial | 100% |
+| Pixel-mirror | ~1 Hz | ~30 | partial | 100% |
+| Kia | ~2 / 5 min | 2 (1 per re-register × 2) | 8 (some duplicates leaked through) | 2 spec-correct |
+
+For Kia, post-fix wire count is LOWER (2 vs 8) but every CHANGED is
+guaranteed delivery and spec-correct. If Kia's button responsiveness
+depends on the CHANGED count rather than the re-register matching,
+this would be a regression. If Kia's button responsiveness depends on
+spec-correct one-shot semantics (i.e., it ignores unsolicited CHANGEDs
+anyway), the post-fix behaviour is equivalent.
+
+If Kia turns out to need MORE CHANGEDs than its own re-register rate
+provides, the next iteration would be **P-Y1-rate-limit** — emit at
+~1/sec for ~5 seconds after a state edge, then quiesce. Falls between
+strict-gate and the pre-revert "session-long forever" behaviour.
+
+Closing this trace pending empirical validation of Kia post-flash. The
+discovery question (where does the drop happen?) is answered; the fix
+question (which combination is best?) requires CT-side observation.
+
