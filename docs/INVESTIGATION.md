@@ -3426,3 +3426,106 @@ The strict-gate cherry-pick (`6503c87`) is **not the fix** for this regression �
 
 The unstick fix has to be at the mtkbt layer — same precedent as the M1 patch family.
 
+
+### Drop site located: two-gate chain inside mtkbt's chip-write path
+
+After mapping the full chain `fcn.0xf0bc → fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20 → fcn.0xae5e4 → fcn.0xae418`, the actual drop sites are two consecutive gates that both report "success" upward while silently bypassing the wire-write build:
+
+**Gate 1** — `fcn.0x6d048` at file offset `0x6d06e`:
+
+```asm
+0x6d05c: cmp r4, 0
+0x6d05e: beq 0x6d0dc          ; return 0x12 if r4 == 0 (no ctx)
+0x6d060: ldr r0, [pc + ...]   ; r0 = &g_active_conn_list
+0x6d062: mov r1, r4            ; r1 = conn
+0x6d066: ldr r0, [r0]
+0x6d068: bl 0x6ccdc            ; r0 = list_contains(list_head, conn)
+0x6d06c: cmp r0, 0
+0x6d06e: beq 0x6d0e0           ; *** drop if conn not in list, returns 0xd ***
+0x6d070..0x6d0d0: build wire frame at conn[0xc8..0xd4]
+0x6d0d2: mov r0, r4
+0x6d0d8: b.w 0x6df20            ; tail-call to gate 2
+```
+
+`fcn.0x6ccdc` is a doubly-linked-list `contains` primitive. Returns 1 if `r1` (conn pointer) is in the linked-list anchored at `r0`. The list is `*(0xf99XX)` (mtkbt's "active outbound chip-write channels"); items get added via `fcn.0x6cd18` and presumably removed when a chip-write completes (or when the L2CAP channel state transitions).
+
+**Gate 2** — `fcn.0x6df20` at file offset `0x6df3a`:
+
+```asm
+0x6df20: push {r4, lr}
+0x6df28: mov r4, r0
+0x6df2a: ldrb r3, [r0, 0xf2]    ; r3 = ctx[0xf2] = "chip-write busy" flag
+0x6df36: ldrb r3, [r4, 0xf2]    ; r3 = ctx[0xf2] (re-read after log)
+0x6df3a: cbnz r3, 0x6df52        ; *** drop if busy flag set, returns 0xb ***
+0x6df3c..: set ctx[0xf2] = 1 (mark busy), tail-call to fcn.0xae5e4 (chip send)
+```
+
+`ctx[0xf2]` is set to 1 at `0x6df42` (just before the actual chip-send tail-call) and cleared to 0 at `0x6da10` (inside the send-completion handler at fcn.0x6d9b8). Between set and clear, any new emit attempt sees the flag and drops.
+
+### Why fcn.0xf0bc's queue doesn't catch this
+
+`fcn.0xf0bc`'s "queue path" at `0xf210` triggers on `ctx[0x310] != 0` OR `ctx[0x528] != 0`. Neither corresponds to `ctx[0xf2]`:
+
+| Field | Purpose |
+|---|---|
+| `ctx[0x310]` | "Current packet pointer" — set by fcn.0xf0bc itself on entry, cleared on exit |
+| `ctx[0x528]` | "Fragmented packet in progress" — set when wire emission returns 2 (need continuation), cleared on completion |
+| `ctx[0xf2]` | "Chip-write in flight" — set by gate 2 just before chip-write, cleared by completion handler |
+
+Short packets (PSTAT, REACHED_END/START — anything with single-AVCTP-fragment payload) take fcn.0xf0bc's fast path (since `ctx[0x310]` is briefly set/cleared per-call and `ctx[0x528]` never sets for non-fragmented frames). The fast path calls `fcn.0xed50` → `fcn.0x6d048` → `fcn.0x6df20`. Gate 2 then drops if `ctx[0xf2]` is set — which it is, whenever the chip-write of the previous packet hasn't completed.
+
+The empirical pattern matches: ~10-20% delivery = ratio of time the chip-write completes before the next emit arrives, vs time the busy flag is set. Concurrent A2DP saturates the chip-write queue, so ctx[0xf2] stays set most of the time.
+
+### Why the EXISTING M1 patch doesn't help
+
+M1 (`0x12230`: `cmp r1, 1` → `cmp r1, 0x0F`) is upstream of these gates — it fires at `fcn.0x121d8` which dispatches INTERIM vs CHANGED ctype before reaching `fcn.0x11894` → `fcn.0xf0bc`. M1 ensures correct ctype on the wire **when** the frame reaches the wire, but doesn't change the drop characteristics.
+
+### Two candidate patches
+
+**P-MTK-1** — NOP gate 1:
+
+| Site | Offset | Before | After |
+|---|---|---|---|
+| `fcn.0x6d048:0x6d06e` | `0x6d06e` | `37 d0` (beq 0x6d0e0) | `00 bf` (nop) |
+
+Removes the list-contains check. Wire frame is built and tail-call to gate 2 always happens. Doesn't fix the actual problem (gate 2 still drops), but eliminates the first early-exit.
+
+**P-MTK-2** — NOP gate 2:
+
+| Site | Offset | Before | After |
+|---|---|---|---|
+| `fcn.0x6df20:0x6df3a` | `0x6df3a` | `53 b9` (cbnz r3, 0x6df52) | `00 bf` (nop) |
+
+Removes the busy-flag check. Chip-send is always called, even if previous send hasn't completed. **HIGH RISK** — could:
+- Corrupt mtkbt's per-channel chip-write state
+- Cause overlapping UART writes (depending on what fcn.0xae5e4 / fcn.0xae418 actually do)
+- Hang mtkbt if the chip-side queue overflows
+
+**P-MTK-3 (preferred)** — Replace gate 2 with a queue insert:
+
+Rather than NOP, redirect the drop to fcn.0x6cd18 (list-add to a pending queue). Inserts our packet into a per-conn pending list when chip is busy; queue gets drained by the completion handler when it clears ctx[0xf2].
+
+The fcn.0xf0bc queue path (0xf210) is exactly this shape, but at a higher layer. The proper fix moves the queueing down so it covers short-packet emits too. This would be a multi-instruction patch, larger than M1.
+
+### Cross-reference for fix design
+
+| Question | Answer |
+|---|---|
+| Where is `g_active_conn_list` (used by gate 1)? | `*(0xf99XX)` — exact address pending verification. Items added via `fcn.0x6cd18`, removed via similar primitive nearby. |
+| Where is `ctx[0xf2]` cleared? | `fcn.0x6d9b8` callback at `0x6da10` — only in one of several exit paths (when `r3=3` is selected). Other completion paths don't clear it. |
+| Who calls `fcn.0x6d9b8`? | Likely the IPC completion event handler (when chip ACKs the wire write). Needs further RE if P-MTK-3 is chosen. |
+
+### Strategic recommendation
+
+P-MTK-2 (NOP gate 2) is empirically the simplest test of whether bypassing the busy flag fixes the drops. Risk is real but bounded — worst case mtkbt becomes unstable for ~10 seconds until next reboot, which is acceptable for a diagnostic patch.
+
+P-MTK-3 (proper queueing) is the production fix but requires:
+1. Identifying the queue node structure expected by `fcn.0x6cd18`
+2. Inserting allocator + queue-add code at gate 2
+3. Verifying the completion handler drains correctly
+
+Order of work:
+1. Apply P-MTK-2 as `--debug`-only diagnostic patch.
+2. Capture: if PSTAT delivery jumps to ~100%, gate 2 is the right target.
+3. Design P-MTK-3 if (2) confirms.
+
