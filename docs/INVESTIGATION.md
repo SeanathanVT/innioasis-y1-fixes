@@ -3146,3 +3146,103 @@ Rolled back:
 - Pre-existing **M1 / M1b / M1c / M1d** in fn.0x379e0 / fn.0x396d0 (removed in commit `aae16de`). Were dead code.
 
 Stock MD5 → M1-only output: `926b8e808693a4c44028ee257b33e898`.
+
+## Trace #40 (2026-05-16) — Kia button-stuck root cause: AF_UNIX SOCK_DGRAM datagram drop in mtkbt IPC
+
+### Premise
+
+Post-2.1.0 Kia regression: play/pause button on Kia stays stuck on its initial state across multiple play/pause cycles. Combined logs from `dual-kia-20260515-1841` showed `T9emit pstat` firing 30 times (15× PLAYING / 15× PAUSED, clean alternation) — Y1 detects every edge correctly. Yet Kia's UI doesn't refresh.
+
+### T9 → wire delivery rate is ~14%
+
+Added `T8reg ev=%02x` debug log (commit `446baa8`) at the head of `_emit_t8` to count incoming `RegisterNotification` PDUs from Kia.
+
+`dual-kia-20260515-1933` capture (5-min Kia session):
+
+| Log | Count | Meaning |
+|---|---|---|
+| `T9emit pstat=1` | 14 | Trampoline-level CHANGED-emit attempts on PLAYING edge |
+| `T9emit pstat=2` | 14 | Same on PAUSED edge |
+| `T8reg ev=01` | 2 | Kia's actual RegisterNotification(event=0x01) arrivals |
+
+After fixing `tools/btlog-hci-extract.py` (commits `1de1d5f` + `2bc680c`) to handle the new firmware's record header layout, wire-side decode of the same capture:
+
+| Wire frame (TX) | L2CAP len | Event | Count |
+|---|---|---|---|
+| `CHANGED RegisterNotification` | 18 | 0x05 PLAYBACK_POS_CHANGED | 17 |
+| `CHANGED RegisterNotification` | 14 | 0x03/0x04 REACHED_END/START | 7 |
+| `CHANGED RegisterNotification` | 15 | **0x01 PLAYBACK_STATUS_CHANGED** | **4** |
+| `INTERIM RegisterNotification` | various | (mixed event_ids) | 5 |
+
+So out of **28 trampoline `T9emit pstat` attempts**, only **4 PLAYBACK_STATUS_CHANGED CHANGED frames** reached the wire. Kia subscribes to event 0x01 only twice in the entire 5-minute session — explaining why most CT-side updates never happen — but more importantly, **86% of our trampoline-side emits for event 0x01 are silently dropped between T9 and the wire**.
+
+### First false hypothesis: AVRCP TG one-shot transaction recycle (REFUTED)
+
+Initial reading of `BT_SendMessage` at `libextavrcp.so:0x1840` found a `cbz r6, 0x18bc` guard at offset `0x1870` that drops the frame silently when `conn[8]` (the field at offset 8 of the conn struct passed in) is zero. Hypothesised the AVCTP TG state machine was recycling the per-transaction conn struct after each CHANGED, so subsequent T9 emits would hit a cleared `conn[8]` and drop.
+
+Added `T9connfd=%08x` log (commit `eeeb49c`) at the top of T9's play_status emit path to capture `r4[8]` = `conn[8]` directly.
+
+In parallel, RE'd `enableNative` at `libextavrcp_jni.so:0x48d4`:
+
+```
+0x48fa: bl 0x36c0                  → r5 = struct ptr (the SAME 0x36c0 T9 uses)
+0x491a: blx socket_local_server    → r0 = local server FD  
+0x4920: str r0, [r5, 0x14]         → struct[0x14] = server FD
+0x494a: blx socket(AF_UNIX, SOCK_DGRAM, 0)
+0x4952: str r0, [r5, 0x10]         → struct[0x10] = AF_UNIX SOCK_DGRAM FD
+```
+
+And `initializeNativeObjectNative` at `0x3fd4`: `calloc(1, 28)` → 28-byte struct → stored as a Java long field via vtable-resolved `SetLongField` (vtable offset 0x1b4).
+
+So `0x36c0` returns a **persistent 28-byte struct** that `initializeNativeObjectNative` allocates once (at service construction) and `enableNative` populates. `conn = struct + 8`, `conn[8] = struct[0x10] = AF_UNIX socket FD`. The FD is **session-long** — opened once when the AVRCP service enables, valid until disable.
+
+Therefore `conn[8]` is non-zero throughout the BT pairing session. `BT_SendMessage`'s `cbz r6` guard never trips for normal operation. The drop can't be there. Hypothesis refuted before the connfd capture even came back (although the log will still confirm it empirically).
+
+### Real hypothesis: send() → mtkbt IPC kernel-level datagram drop
+
+The conn struct's FD is **AF_UNIX SOCK_DGRAM** (`socket(1, 2, 0)` — domain=1=AF_UNIX, type=2=SOCK_DGRAM). Datagram sockets are **unreliable**: if the receive side's queue is full, the kernel drops the packet silently. `send()` returns -1 with `EAGAIN` or `ENOBUFS` depending on socket flags.
+
+mtkbt is the recv side. It's concurrently processing:
+- A2DP audio streaming (~50ms-cadence ACL frames at ~736 B each, saturating the BT chip UART)
+- Inbound AVCTP control frames (PASSTHROUGH, GetPlayStatus polls, GetElementAttributes, RegisterNotification)
+- Outbound AVRCP responses
+
+When T9 fires 28 times in a 5-minute window — many bursts triggered by `playstatechanged` broadcasts that happen 1-3 in rapid succession on each play/pause toggle — the mtkbt recv queue saturates and 24 of those 28 frames get dropped at the kernel layer. `send()` returns -1, `BT_SendMessage` returns -1, `AVRCP_SendMessage` logs "ignore index:%d total:%d" and returns 1, T9 has no idea anything went wrong.
+
+The wire-side counts confirm this delivery profile:
+- 4 successful `event 0x01` CHANGED sends — matches roughly "first CHANGED of each subscription burst plus a couple that snuck through".
+- 17 successful `event 0x05` POS_CHANGED sends — pos_changed fires at our 1 Hz cadence, much less bursty than pstat, so most go through.
+- 7 successful REACHED_END/START — same low cadence, mostly go through.
+
+The drop pattern is **rate-limit-driven**, not subscription-driven.
+
+### Where the FD lives
+
+| Offset (struct) | Offset (conn = struct+8) | Field |
+|---|---|---|
+| 0x00..0x07 | -8..-1 | (header / unknown) |
+| 0x08..0x0f | 0..7 | (header / unknown) |
+| 0x10 | **8** | **AF_UNIX SOCK_DGRAM FD** (set by `enableNative` 0x4952) |
+| 0x14 | 0xc | Local server FD (set by `enableNative` 0x4920) |
+| 0x19 | **0x11** | **transId byte** (set by `notificationPlayStatusChangedNative` 0x3cf2 — copied from a static byte in .rodata, see below) |
+| ... | ... | ... |
+| 0x1b | 0x13 | (struct end at 28 bytes) |
+
+`r7[0x19]` write at `0x3cf2` is `strb.w ip, [r7, 0x19]` where `ip` was loaded from `[lr+1]` after `lr = pc + <const>` resolves to a string. So the transId stored is a *constant byte from .rodata*, not the per-CT inbound transId. This means stock `notificationPlayStatusChangedNative` always emits with the same fixed transId — a separate spec-compliance concern from the drop question, but worth noting.
+
+### Diagnostic plan (next capture)
+
+`T9connfd=%08x` log will show — definitively — whether `conn[8]` is zero on dropped attempts. Three outcomes:
+
+| Outcome | Interpretation | Fix shape |
+|---|---|---|
+| `T9connfd=0` on all/most | Hypothesis refuted again — there's a SECOND struct path I haven't found, and the FD is per-event not session-long | RE the second path |
+| `T9connfd=<same nonzero>` on all | Confirmed: drop is at `send()` returning -1 (kernel drops datagram) | Rate-limit T9 emits + add response builder return-value log to confirm |
+| `T9connfd=<varying nonzero>` | conn struct is shared across multiple sessions or per-CT | Investigate which CT each emit targets |
+
+### Spec-compliance angle (per `feedback_avrcp13_only_scope`)
+
+AVRCP 1.3 §6.7.1 is explicit: CT MUST re-`RegisterNotification` after each CHANGED. Kia subscribes once at session start, once mid-session, and that's it. CT-side spec violation. But Y1's TG is *also* generating ~28 CHANGED frames per 5-minute session for event 0x01 — way more than the 2 the CT subscribed for. With the AVRCP 1.3 one-shot model, the spec-correct TG would emit CHANGED only **2 times** (one per subscription). Our session-long gate semantics (state[14]=1, never cleared) emit on every edge — which would be fine if the AVCTP layer had the buffer space, but the AF_UNIX SOCK_DGRAM IPC saturates first.
+
+A spec-compliant fix path: implement strict §6.7.1 one-shot in T9 (clear state[14] after each CHANGED emit, re-arm only on next T8 INTERIM). That brings our wire emit count down from 28 to 2 per Kia session — eliminating the IPC overflow and matching what Kia actually expects. The trade-off: the 26 dropped emits we currently make were "best-effort" attempts to compensate for non-compliant CTs; switching to strict one-shot would relinquish that compensation. But empirically the 26 attempts don't reach the wire anyway, so we lose nothing concrete by becoming spec-compliant.
+
