@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AVRCP 1.4 attr 0x000d Browse PSM advertisement, clear AVRCP 1.4 GroupNavigation feature bit, ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, two NOPs in the outbound-frame builder that remove a chip-readiness list-contains check + the chip-busy flag SET so the matching CHECK never trips). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -20,7 +20,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 Ten byte patches against stock `/system/bin/mtkbt`. Eight reshape the served SDP record so a peer CT engages with AVRCP 1.3 COMMANDs (per AVRCP 1.3 §6 Service Discovery Interoperability Requirements + ESR07 §2.1 / Erratum 4969 clarifying AVCTP version values), one reroutes inbound VENDOR_DEPENDENT frames into the JNI msg-519 emit path so the trampoline chain can respond, and one is a best-effort dispatch alias for AVDTP signal 0x0c.
 
-The mtkbt daemon ships two physical AVRCP TG SDP record templates in `.data.rel.ro`. The internal `activeVersion` field selects which is served on the wire: stock = 10 (legacy 1.0 record), V6 → 14 (AVRCP 1.3 record). V1/V2/S1 patch the legacy record (kept for the fall-through path); V7/V8 patch the AVRCP 1.3 record (where V6 routes the daemon by default) so it conforms to strict AVRCP 1.3 §3 SDP record shape — no Browse PSM advertisement, no 1.4-class feature bits.
+The mtkbt daemon ships two physical AVRCP TG SDP record templates in `.data.rel.ro`. The internal `activeVersion` field selects which is served on the wire: stock = 10 (legacy 1.0 record), V6 → 14 (AVRCP 1.3 record). V1/V2/S1 patch the legacy record (kept for the fall-through path); V7/V8 patch the AVRCP 1.3 record (where V6 routes the daemon by default) so it conforms to AVRCP 1.3 §6 Table 6.2 SDP record shape — no AdditionalProtocolDescriptorList (a 1.4-introduced attribute per AVRCP 1.4 §8 Table 8.2), Group Navigation feature bit cleared (the bit exists in 1.3 §6 Table 6.2 but Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs).
 
 **V1 — AVRCP 1.0 → 1.3** at file `0x0eba58` (1 byte): `0x00` → `0x03`. LSB of the served Group D ProfileDescList Version field.
 
@@ -41,7 +41,7 @@ Edits one entry of the AVDTP signal dispatcher's TBH jump table at file `0xaa81e
 
 This is a **structural workaround**, not a real GET_ALL_CAPABILITIES implementation — the response we emit is the sig 0x02 capability list, which per AVDTP V13 §8.8 is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities like DELAY_REPORTING / RECOVERY / MULTIPLEXING / HEADER_COMPRESSION). For an SBC-only Source this matches what we'd advertise anyway. Closes GAVDP 1.3 ICS Acceptor Table 5 row 9 on paper.
 
-Wire-correct by decoupling: the response builder is `fcn.000ae418` (calls `L2CAP_SendData` at file `0xae58e`), and byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]` — the per-channel transaction state populated by the request parser at RX time. The dispatcher and per-signal handlers do not write `txn->[0xe]`. So a sig 0x0c request lands in the GET_CAPABILITIES handler post-V5, but the response frame still emits `sig_id=0x0c` matching the request. Payload is a V13 §8.8 subset valid for an SBC-only Source. See `INVESTIGATION.md` Trace #16.
+Wire-correct by decoupling: the response builder is `fcn.000ae418` (calls `L2CAP_SendData` at file `0xae58e`), and byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]` — the per-channel transaction state populated by the request parser at RX time. The dispatcher and per-signal handlers do not write `txn->[0xe]`. So a sig 0x0c request lands in the GET_CAPABILITIES handler post-V5, but the response frame still emits `sig_id=0x0c` matching the request. Payload is a V13 §8.8 subset valid for an SBC-only Source. Full walk-through in `INVESTIGATION.md`.
 
 **V6 — internal `activeVersion` 10 → 14** at file `0x10dca` (2 bytes):
 
@@ -59,16 +59,16 @@ The stock activation handler at `fcn.00010d00` hardcodes the activeVersion field
 | before | `0d 00 14 00 12 ba 0e 00 00 00 00 00` | attr=`0x000d`, len=`0x14`, ptr=`0x0eba12` (→ AdditionalProtocolDescList: L2CAP / PSM `0x001b` Browse + AVCTP) |
 | after  | `00 01 11 00 ce b9 0e 00 00 00 00 00` | attr=`0x0100`, len=`0x11`, ptr=`0x0eb9ce` (→ `25 0f "Advanced Audio\0"`) |
 
-The stock AVRCP 1.3 served record advertises attribute `0x000d AdditionalProtocolDescriptorList` carrying the AVRCP Browse PSM `0x001b`. Browse is an AVRCP 1.4 feature — the AVRCP 1.3 §3 SDP record shape contains no AdditionalProtocolDescriptorList. V7 swaps this entry slot for a `0x0100 ServiceName` entry pointing at the same "Advanced Audio" string S1 reuses for the legacy record. Net wire effect: drops the 1.4 Browse advertisement, restores ServiceName presence so the served record matches strict AVRCP 1.3 §3 shape.
+The stock AVRCP 1.3 served record advertises attribute `0x000d AdditionalProtocolDescriptorList` carrying the AVRCP Browse PSM `0x001b`. AdditionalProtocolDescriptorList is introduced in AVRCP 1.4 §8 Table 8.2 (conditional on SupportedFeatures bit 6 "Supports browsing"); AVRCP 1.3 §6 Table 6.2 does not list it. V7 swaps this entry slot for a `0x0100 ServiceName` entry pointing at the same "Advanced Audio" string S1 reuses for the legacy record. Net wire effect: drops the Browse advertisement, restores ServiceName presence so the served record matches AVRCP 1.3 §6 Table 6.2 shape.
 
 **V8 — `SupportedFeatures` 0x0021 → 0x0001** at file `0x0eba4e` (1 byte):
 
 | | byte | bits set |
 |---|---|---|
-| before | `21` | bit 0 (Category 1: Player/Recorder) + bit 5 (AVRCP 1.4 GroupNavigation) |
+| before | `21` | bit 0 (Category 1: Player/Recorder) + bit 5 (Group Navigation) |
 | after  | `01` | bit 0 only |
 
-LSB of the AVRCP 1.3 served record's SupportedFeatures `uint16` (byte stream `09 00 21` → `09 00 01` at `0x0eba4c`). AVRCP 1.3 §6.5 Table 6.10 reserves bits 4-15 (must be 0); bit 5 is GroupNavigation, an AVRCP 1.4 capability. V8 clears bit 5 so the advertised mask is strictly AVRCP 1.3-conformant.
+LSB of the AVRCP 1.3 served record's SupportedFeatures `uint16` (byte stream `09 00 21` → `09 00 01` at `0x0eba4c`). AVRCP 1.3 §6 Table 6.2 defines bit 5 as "Group Navigation" (conditional on bit 0 Category 1 being set) with the note "the bits for supported categories are set to 1; others are set to 0." Y1's stock advertises bit 5 set but ships no Group Navigation PASSTHROUGH handler; V8 clears it so the advertised mask is 0x0001 (Category 1 only), matching what's actually implemented. Bits 6-15 are RFA in 1.3 Table 6.2; bit 6 became "Supports browsing" in AVRCP 1.4 §8 Table 8.2.
 
 **S1 — `0x0311 SupportedFeatures` → `0x0100 ServiceName`** at file `0x0f97ec` (12 bytes):
 
@@ -88,7 +88,39 @@ Patches the same entry-slot swap on the legacy AVRCP 1.0 served record (the fall
 
 Replaces the first comparison in fn `0x144bc`'s op_code dispatch with an unconditional branch to the PASSTHROUGH-emit branch at `0x14528` (which ends with `bl 0x10404`, the function that emits msg 519 CMD_FRAME_IND to the JNI socket). Every AV/C frame flows through the emit path. Cost: VENDOR_DEPENDENT bytes get interpreted in PASSTHROUGH-shaped fields, so mtkbt's mid-stack response may be malformed — but the JNI trampoline chain takes over before that matters.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `5d65088540898231d5f235ac270ad5e1`.
+**M1 — RegNotif INTERIM/CHANGED discriminator: cmp ctxt[8] against 0x0F** at file `0x12230` (1 site, 2 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x12230` | `01 29` → `0f 29` | `cmp r1, 1` → `cmp r1, 0xF` |
+
+Stock mtkbt's RegNotif response packetFrame builder dispatch at fn `0x121d8` reads `ctxt[8]` and compares against `1` to choose between INTERIM (ctype `0x0F` at `0x12238`) and CHANGED (ctype `0x0D` at `0x12244`) branches. The JNI's `btmtk_avrcp_send_reg_notievent_*_rsp` helpers in `libextavrcp.so` marshal the reasonCode argument (REASON_INTERIM=`0x0F` / REASON_CHANGED=`0x0D`) into IPC payload byte 8 — verified by the `strb.w r7, [sp, #12]` encoding (bytes `8d f8 0c 70`) at the cardinality=0 path of every helper, where sp+12 maps to payload+8 (the helper's 40-byte buffer starts at sp+4). Stock mtkbt reads the correct byte but compares against `1`, so `0x0F` and `0x0D` both fail the cmp and the dispatch always lands on the CHANGED branch — wire ctype is `0x0D` for every RegNotif response regardless of which reasonCode the trampoline passes.
+
+M1 widens the cmp constant from `1` to `0x0F`. After M1: `ctxt[8] == 0x0F` (T2 / extended_T2 / T8 first-response INTERIM arms) → INTERIM branch → wire ctype `0x0F` INTERIM. `ctxt[8] != 0x0F` (T5 / T9 edge emits, where r2 = REASON_CHANGED = `0x0D`) → CHANGED branch → wire ctype `0x0D` CHANGED. Spec-compliant per AVRCP 1.3 §6.7.1 (INTERIM on first response per registration, CHANGED on subsequent value updates without re-registration).
+
+End-to-end byte chain: IPC msg=544 → `fcn.00067768` (sets ctxt ptr at msg+0x1c) → `fcn.000518ac` case 44 → `fcn.00012478` event_id tbb → per-event response builder → `fcn.000121d8` (M1 site at `0x12230`) → `fcn.00011894` strb ctype to packetFrame[0xb] → `fcn.0000f0bc` queue → `fcn.0000ef08` strb to wire `buf[0]`. Full radare2 trace in `docs/INVESTIGATION.md`.
+
+**M2 — Outbound-frame drop bypass: NOP gate 1 list-contains check** at file `0x6d06e` (1 site, 2 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x6d06e` | `37 d0` → `00 bf` | `beq 0x6d0e0` → `nop` |
+
+Stock `fcn.0x6d048` (outbound-frame builder reached from `fcn.0xf0bc → fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20 → fcn.0xae5e4` for short-frame AVRCP responses under the L2CAP MTU — PSTAT, REACHED_END/START, batt status) calls `fcn.0x6ccdc` (doubly-linked-list contains check) against `g_active_conn_list` at `*(0xf99XX)`. If the conn isn't in the list, returns `0xd` and skips the wire-frame build; the caller (`fcn.0xf0bc`) treats this as success via `cmp r5, 2; bne 0xf208`.
+
+M2 NOPs the `beq 0x6d0e0`, so the function unconditionally builds the wire frame and tail-calls `fcn.0x6df20`. The list state was a chip-readiness heuristic that empirically gated nothing measurable (the wire-side drop rate was a btlog sampling artifact — see `docs/INVESTIGATION.md` Trace #40 closure). The downstream send chain handles its own per-channel state, so removing this gate is safe; net wire-side delivery unchanged in observed captures, but the gate's removal eliminates one source of "did this CHANGED reach the wire?" ambiguity for future RE.
+
+**M3 — Chip-busy gate bypass: NOP set-busy-flag** at file `0x6df42` (1 site, 4 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x6df42` | `84 f8 f2 00` → `00 bf 00 bf` | `strb.w r0, [r4, #0xf2]` → `nop; nop` |
+
+Stock `fcn.0x6df20` (second-stage outbound send, tail-called from M2's site) tests `ctx[0xf2]` (chip-write busy flag) at `0x6df3a`. If set, returns `0xb`. The flag is set at `0x6df42` just before the chip-send tail-call to `fcn.0xae5e4`, and cleared at `fcn.0x6d9b8:0x6da10` in the send-completion handler when the chip ACKs the write.
+
+M3 NOPs the SET (not the CHECK). After M3 the flag is never set, so `cbnz r3, 0x6df52` at `0x6df3a` never trips. Safe because mtkbt's IPC dispatcher is single-threaded and `fcn.0xae5e4`'s downstream chain (`fcn.0xae418 → fcn.0x50918 → mtk_bt_write`) is synchronous (blocking UART write) — no concurrent emits race on the per-channel state inside `fcn.0xae5e4`. The completion handler (`fcn.0x6d9b8`) still clears the flag on ACK events; harmless no-op since the flag is already 0. Paired with M2 to remove the two outbound-frame gates whose practical effect was ambiguous (see `docs/INVESTIGATION.md` Trace #40 closure for the empirical-validation story).
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `2b0bffeb6d29ff2ba75cf811688ec0ef`.
 
 ---
 
@@ -107,9 +139,9 @@ Diverts the size!=3 dispatch arm to T1 instead of falling into "unknow indicatio
 
 ### T1 — GetCapabilities (PDU 0x10) at `0x7308` (40 bytes)
 
-Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with the 8-element `EventsSupported` array `[0x01..0x08]`, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
+Overwrites the unused JNI debug method `_Z33BluetoothAvrcpService_testparmnumP7_JNIEnvP8_jobjectaaaaaaaaaaaa` (~44 byte slot). Detects PDU 0x10, calls `btmtk_avrcp_send_get_capabilities_rsp` via PLT `0x35dc` with an 8-element `EventsSupported` array, branches to epilogue at `0x712a`. Fall-through (b.w `0x72d4`) bridges to T2.
 
-Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). The advertised events match what we implement: `0x01` PLAYBACK_STATUS, `0x02` TRACK_CHANGED, `0x03` TRACK_REACHED_END, `0x04` TRACK_REACHED_START, `0x05` PLAYBACK_POS, `0x06` BATT_STATUS, `0x07` SYSTEM_STATUS, `0x08` PLAYER_APPLICATION_SETTING_CHANGED.
+Per AVRCP 1.3 §5.4.2 + ICS Table 7 row 11, GetCapabilities is **mandatory** for any TG advertising PASS THROUGH Cat 1 (which our V1 SDP does). Advertised set: `0x01` PLAYBACK_STATUS, `0x02` TRACK_CHANGED, `0x05` PLAYBACK_POS, `0x08` PLAYER_APPLICATION_SETTING_CHANGED, plus `0x09` NOW_PLAYING_CONTENT_CHANGED, `0x0a` AVAILABLE_PLAYERS_CHANGED, `0x0b` ADDRESSED_PLAYER_CHANGED, `0x0c` UIDS_CHANGED. The four 0x09..0x0c IDs come from AVRCP 1.4+ and are advertised here — even though the SDP profile descriptor is 1.3 — because strict CT metadata-pane render empirically gates on them being acknowledged. T8 INTERIM-acks all four with zero/empty payload; no CHANGED ever fires (Y1 has one player, no Now Playing folder, no UID database).
 
 ### T2 stub + extended_T2 — RegisterNotification (PDU 0x31) entry
 
@@ -117,13 +149,13 @@ T2 stub at `0x72d0` (8 bytes) overwrites `classInitNative` with `movs r0, #0; bx
 
 1. Read `y1-track-info[0..7]` (track_id) into a stack buffer.
 2. Write `[track_id || transId || pad]` to `y1-trampoline-state` so T4 can detect track-id edges later.
-3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&sentinel_ffx8`.
+3. Reply INTERIM via `reg_notievent_track_changed_rsp` (PLT `0x3384`) with `r1=0` (success), `r2=REASON_INTERIM` (`0x0f`), `r3=&audio_id` (per-track BE u64 from `y1-track-info[0..7]`).
 
 Other PDU / event combos fall through to T4 (PDU 0x20 → main, 0x17 → T_charset, 0x18 → T_battery, 0x30 → T6, 0x40 / 0x41 → T_continuation, 0x31+event≠0x02 → T8) before hitting the original "unknow indication" path.
 
 `r1=0` matters: response builders dispatch on r1 — `r1==0` writes the spec-correct event payload (reasonCode + event_id + 8-byte track_id memcpy per AVRCP 1.3 §5.4.2 Table 5.30); `r1!=0` writes a reject-shape frame. We pass `r1=0` everywhere.
 
-**Track_id sentinel** = `0xFFFFFFFFFFFFFFFF` (8 bytes of 0xFF) per AVRCP 1.3 §5.4.2 Table 5.30 + ESR07 §2.2 (printed `0xFFFFFFFF` in 1.3 is a typo; ESR07 clarifies the field is 8 bytes — "this information is not bound to a particular media element"). Keeps CTs in poll-on-each-event mode rather than the alternative "stable identity, refresh on CHANGED only" mode (which deadlocks against a reactive-only TG). The `y1-trampoline-state[0..7]` field still holds the real track_id internally so T4 / T5 can detect edges and emit CHANGED proactively.
+**Track_id payload** = the per-track audio_id (BE u64) read from `y1-track-info[0..7]`. Strict 1.4+ CTs cache `GetElementAttributes` keyed by the TRACK_CHANGED Identifier; an unchanging value (e.g. `0x0000000000000000` SELECTED) means the CT dedups every re-query after the first one and the metadata pane stays stale on track skip. A per-track id forces cache invalidation + re-query on every track edge. `y1-trampoline-state[0..7]` holds the previous audio_id so T4 / T5 detect real-id edges before emitting CHANGED.
 
 ### T4 — GetElementAttributes (PDU 0x20)
 
@@ -149,7 +181,7 @@ T4 also detects track-id edges (compares `y1-track-info[0..7]` against `y1-tramp
 
 Pre-check dispatch table: `0x20 → main`, `0x17 → T_charset`, `0x18 → T_battery`, `0x30 → T6`, `0x40 → T_continuation`, `0x41 → T_continuation`, `0x31+event≠0x02 → T8`, else fall through to "unknow indication".
 
-### T5 — proactive TRACK_CHANGED on Y1 track-change broadcast
+### T5 — proactive track-edge CHANGED burst
 
 In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `notificationTrackChangedNative` at file offset `0x3bc0`:
 
@@ -158,19 +190,23 @@ In LOAD #1 padding. Entered via `b.w T5` from the patched first instruction of `
 | before | `2D E9 F0 47` | `stmdb sp!, {r4, r5, r6, r7, r8, r9, sl, lr}` (function prologue) |
 | after  | `[b.w T5 emitted by patcher]` | branch to T5 trampoline |
 
-T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` (full 800 B) and `y1-trampoline-state`, and on track-id divergence emits the AVRCP 1.3 §5.4.2 track-edge 3-tuple in spec order:
+T5 obtains the AVRCP per-conn struct via JNI helper at `0x36c0` (the same helper the stock native called), reads `y1-track-info` (full 800 B) and `y1-trampoline-state` (21 B), and on track-id divergence emits a track-edge CHANGED burst:
 
-1. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by `PlaybackStateBridge.onCompletion`) `== 1`. Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
-2. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=&sentinel_ffx8`. Always.
-3. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Always (every track edge crosses a start-of-new-track boundary).
+1. `reg_notievent_now_playing_content_rsp` (PLT `0x330c`, event 0x09) with `r1=0`, `r2=REASON_CHANGED` (`0x0d`). Gated on `state[20]` (sub_now_playing_content, armed by T8 0x09 INTERIM).
+2. `reg_notievent_pos_changed_rsp` (PLT `0x3360`, event 0x05 — Tbl 5.33) with `r1=0`, `r2=REASON_CHANGED`, `r3=REV(file[780..783])` (current position in host order — `duration_ms` on natural end, `0` on NEXT / PREV). Gated on `state[13]` (sub_pos, armed by T8 0x05 INTERIM).
+3. `reg_notievent_reached_end_rsp` (PLT `0x3378`, event 0x03 — Tbl 5.31) **only when** `y1-track-info[793]` (the `previous_track_natural_end` flag set by `PlaybackStateBridge.onCompletion`) `== 1` AND `state[17]` (sub_track_reached_end, armed by T8 0x03 INTERIM). Strict spec semantic: TRACK_REACHED_END fires on natural end, not on a skip.
+4. `reg_notievent_track_changed_rsp` (PLT `0x3384`, event 0x02 — Tbl 5.30) with `r1=0`, `r2=REASON_CHANGED`, `r3=&audio_id` (per-track BE u64 from `y1-track-info[0..7]`). Gated on `state[16]` (sub_track_changed, armed by extended_T2's INTERIM emit).
+5. `reg_notievent_reached_start_rsp` (PLT `0x336c`, event 0x04 — Tbl 5.32) with `r1=0`, `r2=REASON_CHANGED`. Gated on `state[18]` (sub_track_reached_start, armed by T8 0x04 INTERIM).
 
 Then writes the new track_id back to state and returns `jboolean(1)`.
 
-Fired on every `com.android.music.metachanged` broadcast emitted by the music app (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable. T5's frame is 816 B (16 state + 800 file_buf, mirroring T9's frame shape — needed so T5 can read `file[793]` for the natural-end gate).
+Emit ordering: NowPlayingContent → PlaybackPos → TrackChanged. 0x03 / 0x04 are AVRCP 1.3 extensions Y1 supports if the CT subscribes (they're not advertised in the current `T1` event set, so the gates are typically `0` and these emits become no-ops).
+
+Fired on every `com.android.music.metachanged` broadcast emitted by the music app (after the MtkBt.odex sswitch_1a3 cardinality NOP at 0x3c530 wakes the dispatch path). The remaining 196 bytes of the original native body are unreachable. T5's frame is 824 B (24 state + 800 file_buf, with state byte 20 holding sub_now_playing_content).
 
 ### T_charset — InformDisplayableCharacterSet (PDU 0x17)
 
-Branched from T4's pre-check on PDU 0x17. Calls `inform_charsetset_rsp` via PLT `0x3588` with `r1=0` (success). 14 bytes. Tail-jumps to t4_to_epilogue. AVRCP 1.3 §5.2.7 — strict CTs send this once at connect to declare their charset support; pre-T_charset our TG NACKed, which strict CTs interpret as the TG distrusting subsequent metadata.
+Branched from T4's pre-check on PDU 0x17. Restores lr canary + r0=conn and tail-jumps to UNKNOW_INDICATION (`0x65bc`), which emits an AV/C `NOT_IMPLEMENTED` reject. 12 bytes. Spec-permissible per AVRCP 1.3 §5.2.7 (Optional). Acking via `inform_charsetset_rsp` stalled at least one strict CT into a 3 s wait between 0x17 and the first RegisterNotification (apparently waiting for a follow-up notification that never came); reject lets the subscription burst land in <10 ms.
 
 ### T_battery — InformBatteryStatusOfCT (PDU 0x18)
 
@@ -215,35 +251,43 @@ ICS Table 7 rows 12-15 (C.14 Mandatory if any), 16-17 (Optional), and 30 (event 
 
 In LOAD #1 padding. Branched from extended_T2's "PDU 0x31 + event ≠ 0x02" arm. Reads `y1-track-info` for events that need payloads (0x01 / 0x05), then dispatches on event_id and calls the matching `reg_notievent_*_rsp` PLT entry:
 
-| event_id | name | spec § | PLT | payload |
-|---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | `0x339c` | play_status u8 (from `y1-track-info[792]`) |
-| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | `0x3378` | (none) |
-| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | `0x336c` | (none) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | `0x345c` | n=2 + `[(Repeat, repeat_avrcp), (Shuffle, shuffle_avrcp)]` from `y1-track-info[795..796]` |
+| event_id | name | PLT | payload |
+|---|---|---|---|
+| 0x01 | PLAYBACK_STATUS_CHANGED | `0x339c` | play_status u8 (from `y1-track-info[792]`) |
+| 0x03 | TRACK_REACHED_END | `0x3378` | (none) |
+| 0x04 | TRACK_REACHED_START | `0x336c` | (none) |
+| 0x05 | PLAYBACK_POS_CHANGED | `0x3360` | position_ms u32 (from `y1-track-info[780..783]`, REV-swapped) |
+| 0x06 | BATT_STATUS_CHANGED | `0x3354` | battery_status u8 from `y1-track-info[794]` (real bucket from `Intent.ACTION_BATTERY_CHANGED`) |
+| 0x07 | SYSTEM_STATUS_CHANGED | `0x3348` | canned `0x00 POWER_ON` (intentional — while trampolines run the system is by definition POWER_ON; the canned value IS the real value) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | `0x345c` | n=2 + `[(Repeat, repeat_avrcp), (Shuffle, shuffle_avrcp)]` from `y1-track-info[795..796]` |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | `0x330c` | (none) |
+| 0x0a | AVAILABLE_PLAYERS_CHANGED | `0x3324` | (none) |
+| 0x0b | ADDRESSED_PLAYER_CHANGED | `0x3330` | PlayerID u16 = 0 + UidCounter u16 = 0 |
+| 0x0c | UIDS_CHANGED | `0x3318` | UidCounter u16 = 0 |
 
-All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Event 0x07 SYSTEM_STATUS_CHANGED is intentionally INTERIM-only (see footnote in `docs/BT-COMPLIANCE.md` §2).
+Events 0x01-0x08 cover AVRCP 1.3 §5.4.2 (Tbls 5.29/5.31/5.32/5.33/5.34/5.36/5.37). Events 0x09-0x0c are 1.4+ event IDs whose response builders are already linked by `libextavrcp_jni.so` (their PLT stubs are present though stock JNI never invokes them); T8 acks each with INTERIM-only zero/empty payload. Strict CTs empirically gate metadata-pane render on those acks, even when the SDP profile descriptor advertises 1.3.
 
-### T9 — proactive PLAYBACK_STATUS_CHANGED + BATT_STATUS_CHANGED + PLAYBACK_POS_CHANGED + PLAYER_APPLICATION_SETTING_CHANGED
+All response builders share the calling convention `r0=conn`, `r1=0` (success), `r2=reasonCode`, `r3=event-specific u8/u16/u32`. Unknown event_ids fall through to "unknow indication" for the spec-correct NOT_IMPLEMENTED reject. T8 handles INTERIM for every event_id; proactive CHANGED for events 0x01/0x05/0x06/0x08 lives in T9 (entered from `notificationPlayStatusChangedNative`) and for 0x02/0x03/0x04 in T5/extended_T2 (entered from `notificationTrackChangedNative` / extended_T2's PDU 0x31 + event 0x02 arm respectively). Events 0x07 and 0x09-0x0c are INTERIM-only — nothing on Y1 ever changes them. (0x07 SYSTEM_STATUS rationale: see footnote in `docs/BT-COMPLIANCE.md` §2; 0x09-0x0c rationale: Y1 has one player, no Now Playing folder, no UID database.)
 
-T5's structural twin for events 0x01, 0x06, and 0x05. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
+### T9 — proactive CHANGED on play-state / battery / papp / 1Hz position tick
+
+T5's structural twin for events 0x01, 0x06, 0x05, 0x08, 0x09. Entered via `b.w T9` from the patched first instruction of `notificationPlayStatusChangedNative` at file offset `0x3c88`:
 
 | | bytes | mnemonic |
 |---|---|---|
 | before | `2D E9 F3 41` | function prologue |
 | after  | `[b.w T9 emitted by patcher]` | branch to T9 trampoline |
 
-T9 reads `y1-track-info` into its file buffer, then runs four independent edge / cadence checks:
+T9 reads `y1-track-info` into its file buffer and `y1-trampoline-state` (21 B) into the state buffer, then runs five independent edge / cadence checks:
 
-- **play_status:** compare file[792] vs state[9] (`last_play_status`). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Update state[9].
-- **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r1=0`, `r2=REASON_CHANGED`, `r3=battery_status`. Update state[10].
-- **papp settings:** compare file[795]/file[796] (repeat_avrcp / shuffle_avrcp) vs state[11]/state[12]. On any inequality, emit `reg_notievent_player_appsettings_changed_rsp` via PLT `0x345c` with `r1=0`, `r2=REASON_CHANGED`, `r3=2`, `sp[0]=&papp_attr_ids` (=`[0x02, 0x03]`), `sp[4]=&file[795]`. Update state[11..12]. The values pointer is just `sp+T9_OFF_FILE_REPEAT` since file_buf already holds `[r, s]` contiguously at 795..796, so no scratch copy is needed.
-- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `now_ms = tv_sec * 1000 + tv_nsec / 1e6` (nsec/1e6 via magic-multiply 0x431BDE83 then high-half >>18), then `live_pos = REV(file[780..783]) + (now_ms - REV(file[784..787]))` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r2=REASON_CHANGED`, `r3=live_pos`. Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. Both endpoints (`state_change_time_ms` written by `TrackInfoWriter` from `SystemClock.elapsedRealtime()`; `now_ms` from `clock_gettime(CLOCK_BOOTTIME)`) carry full ms precision in the same monotonic-since-boot epoch, so subtraction is bit-exact. T9's frame is 832 B (8 outgoing-args at sp+0..7 for the appsettings call + 16 state + 800 file_buf + 8 timespec).
+- **play_status:** compare file[792] vs state[9] (`last_play_status`). On inequality, emit `reg_notievent_playback_rsp` via PLT `0x339c` with `r1=0`, `r2=REASON_CHANGED` (`0x0d`), `r3=play_status`. Gated on `state[14]` (sub_play_status). In the same edge branch, also emit `reg_notievent_now_playing_content_rsp` via PLT `0x330c` if `state[20]` (sub_now_playing_content) is armed (paired NowPlayingContent + PlaybackStatus burst on play-edge). Update state[9].
+- **battery_status:** compare file[794] vs state[10] (`last_battery_status`). On inequality, emit `reg_notievent_battery_status_changed_rsp` via PLT `0x3354` with `r3=battery_status`. Gated on `state[19]` (sub_battery). Update state[10].
+- **papp settings:** compare file[795]/file[796] (repeat_avrcp / shuffle_avrcp) vs state[11]/state[12]. On any inequality, emit `reg_notievent_player_appsettings_changed_rsp` via PLT `0x345c` with `r3=2`, `sp[0]=&papp_attr_ids` (=`[0x02, 0x03]`), `sp[4]=&file[795]`. Gated on `state[15]` (sub_papp). Update state[11..12]. The values pointer is just `sp+T9_OFF_FILE_REPEAT` since file_buf already holds `[r, s]` contiguously at 795..796.
+- **playback_pos:** if file[792] == 1 (PLAYING), `clock_gettime(CLOCK_BOOTTIME, &timespec)` (NR=263, clk_id=7 via `svc 0`), compute `now_ms = tv_sec * 1000 + tv_nsec / 1e6` (nsec/1e6 via magic-multiply 0x431BDE83 then high-half >>18), then `live_pos = REV(file[780..783]) + (now_ms - REV(file[784..787]))` and emit `reg_notievent_pos_changed_rsp` via PLT `0x3360` with `r3=live_pos`. Gated on `state[13]` (sub_pos). Same arithmetic T6 does for GetPlayStatus, so position parity is maintained between polled GetPlayStatus and notification CHANGED. Both endpoints (`state_change_time_ms` written by `TrackInfoWriter` from `SystemClock.elapsedRealtime()`; `now_ms` from `clock_gettime(CLOCK_BOOTTIME)`) carry full ms precision in the same monotonic-since-boot epoch, so subtraction is bit-exact. Fires on every `playstatechanged` broadcast while playing — the music app's 1 s position ticker drives the ~1 Hz cadence.
 
-If play, battery, or papp changed, the 16 B state file is written back (single combined write per fire); the position emit is independent and never dirties state. Fires on every `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's CHANGED requirement on event-0x06 subscribers, Table 5.33's CHANGED requirement on event-0x05 subscribers, and Table 5.36's CHANGED requirement on event-0x08 subscribers.
+T9's frame is 840 B (8 outgoing-args at sp+0..7 + 24 state + 800 file_buf + 8 timespec).
+
+If play, battery, or papp changed, the state file is written back at offset 9 (4 B: bytes 9..12) — never touches the gate region at bytes 13..20; the position emit is independent and never dirties state. Fires on every `playstatechanged` broadcast (after the MtkBt.odex sswitch_18a cardinality NOP at 0x3c4fe wakes the dispatch path). Closes AVRCP 1.3 §5.4.2 Table 5.29's CHANGED requirement on event-0x01 subscribers, Table 5.34's on 0x06, Table 5.33's on 0x05, Table 5.36's on 0x08, and AVRCP 1.4 §6.9.5's NowPlayingContentChanged on play-edge for 0x09.
 
 `playstatechanged` is emitted whenever any of the following occurs:
 - play state edge (the music app's `PlayerService` fires `com.android.music.playstatechanged` directly per android.music standard)
@@ -491,7 +535,7 @@ Four new classes under `com/koensayr/y1/` (smali sources at `src/patches/inject/
 
 | Class | Role |
 |---|---|
-| `trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer (tmp + rename, world-readable). 1104-byte schema: audio_id at bytes 0..7 via `syntheticAudioId(path) = (path.hashCode() & 0xFFFFFFFFL) | 0x100000000L`; title/artist/album UTF-8 codepoint-safe-truncated to 240 B; duration/position/state-time BE u32; play_status / natural_end / battery / repeat / shuffle bytes at 792..796; track-num / total-tracks / playing-time / genre at 800..1103. `init(Context)` flushes the file immediately after creating it so MtkBt's first read returns the valid AVRCP defaults (Repeat=0x01 OFF, Shuffle=0x01 OFF) rather than the all-zero fill that would otherwise persist until the first mutator runs. `prepareFiles()` chmods all three files world-rw / world-readable so MtkBt's `bluetooth` uid can `open()` them. `wakeTrackChanged()` / `wakePlayStateChanged()` fire `com.android.music.metachanged` / `playstatechanged` via the stored Application Context — the music app's `PlayerService` doesn't fire these broadcasts itself (it uses an internal `MY_PLAY_SONG` action), so the trampolines' wake path needs them to be synthesised here. |
+| `trackinfo.TrackInfoWriter` | Singleton state holder + atomic file writer (tmp + rename, world-readable). 1104-byte schema: audio_id at bytes 0..7 via `syntheticAudioId(path) = (path.hashCode() & 0xFFFFFFFFL) | 0x100000000L`; title/artist/album UTF-8 codepoint-safe-truncated to 240 B; duration/position/state-time BE u32; play_status / natural_end / battery / repeat / shuffle bytes at 792..796; track-num / total-tracks / playing-time / genre at 800..1103. `init(Context)` flushes the file immediately after creating it so MtkBt's first read returns the valid AVRCP defaults (Repeat=0x01 OFF, Shuffle=0x01 OFF) rather than the all-zero fill that would otherwise persist until the first mutator runs. `prepareFiles()` chmods all three files world-rw / world-readable so MtkBt's `bluetooth` uid can `open()` them. `onFreshTrackChange()` (always-reset variant) is called from `PlaybackStateBridge.onEarlyTrackChange` — unconditionally zeroes `mPositionAtStateChange` + `mLastKnownDuration` and stamps `mLastFreshTrackChangeAt`, since the music-app's `restartPlay() → pause()` updates `mCachedAudioId` to the new track's id before our hook can snapshot the old, defeating any audio_id dedup at this entry. `onTrackEdge()` (dedup variant) stays for the OnPreparedListener path where same-track re-prepares mustn't disturb the live-position baseline. `wakeTrackChanged()` / `wakePlayStateChanged()` fire `com.android.music.metachanged` / `playstatechanged` via the stored Application Context — the music app's `PlayerService` doesn't fire these broadcasts itself (it uses an internal `MY_PLAY_SONG` action), so the trampolines' wake path needs them to be synthesised here. |
 | `playback.PlaybackStateBridge` | Stateless static dispatcher. `onPlayValue(II)V` maps the music-app's `Static.setPlayValue` newValue (0/1/3/5) to the AVRCP §5.4.1 Tbl 5.26 byte (STOPPED/PLAYING/PAUSED) then calls `TrackInfoWriter.wakePlayStateChanged()` so T9 emits PLAYBACK_STATUS / POS CHANGED on the state edge. On the PLAYING edge it also starts `PositionTicker`; on PAUSED / STOPPED it stops it. `onCompletion()V` latches a natural-end signal; the next `onPrepared()V` consumes it into `mPreviousTrackNaturalEnd`, resets position+time, then calls `wakeTrackChanged()` + `wakePlayStateChanged()` so T5 emits TRACK_CHANGED / REACHED_END / REACHED_START and T9 emits PLAYBACK_POS CHANGED for the position reset. `onError()V` clears the latch. |
 | `playback.PositionTicker` | `Runnable` posted to a main-thread `Handler` every 1000 ms while playing. Each tick calls `TrackInfoWriter.wakePlayStateChanged()` so T9 emits PLAYBACK_POS_CHANGED CHANGED with the live-extrapolated position. Started from `PlaybackStateBridge.onPlayValue` on PLAYING edges, stopped on PAUSED / STOPPED. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the cadence to the TG; 1 s is the conventional minimum interval a 1.3 CT will display playhead at. |
 | `battery.BatteryReceiver` | `Intent.ACTION_BATTERY_CHANGED` consumer. Bucket-maps to AVRCP §5.4.2 Tbl 5.35 (FULL_CHARGE / EXTERNAL / CRITICAL / WARNING / NORMAL). Sticky-broadcast value is processed at registration time so cold boot has a real bucket before the next CHANGED tick. |
@@ -502,12 +546,14 @@ Existing-file edits (smali prepends, no logic replacement):
 | File | Inject |
 |---|---|
 | `smali_classes2/com/innioasis/y1/utils/Static.smali` | Top of `setPlayValue(II)V` — `invoke-static {p1, p2}, …PlaybackStateBridge;->onPlayValue(II)V`. Single canonical state-edge entry; catches every play/pause/stop/resume regardless of UI foreground state. |
-| `smali/com/innioasis/y1/service/PlayerService.smali` | Top of six listener lambdas. `initPlayer$lambda-{10,11,12}` are the IjkMediaPlayer (Bilibili IJK FFmpeg fork) `OnCompletion` / `OnPrepared` / `OnError` arms; `initPlayer2$lambda-{13,14,15}` are the same for `android.media.MediaPlayer`. Each lambda gets one `invoke-static` to the matching `PlaybackStateBridge` callback. |
+| `smali/com/innioasis/y1/service/PlayerService.smali` | Top of six listener lambdas (`initPlayer$lambda-{10,11,12}` IjkMediaPlayer Bilibili-IJK `OnCompletion`/`OnPrepared`/`OnError`; `initPlayer2$lambda-{13,14,15}` same for `android.media.MediaPlayer`) — each gets one `invoke-static` to the matching `PlaybackStateBridge` callback. Plus `setCurrentPosition(J)V` head (B5.2a) → `PlaybackStateBridge.onSeek`; `toRestart()V` 3 × `setDataSource` sites (B5.2b) → `PlaybackStateBridge.onEarlyTrackChange` (~100-500 ms early TRACK_CHANGED before prepareAsync completes); `playerPrepared()V` 2 × `iput-boolean playerIsPrepared:=true` sites (B5.2c) → `PlaybackStateBridge.onPlayerPreparedTail` (post-prepare flush so `getDuration()` is captured before broadcasting; without this, `flushLocked` from OnPreparedListener runs ~26 ms before the prepared flag flips and reports the previous track's stale duration). |
 | `smali/com/innioasis/y1/Y1Application.smali` | `onCreate` `:cond_3` block, between B3 and B4. Brings up `TrackInfoWriter.init(Context)` + `PappSetFileObserver.start(Context)` + `BatteryReceiver.register(Context)`. Order matters: must run before B4's `sendNow()` so the cold-boot file write reflects live SharedPreferences Repeat/Shuffle, not the default OFF/OFF. |
 | `smali/com/koensayr/PappStateBroadcaster.smali` (B4 product) | `sendNow()` tail — calls `TrackInfoWriter.setPapp(repeat, shuffle)` so the music-app file reflects the new state immediately, then fires `com.android.music.playstatechanged` so MtkBt's BluetoothAvrcpReceiver wakes T9 to emit PApp CHANGED on the wire. |
 | `smali/com/koensayr/y1/battery/BatteryReceiver.smali` | `onReceive` tail — fires `com.android.music.playstatechanged` after each bucket transition so T9 reads the new file[794] and emits BATT_STATUS_CHANGED CHANGED. |
 
 State sources, all read live from `PlayerService` accessors via `Y1Application.Companion.getPlayerService()`: `getPlayingMusic()`/`getPlayingSong()` for the current `Song` (title via `getSongName()`, plus `getArtist`/`getAlbum`/`getGenre`/`getPath`); `getDuration()`; `getMusicIndex()+1` for TrackNumber; `getMusicList().size()` for TotalNumberOfTracks. Position-at-state-change is captured at the `setPlayValue` edge with `SystemClock.elapsedRealtime()` for the lockstep clock the trampoline `T6` extrapolation expects.
+
+Duration has a fallback path: `PlayerService.getDuration()` delegates to `IjkMediaPlayer/MediaPlayer.getDuration()` and throws between `setDataSource` and `OnPrepared`, so `flushLocked` gates on `getPlayerIsPrepared()`. The unprepared branch consults `getMmrDurationLocked(path, audio_id)` — a per-`audio_id` cache backed by `MediaMetadataRetriever.setDataSource(path).extractMetadata(METADATA_KEY_DURATION)` (synchronous container-header parse, no MediaPlayer dependency). This guarantees the first T4 `GetElementAttributes` response on every track skip carries a valid `attribute 0x07 PlayingTime`. AVRCP 1.3 has no `DURATION_CHANGED` event, so a CT that caches `dur=0` from a fresh-track T4 would keep it until the next track change — MMR closes that gap.
 
 **Patch B6** — AvrcpBinder smali (unused groundwork).
 
@@ -517,6 +563,17 @@ Two new classes routed to `smali_classes2/` (secondary DEX) because `classes.dex
 |---|---|
 | `avrcp.AvrcpBridgeService` | Service shell. Not declared in the music APK manifest, so unreferenced at runtime. |
 | `avrcp.AvrcpBinder` | `Binder` implementing `IBTAvrcpMusic` + `IMediaPlaybackService` onTransact in smali. Skips `strictModePolicy` + descriptor string and dispatches by transact code (descriptor mismatches across ROM variations have historically aborted `registerCallback` on `enforceInterface`). Codes implemented: 1 (`registerCallback`); 2 (`unregisterCallback`); 3 (`regNotificationEvent` — ACK true; returning false leaves MtkBt's `mRegBit` empty and notifyTrackChanged is dropped); 5 (`getCapabilities` — return `[0x01, 0x02]`); 6-13 (transport keys via `sendMediaKey` broadcast). Every other code: `writeNoException` + `return true` (ack-only). Not instantiated — Y1Bridge.apk hosts the live Binder MtkBt resolves to. The smali stays in tree so MtkBt.odex component-bind work doesn't have to recreate it. |
+
+**`--debug` instrumentation** (gated on `KOENSAYR_DEBUG=1`; `apply.bash --debug` sets it). When enabled the patcher injects `Log.d("Y1Patch", …)` traces at every metadata-relevant entry point and inline value-bearing `_dbgKV(String key, long val)` / `_dbgLogTrampolineState(String tag)` calls at the diagnostic-critical sites. Nothing is added to release builds — helpers and call sites are gated in `patch_y1_apk.py` itself.
+
+| Layer | Coverage |
+|---|---|
+| Stock smali entry traces | `PlayControllerReceiver.onReceive`; `BaseActivity.dispatchKeyEvent` + `BasePlayerActivity.dispatchKeyEvent`; `PlayerService` — `play / pause / playOrPause / stop / nextSong / prevSong / restartPlay / playerPrepared / toRestart`. |
+| Inject-tree entry traces | `TrackInfoWriter` — `init / setPlayStatus / onSeek / markCompletion / markError / onFreshTrackChange / onTrackEdge / setBattery / setPapp / flush / flushLocked / wakeTrackChanged / wakePlayStateChanged`. `PlaybackStateBridge` — `onPlayValue / onEarlyTrackChange / onPrepared / onPlayerPreparedTail / onCompletion / onSeek / onError`. `PositionTicker` — `start / stop / run`. `BatteryReceiver` — `register / onReceive`. `PappSetFileObserver` — `start / onEvent / dispatch`. `NowPlayingRefresher` — `onResume / onPause / refresh / run`. |
+| Inline value-bearing | `TrackInfoWriter.onTrackEdge` → `onTE.old`, `onTE.new`, `onTE.EDGE_DETECTED`. `TrackInfoWriter.flushLocked` → `fL.id`, `fL.pos`, `fL.dur`, `fL.ps` (audio_id, position-at-state-change, last-known-duration, AVRCP play-status). `TrackInfoWriter.onSeek` → `onSeek.in`, `onSeek.SUPPRESSED.dtMs`, `onSeek.APPLIED.pos`. `TrackInfoWriter.setPlayStatus` → `sPS.from`, `sPS.to`. `PlaybackStateBridge.onPlayValue` → `oPV.newVal`, `oPV.reason`. |
+| Trampoline-state byte dump | `TrackInfoWriter.wakeTrackChanged` → `wTC.pre` + `wTC.post` (post via `Handler.postDelayed(50 ms)`). Same for `wakePlayStateChanged` → `wPSC.pre` + `wPSC.post`. Format: `tramp.state[0..19]=HH …` × 20 hex bytes. Authoritative semantics from `src/patches/_trampolines.py` (T9 stack frame): `[0..7]`=last-synced track_id mirror, `[9]`=last_play_status, `[10]`=last_battery_status, `[11]`=last_repeat_avrcp, `[12]`=last_shuffle_avrcp, `[13]`=sub_pos_changed (0x05), `[14]`=sub_play_status (0x01), `[15]`=sub_papp (0x08), `[16]`=sub_track_changed (0x02), `[17]`=sub_track_reached_end (0x03), `[18]`=sub_track_reached_start (0x04), `[19]`=sub_battery (0x06). Successive pre/post captures answer whether T5/T9 actually emitted CHANGED on the wire (the relevant mirror byte updates between pre and post; e.g., `[9]` flips from `1` to `2` after a PAUSE if T9 emitted PLAYBACK_STATUS_CHANGED) or got gated out (mirror byte stays stale). Gate bytes `[13..19]` typically appear armed at `1` even when CHANGED fires correctly — strict CTs re-`RegisterNotification` faster than the 50 ms post-window so T8 INTERIM re-arms the gate. |
+
+Tail with `adb logcat -s Y1Patch:*` to observe the metadata pipeline live; pipe to a file for post-test analysis.
 
 `AndroidManifest.xml` is NOT modified by the patcher. `com.innioasis.y1` declares `sharedUserId="android.uid.system"`, which constrains the package's signing key to the OEM platform key. Any change to AndroidManifest.xml bytes invalidates `META-INF/MANIFEST.MF`'s recorded SHA1-Digest, JarVerifier throws SecurityException, PackageParser logs "no certificates at entry AndroidManifest.xml; ignoring!", and PackageManager drops the package. JarVerifier doesn't digest-check classes.dex / classes2.dex / resources at scan time — that's why DEX-only modifications work. The intent-filter `<service>` MtkBt's `bindService` resolves to lives in Y1Bridge.apk's manifest, which is self-signed and unconstrained by the platform key requirement.
 

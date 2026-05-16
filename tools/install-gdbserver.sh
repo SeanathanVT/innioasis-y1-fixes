@@ -1,22 +1,9 @@
 #!/usr/bin/env bash
 #
-# tools/install-gdbserver.sh — auto-install an ARM 32-bit static gdbserver
-# (API-17-compatible, for Android 4.2.2 / Innioasis Y1) at tools/gdbserver.
-# Re-runnable; safe to run after a partial first run.
-#
-# Required by tools/attach-mtkbt-gdb.sh — the gdbserver binary gets pushed
-# to /data/local/tmp/ and attached to the live mtkbt PID via su.
-#
-# Sources, in priority order:
-#   1. tools/gdbserver — already installed and validated, short-circuit
-#   2. $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver — if user
-#      has NDK r10e–r17c installed, copy from there
-#   3. AOSP prebuilts/misc — fetch from github.com/aosp-mirror/platform_prebuilts_misc
-#      (canonical Google mirror; the binary is rebuilt rarely so master is stable)
-#
-# Prereqs: curl, file, sha256sum (or shasum -a 256)
-# Disk:    ~3 MB
-# Network: ~3 MB (skipped if a valid gdbserver is already in place)
+# install-gdbserver.sh — install an ARM 32-bit static gdbserver (API 17,
+# Android 4.2.2) at tools/gdbserver. Sources in priority order:
+# existing tools/gdbserver, NDK r10e–r17c prebuilt, AOSP prebuilts/misc.
+# Prereqs: curl, file, sha256sum. Idempotent.
 
 set -euo pipefail
 

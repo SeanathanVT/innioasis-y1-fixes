@@ -65,7 +65,7 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 | **11** | GetCapabilities Response (PDU 0x10) | §5.1.1 | **M (C.3: M IF cat 1)** | ✓ T1 | — |
 | 12-15 | List / Get / Set PApp Settings (0x11–0x14) | §5.2.1–5.2.4 | C.14: M to support **none or all** | ✓ T_papp (Repeat + Shuffle, OFF/OFF; Set rejects `0x06 INTERNAL_ERROR` — see §1) | — |
 | 16-17 | PApp Setting Attribute / Value Text (0x15-0x16) | §5.2.5-5.2.6 | O | ✓ T_papp (UTF-8 "Repeat" / "Shuffle" / "Off") | — |
-| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset | — |
+| 18 | InformDisplayableCharacterSet (PDU 0x17) | §5.2.7 | O | ✓ T_charset (NOT_IMPLEMENTED reject; spec-permissible for Optional PDU) | — |
 | 19 | InformBatteryStatusOfCT (PDU 0x18) | §5.2.8 | O | ✓ T_battery | — |
 | **20** | GetElementAttributes (PDU 0x20) | §5.3.1 | **M (C.3: M IF cat 1)** | ✓ T4 (all 7 §5.3.4 attrs: Title / Artist / Album / TrackNumber / TotalNumberOfTracks / Genre / PlayingTime, single packed frame) | — |
 | **21** | GetPlayStatus (PDU 0x30) | §5.4.1 | **M (C.2: M IF GetElementAttributes Response)** | ✓ T6 with live position via `clock_gettime(CLOCK_BOOTTIME)` | — |
@@ -106,18 +106,20 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 
 ### Notification events (PDU 0x31 sub-dispatch, AVRCP 1.3 §5.4.2 Tables 5.29–5.37)
 
-The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We currently advertise events `0x01..0x08`.
+The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x03, 0x04, 0x06, 0x07 are not advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes anyway.
+
+**§6.7.1 strict gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` = 1; T5 / T9 read the gate, emit CHANGED, then clear the gate (= 0). CT must re-`RegisterNotification` to re-arm and receive the next CHANGED. Wire-side cadence becomes `min(TG_tick_rate, CT_re-register_rate)`. M1 widens the cmp constant in mtkbt's RegNotif response dispatch (`fcn.0x121d8` at `0x12230`) from 1 to `0x0F`, so the dispatcher routes the JNI's reasonCode byte (IPC offset 8 = `ctxt[8]`) to the matching wire ctype: INTERIM (`0x0F`) for first-response arms, CHANGED (`0x0D`) for edge emits.
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 | ✓ T9 (Y1 play / pause broadcast) |
-| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 | ✓ T5 (Y1 track-change broadcast) |
-| 0x03 | TRACK_REACHED_END | §5.4.2 Tbl 5.31 | ✓ T8 | ✓ T5 (gated on natural-end flag at file[793], set by music app's `PlaybackStateBridge.onCompletion`) |
-| 0x04 | TRACK_REACHED_START | §5.4.2 Tbl 5.32 | ✓ T8 | ✓ T5 (unconditional on track edge) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 | ✓ T9 (1 s cadence while playing; tick fires `playstatechanged`; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
-| 0x06 | BATT_STATUS_CHANGED | §5.4.2 Tbl 5.34 | ✓ T8 (real bucket from y1-track-info[794]) | ✓ T9 (piggybacked on playstatechanged; gated on file[794] vs state[10] edge) |
-| 0x07 | SYSTEM_STATUS_CHANGED | §5.4.2 Tbl 5.36 | ✓ T8 (canned 0x00 POWER_ON) | intentionally INTERIM-only (see §2 footnote) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (reads `y1-track-info[795..796]`) | ✓ T9 (papp block, piggybacked on `playstatechanged`; gated on file[795..796] vs state[11..12] edge) |
+| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 (arms state[14]) | ✓ T9 on play/pause edge (gated on state[14]; cleared after emit) |
+| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 (arms state[16]) | ✓ T5 on track edge (gated on state[16]; cleared after emit) |
+| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 (arms state[13]) | ✓ T9 at ~1Hz while playing + T5 on track edge (gated on state[13]; T9's tick clears after emit so CT re-register sets the wire rate; T5's track-edge burst leaves the gate intact, T9's next 1 s tick re-evaluates) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (arms state[15]; reads `y1-track-info[795..796]`) | ✓ T9 on Repeat/Shuffle edge (gated on state[15]; cleared after emit) |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (arms state[20]; zero/empty payload) | ✓ T5 on track edge + T9 on play/pause edge (gated on state[20]; not cleared — piggybacks on the track + play edge bursts) |
+| 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.9.4 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
+| 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.9.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
+| 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.10.3.3 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |
 
 ---
 
@@ -134,7 +136,7 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 |---|---|---|---|
 | **Currently used by shipped trampolines** ||||
 | 0x10 GetCapabilities | get_capabilities_rsp | `0x35dc` | `0x1dac` |
-| 0x17 InformDisplayableCharacterSet | inform_charsetset_rsp | `0x3588` | `0x2138` |
+| 0x17 InformDisplayableCharacterSet | (T_charset rejects via UNKNOW_INDICATION; ACK builder `inform_charsetset_rsp` at PLT `0x3588` / body `0x2138` is no longer called) | — | — |
 | 0x18 InformBatteryStatusOfCT | battery_status_rsp | `0x357c` | `0x2160` |
 | 0x20 GetElementAttributes | get_element_attributes_rsp | `0x3570` | `0x2188` |
 | 0x30 GetPlayStatus | get_playstatus_rsp | `0x3564` | `0x2354` |
@@ -145,6 +147,10 @@ Full PLT inventory (from `libextavrcp_jni.so` md5 `fd2ce74db9389980b55bccf3d8f15
 | 0x31 event 0x05 | reg_notievent_pos_changed_rsp | `0x3360` | `0x2588` |
 | 0x31 event 0x06 | reg_notievent_battery_status_changed_rsp | `0x3354` | `0x25f0` |
 | 0x31 event 0x07 | reg_notievent_system_status_changed_rsp | `0x3348` | `0x2658` |
+| 0x31 event 0x09 | reg_notievent_now_playing_content_changed_rsp | `0x330c` | `0x26c0` |
+| 0x31 event 0x0a | reg_notievent_availplayers_changed_rsp | `0x3324` | `0x27b0` |
+| 0x31 event 0x0b | reg_notievent_addredplayer_changed_rsp | `0x3330` | `0x2810` |
+| 0x31 event 0x0c | reg_notievent_uids_changed_rsp | `0x3318` | `0x2880` |
 | (default reject for unknown PDU including 0x40/0x41) | pass_through_rsp | `0x3624` | n/a (in libextavrcp.so too — reached via UNKNOW_INDICATION fall-through) |
 | **PlayerApplicationSettings (T_papp + T8 event 0x08)** ||||
 | 0x11 | list_player_attrs_rsp | `0x35d0` | `0x1e24` |
@@ -434,7 +440,7 @@ Table 16 (Message Error Handling): Reporting Capability Error (M) ✓ via `[AVDT
 
 **Handler verification for AVDTP 1.3 additions (sig_id 0x0c GET_ALL_CAPABILITIES + 0x0d DELAYREPORT):**
 
-The AVDTP signal dispatcher at file `0xaa72c` (see `INVESTIGATION.md` Trace #13c for the disassembly walk-through) has a TBH jump table at `0xaa81e` with explicit entries for both sig 0x0c (target `0xab4de`) and sig 0x0d (target `0xab540`). Sig 0x0d DELAYREPORT has substantive handler logic. Sig 0x0c GET_ALL_CAPABILITIES is a stub at `0xab4de` that always falls through to the BAD_LENGTH error path — peer receives an error response, not a General Reject.
+The AVDTP signal dispatcher at file `0xaa72c` (full disassembly in `INVESTIGATION.md`) has a TBH jump table at `0xaa81e` with explicit entries for both sig 0x0c (target `0xab4de`) and sig 0x0d (target `0xab540`). Sig 0x0d DELAYREPORT has substantive handler logic. Sig 0x0c GET_ALL_CAPABILITIES is a stub at `0xab4de` that always falls through to the BAD_LENGTH error path — peer receives an error response, not a General Reject.
 
 V5 patches the jump-table entry for sig 0x0c to redirect to the sig 0x02 GET_CAPABILITIES handler at `0xaa924`. This is a structural workaround, not a real handler — but per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible subset of the sig 0x0c response, which suffices for an SBC-only Source.
 
@@ -504,7 +510,7 @@ Combining §9.10 (AVCTP) + §9.11 (A2DP) + §9.12 (AVDTP) + §9.13 (GAVDP):
 
 **Status: Option C shipped — V3 + V4 + V5 landed together.** V3 + V4 bump A2DP/AVDTP advertisement to 1.3; V5 is the structural workaround for sig 0x0c — it aliases the dispatcher's TBH jump-table entry from the BAD_LENGTH stub at `0xab4de` to the existing GET_CAPABILITIES handler at `0xaa924`. Per AVDTP V13 §8.8 the sig 0x02 response is a wire-compatible **subset** of the sig 0x0c response (no extended Service Capabilities), which is exactly what our SBC-only Source advertises anyway.
 
-**V5 is wire-correct by decoupling.** The AVDTP wire-frame TX site is `fcn.000ae418` (calls `L2CAP_SendData` at file offset `0xae58e`). Byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]`, where `txn = *(channel + 0x10)` is the per-channel transaction state populated by the request parser at signal-RX time. The dispatcher (TBH at `0xaa81e`) and per-signal handlers (e.g. `0xaa924`) do not write `txn->[0xe]`. When a peer issues sig 0x0c the parser stores 0x0c in `txn->[0xe]`, V5 routes dispatch through the GET_CAPABILITIES handler, the handler updates state, and `fcn.000ae418` reads `txn->[0xe]=0x0c` and emits a response with `sig_id=0x0c`. See `INVESTIGATION.md` Trace #16 for the full walk-through.
+**V5 is wire-correct by decoupling.** The AVDTP wire-frame TX site is `fcn.000ae418` (calls `L2CAP_SendData` at file offset `0xae58e`). Byte 1 of the response frame (sig_id) is read at `0xae480` from `txn->[0xe]`, where `txn = *(channel + 0x10)` is the per-channel transaction state populated by the request parser at signal-RX time. The dispatcher (TBH at `0xaa81e`) and per-signal handlers (e.g. `0xaa924`) do not write `txn->[0xe]`. When a peer issues sig 0x0c the parser stores 0x0c in `txn->[0xe]`, V5 routes dispatch through the GET_CAPABILITIES handler, the handler updates state, and `fcn.000ae418` reads `txn->[0xe]=0x0c` and emits a response with `sig_id=0x0c`. Full walk-through in `INVESTIGATION.md`.
 
 `patch_mtkbt.py` `OUTPUT_MD5` reflects V1+V2+V3+V4+V5+S1+P1.
 

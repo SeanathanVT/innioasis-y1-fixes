@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- AVRCP 1.3 §6.7.1 strict subscription gating in the trampoline chain — one CHANGED per CT registration; CT re-registers to receive the next. Matches Pixel-as-TG observed cadence on spec-compliant Controllers.
+- `mtkbt` outbound-frame drop bypass — every T9 / T5 CHANGED emit reaches the wire under sustained traffic (stock dropped silently under A2DP saturation).
+- TRACK_CHANGED `Identifier` carries the per-track audio ID so strict 1.4+ Controllers invalidate their `GetElementAttributes` cache on every track edge instead of serving stale metadata.
+- Faster perceived metadata refresh — TRACK_CHANGED pre-emits at `setDataSource` and at `playerPrepared` tail (was: `OnPreparedListener`, ~100-500 ms later). PLAYBACK_STATUS_CHANGED fresh-track edge fires ~260 ms earlier.
+- `GetCapabilities(EventsSupported)` advertises the 1.4+ event IDs (0x09-0x0c) alongside the 1.3 set — INTERIM-acked with zero payload. Strict Controllers gate metadata-pane render on these even from a 1.3-declared TG.
+- `--bluetooth` `ro.bluetooth.class` accurately advertises the Y1 as Audio/Video Major / Portable Audio Minor with Audio + Information service bits.
+- `T_charset` rejects `InformDisplayableCharacterSet` with AV/C `NOT_IMPLEMENTED` (spec-permissible per AVRCP 1.3 §5.2.7, Optional) — avoids a multi-second pre-subscription stall some Controllers exhibit.
+
+### Added
+- `GetElementAttributes` synthesises a `PlayingTime` via a synchronous `MediaMetadataRetriever` fallback for responses that arrive before `prepareAsync` completes — Controllers no longer see "0:00 duration" on track transitions.
+- `--debug` build path (`KOENSAYR_DEBUG=1`): native `__android_log_print` injection in `libextavrcp_jni.so` plus smali-side instrumentation in the metadata pipeline. Release builds are byte-identical without the env var.
+- `tools/btlog-hci-extract.py` decodes `mtkbt`'s `btlog.bin` as AVRCP frames for offline trace inspection.
+
+### Fixed
+- `TrackInfoWriter.onSeek()` no longer treats the music app's post-`prepareAsync` "resume from saved progress" seek as a user seek (was: spurious wire-side `setSeekStatus`). Real user seeks (drag the seek bar) propagate unchanged.
+- TRACK_CHANGED no longer re-emits on the music app's same-track `prepareAsync` cycles (now dedup'd on audio ID).
+
 ## [2.1.0] - 2026-05-13
 AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller now sees full track metadata, live play status, and play-state changes from the Y1, and can drive Repeat / Shuffle from its own UI. Reference docs: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PATCHES.md`](docs/PATCHES.md). Investigation history: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 

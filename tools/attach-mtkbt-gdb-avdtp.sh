@@ -1,58 +1,8 @@
 #!/usr/bin/env bash
-# attach-mtkbt-gdb-avdtp.sh — attach gdbserver to the live mtkbt daemon for
-# breakpoint-driven RE of the AVDTP signal dispatcher (V5 dispatcher hunt).
-#
-# Sibling of attach-mtkbt-gdb.sh which targets the AVCTP-RX classifier.
-# Goal: find the per-sig_id dispatch site so V5 (the sig 0x0c
-# GET_ALL_CAPABILITIES handler that closes GAVDP 1.3 ICS Acceptor Table 5
-# row 9 — see docs/BT-COMPLIANCE.md §9.13) can be designed.
-#
-# Static analysis converges slowly because mtkbt's AVDTP code uses dense
-# MOVW/MOVT encoding that defeats string-xref grep. Runtime trace from
-# the parser site (0x50b08) is much faster.
-#
-# Pre-reqs:
-#   - --root flashed (su needs to work via `adb shell su -c ...`)
-#   - gdbserver binary on the host at one of:
-#         tools/gdbserver  (preferred — in-tree)
-#         $GDBSERVER       (env var override)
-#         $ANDROID_NDK_HOME/prebuilt/android-arm/gdbserver/gdbserver
-#     Must be ARM 32-bit, statically linked, API 17 / Android 4.2 compatible.
-#
-# Host side: gdb-multiarch (Debian/Ubuntu) or arm-linux-gnu-gdb (Fedora).
-#
-# What this does:
-#   1. Validates gdbserver and adb device.
-#   2. Finds live mtkbt PID + reads /proc/<pid>/maps to get the PIE base.
-#   3. Pushes gdbserver to /data/local/tmp/.
-#   4. Starts `gdbserver --attach :<port> <pid>` on the device under su.
-#   5. Sets up `adb forward tcp:<port> tcp:<port>`.
-#   6. Generates a gdb command file with breakpoints at the AVDTP-RX
-#      sites located via static analysis: parser entry (0x50b08), sig_id
-#      store (0x50b96), parser exit (0x50c46), and a candidate caller
-#      (0xde26 + 0xde2a). Translated to live addresses using PIE base.
-#   7. Prints the one-line command for the user to launch gdb against the
-#      generated command file.
-#
-# Usage:
-#   ./tools/attach-mtkbt-gdb-avdtp.sh                       # default flow
-#   ./tools/attach-mtkbt-gdb-avdtp.sh --gdbserver /path/to/gdbserver
-#
-# Driving the capture (once gdb is running):
-#   1. Pair Y1 with any A2DP Sink.
-#   2. The pairing exchange will issue DISCOVER (sig 0x01) +
-#      GET_CAPABILITIES (sig 0x02) — breakpoints will fire.
-#   3. Watch BP@0x50c46 (parser exit): note the post-return PC the
-#      caller branches to. That branch site is the AVDTP signal
-#      dispatcher we need to find for V5.
-#   4. The gdb command file's `commands` blocks log register + memory state
-#      at each BP and continue automatically.
-#
-# Watch-items:
-#   - Each BP halt freezes mtkbt's RX thread for as long as the BP commands
-#     run. Most peer CTs time out after a few seconds. Keep `commands` blocks
-#     short (silent + printf + continue) so peers don't disconnect mid-capture.
-#   - After detach, mtkbt may be in a wedged state. `BT off → on` resets it.
+# attach-mtkbt-gdb-avdtp.sh — gdbserver-attach mtkbt with BPs at the AVDTP
+# signal parser entry/store/exit + candidate caller. Sibling of
+# attach-mtkbt-gdb.sh (AVCTP-RX). Pre-reqs match the sibling script.
+# Run --help for usage.
 
 set -u
 

@@ -80,8 +80,20 @@
 
     # State-edge wake: setPlayStatus has flushed y1-track-info[792]/[780..787]
     # synchronously; fire playstatechanged so MtkBt routes through T9 and emits
-    # PLAYBACK_STATUS / POS CHANGED.
+    # PLAYBACK_STATUS / POS CHANGED. Also fire metachanged so MtkBt's Java
+    # mirror picks up the latest AOSP-convention extras (id/track/artist/album);
+    # setPlayStatus may have just detected a fresh-track edge (audio_id changed
+    # since prior flush — the pause-flush leading edge of a nextSong/prevSong
+    # sequence) and reset position+duration to 0. The metachanged wake ensures
+    # T5 sees the new audio_id mirror-vs-file mismatch in the same broadcast
+    # cycle as T9's POS reset emit, so the CT gets a coherent "track just
+    # started" update ~260 ms earlier than B5.2b's toRestart-setDataSource
+    # hook would. wakeTrackChanged is idempotent when no edge is present
+    # (T5 dedups via file[0..7] vs state[0..7]) — safe to fire on every
+    # play-status edge.
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
+    invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
 
     # Drive the 1 s position-tick loop. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the
     # PLAYBACK_POS_CHANGED cadence to the TG; T9 has the live-extrapolated
@@ -106,6 +118,84 @@
     .catch Ljava/lang/Throwable; {:try_start_b5 .. :try_end_b5} :catch_b5
 
     :catch_b5
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
+# Early track-change hook fired from PlayerService.toRestart() right after
+# setDataSource(newPath) succeeds but BEFORE prepareAsync completes. By
+# this point mPlayingMusic / mPlayingAudiobook already point at the new
+# song so flushLocked() writes the new metadata. Moves the CT-visible
+# track-change emit ~100-500 ms earlier than the OnPreparedListener path.
+# Audio_id-dedup doesn't help here: restartPlay() pause()s before
+# toRestart(), and pause's flushLocked has already updated mCachedAudioId.
+.method public static onEarlyTrackChange()V
+    .locals 3
+
+    :try_start_e
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->onFreshTrackChange()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
+
+    return-void
+    :try_end_e
+    .catch Ljava/lang/Throwable; {:try_start_e .. :try_end_e} :catch_e
+
+    :catch_e
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+
+# PlayerService.playerPrepared() tail hook (B5.2c). Fires AFTER the
+# `iput-boolean playerIsPrepared = true` (both shutdown-restore + normal
+# prepare branches). getPlayerIsPrepared() is now true, so flushLocked
+# captures the freshly-valid getDuration() into mLastKnownDuration +
+# y1-track-info[776..779]. Without this hook, flushLocked at
+# OnPreparedListener time runs ~26 ms BEFORE playerIsPrepared flips
+# and falls back to the stale prior-track mLastKnownDuration.
+#
+# Also re-broadcasts metachanged + playstatechanged so T5 → TRACK_CHANGED
+# CHANGED and T9 → PLAYBACK_POS / STATUS CHANGED carry the corrected
+# duration on the wire.
+.method public static onPlayerPreparedTail()V
+    .locals 3
+
+    :try_start_pt
+    sget-object v0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->INSTANCE:Lcom/koensayr/y1/trackinfo/TrackInfoWriter;
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flush()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
+
+    invoke-virtual {v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
+
+    return-void
+    :try_end_pt
+    .catch Ljava/lang/Throwable; {:try_start_pt .. :try_end_pt} :catch_pt
+
+    :catch_pt
     move-exception v0
 
     const-string v1, "Y1Patch"

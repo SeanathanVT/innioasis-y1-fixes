@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 #
-# tools/setup.sh — idempotent: clone MTKClient at the pinned ref, create
-# Python venvs (mtkclient deps + patcher deps).
-#
-# Re-runnable. Skips work that's already done. To force a refresh, delete the
-# subdir and re-run (e.g. `rm -rf tools/mtkclient && tools/setup.sh`).
-#
-# Bumping the MTKClient pin: change MTKCLIENT_REF below, delete tools/mtkclient,
-# re-run.
+# setup.sh — clone MTKClient at the pinned ref, create the patcher venvs.
+# Idempotent; to refresh, `rm -rf tools/mtkclient` and re-run.
 
 set -euo pipefail
 

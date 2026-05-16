@@ -63,6 +63,36 @@
 # the playhead display).
 .field private mLastKnownDuration:J
 
+# elapsedRealtime() at the most recent real (audio_id-changed) onTrackEdge
+# fire. onSeek consults this to suppress the music app's playerPrepared()
+# restore-from-saved-progress seek (3 setCurrentPosition sites in stock
+# playerPrepared, lines 1737/1793/1923) — without it, those calls
+# overwrite our reset-to-0 from onEarlyTrackChange and the wire-side
+# playhead resumes from the user's prior pause point on the new track.
+#
+# 2 s suppression window covers prepareAsync + OnPreparedListener + the
+# playerPrepared restore. User-initiated seeks (seek-bar drag) come well
+# after, so they're not affected.
+.field private mLastFreshTrackChangeAt:J
+
+# MediaMetadataRetriever-derived duration cache. Y1 music app stores no
+# DB-cached duration; PlayerService.getDuration() delegates to
+# IjkMediaPlayer/MediaPlayer.getDuration() which throws before
+# prepareAsync completes. Without an alternate source the first T4
+# GetElementAttributes response on every track skip carries dur=0
+# (attribute 0x07 PlayingTime = "0"), which strict CTs cache as
+# "duration unknown" — AVRCP 1.3 has no DURATION_CHANGED event so a
+# §6.7.1-correct second TRACK_CHANGED CHANGED (same audio_id) cannot
+# refresh it once the real duration arrives via B5.2c's playerPrepared
+# tail ~700 ms later. MediaMetadataRetriever.setDataSource(path) +
+# extractMetadata(METADATA_KEY_DURATION) reads the file's container
+# header synchronously without involving the C++ MediaPlayer, so it's
+# safe to call from any state. Per-audio_id cache keeps the cost to one
+# header parse per track (~10-50 ms for local MP3/M4A).
+.field private mMmrAudioId:J
+
+.field private mMmrDurationMs:J
+
 
 # direct methods
 .method static constructor <clinit>()V
@@ -121,6 +151,10 @@
     const-wide/16 v0, 0x0
 
     iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
 
     return-void
 .end method
@@ -290,8 +324,25 @@
 
 # Public mutator: AVRCP play-status edge. Captures position/time-at-edge.
 # Returns silently if status unchanged (dedupe).
+#
+# Inline track-edge detection (perceived-responsiveness optimisation): if
+# flushLocked recomputes mCachedAudioId to a different value than the
+# pre-flush snapshot, the music-app's internal nextSong/prevSong/restartPlay
+# sequence has already advanced mPlayingMusic to a new track. This pause-
+# flush is the earliest possible point we observe the audio_id change —
+# ~260 ms BEFORE PlayerService.toRestart()'s setDataSource sites where
+# B5.2b's onEarlyTrackChange currently fires. Resetting position +
+# mLastKnownDuration to 0 here and re-flushing keeps the file internally
+# consistent (new audio_id + new title + 0 position + 0 duration) so T4
+# GetElementAttributes responses + T9 POS_CHANGED + T5 TRACK_CHANGED all
+# show the CT a coherent "track just started" state in the same broadcast
+# cycle. Without this, the CT briefly sees new_audio_id + new_title +
+# stale_position (e.g., 15.7 s into a track that "just started"), which
+# stricter CTs latch onto and visibly lag before the next consistent
+# update arrives. Returns silently for resume-from-pause (audio_id
+# unchanged) — no extra work.
 .method public declared-synchronized setPlayStatus(B)V
-    .locals 5
+    .locals 7
 
     monitor-enter p0
 
@@ -319,7 +370,39 @@
 
     iput-byte p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPlayStatus:B
 
+    # Snapshot audio_id BEFORE flushLocked. The flush re-reads PlayerService
+    # state which by this point may already reflect a new track (the music
+    # app's nextSong/prevSong/restartPlay flow updates mPlayingMusic before
+    # the pause() call that brings us here).
+    iget-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    # Compare new mCachedAudioId (just written) with snapshot. If different,
+    # this play-status edge is the leading edge of a track change — reset
+    # position + duration to 0 and re-flush so the file is internally
+    # consistent before any T4/T5/T6/T9 response sees it.
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    cmp-long v3, v5, v0
+
+    if-eqz v3, :cond_no_edge
+
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    :cond_no_edge
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
@@ -341,12 +424,52 @@
 # Without this, a user-initiated seek (via the music app's seek bar) leaves
 # the anchor at the previous position and the CT's playhead either jumps
 # back to the pre-seek value or freezes until the next state edge.
+#
+# Suppression window: PlayerService.playerPrepared() in stock 3.0.2 calls
+# setCurrentPosition(savedTime) at three sites (lines 1737/1793/1923 —
+# restoreStartTime / Bookmark.startTime / Progress.startTime) right after
+# prepareAsync completes. Desirable for the local UI but overwrites the
+# reset-to-0 our onEarlyTrackChange stamped — wire-side playhead would
+# resume from the prior pause point on the freshly-skipped track. Suppress
+# onSeek for ~2 s after a fresh-track-change reset; user-initiated seeks
+# (seek-bar drag) come well after.
 .method public declared-synchronized onSeek(J)V
-    .locals 3
+    .locals 5
 
     monitor-enter p0
 
     :try_start_0
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    const-wide/16 v2, 0x0
+
+    cmp-long v4, v0, v2
+
+    if-eqz v4, :cond_normal
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v2
+
+    sub-long/2addr v2, v0
+
+    const-wide/16 v0, 0x7d0
+
+    cmp-long v4, v2, v0
+
+    if-gez v4, :cond_normal
+
+    # Within ~2 s of a fresh track-change reset — this seek is almost
+    # certainly playerPrepared's restore-from-saved-progress call.
+    # Skip the position update (and the wakePlayStateChanged broadcast,
+    # since nothing changed). Don't clear mLastFreshTrackChangeAt — if
+    # playerPrepared somehow fires a second restore call (e.g. for
+    # bookmark + progress) we want to suppress that too.
+    monitor-exit p0
+
+    return-void
+
+    :cond_normal
     iput-wide p1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
 
     invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
@@ -442,9 +565,21 @@
 .end method
 
 
-# Track edge: consume the pending natural-end latch, reset position+time, flush.
-# Called from OnPreparedListener (track is now decoded and playable).
-.method public declared-synchronized onTrackEdge()V
+# Unconditional fresh-track reset. Called from PlaybackStateBridge.onEarlyTrackChange
+# (invoked from PlayerService.toRestart's setDataSource sites — a guaranteed
+# track-load entry). Resets position-anchor + mLastKnownDuration + stamps
+# mLastFreshTrackChangeAt; bypasses audio_id dedup.
+#
+# Dedup wouldn't work here: restartPlay() pauses before toRestart(), and pause's
+# setPlayValue → flushLocked has already updated mCachedAudioId — by the time
+# onTrackEdge would snapshot it, old==new.
+#
+# mLastKnownDuration reset is critical: flushLocked falls back to the cached
+# duration when getPlayerIsPrepared() is false (the prepareAsync gap). Without
+# the reset, the file briefly reports the previous track's duration. 0 reads
+# as "unknown" per AVRCP §5.3.4 / 1.3 attr 0x07; the B5.2c playerPrepared-tail
+# hook re-flushes once getPlayerIsPrepared() flips true.
+.method public declared-synchronized onFreshTrackChange()V
     .locals 3
 
     monitor-enter p0
@@ -454,21 +589,101 @@
 
     iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPreviousTrackNaturalEnd:Z
 
-    const/4 v1, 0x0
+    const/4 v0, 0x0
 
-    iput-boolean v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
 
-    const-wide/16 v1, 0x0
+    const-wide/16 v0, 0x0
 
-    iput-wide v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
 
     invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
 
-    move-result-wide v1
+    move-result-wide v0
 
-    iput-wide v1, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
 
     invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+    :try_end_0
+    .catchall {:try_start_0 .. :try_end_0} :catchall_0
+
+    monitor-exit p0
+
+    return-void
+
+    :catchall_0
+    move-exception v0
+
+    monitor-exit p0
+
+    throw v0
+.end method
+
+
+# Soft track edge: dedup-gated reset for re-prepare paths that may or may not
+# represent a real track change. Called from PlaybackStateBridge.onPrepared
+# (OnPreparedListener fires on every prepareAsync completion, including the
+# re-prepare some player engines do on pause→resume cycles of the same track).
+#
+# Snapshot old mCachedAudioId → flushLocked refreshes it → compare. Only resets
+# position-anchor if audio_id actually changed. Real fresh-track changes are
+# already handled by onFreshTrackChange via onEarlyTrackChange; this method
+# exists so an OnPrepared firing for a same-track re-prepare doesn't disturb
+# the existing live-position baseline.
+.method public declared-synchronized onTrackEdge()V
+    .locals 5
+
+    monitor-enter p0
+
+    :try_start_0
+    # Natural-end latch (unchanged).
+    iget-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPreviousTrackNaturalEnd:Z
+
+    const/4 v0, 0x0
+
+    iput-boolean v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPendingNaturalEnd:Z
+
+    # Snapshot the previous cached audio_id (from prior flushLocked).
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    # First flush — recomputes audio_id from PlayerService.getPlayingSong()
+    # and stores it in mCachedAudioId. Also refreshes title/artist/album so
+    # CTs that re-query metadata immediately after the metachanged broadcast
+    # see the new track even if we end up taking the same-track path below.
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    # Compare new audio_id (just written) with snapshot.
+    iget-wide v2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mCachedAudioId:J
+
+    cmp-long v4, v0, v2
+
+    if-eqz v4, :cond_same_track
+
+    # Real track edge — reset position anchor and re-flush.
+    const-wide/16 v0, 0x0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mPositionAtStateChange:J
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mStateChangeTime:J
+
+    # Stamp the fresh-track-change time so onSeek can suppress the
+    # music app's playerPrepared() restore-from-saved-progress seek
+    # that fires ~50-500 ms later (after prepareAsync completes).
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastFreshTrackChangeAt:J
+
+    invoke-direct {p0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->flushLocked()V
+
+    :cond_same_track
     :try_end_0
     .catchall {:try_start_0 .. :try_end_0} :catchall_0
 
@@ -779,7 +994,10 @@
     # inside its restart sequence BEFORE prepareAsync completes, so flushing here
     # without a guard would nuke the new MediaPlayer mid-prepare and leave the UI
     # stuck at 0:00. Gate on getPlayerIsPrepared (a pure iget-boolean, safe in any
-    # state) and write 0 for unknown duration.
+    # state); when not prepared, fall back to MediaMetadataRetriever (cached per
+    # audio_id) so the first T4 response for a new track carries the real duration
+    # rather than 0. AVRCP 1.3 has no DURATION_CHANGED event — a CT that caches
+    # dur=0 from the first T4 will keep it until the next track change.
     invoke-virtual {v2}, Lcom/innioasis/y1/service/PlayerService;->getPlayerIsPrepared()Z
 
     move-result v0
@@ -799,6 +1017,36 @@
     goto :cond_have_duration
 
     :cond_skip_duration
+    # Pre-prepare path. Try MMR cache first (per-audio_id parse of file
+    # container header — no MediaPlayer involvement). v8 = path string,
+    # v9:v10 = synthetic audio_id long. Result lands in v11:v12 (long).
+    #
+    # Register-type discipline at :cond_have_duration: the "true" branch
+    # above wrote v0 as int (boolean from getPlayerIsPrepared move-result)
+    # and we reach the merge via goto. Dalvik 4.x's verifier joins
+    # register types at the merge — if THIS branch writes v0 as long
+    # (e.g., const-wide/16 v0, 0x0 for a cmp-long), the join becomes
+    # int|long-low → conflict, and the class fails verification with
+    # VerifyError at Y1Application.onCreate even though v0 is later
+    # overwritten (Dalvik 4.x is strict about conflict-state merges).
+    #
+    # Use long-to-int instead to derive a sign-test int without touching
+    # v0 as long. AVRCP duration is u32 in the file schema (max ~4.3 B ms
+    # = ~50 days, well beyond any real track), so v11 alone (the low half
+    # of the long pair) is a safe int representation for the sign check.
+    invoke-direct {p0, v8, v9, v10}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->getMmrDurationLocked(Ljava/lang/String;J)J
+
+    move-result-wide v11
+
+    long-to-int v0, v11
+
+    if-gtz v0, :cond_have_duration
+
+    # MMR returned 0 (failure or unsupported codec) — last-resort fallback
+    # to the legacy cached duration. mLastKnownDuration is reset to 0 by
+    # setPlayStatus's inline edge detection on track changes, so this
+    # typically yields 0 for fresh tracks where MMR also failed; the wire
+    # result is dur=0, same as pre-MMR behaviour.
     iget-wide v11, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
 
     :cond_have_duration
@@ -1048,6 +1296,106 @@
 
 
 # Helpers
+
+# MediaMetadataRetriever-backed duration getter. Per-audio_id cache: only
+# the first call for a given audio_id parses the file container; subsequent
+# calls return the cached value in microseconds. Failures (unreadable file,
+# unsupported codec, malformed metadata) latch a cached 0 for that audio_id
+# so we don't retry on every flush.
+#
+# Caller must hold the TrackInfoWriter monitor.
+.method private getMmrDurationLocked(Ljava/lang/String;J)J
+    .locals 7
+
+    # Cache check: if cached audio_id matches current, return cached duration
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    cmp-long v6, v0, p2
+
+    if-nez v6, :cond_cache_miss
+
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Re-mirror into mLastKnownDuration. setPlayStatus's inline-edge reset
+    # zeroes mLastKnownDuration between the two flushLocked calls; without
+    # this, the second flush would write the cached MMR value via v11:v12
+    # but leave mLastKnownDuration stale at 0 (visible in --debug fL.dur).
+    iput-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+
+    return-wide v0
+
+    :cond_cache_miss
+    # Latch the audio_id immediately so a failed parse caches 0 and avoids
+    # re-attempting on every subsequent flush during this track.
+    iput-wide p2, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrAudioId:J
+
+    const-wide/16 v3, 0x0
+
+    iput-wide v3, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Null path → return 0
+    if-eqz p1, :cond_return
+
+    # Construct the MediaMetadataRetriever OUTSIDE the try block. Dalvik
+    # 4.x's verifier rejects code where a catch handler is reachable while
+    # any register holds an uninitialized reference — `new-instance` produces
+    # an uninit ref and `invoke-direct <init>` only marks it initialized on
+    # successful return. If either of those instructions were inside the try
+    # range, the catch handler entry would observe v0 as "uninit MMR", which
+    # is a verify-time error (the stock `com/innioasis/music/util/Other`'s
+    # `getAlbumCover` uses the same out-of-try construction pattern).
+    new-instance v0, Landroid/media/MediaMetadataRetriever;
+
+    invoke-direct {v0}, Landroid/media/MediaMetadataRetriever;-><init>()V
+
+    :try_start_mmr
+    invoke-virtual {v0, p1}, Landroid/media/MediaMetadataRetriever;->setDataSource(Ljava/lang/String;)V
+
+    # METADATA_KEY_DURATION = 9 (android.media.MediaMetadataRetriever)
+    const/16 v1, 0x9
+
+    invoke-virtual {v0, v1}, Landroid/media/MediaMetadataRetriever;->extractMetadata(I)Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-virtual {v0}, Landroid/media/MediaMetadataRetriever;->release()V
+
+    if-eqz v2, :cond_return
+
+    invoke-static {v2}, Ljava/lang/Long;->parseLong(Ljava/lang/String;)J
+
+    move-result-wide v5
+
+    # cmp result into v1 (kept int across the try), not v0 (kept MMR object
+    # across the try). The verifier joins register types at catch entry over
+    # every throwing instruction in the try region; writing v0 as int late
+    # in the try would make catch-entry v0 a conflict (MMR vs int), which
+    # Dalvik 4.x rejects even though move-exception immediately overwrites.
+    cmp-long v1, v5, v3
+
+    if-lez v1, :cond_return
+
+    iput-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    # Mirror into mLastKnownDuration so the legacy fallback path + the
+    # --debug fL.dur log read the same coherent value.
+    iput-wide v5, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mLastKnownDuration:J
+    :try_end_mmr
+    .catch Ljava/lang/Throwable; {:try_start_mmr .. :try_end_mmr} :catch_mmr
+
+    :cond_return
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    return-wide v0
+
+    :catch_mmr
+    move-exception v0
+
+    iget-wide v0, p0, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->mMmrDurationMs:J
+
+    return-wide v0
+.end method
+
 
 .method private static safeStr(Ljava/lang/String;)Ljava/lang/String;
     .locals 1

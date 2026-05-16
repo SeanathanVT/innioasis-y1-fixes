@@ -1,29 +1,9 @@
 #!/usr/bin/env bash
-# attach-libextavrcp-gdb-papp.sh — attach gdbserver to whatever Java process
-# has loaded libextavrcp_jni.so, break at T_papp's PDU-0x14 dispatch arm,
-# and dump the inbound param body (n + attr_id + value) so we can verify
-# the AVRCP↔Y1 enum mapping a peer CT is using.
-#
-# Pre-reqs:
-#   - --root flashed (su via `adb shell su -c` works)
-#   - --avrcp flashed (this trampoline only exists post-flash)
-#   - tools/gdbserver in tree (or $GDBSERVER env var override)
-#   - host has gdb-multiarch / arm-linux-gnu-gdb
-#
-# Usage:
-#   ./tools/attach-libextavrcp-gdb-papp.sh
-#   ./tools/attach-libextavrcp-gdb-papp.sh --port 5039
-#
-# Driving the capture (once gdb is running):
-#   1. Pair / connect a peer CT that issues PDU 0x14.
-#   2. Each `BP@papp_set` hit prints n / attr_id / value — three bytes
-#      that tell us exactly what CT→TG enum the peer is sending.
-#   3. Output is also tee'd to /tmp/papp-gdb.log.
-#
-# Post-capture: feed the n / attr_id / value into iter3's enum-mapping table
-# (Trace #18). attr_id 0x02 = Repeat (Y1 enum 0/1/2 OFF/SINGLE/ALL <-> AVRCP
-# 0x01/0x02/0x03 OFF/SINGLE/ALL); attr_id 0x03 = Shuffle (Y1 bool false/true
-# <-> AVRCP 0x01/0x02 OFF/ALL).
+# attach-libextavrcp-gdb-papp.sh — gdbserver-attach the Java process holding
+# libextavrcp_jni.so and break at T_papp's PDU-0x14 dispatch arm, dumping
+# inbound n / attr_id / value bytes. Pre-reqs: --root + --avrcp flashed,
+# tools/gdbserver in tree, host gdb-multiarch / arm-linux-gnu-gdb.
+# Output also tee'd to /tmp/papp-gdb.log.
 
 set -e
 
