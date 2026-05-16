@@ -108,15 +108,15 @@ Anchored against **ICS Table 7 (Target Features)** in `docs/spec/AVRCP 1.3/AVRCP
 
 The advertised set in the GetCapabilities response (T1's `EventsSupported` array) determines what a CT can register for. We advertise eight events: `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x03, 0x04, 0x06, 0x07 are not advertised; T8 / T5 / T9 still handle them if a permissive CT subscribes anyway.
 
-**Session-long gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` = 1; T5 / T9 read the gate but **never clear**. Once a CT subscribes in a session, every subsequent value change emits CHANGED. M1 widens the cmp constant in mtkbt's RegNotif response dispatch (`fcn.0x121d8` at `0x12230`) from 1 to `0x0F`, so the dispatcher routes the JNI's reasonCode byte (IPC offset 8 = `ctxt[8]`) to the matching wire ctype: INTERIM (`0x0F`) for first-response arms, CHANGED (`0x0D`) for edge emits.
+**§6.7.1 strict gate semantics:** T2 / T8 INTERIM arms `y1-trampoline-state[N]` = 1; T5 / T9 read the gate, emit CHANGED, then clear the gate (= 0). CT must re-`RegisterNotification` to re-arm and receive the next CHANGED. Wire-side cadence becomes `min(TG_tick_rate, CT_re-register_rate)`. M1 widens the cmp constant in mtkbt's RegNotif response dispatch (`fcn.0x121d8` at `0x12230`) from 1 to `0x0F`, so the dispatcher routes the JNI's reasonCode byte (IPC offset 8 = `ctxt[8]`) to the matching wire ctype: INTERIM (`0x0F`) for first-response arms, CHANGED (`0x0D`) for edge emits.
 
 | event_id | Name | Spec § | INTERIM | CHANGED on edge |
 |---|---|---|---|---|
-| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 (arms state[14]) | ✓ T9 on play/pause edge (gated on state[14]; session-long) |
-| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 (arms state[16]) | ✓ T5 on track edge (gated on state[16]; session-long) |
-| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 (arms state[13]) | ✓ T9 at ~1Hz while playing + T5 on track edge (gated on state[13]; session-long; live-extrapolated via `clock_gettime(CLOCK_BOOTTIME)`) |
-| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (arms state[15]; reads `y1-track-info[795..796]`) | ✓ T9 on Repeat/Shuffle edge (gated on state[15]; session-long) |
-| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (arms state[20]; zero/empty payload) | ✓ T5 on track edge + T9 on play/pause edge (gated on state[20]; session-long) |
+| 0x01 | PLAYBACK_STATUS_CHANGED | §5.4.2 Tbl 5.29 | ✓ T8 (arms state[14]) | ✓ T9 on play/pause edge (gated on state[14]; cleared after emit) |
+| 0x02 | TRACK_CHANGED | §5.4.2 Tbl 5.30 | ✓ extended_T2 (arms state[16]) | ✓ T5 on track edge (gated on state[16]; cleared after emit) |
+| 0x05 | PLAYBACK_POS_CHANGED | §5.4.2 Tbl 5.33 | ✓ T8 (arms state[13]) | ✓ T9 at ~1Hz while playing + T5 on track edge (gated on state[13]; T9's tick clears after emit so CT re-register sets the wire rate; T5's track-edge burst leaves the gate intact, T9's next 1 s tick re-evaluates) |
+| 0x08 | PLAYER_APPLICATION_SETTING_CHANGED | §5.4.2 Tbl 5.37 | ✓ T8 (arms state[15]; reads `y1-track-info[795..796]`) | ✓ T9 on Repeat/Shuffle edge (gated on state[15]; cleared after emit) |
+| 0x09 | NOW_PLAYING_CONTENT_CHANGED | AVRCP 1.4 §6.9.5 | ✓ T8 (arms state[20]; zero/empty payload) | ✓ T5 on track edge + T9 on play/pause edge (gated on state[20]; not cleared — piggybacks on the track + play edge bursts) |
 | 0x0a | AVAILABLE_PLAYERS_CHANGED | AVRCP 1.4 §6.9.4 | ✓ T8 (zero/empty payload) | n/a (Y1 has one player) |
 | 0x0b | ADDRESSED_PLAYER_CHANGED | AVRCP 1.4 §6.9.2 | ✓ T8 (PlayerID=0, UidCtr=0) | n/a (Y1 has one player) |
 | 0x0c | UIDS_CHANGED | AVRCP 1.4 §6.10.3.3 | ✓ T8 (UidCtr=0) | n/a (Y1 has no UID database) |
