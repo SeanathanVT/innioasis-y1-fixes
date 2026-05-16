@@ -16,9 +16,11 @@ case "${1:-}" in
 Usage: ./tools/release.sh <semver> [--push]
 
 Release helper. Bumps apply.bash's # Version: header, renames
-[Unreleased] in CHANGELOG.md to [<version>] - YYYY-MM-DD (and prepends
-a new empty [Unreleased] above), commits both, and creates an
-annotated v<version> tag at HEAD.
+[Unreleased] in CHANGELOG.md to [<version>] - YYYY-MM-DD, commits both,
+and creates an annotated v<version> tag at HEAD.
+
+A new empty [Unreleased] section is NOT prepended; add one when the
+next batch of changes actually lands.
 
 Refuses to proceed unless: <semver> is strict X.Y.Z (no v prefix,
 no pre-release / build metadata), the working tree is clean,
@@ -127,7 +129,7 @@ echo "---"
 echo
 echo "Files to be modified:"
 echo "  - $BASH_FILE  (# Version: bump)"
-echo "  - $CHANGELOG  (rename [Unreleased] → [$VERSION] - $TODAY, add new empty [Unreleased])"
+echo "  - $CHANGELOG  (rename [Unreleased] → [$VERSION] - $TODAY)"
 echo "Then: commit + annotated tag $TAG."
 if $PUSH; then
     echo "Then: git push origin $(git symbolic-ref --short HEAD) && git push origin $TAG."
@@ -152,6 +154,10 @@ fi
 # 6 — rewrite CHANGELOG first (the more-likely-to-fail step). If the regex
 # misses or anything else goes wrong, the apply.bash sed below never runs.
 # Also captures the [Unreleased] body for re-use as the commit + tag message.
+#
+# Behaviour: rename [Unreleased] → [VERSION] - TODAY in place. Prior
+# `## [...]` version sections are preserved. A new empty [Unreleased]
+# is NOT prepended — re-add one when the next batch of changes lands.
 RELEASE_BODY="$(mktemp)"
 trap 'rm -f "$RELEASE_BODY"' EXIT
 python3 - "$CHANGELOG" "$VERSION" "$TODAY" "$RELEASE_BODY" <<'PYEOF'
@@ -164,7 +170,7 @@ if not m:
 pathlib.Path(body_path).write_text(m.group(1).strip() + '\n')
 new = re.sub(
     r'^## \[Unreleased\]\s*\n',
-    f'## [Unreleased]\n\n## [{version}] - {today}\n',
+    f'## [{version}] - {today}\n',
     text,
     count=1,
     flags=re.M,
@@ -173,7 +179,7 @@ if new == text:
     sys.exit("ERROR: failed to rewrite [Unreleased] section in CHANGELOG")
 pathlib.Path(path).write_text(new)
 PYEOF
-echo "[updated] $CHANGELOG  [Unreleased] → [$VERSION] - $TODAY (and new empty [Unreleased])"
+echo "[updated] $CHANGELOG  [Unreleased] → [$VERSION] - $TODAY"
 
 # 7a — bump the bash's # Version: header (now safe — CHANGELOG is already written)
 sed -i.bak -E "s/^# Version:[[:space:]]+[0-9]+\\.[0-9]+\\.[0-9]+[[:space:]]*$/# Version:   $VERSION/" "$BASH_FILE"
