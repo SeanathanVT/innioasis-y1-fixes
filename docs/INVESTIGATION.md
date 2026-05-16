@@ -3246,3 +3246,90 @@ AVRCP 1.3 §6.7.1 is explicit: CT MUST re-`RegisterNotification` after each CHAN
 
 A spec-compliant fix path: implement strict §6.7.1 one-shot in T9 (clear state[14] after each CHANGED emit, re-arm only on next T8 INTERIM). That brings our wire emit count down from 28 to 2 per Kia session — eliminating the IPC overflow and matching what Kia actually expects. The trade-off: the 26 dropped emits we currently make were "best-effort" attempts to compensate for non-compliant CTs; switching to strict one-shot would relinquish that compensation. But empirically the 26 attempts don't reach the wire anyway, so we lose nothing concrete by becoming spec-compliant.
 
+
+### Per-event transId database
+
+At `libextavrcp_jni.so:0x71f0`, `getSavedRegEventSeqId(eventId)`:
+```
+cmp r0, 0xf
+bhi return_zero
+ldr r3, [pc + 0x60bb]    → r3 = &g_avrcp_req_event_database
+add r3, pc
+ldrb r0, [r3, r0]         → r0 = g_avrcp_req_event_database[eventId]
+bx lr
+```
+
+`g_avrcp_req_event_database` is a **16-byte global table** (one byte per event_id, indices 0..15) at VA `0xd2b5` in `.bss`. Sister function `saveRegEventSeqId(eventId, seqId)` at `0x5ee4` writes to it from the inbound RX path when CT sends a `RegisterNotification`.
+
+The stock `notificationPlayStatusChangedNative` (at `0x3cdc`) reads this DB to populate `conn[0x11]` (= AVCTP transaction label) before calling the response builder:
+
+```
+ldr.w lr, [pc + ...]       ; lr = const offset, resolves to 0xd2b5 = g_avrcp_req_event_database
+add lr, pc
+ldrb.w ip, [lr, 1]         ; ip = g_avrcp_req_event_database[1] (event 0x01 = PLAYBACK_STATUS)
+strb.w ip, [r7, 0x19]      ; r7[0x19] = conn[0x11] = transId
+```
+
+Our T9 trampoline (entered via `b.w T9` at `0x3c88`, the first instruction of `notificationPlayStatusChangedNative`) **bypasses this stock prolog** — we don't write conn[0x11] either. So T9 emits CHANGED with whatever transId the conn struct already held from the last stock-prolog or inbound-RX path execution. In practice that's still correct (= the CT's last subscription transId), but it's an implicit dependency that should be made explicit if T9 is ever entered before any inbound RX path has run.
+
+### Struct layout (28-byte conn struct from `calloc(1, 28)`)
+
+| Offset (struct) | Offset (conn = struct + 8) | Field | Setter |
+|---|---|---|---|
+| 0x00..0x07 | -8..-1 | (header / unknown) | unset by `initializeNativeObjectNative`, only `memset(0)` |
+| 0x08..0x0f | 0..7 | (header / unknown) | unset |
+| **0x10** | **8** | **AF_UNIX SOCK_DGRAM FD** | `enableNative` 0x4952: `socket(1, 2, 0)` → here |
+| 0x14 | 0xc | local server FD | `enableNative` 0x4920: `socket_local_server(...)` |
+| **0x19** | **0x11** | **transId byte (= AVCTP TL)** | stock `notificationPlayStatusChangedNative` 0x3cf2; `getSavedSeqId` callsites at 0x4afc / 0x4b4a (folder-items paths) |
+| 0x1a..0x1b | 0x12..0x13 | (struct end at 28 B) | unset |
+
+`BT_SendMessage` reads only `conn[8]` (FD) from the conn struct. `btmtk_avrcp_send_*_rsp` builders read `conn[0x11]` (transId) for the AVCTP byte. Everything else is local-buffer scratch.
+
+### Strict-gate revert history
+
+The "session-long subscription gate" semantics that produce 28 T9 emit attempts per 14 play/pause cycles weren't always in place. Project history:
+
+| Date | Commit | What | Why |
+|---|---|---|---|
+| 2026-05-15 | `3a98be8` | "Pixel-mirror emit semantics — drop §6.7.1 gate clearing" | Switched to session-long after observing Pixel-as-TG keeps emitting CHANGED across multiple events without waiting for re-register |
+| 2026-05-15 | `6503c87` | "T5+T9: AVRCP §6.7.1 strict gate clearing after CHANGED emit" | Re-introduced strict §6.7.1 — clear state[14]/state[16]/etc. after each CHANGED. Verified Pixel-as-TG actually does emit strict on play/pause edges per tshark btsnoop trace |
+| 2026-05-15 | `b1c15a9` | bare revert of `6503c87` | (No body — revert reason undocumented) |
+
+So the strict-gate flip-flop was tried-and-reverted within hours on 2026-05-15. The current state is session-long, justified empirically by some CTs not re-registering. But Trace #40's finding — that 24/28 emits drop at the IPC layer anyway — means session-long's "compensate for non-compliant CTs" doesn't actually compensate. Strict §6.7.1 (re-introducing `6503c87`) would emit at most 2 CHANGED per Kia's 2 subscriptions for event 0x01, and all 2 would survive the IPC layer (low burst rate, no buffer overflow).
+
+### Why session-long isn't actually compensating
+
+The intuition behind session-long: "if a CT doesn't re-register but expects more updates (1.4-style sticky semantics), keep firing CHANGED." Empirically:
+- Kia subs 2× for event 0x01, gets 4 CHANGED on the wire (≈ 2× INTERIM-bonus per sub). Button updates ~2 times across the session.
+- Strict-gate would emit exactly 2 CHANGED on the wire (one per sub). Button still updates 2 times.
+
+Either mode results in the same Kia UI behaviour, because Kia's button updates are bounded by Kia's subscription count, not our CHANGED count — Kia treats unsolicited CHANGEDs (without a matching pending NOTIFY) as protocol noise.
+
+The 14% delivery rate IS the IPC-saturation symptom; it's not a separate failure — the session-long firing rate is what fills the IPC queue. Strict-gate would emit at the natural CT-driven rate, which is well within IPC throughput.
+
+### Spec-compliance fix
+
+Re-introduce the strict §6.7.1 gate-clear:
+
+- T9 PLAYBACK_STATUS_CHANGED CHANGED: clear state[14] after emit.
+- T9 PLAYER_APPLICATION_SETTINGS_CHANGED CHANGED: clear state[15] after emit.
+- T9 PLAYBACK_POS_CHANGED CHANGED: clear state[13] after emit.
+- T9 NowPlayingContent CHANGED: clear state[20] after emit.
+- T5 TRACK_CHANGED CHANGED: clear state[16] after emit.
+
+Existing implementation in `6503c87` can be cherry-picked; the `_emit_subscription_write` helper already supports the `fd_reg` parameter for callee-saved register choice.
+
+Trade-off: with strict gate, a CT that *really* does treat sub as sticky (doesn't re-register) would receive only the first CHANGED. We'd lose that CT's compensation. But the CT test matrix doesn't include any such CT (Kia, Bolt, Sonos, Pixel-mirror all spec-compliantly re-register). And empirically the IPC drop kills the sticky-CT compensation anyway.
+
+### What the upcoming `T9connfd` capture confirms
+
+Three possible outcomes; this RE narrows it to one.
+
+| `T9connfd=` value pattern | Interpretation | Confirms |
+|---|---|---|
+| All == same large nonzero (e.g. `T9connfd=0000000d`) | FD is the session-long AF_UNIX SOCK_DGRAM FD | Drop is at `send()` returning -1 (kernel datagram buffer overflow) |
+| All == 0 | A second struct path exists; the FD field is being cleared between emits | RE the second path (would invalidate the enableNative/0x36c0 finding) |
+| Varies non-zero | Multiple conn structs in play | Investigate further |
+
+Outcome 1 is the predicted result. The companion `T9rsprc=%u` log (commit `baaf496`) captures the response builder's return value: 0 = wire frame sent, 1 = `send()` returned -1 (silent drop). Together they pin the drop site to the kernel-level datagram queue.
+
