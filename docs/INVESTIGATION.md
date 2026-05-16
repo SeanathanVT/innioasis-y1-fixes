@@ -3333,3 +3333,56 @@ Three possible outcomes; this RE narrows it to one.
 
 Outcome 1 is the predicted result. The companion `T9rsprc=%u` log (commit `baaf496`) captures the response builder's return value: 0 = wire frame sent, 1 = `send()` returned -1 (silent drop). Together they pin the drop site to the kernel-level datagram queue.
 
+
+### `dual-kia-20260515-2215` capture (commit `f8fe647`) — empirical results
+
+The full debug-log + btlog capture brought back **definitive data** that overturns the AF_UNIX SOCK_DGRAM IPC-drop hypothesis:
+
+| Signal | Value |
+|---|---|
+| `T9emit pstat=1` | 22 |
+| `T9emit pstat=2` | 22 |
+| `T9connfd=` | **`0x0000002f` (FD=47), unchanged across all 44 emits** |
+| `T9rsprc=` | **`0` (success) across all 44 emits** |
+| `T8reg ev=01` | 2 |
+| Wire `TX CHANGED` L2CAP=15 (event 0x01 or 0x06) | **8** |
+
+**Interpretations confirmed:**
+
+1. **conn[8] is session-long FD=47.** Confirms `enableNative` RE: AF_UNIX SOCK_DGRAM FD opened once at AVRCP service enable, persistent. The `cbz r6, 0x18bc` guard in `BT_SendMessage` never trips.
+
+2. **`AVRCP_SendMessage` always returns 0 (success).** `send()` on the AF_UNIX SOCK_DGRAM socket succeeds for all 44 emit attempts. The kernel queues every datagram into mtkbt's recv socket buffer.
+
+**Hypothesis overturned:** the drop is NOT at the kernel datagram queue. mtkbt receives every datagram. **mtkbt itself drops 36 of 44 frames before forwarding to the BT chip.**
+
+### Real drop site: mtkbt-side AVRCP TG state machine
+
+mtkbt's IPC handler reads our AVRCP response datagram, runs it through the chain documented in Trace #34:
+
+```
+IPC msg=544 → fcn.00067768 → fcn.000518ac → fcn.00012478 → per-event handler
+   → fcn.000121d8 → fcn.00011894 → fcn.0000f0bc → fcn.0000ef08 (UART wire write)
+```
+
+Somewhere in that chain (most likely fcn.000121d8 or fcn.00011894 — the ones nearest the wire-write) mtkbt checks per-event AVRCP TG state ("is there a pending RegNotif sub for event X?") and silently drops the frame if no match. This is mtkbt enforcing AVRCP §6.7.1 strict semantics on its side, regardless of what our trampolines send.
+
+### Fix architecture (corrected)
+
+The strict-gate cherry-pick (`6503c87`) **would not change wire-side behaviour** — mtkbt is the gate, not our trampolines. Reducing our emit rate to spec-compliant levels is still good hygiene (less pointless IPC traffic), but it doesn't unstick Kia's button.
+
+The real fix paths are:
+
+1. **Patch mtkbt to NOP its drop-gate.** Same shape as the M1 patch — find the byte sequence in fcn.000121d8 or fcn.00011894 that gates wire emission on TG-side pending sub state, and either NOP the check or rewrite the cmp constant. Precedent exists; this is the same RE territory as Trace #34/35/36.
+
+2. **Synthetic re-arm via IPC.** Before each T9 CHANGED emit, send an additional IPC message that emulates "CT just sent RegisterNotification(event=X, transId=Y)" so mtkbt allocates a fresh pending response slot. mtkbt's chain accepts our subsequent CHANGED, forwards to wire. Requires understanding the IPC msg-id for inbound RegNotif from CT direction (different from our outbound msg=544).
+
+(1) is the cleaner fix once the byte-level gate is located.
+
+### Why the IPC-drop hypothesis was wrong
+
+The model I derived from RE'ing `BT_SendMessage` was correct **as far as the libextavrcp.so layer goes** — `cbz r6, 0x18bc` does drop frames if `conn[8]==0`, and `send()` failures do propagate through `AVRCP_SendMessage`'s `cmp r0, 0; bge return; movs r0, 1`. Both observations are accurate.
+
+But neither matches the empirical data. The capture shows neither `cbz r6` trip (FD always non-zero) nor `send()` failure (rsprc always 0). The drop is **downstream of `send()`**, in mtkbt — a layer the libextavrcp.so RE doesn't see.
+
+The `T9connfd=` and `T9rsprc=` instrumentation was load-bearing here: without it, I would have committed to the wrong fix layer based on plausible-but-wrong RE.
+
