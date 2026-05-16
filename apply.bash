@@ -231,6 +231,7 @@ FILENAME_MUSIC_APK=""
 # system.img md5 is for the RAW image (post-simg2img if input was sparse).
 KNOWN_FIRMWARES=(
   "3.0.2|473991dadeb1a8c4d25902dee9ee362b|1f7920228a20c01ad274c61c94a8cf36|82657db82578a38c6f1877e02407127a|com.innioasis.y1_3.0.2.apk"
+  "3.0.7|663baf9f7f2a08caa82e3fba7a9baa28|83b946d1799b4f0281ba8e808ed7911b|02ae3ae89e20bde0a20e940f73e1ed1b|com.innioasis.y1_3.0.7.apk"
 )
 
 # (PATH_SCRIPT_DIR set earlier — used by the --artifacts-dir staging fallback.)

@@ -88,8 +88,11 @@ Known stock firmwares recognised by `KNOWN_FIRMWARES` in the bash. Add a row (sa
 | Version | rom.zip (input) | system.img (raw, extracted) | boot.img (in zip; not consumed since v1.7.0) | Music APK basename in `app/` |
 |---|---|---|---|---|
 | **3.0.2** | `82657db82578a38c6f1877e02407127a` | `473991dadeb1a8c4d25902dee9ee362b` | `1f7920228a20c01ad274c61c94a8cf36` | `com.innioasis.y1_3.0.2.apk` |
+| **3.0.7** | `02ae3ae89e20bde0a20e940f73e1ed1b` | `663baf9f7f2a08caa82e3fba7a9baa28` | `83b946d1799b4f0281ba8e808ed7911b` | `com.innioasis.y1_3.0.7.apk` |
 
-Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes; `system.img` 681,574,400 bytes (raw ext4 — auto-de-sparsed via `simg2img` if a build bundles a sparse one); `boot.img` 4,706,304 bytes.
+The MediaTek BT stack (`bin/mtkbt`, `lib/libextavrcp*.so`, `lib/libaudio.a2dp.default.so`, `app/MtkBt.odex`) is byte-identical between 3.0.2 and 3.0.7 — every native patch in `--avrcp` / `--bluetooth` applies unchanged. Only the music APK differs (resource-ID shifts + a few additions in `Y1Repository`), and `patch_y1_apk.py`'s smali anchors handle both builds.
+
+Stock sizes: 3.0.2 `rom.zip` 259,502,414 bytes (raw `system.img` inside); 3.0.7 `rom.zip` 189,791,144 bytes (sparse `system.img` inside, auto-de-sparsed via `simg2img`). Both `system.img`s expand to 681,574,400 bytes raw ext4. `boot.img` 4,706,304 bytes on both.
 
 ## Requirements
 
@@ -97,7 +100,7 @@ Stock sizes (v3.0.2, the currently enrolled build): `rom.zip` 259,502,414 bytes;
 - `git`, `unzip`, `md5sum`.
 - Python 3.8+ with `venv` module. Patcher byte-level scripts are stdlib-only; `patch_y1_apk.py` needs `androguard`, which `tools/setup.sh` installs into `tools/python-venv/`. Java 11+ also required for `--music-apk` (apktool's smali assembler; apktool itself is downloaded by `patch_y1_apk.py` on first invocation).
 - `tools/setup.sh` clones MTKClient (currently pinned to 2.1.4.1) into `tools/mtkclient/` and creates `tools/mtkclient/venv/` with its requirements. Override with `--mtkclient-dir <path>` or `MTKCLIENT_DIR` if you have it elsewhere.
-- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (the currently-enrolled v3.0.2 is raw). Install: `dnf install android-tools` (Fedora / RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian / Ubuntu), `pacman -S android-tools` (Arch).
+- `simg2img` — only if the matched `KNOWN_FIRMWARES` build bundles a sparse `system.img` (v3.0.2 is raw; v3.0.7 is sparse). Install: `dnf install android-tools` (Fedora / RHEL via EPEL), `apt install android-sdk-libsparse-utils` (Debian / Ubuntu), `pacman -S android-tools` (Arch).
 - For `--root` only: prebuilt `src/su/build/su` (`cd src/su && make`). Toolchain: `dnf install -y epel-release && dnf install -y gcc-arm-linux-gnu binutils-arm-linux-gnu make` (Rocky/Alma/RHEL/Fedora) or `gcc-arm-linux-gnueabi` on Debian/Ubuntu.
 - For `--avrcp` only: Android SDK + JDK 17+. `tools/install-android-sdk.sh` auto-installs into `tools/android-sdk/` (~1.5 GB, idempotent). Manual instructions: [`docs/ANDROID-SDK.md`](docs/ANDROID-SDK.md).
 
@@ -123,7 +126,7 @@ adb reboot
 
 ## Verified against
 
-Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2. Hardware-verified against the v3.0.2 firmware in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
+Innioasis Y1 — MTK MT6572 ARM, Android 4.2.2. Hardware-verified against the v3.0.2 and v3.0.7 firmwares in [`KNOWN_FIRMWARES`](#stock-firmware-manifest); other builds need a manifest row added and may need patch-site offsets re-located if their stock MD5s diverge.
 
 ## Author
 

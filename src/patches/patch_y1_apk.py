@@ -83,12 +83,20 @@ APKTOOL_MD5     = "e28e4b4a413a252617d92b657a33c947"
 # slot here so a future bump can wire it up by changing one constant.
 APKTOOL_JVM_FLAGS: list = []
 
-# Stock APK md5 — pulled from /system/app/com.innioasis.y1/ on a clean v3.0.2
-# device. The smali pattern matches in this script assume unpatched bytecode,
+# Stock APK md5s — pulled from /system/app/com.innioasis.y1/ on clean stock
+# devices. The smali pattern matches in this script assume unpatched bytecode,
 # so re-running against an already-patched APK silently fails to apply the
 # patches. The md5 check rejects any non-stock input by default; pass
 # --skip-md5 to override (diagnostic use only).
-STOCK_APK_MD5 = "d2cd2841305830db2daf388cb9866c67"
+#
+# Every anchor in this script (literal-text + the AlbumsActivity regex) hits
+# on both builds. Resource-ID shifts in 3.0.7 are absorbed by the regex's
+# capture-group; .line-directive drift and const-string/jumbo opcode collapse
+# don't sit in any anchor.
+STOCK_APK_MD5S = {
+    "d2cd2841305830db2daf388cb9866c67": "3.0.2",
+    "b910b7d0e216b4851ee7f027e8fa5336": "3.0.7",
+}
 
 # === DEBUG LOGGING TOGGLE ============================================
 # When True, instruments every metadata-relevant entry point with
@@ -119,7 +127,7 @@ Y1APP_SMALI   = "smali/com/innioasis/y1/Y1Application.smali"
 PAPP_RECEIVER_SMALI = "smali/com/koensayr/PappSetReceiver.smali"
 PAPP_BROADCASTER_SMALI = "smali/com/koensayr/PappStateBroadcaster.smali"
 
-# Intent extra key we inject. Verified absent from 3.0.2 DEX string pool.
+# Intent extra key we inject. Verified absent from both 3.0.2 and 3.0.7 DEX string pools.
 ARTIST_INTENT_KEY = "artist_key"
 
 # -- Helpers ------------------------------------------------------------------
@@ -154,18 +162,23 @@ def md5_file(path: str) -> str:
 
 
 def verify_input_apk(path: str, skip_md5: bool) -> None:
-    """Pin input to the stock 3.0.2 APK so we don't silently re-patch."""
+    """Pin input to a known stock APK so we don't silently re-patch."""
     actual = md5_file(path)
-    if actual == STOCK_APK_MD5:
-        print(f"  Input md5: {actual}  (stock 3.0.2, verified)")
+    version = STOCK_APK_MD5S.get(actual)
+    if version:
+        print(f"  Input md5: {actual}  (stock {version}, verified)")
         return
+    expected_lines = "\n".join(
+        f"    {md5}  (com.innioasis.y1_{ver}.apk)"
+        for md5, ver in STOCK_APK_MD5S.items()
+    )
     msg = (
         f"\nERROR: input APK md5 mismatch.\n"
-        f"  Expected: {STOCK_APK_MD5}  (stock com.innioasis.y1_3.0.2.apk)\n"
-        f"  Got:      {actual}\n"
+        f"  Expected one of:\n{expected_lines}\n"
+        f"  Got: {actual}\n"
         f"\n"
-        f"  This patcher operates only on the stock APK pulled from\n"
-        f"  /system/app/com.innioasis.y1/ on a clean v3.0.2 device. The\n"
+        f"  This patcher operates only on a stock APK pulled from\n"
+        f"  /system/app/com.innioasis.y1/ on a clean stock device. The\n"
         f"  smali pattern matches assume unpatched bytecode -- patching an\n"
         f"  already-patched APK silently fails to apply the patches.\n"
         f"\n"
@@ -175,7 +188,8 @@ def verify_input_apk(path: str, skip_md5: bool) -> None:
         f"  --skip-md5 bypasses this check (diagnostic use only).\n"
     )
     if skip_md5:
-        print(f"  WARNING: input md5 {actual} != expected {STOCK_APK_MD5} (--skip-md5 set, proceeding)")
+        known = ", ".join(sorted(STOCK_APK_MD5S.values()))
+        print(f"  WARNING: input md5 {actual} not in known stock manifest ({known}); --skip-md5 set, proceeding")
         return
     sys.exit(msg)
 
@@ -249,11 +263,12 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument(
     'apk', nargs='?',
-    help='Path to stock com.innioasis.y1_3.0.2.apk. If omitted, looks for one in CWD.'
+    help='Path to stock com.innioasis.y1_<version>.apk. If omitted, looks for one in CWD.'
 )
 parser.add_argument(
     '--skip-md5', action='store_true',
-    help=f'Bypass input APK md5 check (expected: {STOCK_APK_MD5}). Diagnostic use only.'
+    help=f'Bypass input APK md5 check (expected one of: {", ".join(sorted(STOCK_APK_MD5S.values()))}). '
+         f'Diagnostic use only.'
 )
 parser.add_argument(
     '--clean-staging', action='store_true',
@@ -412,7 +427,7 @@ NEW_ARTISTS = (
 if OLD_ARTISTS not in artists_src:
     sys.exit(
         "ERROR: ArtistsActivity patch target not found.\n"
-        "  The smali structure may differ from 3.0.2.\n"
+        "  The smali structure may differ from supported stock builds.\n"
         "  Inspect ArtistsActivity.smali and locate the switchSongSortType\n"
         "  call in the confirm() method's artist-tap branch."
     )
@@ -530,7 +545,7 @@ m = INIT_VIEW_PATTERN.search(albums_src)
 if not m:
     sys.exit(
         "ERROR: AlbumsActivity initView() pattern not found.\n"
-        "  The smali structure may differ from 3.0.2.\n"
+        "  The smali structure may differ from supported stock builds.\n"
         "  Inspect AlbumsActivity.smali manually."
     )
 
@@ -925,7 +940,7 @@ if OLD_PLAY_BRANCH not in play_receiver_src:
     sys.exit(
         "ERROR: PlayControllerReceiver KEY_PLAY → playOrPause branch not found.\n"
         f"  File: {play_receiver_path}\n"
-        "  The smali shape may differ from 3.0.2."
+        "  The smali shape may differ from supported stock builds."
     )
 
 play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 1)
@@ -1141,7 +1156,7 @@ if OLD_DISPATCH_HEAD not in base_activity_src:
     sys.exit(
         "ERROR: BaseActivity dispatchKeyEvent prologue not found.\n"
         f"  File: {base_activity_path}\n"
-        "  The smali shape may differ from 3.0.2."
+        "  The smali shape may differ from supported stock builds."
     )
 
 base_activity_src = base_activity_src.replace(OLD_DISPATCH_HEAD, NEW_DISPATCH_HEAD, 1)
@@ -1252,7 +1267,7 @@ if OLD_PLAYER_DISPATCH_HEAD not in base_player_activity_src:
     sys.exit(
         "ERROR: BasePlayerActivity dispatchKeyEvent prologue not found.\n"
         f"  File: {base_player_activity_path}\n"
-        "  The smali shape may differ from 3.0.2."
+        "  The smali shape may differ from supported stock builds."
     )
 
 base_player_activity_src = base_player_activity_src.replace(
@@ -1452,7 +1467,7 @@ if OLD_Y1APP_RETURN not in y1app_src:
     sys.exit(
         "ERROR: Y1Application.onCreate :cond_3 + return-void not found.\n"
         f"  File: {y1app_path}\n"
-        "  The smali shape may differ from 3.0.2."
+        "  The smali shape may differ from supported stock builds."
     )
 
 y1app_src = y1app_src.replace(OLD_Y1APP_RETURN, NEW_Y1APP_RETURN, 1)
