@@ -3529,3 +3529,50 @@ Order of work:
 2. Capture: if PSTAT delivery jumps to ~100%, gate 2 is the right target.
 3. Design P-MTK-3 if (2) confirms.
 
+
+### Correction: P-MTK-2 (NOP gate 2) is unsafe — would corrupt state
+
+Closer look at `fcn.0xae5e4`'s prolog shows it writes the packet pointer to `ctx[0x10]` (relative to its own arg0, which is `ctx_orig + 0x14` per fcn.0x6df20:0x6df46):
+
+```asm
+0xae5e8: mov r4, r0           ; r4 = ctx_orig + 0x14
+0xae5ea: ldrh r0, [r0, 0x60]  ; r0 = ctx[0x60] (MTU)
+0xae5ee: mov r5, r1           ; r5 = packet
+...
+0xae60a: str r5, [r4, 0x10]   ; ctx_orig[0x24] = packet
+```
+
+If we NOP gate 2 and two `fcn.0xae5e4` calls happen concurrently with the same `ctx_orig`, both write to `ctx_orig[0x24]`. The second overwrites the first → first packet is silently lost AND the in-flight chip-write may be confused mid-transaction. This isn't a fix — it just moves the drop one layer deeper while corrupting state.
+
+So the candidates collapse to:
+
+| Candidate | Status |
+|---|---|
+| P-MTK-1 (NOP gate 1) | Doesn't fix anything (gate 2 still drops) |
+| P-MTK-2 (NOP gate 2) | **Unsafe — corrupts in-flight chip-write state** |
+| P-MTK-3 (proper queue insert at gate 2) | Production fix; multi-instruction; requires further RE of completion handler |
+| **P-Y1-rate-limit (Y1-side throttle)** | Add rate limit in T9 trampoline: skip emit if <N ms since last emit |
+| **P-Y1-strict-gate (re-introduce 6503c87)** | Strict §6.7.1 gate clear after CHANGED: emit only on CT-driven re-register; reduces our emit rate to whatever the CT requests |
+
+The Y1-side options are simpler and don't risk mtkbt instability. Trade-offs:
+
+- **P-Y1-rate-limit**: limits emit rate to match mtkbt's chip-write capacity. Requires clock_gettime in the trampoline (precedent: T6 / T9 already use it for live-position math). Set rate to ~1 emit per 100-200ms — enough to clear chip-write busy between attempts but fast enough to feel responsive.
+- **P-Y1-strict-gate**: cherry-pick `6503c87`. Emits one CHANGED per CT subscription, full stop. For a CT that re-registers at 1 Hz (Bolt, Sonos): 1 CHANGED per second. For Kia (re-registers ~2× per 5 min): 2 CHANGEDs per 5 min. Spec-correct but Kia gets very few updates.
+
+A hybrid is possible: re-introduce strict-gate BUT also rate-limit. For non-re-registering CTs, fire emits at 1/sec for the first ~5 seconds after a transition (giving the CT time to notice and re-subscribe), then quiesce.
+
+This is now a design decision rather than a discovery question. The RE has located the drop definitively; the fix shape depends on which CTs we want to optimize for and what protocol-deviation cost we'll accept.
+
+### Open: P-MTK-3 implementation sketch
+
+If the user prefers a mtkbt-side fix:
+
+1. Replace `cbnz r3, 0x6df52` (gate 2) with `bne <queue_insert_thunk>`. The thunk:
+   - Loads the per-conn pending queue head from `ctx[0xb0]` (offset TBD by RE)
+   - Calls `fcn.0x6cd48` to add the packet
+   - Returns 0xb (same as drop) so caller's bookkeeping works
+2. Patch `fcn.0x6d9b8` (the send-completion handler that clears `ctx[0xf2]`) to drain the per-conn queue when ctx[0xf2] clears.
+3. Allocate the per-conn queue head in stock data — likely possible via mtkbt's existing list-init infrastructure.
+
+This is ~50-80 bytes of injected code, similar in scope to extended_T2. Likely fits in mtkbt's padding regions but needs verification.
+
