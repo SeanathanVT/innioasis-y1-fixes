@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/spec/v2.0.0.html). For full prose detail on any entry, see `git log`.
 
 ## [Unreleased]
+### Fixed
+- mtkbt M4 patch: bypass the outbound-frame builder list-contains drop gate on the second of two structurally-identical builders (`fcn.0x6d0f0`, Path B). Path B carries short single-PDU AVRCP responses (`msg=544` RegNotif INTERIM/CHANGED); Path A carries fragmented multi-frame responses (`msg=540` GetElementAttributes) and was already covered by M2/M3. Subscription-class CTs that depend on RegNotif INTERIM confirmation for ev=01 / 05 / 08 / 0A now establish subscriptions instead of retry-storming until they disengage AVRCP TG.
 
 ## [2.3.0] - 2026-05-16
 ### Added

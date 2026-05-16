@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, two NOPs in the outbound-frame builder that remove a chip-readiness list-contains check + the chip-busy flag SET so the matching CHECK never trips). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3, M4** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, three NOPs across the two outbound-frame builders that remove the chip-readiness list-contains check on each path + the chip-busy flag SET on the multi-frame path so the matching CHECK never trips). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -120,7 +120,17 @@ Stock `fcn.0x6df20` (second-stage outbound send, tail-called from M2's site) tes
 
 M3 NOPs the SET (not the CHECK). After M3 the flag is never set, so `cbnz r3, 0x6df52` at `0x6df3a` never trips. Safe because mtkbt's IPC dispatcher is single-threaded and `fcn.0xae5e4`'s downstream chain (`fcn.0xae418 → fcn.0x50918 → mtk_bt_write`) is synchronous (blocking UART write) — no concurrent emits race on the per-channel state inside `fcn.0xae5e4`. The completion handler (`fcn.0x6d9b8`) still clears the flag on ACK events; harmless no-op since the flag is already 0. Paired with M2 to remove the two outbound-frame gates whose practical effect was ambiguous (see `docs/INVESTIGATION.md` Trace #40 closure for the empirical-validation story).
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `2b0bffeb6d29ff2ba75cf811688ec0ef`.
+**M4 — Outbound-frame drop bypass: NOP gate 1 list-contains check on twin builder** at file `0x6d116` (1 site, 2 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x6d116` | `41 d0` → `00 bf` | `beq 0x6d19c` → `nop` |
+
+`fcn.0xf0bc` dispatches outbound AVRCP responses through two structurally-identical builders selected by IPC msg byte 9: `ldrb r3, [r6, #9]; cbz r3, 0xf186`. `r3 != 0` (multi-frame fragmented responses — `msg=540` GetElementAttributes STABLE `0x0C`) takes Path A via `fcn.0xed50 → fcn.0x6d048` (M2/M3-patched). `r3 == 0` (short single-PDU responses — `msg=544` RegNotif INTERIM `0x0F` / CHANGED `0x0D`) takes Path B via `fcn.0xef08 → fcn.0x6d0f0`. M2/M3 patch only Path A; before M4, Path B was unpatched.
+
+`fcn.0x6d0f0` is byte-for-byte structurally identical to M2's `fcn.0x6d048`: same `fcn.0x6ccdc` list-contains check at `0x6d110`, same INTERIM/CHANGED discriminator at `0x6d11e`, same drop target `movs r0, 0xd; pop {r3, r4, r5, pc}` at `0x6d19c`. Unlike Path A on busy A2DP-heavy CTs, Path B's list-contains check fails on most invocations, dropping the majority of `msg=544` emits before the wire frame is built. Subscription-class CTs that depend on RegNotif INTERIM responses (ev=01 / 05 / 08 / 0A) then retry-storm on the AVCTP V13 §3.3.5 3 s timer until they disengage AVRCP TG. M4 NOPs the analogous `beq 0x6d19c` at `0x6d116`, so `fcn.0x6d0f0` unconditionally builds the wire frame and tail-calls `b.w 0xae5e4` (`L2CAP_SendData`). `fcn.0x6d0f0` skips `fcn.0x6df20` entirely, so M3's chip-busy SET has no analogue on Path B.
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `a10ca9636417a0ed71495dfa11b5eff0`.
 
 ---
 

@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "2b0bffeb6d29ff2ba75cf811688ec0ef"
+OUTPUT_MD5        = "a10ca9636417a0ed71495dfa11b5eff0"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -281,6 +281,37 @@ PATCHES = [
         "offset": 0x6df42,
         "before": bytes([0x84, 0xf8, 0xf2, 0x00]),  # strb.w r0, [r4, #0xf2]
         "after":  bytes([0x00, 0xbf, 0x00, 0xbf]),  # nop; nop
+    },
+    {
+        # M4 — analogue of M2 on the TWIN outbound-frame builder fcn.0x6d0f0.
+        #
+        # fcn.0xf0bc dispatches outbound AVRCP responses through two
+        # structurally-identical builders selected by IPC msg byte 9:
+        #   r3 = ldrb [r6, #9]
+        #   cbz r3, 0xf186    ; r3 == 0 → Path B (fcn.0xef08 → fcn.0x6d0f0)
+        #   ...               ; r3 != 0 → Path A (fcn.0xed50 → fcn.0x6d048, M2/M3)
+        # The JNI marshaller writes byte[9]=0 for short single-PDU responses
+        # (RegNotif INTERIM 0x0F / CHANGED 0x0D, IPC msg=544) and byte[9]!=0
+        # for AVCTP-fragmented multi-frame responses (GetElementAttributes
+        # STABLE 0x0C, IPC msg=540). M2/M3 cover Path A; Path B was unpatched.
+        #
+        # Wire captures on a subscription-class CT show msg=544 IPC emits
+        # reaching the wire at ~6% (vs ~100% for msg=540) when the
+        # fcn.0x6ccdc list-contains check at 0x6d110 fails — same gate M2
+        # bypasses on Path A. CTs that rely on RegNotif subscriptions
+        # (ev=01/05/08/0A) then retry-storm on the V13 §3.3.5 3 s AVCTP
+        # retry timer until they disengage AVRCP TG.
+        #
+        # fcn.0x6d0f0 is byte-for-byte structurally identical to
+        # fcn.0x6d048: same fcn.0x6ccdc list-contains check at 0x6d110,
+        # same INTERIM/CHANGED discriminator at 0x6d11e, same drop target
+        # `movs r0, 0xd; pop {r3, r4, r5, pc}` at 0x6d19c. fcn.0x6d0f0
+        # tail-calls b.w 0xae5e4 (L2CAP_SendData) directly, skipping
+        # fcn.0x6df20 — so M3's chip-busy SET has no analogue on Path B.
+        "name":   "[M4] Outbound-frame drop bypass: NOP gate 1 list-contains check on twin builder (mtkbt 0x6d116)",
+        "offset": 0x6d116,
+        "before": bytes([0x41, 0xd0]),  # beq 0x6d19c (drop with rc=0xd)
+        "after":  bytes([0x00, 0xbf]),  # nop
     },
 ]
 

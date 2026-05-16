@@ -10,7 +10,7 @@ Current shipped patches by binary:
 
 | Binary | Patches |
 |---|---|
-| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 / M1b / M1c (three sites in fn 0x379e0 flipped 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34), M2 (NOP `beq 0x6d0e0` at `0x6d06e` — bypass the outbound-frame builder's list-contains drop gate), M3 (NOP `strb.w r0, [r4, #0xf2]` at `0x6df42` — disable the chip-busy flag SET so the gate at `0x6df3a` never trips; both M2 and M3 derived in Trace #40 to eliminate the silent ~80% drop of T9 CHANGED emits under A2DP saturation) |
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 / M1b / M1c (three sites in fn 0x379e0 flipped 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34), M2 (NOP `beq 0x6d0e0` at `0x6d06e` — bypass the outbound-frame builder's list-contains drop gate on Path A, the fragmented multi-frame path for `msg=540` GetElementAttributes), M3 (NOP `strb.w r0, [r4, #0xf2]` at `0x6df42` — disable the chip-busy flag SET on Path A so the gate at `0x6df3a` never trips; both M2 and M3 derived in Trace #40 to eliminate the silent ~80% drop of T9 CHANGED emits under A2DP saturation), M4 (NOP `beq 0x6d19c` at `0x6d116` — bypass the structurally-identical list-contains drop gate on Path B `fcn.0x6d0f0`, the short single-PDU path for `msg=544` RegNotif INTERIM/CHANGED that the dispatcher at `fcn.0xf0bc` selects via `cbz r3, 0xf186` when IPC `byte[9]==0`; see Trace #41 — addresses the subscription-class CT retry-storm where `msg=544` was delivering at ~6% on the wire while `msg=540` on Path A was at ~100%) |
 | `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard). T1 advertises `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — events 0x09-0x0c are 1.4+ event IDs INTERIM-acked with zero payload via existing `libextavrcp.so` builders (no CHANGED ever fires; Y1 has one player, no Now Playing folder, no UID database). Mirrors Pixel-as-TG; what unblocks strict CT metadata-pane render (see Trace #32). |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
@@ -3673,4 +3673,54 @@ question (which combination is best?) requires CT-side observation.
 **Implications for strict-gate**: validated correct for subscription-driven CTs (Bolt, Sonos, Pixel-mirror), irrelevant for polling-driven CTs (Kia in observed sessions). The "Kia gets only 2 CHANGED" concern was based on a metric (wire-visible CHANGED count) that's a btlog-sampling artifact; Kia's actual UI behaviour in this session was driven by polling, not by the CHANGED count.
 
 Trace #40 closed: the Kia stuck-button regression resolved by the combined work even though the exact causal mechanism remains under-determined (likely a mix of TrackInfoWriter fast-path improvements + strict-gate hygiene + the position-fix work). Future Kia-specific debugging should focus on T6 freshness (file[792] / file[780-787] / file[776-779]) since that's the wire path Kia actually uses.
+
+
+## Trace #41 (2026-05-16) — Subscription-class CT metadata-pane regression: twin outbound-frame builder Path B is unpatched; M4 fix
+
+**Symptom.** A subscription-class CT (Chevrolet Bolt EV — see `dual-bolt-20260516-1453` for the load-bearing capture) displayed metadata for only 3 of 32 tracks played across a ~2.5 min driver-seat session. Y1 music app behaved correctly (track changes, play/pause, all logged). The 3 displayed tracks were not adjacent in playback order, not at session boundaries, and the metadata-success/failure cadence didn't correlate with screen wake events (user explicitly verified by waking the screen mid-session on failed tracks). PASSTHROUGH worked on every press. Title / Artist / Album / Genre / track-number / duration all appeared when they appeared.
+
+**Hypotheses ruled out.**
+
+- *Screen-off / Y1Bridge cascade.* Refuted by user waking the Y1 screen on a non-displaying track and seeing no metadata update.
+- *AVRCP 1.3 attribute corruption.* The 3 displayed tracks contained varied attribute lengths, characters, and zero-pad alignment; nothing distinguished them structurally from non-displayed tracks.
+- *Path-A (M2/M3) regression.* `msg=540` GetElementAttributes IPC emits → wire TX frames mapped 3:3 — every `msg=540` reached the wire. The 3 displayed tracks were each emitted via `msg=540` opportunistically (not via subscription).
+- *MtkBt.odex cardinality gates*. Already NOP'd; `MMI_AVRCP` logged 1,542 `ACTION_REG_NOTIFY ... cardinality:0` lines confirming the JNI was firing the natives but the Java callback table was empty (downstream of the root cause, not the root cause itself).
+- *Stale btlog sampling artifact (Trace #40 closure pattern).* Refuted by direct correlation between IPC emit count and `MMI_AVRCP cardinality:0` log volume — the missing wire frames are real, not a sampling artifact, because subscription confirmation never happens.
+
+**Wire-level evidence.** In the same `dual-bolt-20260516-1453` capture:
+
+| IPC msg | Path | Logcat emits | Wire TX frames | Delivery rate |
+|---|---|---|---|---|
+| `msg=540` GetElementAttributes (STABLE 0x0C) | Path A (M2/M3-patched) | 3 | 3 | 100% |
+| `msg=544` RegNotif response (INTERIM 0x0F / CHANGED 0x0D) | Path B (unpatched) | 117 | ~7 | ~6% |
+
+**Static dispatch trace.** `fcn.0xf0bc` (outbound AVRCP frame dispatcher) splits at `ldrb r3, [r6, #9]; cbz r3, 0xf186`:
+
+- `r3 != 0` (`byte[9] != 0`) → Path A: `fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20 → fcn.0xae5e4 L2CAP_SendData`. This is the fragmented multi-frame send path; M2 NOPs `fcn.0x6d048`'s list-contains drop gate at `0x6d06e`, M3 NOPs the chip-busy SET in `fcn.0x6df20` at `0x6df42`. Carries `msg=540`-class responses.
+- `r3 == 0` (`byte[9] == 0`) → Path B: `fcn.0xef08 → fcn.0x6d0f0 → b.w 0xae5e4 L2CAP_SendData` (tail-call direct, no `fcn.0x6df20` intermediate). This is the short single-PDU send path. Carries `msg=544`-class responses. Unpatched before this trace.
+
+Empirical confirmation that the JNI marshaller writes `byte[9]=0` for `msg=544` and non-zero for `msg=540`: log analysis of the `dual-bolt-20260516-1453` capture shows perfect path separation by IPC `msg` field — every `msg=544` IPC emission is followed by a Path-B selection in mtkbt, every `msg=540` IPC emission is followed by a Path-A selection.
+
+**Structural identity of the two builders.** `fcn.0x6d0f0` is byte-for-byte structurally identical to M2's `fcn.0x6d048`:
+
+| offset (Path A / `fcn.0x6d048`) | offset (Path B / `fcn.0x6d0f0`) | role |
+|---|---|---|
+| `0x6d068` `bl 0x6ccdc` | `0x6d110` `bl 0x6ccdc` | list-contains check against `g_active_conn_list` |
+| `0x6d06e` `beq 0x6d0e0` | `0x6d116` `beq 0x6d19c` | drop gate (returns `rc=0xd`) |
+| `0x6d076` `cmp r6, #0x0F` | `0x6d11e` `cmp r6, #0x0F` | INTERIM/CHANGED discriminator |
+| `0x6d0e0` `movs r0, 0xd; pop` | `0x6d19c` `movs r0, 0xd; pop` | drop epilogue |
+
+**Fix — M4.** NOP `beq 0x6d19c` at `0x6d116` (2 bytes, `41 d0` → `00 bf`). After M4, `fcn.0x6d0f0` unconditionally builds the wire frame and tail-calls `b.w 0xae5e4`. No M3-analogue is needed on Path B because `fcn.0x6d0f0` skips `fcn.0x6df20` entirely (the chip-busy SET only exists in `fcn.0x6df20`).
+
+**Safety.** Same reasoning as M2 — the list-contains state was a chip-readiness heuristic, not a correctness check. mtkbt's IPC dispatcher is single-threaded, `fcn.0xae5e4`'s downstream chain (`fcn.0xae418 → fcn.0x50918 → mtk_bt_write`) is synchronous blocking UART write, no concurrent emits race on per-channel state.
+
+**Why subscription-class CTs disengage.** AVCTP V13 §3.3.5 specifies a 3 s response timeout per outstanding transaction. A subscription-class CT (e.g. Bolt) sends RegisterNotification COMMANDs for ev=01 PLAYBACK_STATUS_CHANGED, ev=05 PLAYBACK_POS_CHANGED, ev=08 PLAY_TRACK_REACHED_END, ev=0A NOW_PLAYING_CONTENT_CHANGED on initial AVRCP TG engagement. Without INTERIM responses landing within the 3 s window, the CT retries each subscription. After several retries (CT-implementation-specific, observed 7-14 in the Bolt capture) the CT disengages AVRCP TG and gives up on subscription-based updates entirely. From that point on, only opportunistic `msg=540` GetElementAttributes responses driven by track changes reach the CT — explaining the "3 of 32 tracks displayed" pattern (whichever 3 tracks triggered a `msg=540` emit in the narrow window before the CT disengaged).
+
+**Why polling-class CTs were unaffected pre-M4.** A polling-class CT (e.g. Kia) does not depend on RegNotif subscriptions at all — it polls `GetPlayStatus` + `GetElementAttributes` (both `msg=540`-class) at its own cadence. Path A was patched; Path B drops were invisible to polling CTs. This is why Trace #40 closure observed Kia working fine on the same firmware that left Bolt broken — they exercise different builders.
+
+**Why this wasn't caught in Trace #40.** Trace #40 derived M2/M3 from observed wire-side drops on `msg=540` Path A under a different CT class. The `msg=544` Path B path was never explicitly profiled in #40 because the captures used for #40 were polling-class CTs (Kia) and a subscription-class CT (Sonos) on a build where `msg=544` delivery was confounded by the cardinality-0 gate (which was a separate bug fixed elsewhere). With `msg=544` actually reaching the IPC layer in current builds, the Path B drop became observable.
+
+**Confidence.** High on byte-level mechanism (the `fcn.0xf0bc` dispatch + the structural identity of the two builders is direct static analysis, independent of any wire-side measurement). High on Bolt as primary affected CT (load-bearing capture). Medium on whether other subscription-class issues (notably the Sonos Album metadata regression observed in `dual-sonos-postflash`) are also resolved by M4 — Sonos's `msg=544` delivery rate is higher in the current captures (~25-37% vs Bolt's ~6%), so Sonos may have a separate root cause. Recommend treating Sonos Album as a follow-up after M4 hardware validation.
+
+**Status:** Patch staged in `src/patches/patch_mtkbt.py`. New `OUTPUT_MD5 = a10ca9636417a0ed71495dfa11b5eff0`. Pending hardware validation on a subscription-class CT.
 
