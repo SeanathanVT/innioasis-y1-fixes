@@ -48,7 +48,7 @@ The bash's `patch_in_place_bytes` helper detects "already patched" exit-0-withou
 ## Requirements
 
 - Python 3.8+, stdlib only, for all byte patchers.
-- `patch_y1_apk.py` additionally requires Java 11–21 (apktool 2.9.3's bundled smali assembler can silently drop patches on Java 22+ — the patcher refuses to write if its DEX-signature check fails) and `androguard` (`pip install androguard`). apktool is downloaded once into `tools/apktool-2.9.3.jar` and reused. Decoded smali + rebuilt DEX persist under `staging/y1-apk/` (`--clean-staging` forces a fresh decode). MD5 pinned to stock 3.0.2; `--skip-md5` bypasses.
+- `patch_y1_apk.py` additionally requires Java 11–21 (apktool 2.9.3's bundled smali assembler can silently drop patches on Java 22+ — the patcher refuses to write if its DEX-signature check fails) and `androguard` (`pip install androguard`). apktool is downloaded once into `tools/apktool-2.9.3.jar` and reused. Decoded smali + rebuilt DEX persist under `staging/y1-apk/` (`--clean-staging` forces a fresh decode). MD5 pinned to stock 3.0.2 / 3.0.7; `--skip-md5` bypasses.
 
 ## Debug logging
 

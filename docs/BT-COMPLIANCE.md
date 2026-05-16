@@ -125,7 +125,7 @@ The advertised set in the GetCapabilities response (T1's `EventsSupported` array
 
 ## 3. Binary discovery — what's already mapped
 
-`objdump -dRT` against the v3.0.2 stock libraries was the entire discovery pass for what response-builder primitives we have to call. Result: every PDU and every event has both:
+`objdump -dRT` against the stock libraries (byte-identical between v3.0.2 and v3.0.7) was the entire discovery pass for what response-builder primitives we have to call. Result: every PDU and every event has both:
 
 - A function in `libextavrcp.so` (e.g. `<btmtk_avrcp_send_get_playstatus_rsp>: 0x2354`)
 - A PLT stub in `libextavrcp_jni.so` (e.g. `<btmtk_avrcp_send_get_playstatus_rsp@plt>: 0x3564`)
