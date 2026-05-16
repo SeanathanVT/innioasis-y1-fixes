@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-patch_mtkbt.py — SDP shape + AV/C op_code dispatch against the stock mtkbt
-Bluetooth daemon. Shapes the served AVRCP TG SDP record to AVRCP 1.3 / AVCTP
-1.2 (V1+V2), A2DP/AVDTP 1.3 (V3+V4), drops the 1.4 Browse PSM advertisement
-(V7), clears the 1.4 GroupNavigation feature bit (V8), inserts a 0x0100
-ServiceName attribute (S1), reroutes the daemon to the v=14 SDP template
-(V6), force-emits PASSTHROUGH dispatch for all AV/C frames (P1), and
-best-effort aliases AVDTP sig 0x0c → 0x02 (V5).
+patch_mtkbt.py — SDP shape + AV/C op_code dispatch + outbound-frame gates
+against the stock mtkbt Bluetooth daemon. Shapes the served AVRCP TG SDP
+record to AVRCP 1.3 / AVCTP 1.2 (V1+V2), A2DP/AVDTP 1.3 (V3+V4), drops the
+1.4 Browse PSM advertisement (V7), clears the 1.4 GroupNavigation feature
+bit (V8), inserts a 0x0100 ServiceName attribute (S1), reroutes the daemon
+to the v=14 SDP template (V6), force-emits PASSTHROUGH dispatch for all
+AV/C frames (P1), best-effort aliases AVDTP sig 0x0c → 0x02 (V5), widens
+the RegNotif INTERIM/CHANGED dispatch cmp from 1 to 0x0F (M1), and removes
+the outbound-frame builder's chip-readiness list-contains check + chip-busy
+flag SET (M2 + M3 — eliminate ambiguity in "did this CHANGED reach the
+wire?" by removing two gates whose practical wire-side effect couldn't be
+distinguished from btlog sampling under sustained traffic).
 
 Per-patch byte-level reference (offsets, before/after, rationale, ICS row
 coverage, spec citations): docs/PATCHES.md.

@@ -872,7 +872,9 @@ def _emit_t5(a: Asm) -> None:
     #   1. previous-track-natural-end flag at file[793] (set by music app
     #      before metachanged broadcast)
     #   2. sub_track_reached_end bit at state[17] (armed by T8 INTERIM emit;
-    #      session-long — not cleared)
+    #      not cleared post-emit — state[17] is rarely armed by CTs in our
+    #      test matrix, so adding a §6.7.1-strict clear here would be ~58 B
+    #      of dead code. T2/T8 re-arm idempotently on every CT re-register.)
     a.ldrb_w(0, 13, T5_OFF_FILE_NATURAL_END)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_reached_end")
@@ -926,7 +928,8 @@ def _emit_t5(a: Asm) -> None:
 
     # ---- emit TRACK_REACHED_START (event 0x04) — gated on subscription ----
     # AVRCP 1.3 §5.4.2 Table 5.32. ICS Table 7 row 26 (Optional).
-    # sub_track_reached_start bit at state[18] (session-long; not cleared).
+    # sub_track_reached_start bit at state[18] (not cleared post-emit —
+    # same rationale as state[17] above; the gate is rarely armed by CTs).
     a.ldrb_w(0, 13, T5_OFF_STATE + 18)
     a.cmp_imm8(0, 0)
     a.beq("t5_skip_reached_start")
@@ -2305,8 +2308,11 @@ def _emit_t9(a: Asm) -> None:
     a.strb_w(0, 13, T9_STATE_LAST_BATT_OFF)
     a.movs_imm8(5, 1)                         # any_change = 1
 
-    # Subscription gate (session-long): emit only if sub_battery
-    # ever armed. Not cleared after emit.
+    # Subscription gate: emit only if sub_battery armed (state[19] = 1).
+    # Not cleared post-emit — battery transitions are infrequent (bucket-
+    # mapped from `Intent.ACTION_BATTERY_CHANGED`) and CTs in our matrix
+    # don't broadly subscribe to BATT_STATUS_CHANGED, so adding a strict-
+    # gate clear would add ~58 B for a code path that rarely fires.
     a.ldrb_w(1, 13, T9_STATE_SUB_BATT_OFF)
     a.cmp_imm8(1, 0)
     a.beq("t9_after_batt_check")

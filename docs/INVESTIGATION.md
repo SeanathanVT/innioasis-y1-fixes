@@ -3654,3 +3654,23 @@ Closing this trace pending empirical validation of Kia post-flash. The
 discovery question (where does the drop happen?) is answered; the fix
 question (which combination is best?) requires CT-side observation.
 
+
+### Trace #40 closure (2026-05-16) — car-test validated
+
+`dual-bolt-20260516-0810` (subscription-driven CT) + `dual-kia-20260516-0808` (polling-driven CT) + driver-seat verification:
+
+| CT | Behaviour | Result |
+|---|---|---|
+| Bolt | Re-registers ev=01 14× in session. T9emit pstat = 7 (matches edges within `min(T8reg, edges)`). Wire TX INTERIM + CHANGED RegNotif visible despite btlog under-sampling. PASSTHROUGH ACCEPTED on every command. | Play / pause + next / prev work; playhead stable. |
+| Kia | **Zero RegisterNotification subscriptions this session.** T6resp = 216 (Kia polling ~1/sec). 7 STABLE GetElementAttributes responses. 9 PASSTHROUGH ACCEPTED. | Play / pause + next / prev work; playhead stable. |
+
+**The Kia path that works is pure polling** (T6 GetPlayStatus + GetElementAttributes), independent of every notification-side patch landed in this trace. Strict-gate is irrelevant for Kia because Kia never subscribes. M2/M3 are irrelevant for Kia because Kia's polled responses don't go through the outbound-frame builder gates (those gate only TG-initiated CHANGED frames, not synchronous responses to CT requests).
+
+**The 18% delivery rate observed throughout Trace #40 is most likely a btlog sampling artifact, not a real drop.** Empirical proof in `dual-sonos-20260516-0758`: Sonos re-registered ev=05 73 times, which per §6.7.1 means Sonos received 73 CHANGED frames. btlog visible: 9. → btlog captured ~12% of wire traffic. The "drop" measured by `expected_emit_count / wire_frame_count` is the inverse of btlog's sampling rate, not the wire delivery rate.
+
+**Implications for the M2/M3 patches**: most likely no-ops. The chip-readiness list-check (gate 1) and chip-busy flag (gate 2) in mtkbt's outbound-frame chain were rejecting frames that btlog wasn't capturing anyway; the actual wire delivery was already ~100% via paths btlog under-samples. M2/M3 don't regress anything (the chain is sync, single-threaded — no race) but they remove safety margins that weren't measurably failing. Keeping them in the release: they're verified harmless, they're documented in PATCHES.md, the docs are honest about the sampling-artifact theory, and reverting would require another patcher MD5 update.
+
+**Implications for strict-gate**: validated correct for subscription-driven CTs (Bolt, Sonos, Pixel-mirror), irrelevant for polling-driven CTs (Kia in observed sessions). The "Kia gets only 2 CHANGED" concern was based on a metric (wire-visible CHANGED count) that's a btlog-sampling artifact; Kia's actual UI behaviour in this session was driven by polling, not by the CHANGED count.
+
+Trace #40 closed: the Kia stuck-button regression resolved by the combined work even though the exact causal mechanism remains under-determined (likely a mix of TrackInfoWriter fast-path improvements + strict-gate hygiene + the position-fix work). Future Kia-specific debugging should focus on T6 freshness (file[792] / file[780-787] / file[776-779]) since that's the wire path Kia actually uses.
+

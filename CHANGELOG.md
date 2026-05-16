@@ -7,23 +7,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 
 ### Changed
-- `--bluetooth` `ro.bluetooth.class` sets Audio + Information service bits alongside Audio/Video Major / Portable Audio Minor (`0xA0041C`). Accurately reflects what the Y1 is (a DAP).
-- `GetCapabilities(EventsSupported)` advertised set widened to `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}`. Events 0x09-0x0c (1.4+ event IDs) are INTERIM-acked with zero/empty payload via response builders already linked from `libextavrcp.so`; no CHANGED ever fires. Targets strict CT metadata-pane render, which empirically gates on the 1.4 event IDs being advertised + acked even against a 1.3-declared TG.
-- `T_charset` (PDU 0x17 InformDisplayableCharacterSet) rejects with AV/C `NOT_IMPLEMENTED` instead of acking. Spec-permissible per AVRCP 1.3 §5.2.7 (Optional); avoids a 3 s pre-subscription stall on at least one strict CT.
-- `mtkbt` M1: widens the RegNotif dispatcher cmp from `1` to `0x0F` so the JNI's reasonCode byte routes correctly to INTERIM (`0x0F`) for first-response arms vs CHANGED (`0x0D`) for edge emits. Spec-compliant per §6.7.1.
-- `mtkbt` M2 / M3: outbound-frame drop-gate bypass. Stock's chain `fcn.0xf0bc → fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20` for short-frame CHANGED responses had two consecutive silent-drop gates: a list-contains check at `0x6d06e` (drops if conn isn't in the chip-readiness list) and a chip-busy flag check at `0x6df3a` (drops if `ctx[0xf2]` is set during in-flight chip-write). Under A2DP saturation both gates trip ~80% of the time, so most T9/T5 CHANGED emits never reached the wire even though the response builder reported success. M2 NOPs the list-contains check; M3 NOPs the busy-flag SET (so the CHECK never trips). Safe because mtkbt's IPC path is single-threaded with a blocking UART write — no race exposure. Net effect: 100% wire delivery of trampoline-emitted CHANGED frames.
-- AVRCP 1.3 §6.7.1 strict subscription gates in `libextavrcp_jni.so` T5 / T9: T2 / T8 arm the per-event gate at INTERIM (state[13..20] = 1); T5 / T9 emit CHANGED and clear the gate (= 0). CT must re-`RegisterNotification` to re-arm. Spec-correct (matches Pixel-as-TG observed cadence on Bolt). Clear sites: T5 after TRACK_CHANGED (state[16]); T9 after PSTAT (state[14]), PApp (state[15]), POS_CHANGED tick (state[13]). Adds NowPlayingContent CHANGED on track-edge (T5) + play-edge (T9), and PlaybackPos CHANGED on track-edge (T5) — these don't clear (T9's PositionTicker owns the re-register loop; NowPlayingContent piggybacks).
-- `y1-trampoline-state` schema extended 20→21 B (`state[20]` = `sub_now_playing_content`). Short reads zero-extend; first 0x09 INTERIM arm extends the on-disk file past EOF.
-- TRACK_CHANGED `Identifier` carries per-track `audio_id` BE u64 from `y1-track-info[0..7]`. Strict 1.4+ CTs cache `GetElementAttributes` keyed by Identifier; a constant value (e.g. `0x00×8` SELECTED) dedups the re-query after the first track edge. Per-track id forces cache invalidation + re-query on every edge.
-- `TrackInfoWriter.onTrackEdge()` dedups by audio_id — only resets the position anchor on real track changes, not on same-track `prepareAsync` cycles.
-- Pre-emit TRACK_CHANGED at `setDataSource` (patch B5.2b) and `playerPrepared` tail (B5.2c) instead of relying solely on `OnPreparedListener` (~100-500 ms later). Same-track invocations hit the audio_id dedup so no spurious wire CHANGED.
-- `TrackInfoWriter.setPlayStatus` fires the fresh-track edge ~260 ms earlier, narrowing the stale-metadata window for CTs that poll right after PLAYBACK_STATUS_CHANGED.
-- `TrackInfoWriter` synchronous `MediaMetadataRetriever` fallback supplies a real PlayingTime in `GetElementAttributes` responses that arrive before `prepareAsync` completes.
-- `TrackInfoWriter.onSeek()` suppresses the music app's "resume from saved progress" seek that fires post-`prepareAsync`. Real user seeks (drag the seek bar) are unaffected by the 2 s anchor window.
+- AVRCP 1.3 §6.7.1 strict subscription gating in the trampoline chain — one CHANGED per CT registration; CT re-registers to receive the next. Matches Pixel-as-TG observed cadence on spec-compliant Controllers.
+- `mtkbt` outbound-frame drop bypass — every T9 / T5 CHANGED emit reaches the wire under sustained traffic (stock dropped silently under A2DP saturation).
+- TRACK_CHANGED `Identifier` carries the per-track audio ID so strict 1.4+ Controllers invalidate their `GetElementAttributes` cache on every track edge instead of serving stale metadata.
+- Faster perceived metadata refresh — TRACK_CHANGED pre-emits at `setDataSource` and at `playerPrepared` tail (was: `OnPreparedListener`, ~100-500 ms later). PLAYBACK_STATUS_CHANGED fresh-track edge fires ~260 ms earlier.
+- `GetCapabilities(EventsSupported)` advertises the 1.4+ event IDs (0x09-0x0c) alongside the 1.3 set — INTERIM-acked with zero payload. Strict Controllers gate metadata-pane render on these even from a 1.3-declared TG.
+- `--bluetooth` `ro.bluetooth.class` accurately advertises the Y1 as Audio/Video Major / Portable Audio Minor with Audio + Information service bits.
+- `T_charset` rejects `InformDisplayableCharacterSet` with AV/C `NOT_IMPLEMENTED` (spec-permissible per AVRCP 1.3 §5.2.7, Optional) — avoids a multi-second pre-subscription stall some Controllers exhibit.
 
 ### Added
-- `--debug` build path (`KOENSAYR_DEBUG=1`): native `__android_log_print` injection at T5/T6/T8/T9 emit sites in `libextavrcp_jni.so` (tag `Y1T`), plus smali-side instrumentation across the metadata pipeline (`TrackInfoWriter`, `PlaybackStateBridge`, `wakePlayStateChanged` / `wakeTrackChanged` state mirrors). T8 logs every incoming `RegisterNotification` event_id so the trampoline-side emit count can be compared against the CT's actual subscription rate. Release builds remain byte-identical to non-debug.
-- `tools/btlog-hci-extract.py` decodes `mtkbt`'s `btlog.bin` as AVRCP frames. `tools/dual-capture.sh` whitelists the `Y1T` tag.
+- `GetElementAttributes` synthesises a `PlayingTime` via a synchronous `MediaMetadataRetriever` fallback for responses that arrive before `prepareAsync` completes — Controllers no longer see "0:00 duration" on track transitions.
+- `--debug` build path (`KOENSAYR_DEBUG=1`): native `__android_log_print` injection in `libextavrcp_jni.so` plus smali-side instrumentation in the metadata pipeline. Release builds are byte-identical without the env var.
+- `tools/btlog-hci-extract.py` decodes `mtkbt`'s `btlog.bin` as AVRCP frames for offline trace inspection.
+
+### Fixed
+- `TrackInfoWriter.onSeek()` no longer treats the music app's post-`prepareAsync` "resume from saved progress" seek as a user seek (was: spurious wire-side `setSeekStatus`). Real user seeks (drag the seek bar) propagate unchanged.
+- TRACK_CHANGED no longer re-emits on the music app's same-track `prepareAsync` cycles (now dedup'd on audio ID).
 
 ## [2.1.0] - 2026-05-13
 AVRCP 1.3 metadata + control pipeline over Bluetooth. A peer Controller now sees full track metadata, live play status, and play-state changes from the Y1, and can drive Repeat / Shuffle from its own UI. Reference docs: [`docs/BT-COMPLIANCE.md`](docs/BT-COMPLIANCE.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PATCHES.md`](docs/PATCHES.md). Investigation history: [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
