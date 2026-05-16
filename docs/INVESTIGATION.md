@@ -3743,9 +3743,9 @@ Empirical confirmation that the JNI marshaller writes `byte[9]=0` for `msg=544` 
 
 | Tier | Site | Function | Mnemonic | Drop rc | Condition | M-series analogue |
 |---|---|---|---|---|---|---|
-| 1 | `0x6d1ce` | `fcn.0x6d1a8` (Path C) | `beq 0x6d242` | `r0=0xd` | `fcn.0x6ccdc(conn-list)` returns 0 | **structural twin of M2 / M4** |
-| 1 | `0x6d1ec` | `fcn.0x6d1a8` (Path C) | `strb.w r3, [r4, 0xf2]` (r3=1) | (sets chip-busy) | `msg[1] == 1` | **structural twin of M3 SET** |
-| 1 | `0xf2c4` | `fcn.0xf290` (Path C dispatcher) | `bne 0xf384` → drop `r5=0x12` | `r5=0x12` | `chan[0x558] != 0` (Path C txPending) | M3-analogue (Path C) |
+| 2 | `0x6d1ce` | `fcn.0x6d1a8` (Path C — browse) | `beq 0x6d242` | `r0=0xd` | `fcn.0x6ccdc(conn-list)` returns 0 | structural twin of M2 / M4, on browse path Y1 doesn't emit on |
+| 2 | `0x6d1ec` | `fcn.0x6d1a8` (Path C — browse) | `strb.w r3, [r4, 0xf2]` (r3=1) | (sets chip-busy on browse chan) | `msg[1] == 1` | structural twin of M3 SET, on browse path |
+| - | `0xf2c4` | `fcn.0xf290` (browse dispatcher) | `bne 0xf384` | (queue, `r5=2`) | `chan[0x558] != 0` (browse txPending) | NOT A DROP — branch target is queue-on-`txBrowsePacketList`, structurally analogous to `fcn.0xf0bc`'s `0xf210` queue path |
 | 2 | `0x6d12c` | `fcn.0x6d0f0` (Path B) | `bne 0x6d19e` | `r0=1` | `msg[0] == 0x0F` AND `msg[3] != 0` | none — defensive |
 | 2 | `0xf2dc` | `fcn.0xf290` | `ble 0xf370` → `r5=0x12` | `r5=0x12` | `fcn.0x6d324(chan)+3 ≤ msg.len` (computed MTU shorter than payload+AVCTP header) | none — bounded by spec |
 | 3 | `0xf13e` | `fcn.0xf0bc` (Path A length gate) | `beq 0xf154` (drop fall-through, `r5=1`) | `r5=1` | Path A (`msg[9]!=0`) AND `msg.len` vs `fcn.0xed16` mismatch | empirically not load-bearing (msg=540 100% delivery confirmed in Trace #41) |
@@ -3761,21 +3761,23 @@ Empirical confirmation that the JNI marshaller writes `byte[9]=0` for `msg=544` 
 
 Identical instruction sequence; only the branch displacement to each function's local drop epilogue differs. The Tier-1 Path C `beq 0x6d242` is the literal byte-for-byte twin of M2 and M4 list-contains drops.
 
-**Tier-1 candidate patches (M5, M6, M7).** Listed for completeness; not staged — requires hardware-side evidence that Path C carries metadata responses before applying:
+**Hypothetical patches (would-be M5 / M6, not staged).** Documented for future AVRCP 1.4+ Browsing channel work:
 
-- **M5.** NOP `beq 0x6d242` at `0x6d1ce` (`38 d0` → `00 bf`). Structurally identical to M2 / M4.
-- **M6.** NOP `strb.w r3, [r4, 0xf2]` at `0x6d1ec` (4 bytes, `84 f8 f2 30` → `00 bf 00 bf`). Structurally identical to M3 SET. Required if M5 lands and any Path C emit can have `msg[1]==1`, otherwise the M3 READ-side gate in `fcn.0x6df20` (still intact) would catch leaked chip-busy state.
-- **M7.** NOP `bne 0xf384` at `0xf2c4` (`5e d1` → `00 bf`). Path C `chan[0x558]` txPending gate — M3-flavoured drop on the dispatcher rather than the builder.
+- **(M5).** NOP `beq 0x6d242` at `0x6d1ce` (`38 d0` → `00 bf`). Structurally identical to M2 / M4. Would matter only if Y1 ever emits browse-channel responses.
+- **(M6).** NOP `strb.w r3, [r4, 0xf2]` at `0x6d1ec` (4 bytes, `84 f8 f2 30` → `00 bf 00 bf`). Structurally identical to M3 SET. Required as a pair with (M5) if it lands. Note: the chan-struct used here (`chan+0x10c`) is distinct from Path A/B's chan-struct, so `chan[0xf2]` in the browse context is a separate flag from M3's primary-channel chip-busy.
+- **M7 retracted.** `0xf2c4 bne 0xf384` is a queue path, not a drop. The branch target inserts the packet onto `txBrowsePacketList` and returns `r5=2` success.
 
-**Why not stage M5/M6/M7 immediately.** Trace #41's wire-side evidence (`msg=540` Path A 100% delivery + `msg=544` Path B ~6%) covers `msg[8] ∈ {1}`. Path C (`msg[8]==2`) has not been wire-profiled. Three possibilities:
+**Tier-1 reclassified to defensive after browse-channel discovery.** Initial classification of M5 / M6 / M7 as Tier-1 was premature. Walking the `chan[0x558]` gate branch target (`0xf384`) and the surrounding context reveals that `fcn.0xf290` exclusively handles the AVRCP Browsing channel (1.4+):
 
-1. *Path C is metadata-load-bearing.* Some PDU class uses `fcn.0x119fc`. We'd then expect a third tier of CT regression unaccounted-for by M2/M3/M4. → Apply M5/M6/M7.
-2. *Path C carries only error responses + non-metadata PDUs.* Stock daemon never routes our metadata through it. → M5/M6/M7 are defensive only.
-3. *Path C carries some metadata but the `chan[0x558]` flicker doesn't fire under realistic A2DP saturation.* → M5 might matter, M6/M7 might not.
+- The `0xf384` branch is a QUEUE path (calls `fcn.0x6cc70` list-insert-tail and returns `r5=2` success), NOT a drop. Same shape as `fcn.0xf0bc`'s `0xf210` queue path — `chan[0x558]` is a queue-redirect flag, not a kill switch.
+- The list-circularity asserts inside `0xf384` reference `IsListCircular(&chnl->txBrowsePacketList)` at string offset `0xc8a64` — a `txBrowsePacketList` field by name.
+- `fcn.0xf290` writes to `chan[0x540..0x570]` (a dedicated browse sub-struct), distinct from `fcn.0xf0bc`'s `chan[0x308..0x320]` (primary AVCTP sub-struct).
+- Other AVRCP Browsing strings in the binary confirm separate Browse code path: `AVRCP_DisconnectBrowse status:%d` (`0xc8f48`), `[AVRCP] AvrcpHandleCBAVRCPBrowseCmdInd_Dispatcher pdu_id:%d parm_len:%d` (`0xc90a8`), `[AVRCP][BWS] Receive browse-packet operandLen:%d more:%d` (`0xdc076`).
+- `fcn.0x6d1a8` passes `chan+0x10c` (not `chan+8` like Path A/B) downstream — different L2CAP CID, different AVCTP layer, different channel.
 
-The 11 callers of `fcn.0x119fc` (at file offsets `0x12678`, `0x1273c`, `0x1329e`, `0x13342`, `0x133ee`, `0x134dc`, `0x1364a`, `0x15056`, `0x151d4`, `0x156a4`, `0x15896`) emit short responses with `msg[0xe]` ∈ `{0x60-0x80}` — not standard AVRCP `pdu_id` values (which span `0x10-0x41`). These are likely internal mtkbt message-type codes for an AVRCP-CMD-handler sub-dispatch, not directly addressable by `pdu_id`. Without source-level naming, only wire-side profiling can confirm whether our metadata pipeline reaches them.
+The 11 callers of `fcn.0x119fc` (at file offsets `0x12678`, `0x1273c`, `0x1329e`, `0x13342`, `0x133ee`, `0x134dc`, `0x1364a`, `0x15056`, `0x151d4`, `0x156a4`, `0x15896`) are therefore AVRCP Browsing PDU handlers — `GetFolderItems`, `ChangePath`, `SetBrowsedPlayer`, `GetItemAttributes`, and their error responses. None of these are emitted by Y1's current trampoline chain (per `feedback_avrcp13_only_scope` and the AVRCP 1.3-only project constraint).
 
-**Recommended hardware probe** to disambiguate before patching: build a debug `mtkbt` with a `printf` at `fcn.0x6d1a8` entry, deploy, capture a session, count Path C invocations correlated with CT-side metadata behaviour. If Path C invocation count > 0 on a session with metadata regressions, M5/M6/M7 are load-bearing.
+**Outcome.** M5 / M6 / M7 are **not load-bearing for current metadata delivery** — Y1 does not emit on the browse channel. They are also **out of scope** per the AVRCP 1.3-only project constraint. Not staged. Re-classified Tier-2 (defensive only): would be required if Y1 ever extends to AVRCP 1.4+ Browsing channel support, at which point they should land together with the trampoline-side browse-channel work.
 
 **Tier-2 gates — defensive only.**
 
@@ -3796,7 +3798,7 @@ The RX-side list state might be more stable than the TX side (it's populated by 
 
 **M1 pattern (narrow `cmp` discriminator widening) — re-audit.** Searched for `cmp r1, N` followed by conditional branch in the `0x10000-0x16000` range (avrcputil.c-class functions). Only `0x12230` (the M1 site) matches the discriminator-widening shape. Other matches (`0x138e2`, `0x138f0`, `0x138fc`, `0x1392e`, `0x1393e`, `0x1394c`) are length/count gates in an RX-side CMD-frame parser case-statement, not response-ctype discriminators.
 
-**Outcome.** No new patches staged. Three Tier-1 candidates (M5 / M6 / M7) identified and documented; their load-bearing-ness depends on whether Path C (`fcn.0xf290` → `fcn.0x6d1a8`) is on the metadata response path, which requires hardware-side probing to confirm. Three Tier-4 RX-side candidates documented for completeness. M-series static coverage is now exhaustive for `mtkbt`'s outbound TX path through `fcn.0xf0bc`; the only remaining gap is `fcn.0xf290`.
+**Outcome.** No new patches staged. The two would-be M5 / M6 sites in `fcn.0x6d1a8` and the dispatcher gate at `0xf2c4` are all on the AVRCP Browsing channel (1.4+), confirmed by the `txBrowsePacketList` field name and the disjoint chan-struct offsets used by `fcn.0xf290` vs `fcn.0xf0bc`. Y1's current trampoline chain does not emit browse-channel responses (per AVRCP 1.3 scope constraint), so these gates are unreachable from any Y1-emitted frame. M-series static coverage is now exhaustive for `mtkbt`'s outbound TX path on the **primary AVCTP channel**; the browse channel is uncovered but also un-exercised. Three Tier-4 RX-side candidates documented for completeness — would only matter if the `g_active_conn_list` flicker affects inbound RegisterNotification COMMANDs from CTs, which requires wire-side measurement.
 
-**Confidence.** High on byte-level identification of every conditional-drop site in the audited functions (direct static analysis, MD5-anchored stock binary). High on structural-identity of `0x6d1ce` to M2 / M4. Medium on tier rankings (`Tier 1` is the strongest claim — these gates would absolutely drop if the path is exercised; uncertainty is *whether the path is exercised*, not whether the drop would happen). Low on Tier-4 RX-side relevance — that requires wire-side measurement we don't have.
+**Confidence.** High on byte-level identification of every conditional-drop site in the audited functions (direct static analysis, MD5-anchored stock binary). High on the browse-channel scoping for `fcn.0xf290` → `fcn.0x6d1a8` (the `txBrowsePacketList` source-level field name + disjoint chan offsets are direct evidence). Low on Tier-4 RX-side relevance — that requires wire-side measurement we don't have.
 
