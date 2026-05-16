@@ -2261,11 +2261,6 @@ def _emit_t9(a: Asm) -> None:
     # ---- emit CHANGED via reg_notievent_playback_rsp ----
     # r0 = conn (= struct + 8); r1 = 0 success; r2 = REASON_CHANGED;
     # r3 = play_status (from file_buf[792]).
-    if DEBUG_NATIVE_LOG:
-        # Log conn[8] (= struct[16]) — the FD `BT_SendMessage` gates on.
-        # Zero means the response builder will silently drop the frame.
-        a.ldr_w(0, 4, 16)
-        _emit_native_log_u32(a, "log_fmt_t9connfd", 0)
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # success
     a.movs_imm8(2, REASON_CHANGED)
@@ -2273,12 +2268,6 @@ def _emit_t9(a: Asm) -> None:
     if DEBUG_NATIVE_LOG:
         _emit_native_log_u32(a, "log_fmt_t9pstat", 3)
     a.blx_imm(PLT_reg_notievent_playback_rsp)
-    if DEBUG_NATIVE_LOG:
-        # Log AVRCP_SendMessage's return value (passed through by the
-        # response builder via r0): 0 = wire frame sent, non-zero (1) =
-        # BT_SendMessage's send() syscall returned -1 and the frame was
-        # silently dropped at the AF_UNIX SOCK_DGRAM IPC layer.
-        _emit_native_log_u32(a, "log_fmt_t9rsprc", 0)
 
     # AVRCP §6.7.1 strict: clear sub_play_status (state[14]) after CHANGED.
     # CT must re-RegisterNotification(0x01) to receive the next emit.
@@ -2615,12 +2604,6 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
         a.align(4)
         a.label("log_fmt_t8reg")
         a.asciiz("T8reg ev=%02x")
-        a.align(4)
-        a.label("log_fmt_t9connfd")
-        a.asciiz("T9connfd=%08x")
-        a.align(4)
-        a.label("log_fmt_t9rsprc")
-        a.asciiz("T9rsprc=%u")
         a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).
