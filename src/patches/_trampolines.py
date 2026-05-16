@@ -2242,6 +2242,11 @@ def _emit_t9(a: Asm) -> None:
     # ---- emit CHANGED via reg_notievent_playback_rsp ----
     # r0 = conn (= struct + 8); r1 = 0 success; r2 = REASON_CHANGED;
     # r3 = play_status (from file_buf[792]).
+    if DEBUG_NATIVE_LOG:
+        # Log conn[8] (= struct[16]) — the FD `BT_SendMessage` gates on.
+        # Zero means the response builder will silently drop the frame.
+        a.ldr_w(0, 4, 16)
+        _emit_native_log_u32(a, "log_fmt_t9connfd", 0)
     a.add_imm_t3(0, 4, 8)                     # r0 = r4 + 8 (conn)
     a.movs_imm8(1, 0)                         # success
     a.movs_imm8(2, REASON_CHANGED)
@@ -2565,6 +2570,9 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
         a.align(4)
         a.label("log_fmt_t8reg")
         a.asciiz("T8reg ev=%02x")
+        a.align(4)
+        a.label("log_fmt_t9connfd")
+        a.asciiz("T9connfd=%08x")
         a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).
