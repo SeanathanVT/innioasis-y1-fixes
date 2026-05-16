@@ -3724,3 +3724,79 @@ Empirical confirmation that the JNI marshaller writes `byte[9]=0` for `msg=544` 
 
 **Status:** Patch staged in `src/patches/patch_mtkbt.py`. New `OUTPUT_MD5 = a10ca9636417a0ed71495dfa11b5eff0`. Pending hardware validation on a subscription-class CT.
 
+## Trace #42 (2026-05-16) — Static audit for additional silent-drop gates in mtkbt outbound paths
+
+**Goal.** After M4 landed (Trace #41), do a static-only sweep of every outbound-frame builder, dispatcher, and L2CAP send wrapper in `mtkbt` to find any other gates with the M2/M3/M4 signature: a conditional that returns an error code, doesn't log surface-visibly, and the caller treats the return as drop-and-forget rather than retry-or-error. Stock binary `mtkbt` MD5 `3af1d4ad8f955038186696950430ffda` (extracted via `debugfs` from `/work/koensayr/staging/v3.0.7_sysimg/system-raw.img`).
+
+**Method.** Disassemble (`radare2`) every function in the outbound chain: dispatchers (`fcn.0xf0bc`, `fcn.0xf290`), high-level emitters (`fcn.0x1165c`, `fcn.0x11778`, `fcn.0x11894`, `fcn.0x119fc`), frame builders (`fcn.0xed50`, `fcn.0xef08`), frame finalizers (`fcn.0x6d048`, `fcn.0x6d0f0`, `fcn.0x6d1a8`), AVCTP/L2CAP wrappers (`fcn.0x6df20`, `fcn.0xae5e4`, `fcn.0xae418`, `fcn.0xae6ac`), and RX-side dispatchers (`fcn.0x6cee4`, `fcn.0x6cf30`, `fcn.0x6cf8c`). Byte-search for the M-series gate signatures: the `bl fcn.0x6ccdc + cmp r0, 0 + beq <drop>` list-contains pattern, `movs r0, 0xd; pop` drop epilogues, and `strb.w r0, [r4, 0xf2]` chip-busy SET.
+
+**Three-tier dispatcher discovered.** mtkbt's outbound side has TWO dispatchers (not one), selected by `msg[8]`:
+
+| `msg[8]` | Dispatcher | Emitters that build this | Builder | M-coverage |
+|---|---|---|---|---|
+| 0, 1, 3 | `fcn.0xf0bc` | `fcn.0x1165c` (14-byte short), `fcn.0x11894` (up-to-512 long) | `fcn.0x6d048` (Path A, `msg[9]!=0`) or `fcn.0x6d0f0` (Path B, `msg[9]==0`) | M2/M3 (A), M4 (B) |
+| 2 | `fcn.0xf290` | `fcn.0x11778` (`T_HandleErrorResponse`), `fcn.0x119fc` (up-to-512 long) | `fcn.0x6d1a8` (Path C) | **unpatched** |
+
+`fcn.0x119fc` has 11 caller sites (per-PDU success-path emitters) and `fcn.0x11778` is the project-wide error-response emitter — both route through Path C.
+
+**New gate inventory.** Across the audited functions, every conditional-drop site that fits the M-series pattern:
+
+| Tier | Site | Function | Mnemonic | Drop rc | Condition | M-series analogue |
+|---|---|---|---|---|---|---|
+| 1 | `0x6d1ce` | `fcn.0x6d1a8` (Path C) | `beq 0x6d242` | `r0=0xd` | `fcn.0x6ccdc(conn-list)` returns 0 | **structural twin of M2 / M4** |
+| 1 | `0x6d1ec` | `fcn.0x6d1a8` (Path C) | `strb.w r3, [r4, 0xf2]` (r3=1) | (sets chip-busy) | `msg[1] == 1` | **structural twin of M3 SET** |
+| 1 | `0xf2c4` | `fcn.0xf290` (Path C dispatcher) | `bne 0xf384` → drop `r5=0x12` | `r5=0x12` | `chan[0x558] != 0` (Path C txPending) | M3-analogue (Path C) |
+| 2 | `0x6d12c` | `fcn.0x6d0f0` (Path B) | `bne 0x6d19e` | `r0=1` | `msg[0] == 0x0F` AND `msg[3] != 0` | none — defensive |
+| 2 | `0xf2dc` | `fcn.0xf290` | `ble 0xf370` → `r5=0x12` | `r5=0x12` | `fcn.0x6d324(chan)+3 ≤ msg.len` (computed MTU shorter than payload+AVCTP header) | none — bounded by spec |
+| 3 | `0xf13e` | `fcn.0xf0bc` (Path A length gate) | `beq 0xf154` (drop fall-through, `r5=1`) | `r5=1` | Path A (`msg[9]!=0`) AND `msg.len` vs `fcn.0xed16` mismatch | empirically not load-bearing (msg=540 100% delivery confirmed in Trace #41) |
+| 4 | `0x6cf04`, `0x6cf58`, `0x6cfb2` | `fcn.0x6cee4`, `fcn.0x6cf30`, `fcn.0x6cf8c` (RX-side) | `beq <drop>` | `r0=0xd` | `fcn.0x6ccdc(conn-list)` returns 0 | **RX-side analogue of M2 / M4** |
+
+**Structural-identity verification of Tier-1 Path C gate.** Bytes immediately preceding the `beq <drop>`:
+
+| site | preceding bytes (PC-relative addr load, list-contains call, cmp) | drop byte |
+|---|---|---|
+| `0x6d06e` (M2 / Path A) | `21 46 78 44 00 68 ff f7 38 fe 00 28` | `37 d0` |
+| `0x6d116` (M4 / Path B) | `21 46 78 44 00 68 ff f7 e4 fd 00 28` | `41 d0` |
+| `0x6d1ce` (Path C) | `21 46 78 44 00 68 ff f7 88 fd 00 28` | `38 d0` |
+
+Identical instruction sequence; only the branch displacement to each function's local drop epilogue differs. The Tier-1 Path C `beq 0x6d242` is the literal byte-for-byte twin of M2 and M4 list-contains drops.
+
+**Tier-1 candidate patches (M5, M6, M7).** Listed for completeness; not staged — requires hardware-side evidence that Path C carries metadata responses before applying:
+
+- **M5.** NOP `beq 0x6d242` at `0x6d1ce` (`38 d0` → `00 bf`). Structurally identical to M2 / M4.
+- **M6.** NOP `strb.w r3, [r4, 0xf2]` at `0x6d1ec` (4 bytes, `84 f8 f2 30` → `00 bf 00 bf`). Structurally identical to M3 SET. Required if M5 lands and any Path C emit can have `msg[1]==1`, otherwise the M3 READ-side gate in `fcn.0x6df20` (still intact) would catch leaked chip-busy state.
+- **M7.** NOP `bne 0xf384` at `0xf2c4` (`5e d1` → `00 bf`). Path C `chan[0x558]` txPending gate — M3-flavoured drop on the dispatcher rather than the builder.
+
+**Why not stage M5/M6/M7 immediately.** Trace #41's wire-side evidence (`msg=540` Path A 100% delivery + `msg=544` Path B ~6%) covers `msg[8] ∈ {1}`. Path C (`msg[8]==2`) has not been wire-profiled. Three possibilities:
+
+1. *Path C is metadata-load-bearing.* Some PDU class uses `fcn.0x119fc`. We'd then expect a third tier of CT regression unaccounted-for by M2/M3/M4. → Apply M5/M6/M7.
+2. *Path C carries only error responses + non-metadata PDUs.* Stock daemon never routes our metadata through it. → M5/M6/M7 are defensive only.
+3. *Path C carries some metadata but the `chan[0x558]` flicker doesn't fire under realistic A2DP saturation.* → M5 might matter, M6/M7 might not.
+
+The 11 callers of `fcn.0x119fc` (at file offsets `0x12678`, `0x1273c`, `0x1329e`, `0x13342`, `0x133ee`, `0x134dc`, `0x1364a`, `0x15056`, `0x151d4`, `0x156a4`, `0x15896`) emit short responses with `msg[0xe]` ∈ `{0x60-0x80}` — not standard AVRCP `pdu_id` values (which span `0x10-0x41`). These are likely internal mtkbt message-type codes for an AVRCP-CMD-handler sub-dispatch, not directly addressable by `pdu_id`. Without source-level naming, only wire-side profiling can confirm whether our metadata pipeline reaches them.
+
+**Recommended hardware probe** to disambiguate before patching: build a debug `mtkbt` with a `printf` at `fcn.0x6d1a8` entry, deploy, capture a session, count Path C invocations correlated with CT-side metadata behaviour. If Path C invocation count > 0 on a session with metadata regressions, M5/M6/M7 are load-bearing.
+
+**Tier-2 gates — defensive only.**
+
+- `0x6d12c` (Path B INTERIM+opcode≠0): `msg[0]==0x0F AND msg[3]!=0` drops with `r0=1`. Won't fire under current trampoline emit semantics — T2/T8 INTERIM trampolines build `VENDOR_DEPENDENT` frames (opcode=0). If a future patch ever emits INTERIM via a non-`VENDOR_DEPENDENT` opcode (e.g. PASSTHROUGH INTERIM, which is not a valid AVRCP construct anyway), this gate would silently drop it.
+- `0xf2dc` (Path C MTU bound): drops if msg payload exceeds computed L2CAP MTU minus AVCTP header. Spec-bounded — would only fire on a malformed long-response from the marshaller.
+
+**Tier-3 — `0xf13e` Path A length-vs-MTU mismatch (downgraded).** Initial reading suggested this could drop Path A frames where `msg[9]!=0` (fragmented marker) but `msg.len < MTU`. Empirically refuted by Trace #41 evidence: `msg=540` IPC emits → wire TX frames mapped 3:3 (100% delivery) post-M2/M3. Either the gate's actual semantics are opposite of my initial read, or our marshaller's `msg.len` for `msg=540` consistently satisfies the gate. Either way, not currently load-bearing.
+
+**Tier-4 — RX-side list-contains drops (speculative).** `fcn.0x6cee4` (`0x6cf04`), `fcn.0x6cf30` (`0x6cf58`), and `fcn.0x6cf8c` (`0x6cfb2`) each call `fcn.0x6ccdc(conn-list)` and `beq` to a `r0=0xd` drop. These are upstream of the AVCTP RX state machine `fcn.0x6d9ac` and gate incoming AVCTP frames before they're dispatched. If the `g_active_conn_list` flicker that motivated M2/M4 affects RX too, then incoming `RegisterNotification` COMMANDs from the CT could be silently dropped — same end-user symptom (no metadata) but from the other direction (we never see the request rather than failing to deliver the response).
+
+The RX-side list state might be more stable than the TX side (it's populated by the inbound L2CAP-CONNECT handshake, which the CT initiates; the chip-busy flicker that motivated M2's drop is a TX-side phenomenon). But this is hypothesis, not measurement. Wire-side probe: `tshark`-decode the captured BT traffic, count CT-side `RegisterNotification COMMAND` frames vs mtkbt-side INTERIM responses. Significant disparity post-M4 would point at one of these RX gates.
+
+**`fcn.0xf0bc` and `fcn.0xae5e4` queue paths.** Both have conditional branches that look drop-shaped (`bne.w 0xf210` at `fcn.0xf0bc:0xf106` if `chan[0x310]` (txCurrent) is non-zero; `bne 0xae684` at `fcn.0xae5e4:0xae608` if `chan[0x16]` (L2CAP send-pending) is non-zero). Both are **NOT silent drops** — they take queue paths (`fcn.0x6cc70` list-insert tail; `r6=2` return) that the dispatcher caller treats correctly. Verified by following the queue-path exit (`movs r5, 2; pop`) and confirming the caller's `cmp r5, 2; bne` discriminator handles the queued case.
+
+**Chip-busy flag (`chan[0xf2]`) write-site enumeration.** `strb.w r0, [r4, 0xf2]` matches only at `0x6df42` (M3 site, already NOP'd). One additional site `strb.w r3, [r4, 0xf2]` at `0x6d1ec` (Path C, captured above as Tier-1 M6 candidate). No other writers in the binary. M3's SET-NOP strategy holds for Path A; M6 would be required if Path C carries any metadata.
+
+**INTERIM-marker (`chan[0xf0]`) reads.** Verified via byte-grep — two readers at `0x7e7a4` and `0x7ecf4` are both inside `ittt`/`itttt` blocks that compose multi-byte packed integer fields from `chan[0xee..0xf1]`. Not gates. `chan[0xf0]` is preserved data, not a control flag.
+
+**M1 pattern (narrow `cmp` discriminator widening) — re-audit.** Searched for `cmp r1, N` followed by conditional branch in the `0x10000-0x16000` range (avrcputil.c-class functions). Only `0x12230` (the M1 site) matches the discriminator-widening shape. Other matches (`0x138e2`, `0x138f0`, `0x138fc`, `0x1392e`, `0x1393e`, `0x1394c`) are length/count gates in an RX-side CMD-frame parser case-statement, not response-ctype discriminators.
+
+**Outcome.** No new patches staged. Three Tier-1 candidates (M5 / M6 / M7) identified and documented; their load-bearing-ness depends on whether Path C (`fcn.0xf290` → `fcn.0x6d1a8`) is on the metadata response path, which requires hardware-side probing to confirm. Three Tier-4 RX-side candidates documented for completeness. M-series static coverage is now exhaustive for `mtkbt`'s outbound TX path through `fcn.0xf0bc`; the only remaining gap is `fcn.0xf290`.
+
+**Confidence.** High on byte-level identification of every conditional-drop site in the audited functions (direct static analysis, MD5-anchored stock binary). High on structural-identity of `0x6d1ce` to M2 / M4. Medium on tier rankings (`Tier 1` is the strongest claim — these gates would absolutely drop if the path is exercised; uncertainty is *whether the path is exercised*, not whether the drop would happen). Low on Tier-4 RX-side relevance — that requires wire-side measurement we don't have.
+
