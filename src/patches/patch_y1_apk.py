@@ -427,7 +427,7 @@ NEW_ARTISTS = (
 if OLD_ARTISTS not in artists_src:
     sys.exit(
         "ERROR: ArtistsActivity patch target not found.\n"
-        "  The smali structure may differ from supported stock builds (3.0.2 / 3.0.7).\n"
+        "  The smali structure may differ from supported stock builds.\n"
         "  Inspect ArtistsActivity.smali and locate the switchSongSortType\n"
         "  call in the confirm() method's artist-tap branch."
     )
@@ -545,7 +545,7 @@ m = INIT_VIEW_PATTERN.search(albums_src)
 if not m:
     sys.exit(
         "ERROR: AlbumsActivity initView() pattern not found.\n"
-        "  The smali structure may differ from supported stock builds (3.0.2 / 3.0.7).\n"
+        "  The smali structure may differ from supported stock builds.\n"
         "  Inspect AlbumsActivity.smali manually."
     )
 
@@ -940,7 +940,7 @@ if OLD_PLAY_BRANCH not in play_receiver_src:
     sys.exit(
         "ERROR: PlayControllerReceiver KEY_PLAY → playOrPause branch not found.\n"
         f"  File: {play_receiver_path}\n"
-        "  The smali shape may differ from supported stock builds (3.0.2 / 3.0.7)."
+        "  The smali shape may differ from supported stock builds."
     )
 
 play_receiver_src = play_receiver_src.replace(OLD_PLAY_BRANCH, NEW_PLAY_BRANCH, 1)
@@ -1156,7 +1156,7 @@ if OLD_DISPATCH_HEAD not in base_activity_src:
     sys.exit(
         "ERROR: BaseActivity dispatchKeyEvent prologue not found.\n"
         f"  File: {base_activity_path}\n"
-        "  The smali shape may differ from supported stock builds (3.0.2 / 3.0.7)."
+        "  The smali shape may differ from supported stock builds."
     )
 
 base_activity_src = base_activity_src.replace(OLD_DISPATCH_HEAD, NEW_DISPATCH_HEAD, 1)
@@ -1267,7 +1267,7 @@ if OLD_PLAYER_DISPATCH_HEAD not in base_player_activity_src:
     sys.exit(
         "ERROR: BasePlayerActivity dispatchKeyEvent prologue not found.\n"
         f"  File: {base_player_activity_path}\n"
-        "  The smali shape may differ from supported stock builds (3.0.2 / 3.0.7)."
+        "  The smali shape may differ from supported stock builds."
     )
 
 base_player_activity_src = base_player_activity_src.replace(
@@ -1467,7 +1467,7 @@ if OLD_Y1APP_RETURN not in y1app_src:
     sys.exit(
         "ERROR: Y1Application.onCreate :cond_3 + return-void not found.\n"
         f"  File: {y1app_path}\n"
-        "  The smali shape may differ from supported stock builds (3.0.2 / 3.0.7)."
+        "  The smali shape may differ from supported stock builds."
     )
 
 y1app_src = y1app_src.replace(OLD_Y1APP_RETURN, NEW_Y1APP_RETURN, 1)
