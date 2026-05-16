@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "926b8e808693a4c44028ee257b33e898"
+OUTPUT_MD5        = "2b0bffeb6d29ff2ba75cf811688ec0ef"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -204,6 +204,78 @@ PATCHES = [
         "offset": 0x12230,
         "before": bytes([0x01, 0x29]),  # cmp r1, 1
         "after":  bytes([0x0f, 0x29]),  # cmp r1, 0xF
+    },
+    {
+        # M2 — TG-side outbound-frame drop gate at fcn.0x6d048.
+        #
+        # fcn.0x6d048 is the outbound-frame builder reached from the chain
+        # `fcn.0xf0bc → fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20 → fcn.0xae5e4`
+        # for short-frame AVRCP responses (PSTAT, REACHED_END/START, batt
+        # status — anything under the L2CAP MTU). At file offset 0x6d068
+        # it calls fcn.0x6ccdc (doubly-linked-list contains check) against
+        # g_active_conn_list at *(0xf99XX). If our conn isn't in the list,
+        # the function returns 0xd (drop) WITHOUT building or sending the
+        # wire frame — and the caller (fcn.0xf0bc) treats this as success
+        # via `cmp r5, 2; bne 0xf208` so the drop is silent.
+        #
+        # Empirically (dual-kia-20260515-2215, Trace #40), the list is
+        # populated whenever the chip is ready and emptied when the chip
+        # is mid-write. Under A2DP saturation the conn is in the list only
+        # ~10-20% of the time, so 80% of our T9 emits drop here. AVRCP_
+        # SendMessage's return path doesn't surface this because send()
+        # already succeeded (the datagram was queued into mtkbt's IPC recv
+        # buffer); the drop happens further down inside mtkbt itself.
+        #
+        # M2 NOPs the `beq 0x6d0e0` at file offset 0x6d06e (2 bytes,
+        # `37 d0` → `00 bf`). After M2, fcn.0x6d048 unconditionally builds
+        # the wire frame and tail-calls fcn.0x6df20 — bypassing the
+        # "is-this-conn-active" check. Safe because:
+        #   - The list state was a chip-readiness heuristic, not a
+        #     correctness check. Conn pointer is stable across the BT
+        #     pairing session (per Trace #40's enableNative RE).
+        #   - The downstream send (fcn.0xae5e4 / fcn.0xae418) handles
+        #     its own per-channel busy state.
+        "name":   "[M2] Outbound-frame drop bypass: NOP gate 1 list-contains check (mtkbt 0x6d06e)",
+        "offset": 0x6d06e,
+        "before": bytes([0x37, 0xd0]),  # beq 0x6d0e0 (drop with rc=0xd)
+        "after":  bytes([0x00, 0xbf]),  # nop
+    },
+    {
+        # M3 — TG-side chip-busy gate at fcn.0x6df20.
+        #
+        # fcn.0x6df20 is the second-stage outbound-frame send, tail-called
+        # from M2's site. At file offset 0x6df3a it tests `ctx[0xf2]`
+        # (chip-write busy flag). If set, returns 0xb (drop). The flag is
+        # SET at 0x6df42 just before the chip-send tail-call to
+        # fcn.0xae5e4, and CLEARED at fcn.0x6d9b8:0x6da10 in the
+        # send-completion handler when the chip ACKs the write.
+        #
+        # Empirically (dual-kia-20260515-2215, Trace #40), this gate
+        # combines with M2's gate 1 to produce the ~18% delivery rate
+        # for PSTAT and ~9% for POS. Between mtkbt initiating a chip-write
+        # and the chip's ACK event, the busy flag is set and all new
+        # emits drop silently.
+        #
+        # M3 NOPs the SET at 0x6df42 (4 bytes, `84 f8 f2 00` → two NOPs).
+        # The CHECK at 0x6df3a stays intact but always reads 0 (since the
+        # flag never gets set), so the gate never trips. Safer than NOPing
+        # the check itself because:
+        #   - mtkbt's IPC dispatcher is single-threaded; fcn.0xae5e4's
+        #     downstream chain (fcn.0xae418 → fcn.0x50918 → mtk_bt_write)
+        #     is synchronous (blocking UART write). No concurrent emits
+        #     can race on the per-channel state inside fcn.0xae5e4.
+        #   - The completion handler (fcn.0x6d9b8) still clears the flag
+        #     on ACK events — harmless no-op since the flag is already 0.
+        #
+        # Trade-off: under A2DP saturation, our T9 emits may now be
+        # SLOWER on average (each blocks until mtk_bt_write completes,
+        # whereas before they'd drop fast and return). But total
+        # throughput is higher: every emit reaches the wire instead of
+        # 18% of them.
+        "name":   "[M3] Chip-busy gate bypass: NOP set-busy-flag (mtkbt 0x6df42)",
+        "offset": 0x6df42,
+        "before": bytes([0x84, 0xf8, 0xf2, 0x00]),  # strb.w r0, [r4, #0xf2]
+        "after":  bytes([0x00, 0xbf, 0x00, 0xbf]),  # nop; nop
     },
 ]
 

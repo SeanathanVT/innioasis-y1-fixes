@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, outbound-frame drop-gate bypass + chip-busy gate bypass so every T9/T5 CHANGED emit reaches the wire instead of silently dropping under A2DP saturation). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -100,7 +100,26 @@ M1 widens the cmp constant from `1` to `0x0F`. After M1: `ctxt[8] == 0x0F` (T2 /
 
 End-to-end byte chain: IPC msg=544 → `fcn.00067768` (sets ctxt ptr at msg+0x1c) → `fcn.000518ac` case 44 → `fcn.00012478` event_id tbb → per-event response builder → `fcn.000121d8` (M1 site at `0x12230`) → `fcn.00011894` strb ctype to packetFrame[0xb] → `fcn.0000f0bc` queue → `fcn.0000ef08` strb to wire `buf[0]`. Full radare2 trace in `docs/INVESTIGATION.md`.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `926b8e808693a4c44028ee257b33e898`.
+**M2 — Outbound-frame drop bypass: NOP gate 1 list-contains check** at file `0x6d06e` (1 site, 2 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x6d06e` | `37 d0` → `00 bf` | `beq 0x6d0e0` → `nop` |
+
+Stock `fcn.0x6d048` (outbound-frame builder reached from `fcn.0xf0bc → fcn.0xed50 → fcn.0x6d048 → fcn.0x6df20 → fcn.0xae5e4` for short-frame AVRCP responses under the L2CAP MTU — PSTAT, REACHED_END/START, batt status) calls `fcn.0x6ccdc` (doubly-linked-list contains check) against `g_active_conn_list` at `*(0xf99XX)`. If the conn isn't in the list, returns `0xd` (drop) without building or sending the wire frame. The caller (`fcn.0xf0bc`) treats this as success via `cmp r5, 2; bne 0xf208`, so the drop is silent — `AVRCP_SendMessage` returns 0 to the JNI trampoline even though no wire frame goes out.
+M2 NOPs the `beq 0x6d0e0`, so the function unconditionally builds the wire frame and tail-calls `fcn.0x6df20`. The list state was a chip-readiness heuristic, not a correctness check; the downstream send handles its own per-channel state. Combined with M3, eliminates the silent-drop behaviour described in `docs/INVESTIGATION.md` Trace #40.
+
+**M3 — Chip-busy gate bypass: NOP set-busy-flag** at file `0x6df42` (1 site, 4 bytes):
+
+| site | bytes (before → after) | mnemonic |
+|---|---|---|
+| `0x6df42` | `84 f8 f2 00` → `00 bf 00 bf` | `strb.w r0, [r4, #0xf2]` → `nop; nop` |
+
+Stock `fcn.0x6df20` (second-stage outbound send, tail-called from M2's site) tests `ctx[0xf2]` (chip-write busy flag) at `0x6df3a`. If set, returns `0xb` (drop). The flag is set at `0x6df42` just before the chip-send tail-call to `fcn.0xae5e4`, and cleared at `fcn.0x6d9b8:0x6da10` in the send-completion handler when the chip ACKs the write. Under A2DP saturation the busy window dominates, and ~80% of our T9 emits arrive while the flag is set — dropped silently.
+
+M3 NOPs the SET (not the CHECK). After M3 the flag is never set, so `cbnz r3, 0x6df52` at `0x6df3a` never trips. Safe because mtkbt's IPC dispatcher is single-threaded and `fcn.0xae5e4`'s downstream chain (`fcn.0xae418 → fcn.0x50918 → mtk_bt_write`) is synchronous (blocking UART write) — no concurrent emits race on the per-channel state inside `fcn.0xae5e4`. The completion handler (`fcn.0x6d9b8`) still clears the flag on ACK events; harmless no-op since the flag is already 0.
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `2b0bffeb6d29ff2ba75cf811688ec0ef`.
 
 ---
 
