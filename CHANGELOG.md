@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-16
 ### Changed
 - AVRCP 1.3 §6.7.1 strict subscription gating in the trampoline chain — one CHANGED per CT registration; CT re-registers to receive the next. Matches Pixel-as-TG observed cadence on spec-compliant Controllers.
 - `mtkbt` outbound-frame drop bypass — every T9 / T5 CHANGED emit reaches the wire under sustained traffic (stock dropped silently under A2DP saturation).
