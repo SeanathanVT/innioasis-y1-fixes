@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/spec/v2.0.0.html). For full prose detail on any entry, see `git log`.
 
 ## [Unreleased]
+
+## [2.3.0] - 2026-05-16
 ### Added
 - Stock firmware v3.0.7 support. `KNOWN_FIRMWARES` enrols the new build; `patch_y1_apk.py` accepts both 3.0.2 and 3.0.7 stock music APKs. MediaTek BT stack binaries (`mtkbt`, `libextavrcp*.so`, `libaudio.a2dp.default.so`, `MtkBt.odex`) are byte-identical between the two builds — `--avrcp` and `--bluetooth` patches apply unchanged. The music APK differs (resource-ID shifts, additional methods in `Y1Repository`); every smali anchor in `patch_y1_apk.py` (literal-text + the `AlbumsActivity.initView` regex) handles both builds.
 

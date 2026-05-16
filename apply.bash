@@ -6,7 +6,7 @@
 # Add a row to support a new build.
 #
 # Author:    Sean Halpin (github.com/SeanathanVT)
-# Version:   2.2.0
+# Version:   2.3.0
 # Changelog: see CHANGELOG.md
 # Patches:   see docs/PATCHES.md
 #
