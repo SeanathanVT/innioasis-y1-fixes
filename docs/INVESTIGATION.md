@@ -3967,4 +3967,65 @@ Risk profile:
 
 **Confidence.** High on the byte-level finding (Bolt's RegNotif order verified from btlog wire-frame extraction). Medium on the causal chain (1.4+ INTERIM-ACK → Bolt enters 1.4+ mode → Bolt's flow breaks); reasonable but not proven without a post-trampoline-edit capture. Low on whether this is the *only* remaining issue — there may be additional content-correctness issues post-M4 that emerge once 1.4+ events stop being mis-acknowledged.
 
+## Trace #46 (2026-05-17) — Trace #45 retracted; Pixel HCI snoop comparison surfaces TRACK_CHANGED Identifier divergence as the strongest remaining lead
+
+**Trace #45 retraction.** User pointed out the T8 1.4+ event handlers (`0x09 / 0x0a / 0x0b / 0x0c`) were added in Trace #32 specifically to mirror Pixel-in-AVRCP-1.3-mode's wire shape against the same Bolt CT. Re-checked the Pixel-4 btsnoop at `/work/logs/pixel4-bugreport/FS/data/misc/bluetooth/logs/btsnoop_hci.log` (capture date 2026-05-13, Pixel forced to 1.3 mode):
+
+| Event | Bolt CMD | Pixel response |
+|---|---|---|
+| `0x01` PLAYBACK_STATUS_CHANGED | Notify | Interim with PlayStatus |
+| `0x02` TRACK_CHANGED | Notify | Interim with `0x0000000000000000 (SELECTED)` |
+| `0x05` PLAYBACK_POS_CHANGED | Notify | Interim with `SongPosition: 0ms` |
+| `0x08` PLAYER_APPLICATION_SETTING_CHANGED | Notify | Interim |
+| **`0x09`** NOW_PLAYING_CONTENT_CHANGED | Notify | **Interim** (zero-payload) |
+| **`0x0a`** AVAILABLE_PLAYERS_CHANGED | Notify | **Interim** (zero-payload) |
+| **`0x0b`** ADDRESSED_PLAYER_CHANGED | Notify | **Interim with PlayerID:0, UidCounter:0** |
+| **`0x0c`** UIDS_CHANGED | Notify | **Interim with UidCounter:0** |
+
+Pixel-in-1.3-mode INTERIM-ACKs all four 1.4+ events. T8's behavior is the correct mirror, not a scope violation. Trace #45's "revert the 1.4+ INTERIM ACKs" recommendation is **withdrawn**.
+
+**Method shift.** Switch from "audit Y1 for scope-violating behaviour" to "diff Y1 vs Pixel on the wire for the same Bolt CT, find the divergence". The Pixel-Bolt capture works (Pixel's pane presumably engages on Bolt — same hardware setup). The Y1-Bolt capture (pre-M4) does not. Find what's different.
+
+**Wire-level diff (Pixel vs Y1) — known divergences and candidates:**
+
+| Surface | Pixel | Y1 | §-spec | Material? |
+|---|---|---|---|---|
+| `RegNotif INTERIM` shape for `0x09 / 0x0a / 0x0b / 0x0c` | INTERIM-ACK (with zero/empty payload) | INTERIM-ACK (same) | both within §6.7.1 carve-out | no — matched in Trace #32 |
+| `TRACK_CHANGED INTERIM` Identifier | `0x0000000000000000` (SELECTED) then `0x0000000000000001` after PLAY (small monotonic counter) | y1-track-info[0..7] = audio_id (real BE u64 songid, e.g. `0x0000000175A22BB7` for 6302084023) | §5.4.2 Tbl 5.30: Identifier is a UID; 0 = "SELECTED" semantic for 1.3 | **plausible — Bolt may treat large UIDs as 1.4+ Browse-folder semantics and ignore for the metadata pane** |
+| `GetElementAttributes` response shape | Drops unsupported attributes entirely (returns Count=4 with `{0x01, 0x04, 0x05, 0x07}` even when request asked for `{0x01..0x07}`) | Emits all requested attribs; unsupported get `len=0` (post-E1 patch per Trace #29) | §5.3.4 strict: zero-length emit; Pixel violates §5.3.4 | **plausible inverse to E1's hypothesis — maybe Bolt is coded against Pixel's §5.3.4 violation and trips on Y1's strict-compliant zero-length attribs** |
+| `PASSTHROUGH PLAY` ack | Accepted | Accepted (P1 patch) | both spec-compliant | no — same |
+| `InformDisplayableCharacterSet` ack | Rejected ("Invalid Command") | Rejected (T_charset patch per Trace #33) | both spec-permissible | no — same |
+| GetCapabilities EventsSupported set | `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` | same (Trace #32) | both spec-permissible | no — same |
+| `PlaybackPositionChanged` CHANGED cadence | ~1 s, with Bolt re-subscribing within 20–40 ms after each CHANGED (strict §6.7.1) | Y1's T9 emits POS CHANGED on PositionTicker 1-s ticks; clears state[13] per §6.7.1 strict; CT must re-subscribe to re-arm | both strict §6.7.1 | no — should match |
+
+**Strongest remaining hypothesis: TRACK_CHANGED Identifier divergence.** Pixel sends `0x0000000000000000` (1.3 SELECTED semantic). Y1 sends the real audio_id from `y1-track-info[0..7]` — currently a large 64-bit songid (e.g. `0x0000000175A22BB7`). The inline comment in `extended_T2` at `_trampolines.py:711–717` and again at `t5_track_changed` at `_trampolines.py:894–896` explicitly states "Strict 1.4+ CTs cache GetElementAttributes keyed by the TRACK_CHANGED Identifier; a per-track id forces cache invalidation + re-query on every track edge."
+
+That's a 1.4+ semantic optimization (browseable-folder UIDs). For an AVRCP 1.3 TG (which our SDP advertises), the spec-clean Identifier is `0x0000000000000000` (matches Pixel-in-1.3-mode). The "per-track id forces cache invalidation" rationale was a Trace #32-era optimization for strict-1.4+ CTs, but the same memory note `feedback_avrcp_spec_compliance` says "every Koensayr/AVRCP change must move toward strict AVRCP-spec compliance. Spec-permissible options can be chosen for CT-compat reasons, but the chase starts from 'what does the spec say'."
+
+Spec says: 1.3 TG → Identifier=0. We're a 1.3 TG. Identifier should be 0.
+
+**Proposed patch (would be a trampoline edit, NOT staged yet).**
+
+In `extended_T2` (track UID emit for INTERIM TRACK_CHANGED) at `_trampolines.py:~657–670`: skip the y1-track-info `open + read` and leave `sp+0..7` zero-initialized. Same in `t5_track_changed` (CHANGED TRACK_CHANGED).
+
+Result: every TRACK_CHANGED INTERIM and CHANGED emits Identifier `0x0000000000000000`, matching Pixel-in-1.3-mode. Bolt sees the spec-clean 1.3 semantic.
+
+Risk profile:
+
+- **Low correctness risk.** Pixel-in-1.3-mode does this exact thing against the same Bolt and works.
+- **One regression risk.** Strict-1.4+ CTs that cache GetElementAttributes keyed by Identifier won't see a cache-invalidation signal on track edges, so they could display stale metadata. Mitigation: Bolt is the only subscription-class CT in our test matrix; if no CT in the matrix is "strict-1.4+ cache-keyed", no regression.
+- **One behavior change.** TRACK_CHANGED's `0x0000000000000001` second-edge increment that Pixel does — we can either leave at 0 always (truer 1.3 mirror — Pixel's increment is itself a 1.4+ leak) or replicate a per-edge counter (closer to Pixel exact). Probably leave at 0 first; revisit if Bolt requires the counter.
+
+**Secondary hypothesis: E1's zero-length attribute emit may be the wrong direction.** Pixel violates §5.3.4 by dropping unsupported attributes entirely — and works against Bolt. Y1 (post-E1) emits all requested attributes including zero-length unsupported — strict §5.3.4 compliant. If Bolt's display code is calibrated against Pixel's §5.3.4 violation, Y1's strict compliance may trip it.
+
+Trace #29 added E1 with the opposite reasoning: Bolt's pane was blocked by libextavrcp dropping zero-length, fix was to emit them. That conclusion may have been confounded by the M2/M3/M4-era wire-delivery problem — Bolt wasn't receiving anything at all, so the "blocked by zero-length-drop" theory was unfalsifiable.
+
+**Action plan (do not stage yet — wants user direction):**
+
+1. **Best first move (low-cost, low-risk):** Patch `extended_T2` + `t5_track_changed` to emit Identifier `0x0000000000000000` (skip y1-track-info read). One change touches two sites. Re-flash, test Bolt. If pane engages, problem found.
+2. **If (1) doesn't help:** Try reverting E1 (let libextavrcp drop unsupported attribs again). The patch is a single `cbz` flip in `patch_libextavrcp.py` — small, reversible.
+3. **If neither (1) nor (2) help:** A fresh post-M4-with-M-trampoline-instrumentation logcat from a Bolt session, plus the wire-side Y1 btsnoop equivalent, are the only path forward.
+
+**Confidence.** High on Pixel↔Bolt wire-shape baseline (direct tshark decode of the Pixel snoop). High on the byte-level Identifier divergence (T2/T5 code reads y1-track-info, Pixel sends 0). Medium-low on the Identifier=0 patch fixing Bolt — strong correlation with spec compliance but no proof until tested. Medium on E1 being the wrong direction — possible but speculative.
+
 
