@@ -4390,4 +4390,58 @@ So the TID-mismatch hypothesis is confirmed quantitatively without new captures.
 
 Best next step: examine `fcn.0x7d204` / the AVCTP RX path to see whether stock writes the inbound TID anywhere on the chan struct, and if so where. If chan[0x29] is already written from inbound RX (just overwritten by Path B at `0x6d188`), the fix collapses to a single NOP at `0x6d188-0x6d18b` (4 bytes `84 f8 29 00` → 4 NOPs).
 
+## Trace #53 (2026-05-17) — RE corrections: AVCTP RX path located, chan+0x39 confirmed as the shared TID slot
+
+**Mistake correction (from Trace #52 closing message).** `fcn.0x7d204` is NOT the AVCTP RX entry — its disassembly leads through the format string `"L2CAP_SendData state:%d return:%d"`. It's the L2CAP TX (downward send) path. The actual AVCTP RX entry is `fcn.0xfb04` (the avctpCB callback registered with the AVCTP layer), with its `[AVRCP] avctpCB AVCTP_EVENT:%d` log marker.
+
+**True inbound AVRCP CMD path mapped.** Working back from the wrappers `fcn.0xed04` (Path A) and `fcn.0xed0a` (Path B):
+
+```
+AVCTP layer
+  → fcn.0xfb04 (avctpCB)                 ; r3=evt: 2=RECV, 3=CONN_STATE, 4=…
+  → fcn.0x518ac (AVCTP packet dispatcher) ; (case 20 per prior summary)
+  → fcn.0x11374 ([AVRCP] transId logger)
+  → fcn.0xed0a (+8 trampoline)
+  → fcn.0x6d0f0 (Path B)                  ; writes chan[+0x29]
+  → fcn.0xae5e4 → fcn.0xae418             ; wire-frame builder
+```
+
+The TID is latched twice: first by `fcn.0x11374` at file offset `0x11436` (`strb.w sl, [r4, 0xba9]` where `sl = arg2 = inbound transId`) into the per-channel stash struct at `chan+0xba9` (stash struct base `chan+0xb9c`, offset `+0xd`); then a few instructions later passed as the `r1` arg to `fcn.0xed0a` and propagated through Path B's `ldrb r0, [r5, 0xd]; strb.w r0, [r4, 0x29]` at `0x6d186-0x6d18b` (where `r5 = stash`, `r4 = chan+0x10`).
+
+**Path B's r4 is `chan+0x10` for BOTH inbound and outbound** (initial RE confusion about an 8-byte split was wrong — the `+8` wrapper in `fcn.0xed0a` is the only addition; outbound's chain `fcn.0x11894 (passes chan+8) → fcn.0xf0bc (r5 = r4+8) → Path B (r0 = r5 = chan+0x10)` yields the same `r4`). So the strb-target `[r4, 0x29]` resolves to `chan+0x39` in BOTH paths. The wire-frame builder `fcn.0xae418` reads `[r4, 0x15]` with its `r4 = chan+0x24`, also `chan+0x39`. One physical slot, written by both paths, read by the builder.
+
+**Confirmation of the original Trace #52 hypothesis.** Stock mtkbt's inbound RX writes the AV/C command's transId to `chan+0x39` via Path B at `0x6d188`. The outbound IPC chain then ALSO calls Path B (because RegNotif INTERIM/CHANGED's IPC msg id ≤ 6 routes through the `fcn.0xf0bc → fcn.0xef08 → fcn.0x6d0f0` Path B branch — `cbz r3, 0xf186` at `0xf138` with `r3 = pkt[9]`, where `pkt[9] = (alloc_msg_type > 6) ? 1 : 0` set by `fcn.0x11894` at `0x11912`). The outbound packet has `pkt[0xd] = 0` (set unconditionally by allocator at `0x11924`), so the second Path B call writes `chan+0x39 = 0`, clobbering the inbound-latched TID before `fcn.0xae418` reads it. Wire TID = 0 for every outbound Path B response.
+
+**Why the M4 patch's "msg=544" naming is correct despite the IPC discriminator.** The `cmp r6, 6` at `0x11906` compares `r6 = arg2` (the IPC layer's small msg type, 1..N) — not the AVRCP wire-format PDU identifier (0x208 = `msg=520 cmd_frame_ind`, 0x21C = `msg=540 GEA`, 0x220 = `msg=544 RegNotif`). The allocator's `r6` is the internal IPC message type, and short single-PDU responses (cmd_frame_ind_rsp, RegNotif INTERIM, GetCaps) all use a small IPC type that sets `pkt[9] = 0`, routing them to Path B. Fragmented responses (GEA) use a larger IPC type, setting `pkt[9] = 1` and routing through Path A. So all the Path B-bound msg_ids (520, 522, 544, possibly others) share the same `pkt[0xd] = 0` clobber bug.
+
+**Why NOP-at-0x6d188 doesn't work.** A flat `84 f8 29 00 → 00 bf 00 bf` NOP at `0x6d188-0x6d18b` (4 bytes) would prevent the outbound clobber, but the same instruction is also the only path that latches the inbound TID. NOPping it kills the inbound side too, leaving `chan+0x39` permanently at whatever value preceded the AVRCP session start (likely 0). Net effect: same as stock (wire TID = 0).
+
+**Discriminator candidates within Path B (no msg-id reach).** Path B's `r5` is the inbound stash (`chan+0xb9c`) or the outbound IPC packet (from `fcn.0x11894`'s free-list `fcn.0x6ce6a` pop). Bytes that DIFFER reliably between the two:
+
+| Byte | Outbound IPC packet | Inbound stash struct |
+|---|---|---|
+| `[r5, 8]` | `1` (allocator `strb r2, [r4, 8]` with `r2=1` at `0x11908`) | LSB of `pkt_ptr` (heap-aligned, typically `0`) |
+| `[r5, 9]` | `0` or `1` (msg-type discriminator) | byte 1 of `pkt_ptr` (random-ish) |
+| `[r5, 0xb]` | `arg2 = IPC msg type` (small int, 1..N) | byte 3 of `pkt_ptr` (random-ish) |
+| `[r5, 0xc]` | unwritten (whatever's in the popped buffer) | unwritten |
+| `[r5, 0x14]` | size (always set by allocator's `strh.w sb, [r4, 0x14]` at `0x11930`, capped at 0x200) | bytes from `arg_44h - 1 + ?` (random) |
+
+`pkt[8] == 1` is the cleanest "this came from the allocator" signal — and since the byte's already loaded into `r2` at `0x6d180` (`ldr r2, [r5, 8]` for the unrelated `str.w r2, [r4, 0xec]` at `0x6d182`), a UXTB + CMP + IT/STRB sequence could discriminate without reloading. But it expands to 10 bytes vs the original 6 — no in-place fit.
+
+**Updated fix design space.**
+
+1. **Code-cave trampoline inside `fcn.0x6d0f0`.** Replace `0x6d186-0x6d18b` (6 bytes) with `b.w <cave>` (4 bytes) + `nop` (2 bytes). The cave does `ldrb r0, [r5, 0xd]; uxtb r2, r2; cmp r2, 1; bne do_write; b.w 0x6d18c; do_write: strb.w r0, [r4, 0x29]; b.w 0x6d18c`. Skips the strb on outbound (preserves the inbound-latched chan+0x39); keeps the strb on inbound. Net effect: outbound responses inherit whatever TID the LAST inbound CMD landed at chan+0x39, satisfying §6.5 echo for command-response exchanges and §6.7.2 echo for RegNotif when the subscription's CMD is the most recent inbound. Requires identifying ~24 bytes of code-cave space in mtkbt.
+
+2. **Patch `libextavrcp.so cmd_frame_ind_rsp` to set `ipc[5] = conn[0x11]`** (Option 1 from Trace #52). 6 bytes needed in a 124-byte function. Then the M6 universal allocator-side patch works for all msg_ids including `msg=520`. Total: 2-byte mtkbt change + 6-byte libextavrcp.so change.
+
+3. **Per-msg-id conditional in `fcn.0x11894`** (Option 3 from Trace #52). Insert `cmp r6, <RegNotif_internal_msg_type>; beq do_lift; movs r6, 0; b cont; do_lift: ldrb r6, [r1, 5]; cont: strb r6, [r4, 0xd]`. Same code-cave requirement as (1). Less spec-aligned than (1) — leaves GEA + GetCaps still emitting TID=0.
+
+4. **Scope-cut per `project_y1_scope_cut_plan.md`.** Drop PLAYBACK_POS_CHANGED + track length, keep Artist/Track/Album + PASSTHROUGH. Doesn't fix the TID bug but reduces the matrix of CTs that hit it (since Sonos remains working pre-M4 and post-M4 unchanged).
+
+(1) is structurally cleanest if a code-cave exists in mtkbt. (2) is a two-binary change but doesn't need code-caves — could be done with byte-level overlay if 6 bytes can be found in `cmd_frame_ind_rsp`'s prologue/epilogue. Pending user decision on which to pursue.
+
+**Confidence.** High on the call-chain mapping (verified by axt cross-references in radare2). High on `chan+0x39` being the single shared slot (re-traced through both wrapper paths with consistent r4 = chan+0x10 in Path B). Medium on (1)'s code-cave availability — needs an inventory pass on mtkbt. High on (2)'s feasibility given the prior libextavrcp.so RE done for E1.
+
+
+
 
