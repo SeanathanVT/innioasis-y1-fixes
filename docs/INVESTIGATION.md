@@ -4111,4 +4111,76 @@ If E1's zero-length emit (~56 bytes of attr headers Pixel doesn't emit) plus pos
 
 **Confidence.** High on every dimension verified empirically (direct tshark/strings extraction from both captures). High on the discovery-skip being a real Bolt-side behaviour difference (n=1 each, but consistent across all 17 RegNotif retries in Y1's capture). Medium on the cause (cache vs SDP-attr-driven). Cannot disambiguate without (1) unpair/repair or (2) Y1 btmon capture.
 
+## Trace #48 (2026-05-17) — Trace #47 headline correction; mtkbt DOES support AVCTP fragmentation; reframing wire-vs-IPC distinction
+
+**Trace #47 headline retraction.** The "Bolt skips GetCapabilities query with Y1" observation only applies to the `dual-bolt-20260516-1453` capture, which is a **reconnect** to an existing bond. Multiple prior captures with confirmed unpair+repair (`dual-bolt-20260509-2249`, `dual-bolt-20260510-0953`, `dual-bolt-20260511-1339`, and several more) all show the standard fresh-pair flow:
+
+```
+Recv AVRCP indication: 506      ← AVRCP_CONNECT_IND (first inbound)
+Recv AVRCP indication: 505      ← initial config exchange
+Recv AVRCP indication: 519      ← GetCapabilities CMD (size:9)
+EXTADP_AVRCP: msg=522 size=30   ← Y1's GetCapabilities response (8 events)
+```
+
+The skip-GetCap pattern in `dual-bolt-20260516-1453` is normal AVRCP CT behaviour for reconnects to a known bond — Bolt remembers Y1's capability set from the prior session. **Not a divergence; not Y1-specific.** Cache hypothesis from Trace #47 retracted.
+
+**The metadata-pane regression exists in fresh-pair captures too** (May 9–11), so unpair+repair is not a fix and was never the underlying cause.
+
+**mtkbt DOES support AVCTP fragmentation.** Static analysis of `fcn.0xed50:0xee40–0xee66` confirms the AVCTP `packet_type` field gets computed correctly:
+
+| `r6` (offset) | `r8` (msg.len) vs `sb` (MTU) | `packet_type` |
+|---|---|---|
+| 0 | msg.len < MTU | **0 (Single)** |
+| 0 | msg.len ≥ MTU | **1 (Start)** |
+| > 0 | remaining > MTU | **2 (Continue)** |
+| > 0 | remaining ≤ MTU | **3 (End)** |
+
+MTU comes from `fcn.0xed16(chan, 1)` which returns `min(L2CAP_MTU, 0x200) - 10 = 502` bytes for AVRCP CONTROL channel responses. Above 502 wire bytes triggers fragmentation. The dispatcher `fcn.0xf0bc` tracks the per-channel fragment offset at `chan[0x314]` and increments it after each fragment via `adds r7, r0, r7; strh r7, [r4, 0x314]`. The AVCTP_EVENT 6 (TX complete) handler in `fcn.0xfb04` case-6 triggers the next-fragment send.
+
+So Y1 has fragmentation infrastructure. Whether it actually triggers depends on the actual GEA response size.
+
+**The `msg=540 size=644` is IPC buffer-pool allocation, not wire size.** Looking across captures from May 9 through May 16, every `msg=540` has the same `size=644` regardless of actual track metadata content. Compare to `msg=544` always `size=40` (RegNotif INTERIM, 14-byte wire) and `msg=520` always `size=214` (PASSTHROUGH ACK, ~12-byte wire). These are fixed per-msg-id IPC pool buffer sizes, not data length.
+
+**Estimating Y1's actual GEA wire size.** T4's emit sequence calls `PLT_get_element_attributes_rsp` once per attribute with strlen-based length. Per AVRCP 1.3 §6.6.1 Table 6.26, each attribute on the wire is `4-byte attr_id + 2-byte char_set + 2-byte length + value`. For a typical track with:
+
+- Title: ~25 chars (8 + 25 = 33 bytes)
+- Artist: ~20 chars (28 bytes)
+- Album: ~30 chars (38 bytes)
+- Media Number: ~3 chars (11 bytes)
+- Total Number: ~3 chars (11 bytes)
+- Genre: ~10 chars (18 bytes) or 0 if unpopulated (8 bytes with E1)
+- Playing Time: ~6 chars (14 bytes)
+
+That's ~155–165 bytes of attribute data plus 5 bytes AVRCP header (pdu_id, reserved, parameter_length, num_attribs) plus 9 bytes AV/C frame outer (ctype, subunit, opcode, companyID, transId) plus 3 bytes AVCTP header. Total wire: **~170–180 bytes for typical tracks**. Well under the 502-byte MTU threshold.
+
+**Conclusion: typical Y1 GEA fits in a single AVCTP packet, no fragmentation needed.** Same shape as Pixel. The "fragmentation" hypothesis from Trace #47 was based on misreading the IPC buffer size as wire size.
+
+**Where fragmentation WOULD trigger.** Only for tracks with very long fields — total wire approaching 502 bytes. With 256-byte slots for Title / Artist / Album / Genre in `y1-track-info` (4 × 256 = 1024 bytes max content), an extreme track could push wire >502 and trigger fragmentation. But for typical music data (Spotify-style strings of 20–40 chars), single-packet is the norm.
+
+**btmon unavailability on Y1.** Y1's Android build doesn't ship `/system/xbin/btmon`. The standard Android-stack btsnoop infrastructure isn't present either (Y1 uses BlueAngel/mtkbt, not Bluedroid/Fluoride). Alternatives:
+
+1. **External BT sniffer** (Frontline FTS, Ellisys, or open-source Ubertooth/Bluefruit/HackRF One). Gives clean wire-level visibility. Cost: hardware ($150–$3000) and capture-time setup.
+2. **Wireshark with `nrf_sniffer_for_802154` or a generic Bluetooth Classic sniffer** if available. Same idea, different hardware.
+3. **Add mtkbt debug instrumentation.** Patch `fcn.0xed50:0xee66`-region to write `r3` (the packet_type result) to a side-channel log file or via the existing fcn.0x4cc30 LogPrintf. Cost: ~10-line trampoline-style patch, doesn't require new hardware. Output reaches btlog (not logcat) but we already have btlog tooling. **This is the cheapest path to wire-fragment-type visibility.**
+4. **Patch a "wire-bytes log" into mtkbt's `fcn.0xae5e4`** (L2CAP_SendData entry) — log first 32 bytes of every outbound AVRCP frame to btlog. Slightly more work; gives complete frame visibility.
+5. **Capture btsnoop on the Bolt side** if Bolt's stack supports it. The Pixel snoop is exactly this — Pixel captures HCI inbound/outbound including the wire frames from the CT (Bolt). If Bolt exposes a btsnoop file (most cars don't), we'd have the data.
+
+**Can we implement fragmentation easily?** Yes/already-done:
+
+- mtkbt's `fcn.0xed50` (Path A header builder, used for `msg=540` GEA) and `fcn.0xef08` (Path B header builder, used for `msg=544` RegNotif INTERIM/CHANGED) both compute `packet_type` 0/1/2/3 correctly.
+- The dispatch loop in `fcn.0xf0bc` + `fcn.0xfb04` case-6 (TX-complete handler) drives multi-fragment sends.
+- The L2CAP layer (`fcn.0xae5e4 → fcn.0xae418 → fcn.0x7d204`) accepts the per-fragment send call.
+
+**Likely-not-needed for our metadata pane regression.** Typical GEA wire fits in single packet (<200 bytes vs 502 MTU). Bolt sees the same shape as Pixel.
+
+**What IS load-bearing.** Reframing where to look next:
+
+1. **Direct wire visibility.** Without seeing what Y1's mtkbt actually puts on the wire, we're guessing. The Tier-3 debug-log patch above (log `packet_type` from `fcn.0xed50` to btlog) is the cheapest way to confirm what Y1 emits per-frame.
+2. **The Bolt-side AVRCP state machine.** Bolt subscribes (RegNotif), receives INTERIM, but pane stays blank. Why? Without Bolt firmware to RE, the only data is the wire pattern that DOES work (Pixel) vs the one that doesn't (Y1). The wire-shape diff is small (Identifier, ~50-byte size diff). Either the metadata-pane code path on Bolt's side has a check we haven't identified, or Y1's wire bytes are subtly malformed in a way we can't see without btmon.
+3. **Hardware probe.** A USB BT sniffer on the Bolt-Y1 link captures wire bytes from outside both stacks. Gives a definitive byte-by-byte comparison.
+
+**Outcome.** Trace #47's discovery-skip and fragmentation hypotheses both retracted. The actual blocker remains "Bolt receives Y1's AVRCP responses but doesn't render the metadata pane, while it renders Pixel's." Without wire visibility on the Y1 side, the diagnosis is constrained to "something in Y1's wire bytes differs from Pixel's in a way Bolt cares about, but we can't see it." Cheapest mitigation: patch mtkbt to log per-fragment `packet_type` to btlog, confirm or rule out fragmentation in production.
+
+**Confidence.** High on fragmentation infrastructure existing in mtkbt (direct static analysis of `fcn.0xed50` packet_type logic). High on the IPC-vs-wire size distinction (consistent `size=644` across all msg=540 emits regardless of track content). Medium on "typical GEA fits in single packet" (computation from T4 emit logic but not verified against actual wire bytes).
+
 
