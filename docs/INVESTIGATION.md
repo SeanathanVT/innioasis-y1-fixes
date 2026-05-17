@@ -4245,4 +4245,55 @@ New `OUTPUT_DEBUG_MD5` for `libextavrcp_jni.so` debug build: `3900c80075ae051afc
 
 **Confidence.** High that the trampoline-side wire-size measurement is equivalent to mtkbt-side packet_type observation (mtkbt's logic is a pure function of msg.len vs MTU per `fcn.0xed50:0xee40-0xee66`). High on the implementation working — round-tripped through the patcher in both release and debug modes, MD5-verified. Medium on whether the resulting data will identify the Bolt regression — that's an empirical question requiring the user-side hardware test.
 
+## Trace #50 (2026-05-17) — First post-M4 + debug-instrumented Bolt capture: M4 alone doesn't fix wire delivery for Path B
+
+**Capture.** `/work/logs/dual-bolt-20260517-0902/`, ~3 minutes. M4 + the new `Y1T : T4a=` instrumentation on device, fresh Bolt session.
+
+**`tools/avrcp-wire-trace.py` output — the diagnostic.** Three GEA responses surfaced:
+
+| Time | N | total_strlen | wire | Frags? | Content |
+|---|---|---|---|---|---|
+| 09:00:20 | 7 | 1 | 71 B | 1 | Empty-track placeholder (only MediaNum populated) |
+| 09:00:41 | 7 | 80 | 150 B | 1 | Title=35, Artist=11 (`Anti-Flag` w/ UTF-8 dash), Album=15, Genre=8, PlayTime=6 |
+| 09:01:44 | 7 | 58 | 128 B | 1 | Title=16, Artist=3 (`311`), Album=12, Genre=16, PlayTime=6 |
+
+**All three fit in single AVCTP packets** (wire < 502 B, no fragmentation triggered). The Pixel↔Bolt session's typical 110–125 B wire matches Y1's 128–150 B. **GEA fragmentation is not the issue.** Trace #48's secondary hypothesis is also refuted by direct measurement.
+
+The user-side observation — "only Anti-Flag and 311 displayed metadata" — matches exactly: those are the only two GEA responses with real metadata content. Bolt only queried GEA those two times.
+
+**Bolt's 3-second retry storm continues post-M4.** This is the headline finding. Inbound `MSG_ID_BT_AVRCP_CMD_FRAME_IND size:13` (RegNotif CMD) timestamps:
+
+```
+09:00:11.543 / .14.554 / .17.545 / .23.564 / .26.554 / .29.555 / .32.587 / .35.558 / .38.555 / .41.555
+```
+
+Exact ~3.0 s intervals (with 6 s gap at `.20` where a GEA query interrupted). This is the AVCTP V13 §3.3.5 response-timeout retry. **Bolt is not receiving any INTERIM response for `event=0x01 PLAYBACK_STATUS_CHANGED`.**
+
+Per logcat, Y1's T8 trampoline DOES emit an INTERIM for each retry (10 `Y1T : T8reg ev=01` entries match the 10 inbound `size:13` for ev=01). `EXTADP_AVRCP: msg=544` outbound IPC count is 77. mtkbt's `fcn.0xf0bc` Path B router log (`avrcp: sbunit type:9 id0…`) shows 81 hits in btlog. The trampolines fire correctly; mtkbt processes the IPC; mtkbt routes through Path B (the M4-patched fcn.0x6d0f0). **But Bolt's 3-second retry cadence proves none of the resulting wire frames reach Bolt.**
+
+**M4 alone doesn't fix Path B wire delivery.** There's another drop site downstream that affects Path B but not Path A.
+
+**Where the paths diverge.** Both eventually call `fcn.0xae5e4` (L2CAP_SendData), but with different second argument:
+
+| Path | Finalizer | r1 to `fcn.0xae5e4` | Source instruction |
+|---|---|---|---|
+| A (msg=540 GEA, M2/M3) | `fcn.0x6d048` → `fcn.0x6df20` (M3-NOPed) → `b.w fcn.0xae5e4` | `chan + 0xc0` | `fcn.0x6df20:0x6df3e add.w r1, r4, 0xc0` |
+| B (msg=544 RegNotif, M4) | `fcn.0x6d0f0` (M4-NOPed) → `b.w fcn.0xae5e4` | `chan + 0xd8` | `fcn.0x6d0f0:0x6d18e add.w r1, r4, 0xd8` |
+
+The two paths populate different regions of the chan struct (Path A → `chan[0xc0..]`, Path B → `chan[0xd8..]`). `fcn.0xae5e4` consumes whichever buffer was passed. **If the `chan+0xd8` Path B buffer has a structural bug (missing field, wrong byte at a critical position) that the `chan+0xc0` Path A buffer doesn't, `fcn.0xae5e4 → fcn.0xae418 → fcn.0x7d204` would silently reject it at one of Trace #48's L1 (CID lookup miss, no log) or L2 (packet-flag sanity mask, no log) gates — neither of which surface in btlog.**
+
+**Confirmed not the issue.** L3 (state-check, logs `L2CAP_SendData state:`) — zero hits in btlog. L5 (`l2cap: return no-connection state:`) — zero hits. L6 (`l2cap QueueTx fail`) — zero hits. AVCTP fragmentation (would require wire > 502 B) — empirically all 3 GEA responses fit single-packet, so fragmenter is dormant.
+
+**Confirmed by direct comparison.** The Pixel↔Bolt capture had Bolt's RegNotif re-subscribe arrive **20–22 ms after** each Pixel CHANGED emit (per Trace #45 / #46) — that's the normal CT post-CHANGED re-subscribe cadence. Y1↔Bolt post-M4 has Bolt's RegNotif retries arriving **3000 ms exactly** apart — that's the §3.3.5 retry timer. The two timing signatures unambiguously distinguish "subscription confirmed, normal flow" (20 ms) from "no INTERIM received, retry timer firing" (3000 ms).
+
+**Outcome.** Strong evidence that Path B (`fcn.0x6d0f0`-built AVRCP frames at `chan+0xd8`) has a structural bug between `fcn.0x6d0f0` exit and Bolt's wire-side parser. The bug is silent (no log hits) and affects only Path B (Path A works for some emits, evidenced by the 3 GEA wire deliveries). Most likely candidates:
+
+1. **`chan+0xd8` buffer setup mismatch in `fcn.0x6d0f0`.** Some byte that Path A populates correctly at `chan+0xc0` doesn't get written at `chan+0xd8`, causing `fcn.0x7d204`'s L1 / L2 silent gates to drop.
+2. **Distinct chan-struct sub-state for Path B.** Some flag or counter at `chan[0xd8..]` differs from `chan[0xc0..]` semantics, causing downstream rejection.
+3. **`fcn.0xae5e4` queue logic mishandles Path B's buffer location.** Specifically the `cbnz r0, 0xae69c` "packet already in list" dedup drop (r6=5) might fire for Path B's reused ptr pattern but not Path A's.
+
+**Next investigation.** Byte-level diff of `chan+0xc0..` (Path A) vs `chan+0xd8..` (Path B) build sequences in `fcn.0x6d048` and `fcn.0x6d0f0`. Any field Path A writes that Path B doesn't (or writes differently) is a candidate.
+
+**Confidence.** High on the data: the 3-second retry cadence + zero L-gate logs + Path A success vs Path B failure is unambiguous. High on the structural-bug hypothesis at the byte level — the two paths build different chan-struct regions and consume them via the same downstream chain, so any divergence in field population could explain the symptom. Medium on which specific field is the bug — requires the next round of disassembly diff.
+
 
