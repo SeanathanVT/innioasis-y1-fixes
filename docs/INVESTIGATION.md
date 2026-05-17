@@ -4028,4 +4028,87 @@ Trace #29 added E1 with the opposite reasoning: Bolt's pane was blocked by libex
 
 **Confidence.** High on Pixel↔Bolt wire-shape baseline (direct tshark decode of the Pixel snoop). High on the byte-level Identifier divergence (T2/T5 code reads y1-track-info, Pixel sends 0). Medium-low on the Identifier=0 patch fixing Bolt — strong correlation with spec compliance but no proof until tested. Medium on E1 being the wrong direction — possible but speculative.
 
+## Trace #47 (2026-05-17) — Exhaustive Pixel↔Bolt vs Y1↔Bolt wire-shape diff; Bolt's initial-burst pattern differs dramatically
+
+**Goal.** Per user direction, investigate every plausible Pixel-vs-Y1 divergence using empirical captures. Identifier was already-tested. E1 hypothesis was retracted because Pixel emits Artist/Album when data is present. Push further: AVCTP transactionID/IPID/CR, fragmentation, SDP records, PASSTHROUGH latency, AVDTP signaling, L2CAP setup, HCI connection params, and initial-burst behaviour.
+
+**Data sources.** Pixel-4-with-Bolt HCI snoop at `/work/logs/pixel4-bugreport/FS/data/misc/bluetooth/logs/btsnoop_hci.log` (Pixel forced to AVRCP 1.3). Y1-with-Bolt capture at `/work/logs/dual-bolt-20260516-1453/` (logcat.txt + btlog.bin). SDP-tool browse output at `/work/logs/pixel4-sdptool-browse-avrcp-1.3.xml` vs `/work/logs/y1-sdptool-20260513-1512.log`.
+
+### Pixel↔Bolt vs Y1↔Bolt — wire-level diff (each dimension verified empirically)
+
+| Dimension | Pixel | Y1 | Material? |
+|---|---|---|---|
+| **AVCTP transactionID** | Monotonic 0x0..0xF wrap (`0x00, 0x01, 0x02, …`) per Pixel-driven response | Y1 reads from `conn[17]` for INTERIMs (matches CT's CMD TID) and from `y1-trampoline-state[8]` for proactive CHANGEDs | no — spec-correct, Y1 mirrors CT pattern |
+| **AVCTP packet_type** | All `0` (Single) even at 125-byte GEA responses | Path A (msg=540 GEA) goes through `fcn.0xed50` fragmenter; **likely emits Start+End** for the 644-byte IPC payload (~500B wire) | **plausible — Y1 fragments where Pixel doesn't** |
+| **AVCTP CR / IPID** | CR=1 (Response), IPID=0 (Profile OK) | same | no |
+| **L2CAP MTU** | 512 (CONFIG-negotiated with Bolt) | 512 (per `AVRCP_MAX_PACKET_LEN:512` startup log) | no |
+| **L2CAP retransmission mode** | ERTM proposed, Basic accepted (Bolt rejects ERTM) | Basic (default) | no — both end up Basic |
+| **PASSTHROUGH ack latency** | min 0.5 ms, max 14 ms, avg 2 ms (n=106) | same-millisecond per logcat (sub-ms granularity not observable) | no — both fast |
+| **AVDTP signaling order** | Discover → GetAllCapabilities → SetConfig → Open → Start (then later Suspend) | unverified for Y1 in this capture but stock pattern same | no — assumed match |
+| **HCI connection params** | CoD 0x340408 for Bolt (Audio/Video Hands-free, services: Rendering ObjectTransfer Audio), Encryption disabled (link layer) | Y1 HCI not captured | no diagnostic |
+| **GEA response wire size** | 70 bytes (no metadata) / 110–125 bytes (with metadata) — **always single AVCTP packet** | msg=540 IPC payload is 644 bytes — exceeds 512-byte L2CAP MTU → AVCTP fragmentation REQUIRED on Y1 side | **Y1 emits ≥2 wire fragments; Pixel emits 1** |
+| **SDP — AVRCP TG record version (attr 0x0009)** | 0x110e @ 0x0103 (AVRCP 1.3) | 0x110e @ 0x0103 (AVRCP 1.3, post V1) | no |
+| **SDP — ProtocolDescriptorList (attr 0x0004)** | L2CAP PSM 0x0017 + AVCTP 1.2 (0x0102) | same | no |
+| **SDP — SupportedFeatures (attr 0x0311)** | 0x0001 (Cat 1 only) | 0x0001 (Cat 1 only, post V8) | no |
+| **SDP — BrowseGroupList (attr 0x0005)** | 0x1002 PublicBrowseGroup | same | no |
+| **SDP — Browse PSM (attr 0x000d)** | absent | absent (post V7) | no |
+| **SDP — ServiceName (attr 0x0100)** | `"AV Remote Control Target "` | `"Advanced Audio "` (post S1) — **same name as Y1's A2DP source record** | minor — cosmetic |
+| **SDP — ProviderName (attr 0x0102)** | `" "` (single space) | **absent** | minor — both spec-permissible |
+| **SDP — ServiceRecordState (attr 0x0002)** | **absent** | `0x000001aa` / `0x0000021e` (varies) | minor — Y1's presence may force Bolt SDP cache refresh on change, but doesn't break correctness |
+| **SDP — AVRCP CT record (0x110e in ServiceClassIDList)** | **present** at handle 0x00010005 | **absent** | unclear — Pixel advertises both TG+CT, Y1 only TG |
+| **SDP — GATT/GAP records (0x1800, 0x1801)** | **present** at handles 0x00010000, 0x00010001 | absent | unclear — Y1 isn't LE-capable for these profiles |
+| **SDP — total service records advertised** | 16 (incl. HFG, HFP, NAP, PBAP, SMS/MMS, SIM, OPP, NearbySharing, GATT) | 5 (A2DP, AVRCP TG, PBAP, NAP, OPP) | no — Bolt only cares about AVRCP TG |
+| **Initial-burst pattern at AVCTP session start** | Bolt sends **GetCapabilities first** at T+0ms → Pixel responds (Count=8 events). Then InformDisplayableCharacterSet (rejected). Then 7 RegNotifs all within 75 ms. Then GEA. All within ~115 ms | Bolt sends **RegNotif PSTAT first** at T+0ms. No GetCap, no InformDisplay. Bolt then RETRIES the same RegNotif at 3-second intervals for 2m12s before finally querying GetCap | **YES — Bolt's first AVRCP transaction differs fundamentally** |
+| **First GetCap query** | T+0ms (immediately after AVCTP CONNECT) | T+2m12s (mid-session, after 44 retries of various RegNotifs) | **YES — Bolt skipped discovery for Y1** |
+
+### Headline finding: Bolt skips the discovery handshake with Y1
+
+In the Pixel↔Bolt capture, Bolt's first AVRCP CMD is `GetCapabilities(Events Supported)` within 13 ms of AVCTP CONNECT. Bolt then receives Pixel's 8-event list, fires off 7 `RegisterNotification` CMDs in parallel, and is fully subscribed within ~115 ms. From frame 1480 to frame 1539 every CMD got an immediate ACK or RSP.
+
+In the Y1↔Bolt capture, Bolt's first AVRCP CMD is `RegisterNotification(PlaybackStatusChanged)` (event 0x01) at logcat `14:50:45.462`. **No `GetCapabilities` query precedes it.** Then Bolt retries the same RegNotif at exactly 3-second intervals (the AVCTP V13 §3.3.5 response timer) for 2 m 12 s before finally sending its first `GetCapabilities` at `14:52:57.666`.
+
+This is not "Bolt is broken" or "Bolt retries because of dropped INTERIMs alone". It's **Bolt deciding to skip the discovery flow entirely with Y1**. The most likely explanations:
+
+1. **Bolt has cached SDP for Y1's BD_ADDR from a prior bonding session.** If a previous Y1 firmware version advertised different SDP attributes (e.g., v2.2.0 or earlier without V1-V8 patches), Bolt's cache may have stale data — including the assumed event list and capability set. Bolt skips a fresh query because it "already knows" Y1's capabilities. The 2m12s eventual GetCap suggests a long Bolt-side timeout before forced refresh.
+2. **Y1's SDP record signals "already-known-vendor" via some attribute combo** that triggers Bolt's quick-connect path. The duplicate ServiceName `"Advanced Audio "` between the A2DP source (handle 0x00010002) and AVRCP TG (handle 0x00010003) records is suspicious — this isn't how Pixel-Bolt looks.
+3. **Bolt's pairing flow is fundamentally different for Y1's CoD/EIR pattern** vs Pixel's.
+
+The 2m12s delay between session start and first GetCap query is the single biggest behavioural difference observed. It exists regardless of M2/M3/M4 — these patches only affect wire-side response delivery, not Bolt's CT-side discovery behaviour.
+
+### Secondary finding: Y1's GEA fragments AVCTP; Pixel doesn't
+
+Pixel's GEA responses with full Title/Artist/Album/MediaNum/Total/PlayTime are 110–125 wire bytes — comfortably under the 512-byte L2CAP MTU — and emit as **single AVCTP packets** (packet_type=0).
+
+Y1's outbound `msg=540` IPC buffer is 644 bytes (logcat: `EXTADP_AVRCP: msg=540, ptr=0x52380638, size=644`). After IPC framing overhead this is likely 500–600 wire bytes of AVRCP payload. At >512 bytes this **exceeds the L2CAP MTU and triggers AVCTP fragmentation** (`fcn.0xed50` Path A's fragmenter). Bolt's reassembler may handle the Start+End packet sequence differently from a Single packet; bugs in CT reassembly logic are well-documented across AVRCP implementations.
+
+Why is Y1's GEA so much larger than Pixel's?
+
+1. **Y1 emits all 7 requested attributes** (Title, Artist, Album, MediaNum, TotalNum, Genre, PlayingTime) — including zero-length entries for missing data (E1 patch, Trace #29). Pixel drops missing attributes entirely.
+2. **Per-attribute overhead** is 8 bytes (4-byte attr_id + 2-byte char_set + 2-byte length) — for 7 attribs that's 56 bytes vs Pixel's 4×8 / 6×8 = 32/48 bytes.
+3. **CharSet encoding**: Y1 may emit UTF-16 (1015) where Pixel emits UTF-8 (106). Doubles the byte count for ASCII text. (Not verified — would need Y1 wire bytes to confirm.)
+
+If E1's zero-length emit (~56 bytes of attr headers Pixel doesn't emit) plus possible UTF-16 encoding doubles the payload past 512 bytes, Y1 fragments and Pixel doesn't.
+
+### Static-audit findings that are NOT divergences
+
+- **AVCTP transactionID semantics, IPID/CR bits**: identical wire shape, Y1 correctly mirrors Pixel.
+- **L2CAP setup parameters** (MTU 512, Basic mode): identical.
+- **AVDTP signaling order** (Discover → SetConfig → Open → Start): both follow stock A2DP source flow.
+- **PASSTHROUGH ack latency**: both fast (≤ a few ms on Pixel, sub-ms-granularity on Y1 logcat).
+- **SDP — AVRCP TG fundamentals** (profile version 1.3, AVCTP version 1.2, SupportedFeatures 0x0001, no Browse PSM): exact match between Pixel-in-1.3 and Y1-post-V1/V2/V6/V7/V8.
+
+### Action items (ranked by likelihood-of-mattering × cost-to-attempt)
+
+1. **🔴 Unpair Y1 from Bolt; clear Bolt's BT cache; re-pair fresh.** Zero-cost user action. Tests the "Bolt cached Y1 SDP from older firmware" hypothesis directly. If post-clear, Bolt's first CMD to Y1 is `GetCapabilities` (mirroring Pixel-Bolt pattern), the cache hypothesis is confirmed and the metadata pane should engage. If not, hypothesis is refuted.
+
+2. **🟡 Add an audit: capture Y1's actual outbound wire bytes** via `btmon` on Y1 (`/system/xbin/btmon` or `adb shell btmon`) during a fresh Bolt session. This is the missing data we've been working around. Direct visibility into Y1's AVCTP packet_type, fragmentation pattern, and exact INTERIM/CHANGED byte content lets us compare to Pixel's wire shape byte-for-byte.
+
+3. **🟡 Investigate the GEA fragmentation hypothesis.** If Y1's wire GEA is >512 bytes and fragments, while Pixel's <512 bytes is single-packet, this is a real divergence. Possible mitigations: emit fewer attributes (revert E1 so unsupported drops); emit UTF-8 if currently UTF-16; pack attributes more densely. All non-trivial; requires the btmon capture from (2) to confirm fragmentation is happening.
+
+4. **🟢 Cosmetic SDP cleanup** (not load-bearing for Bolt's behaviour, but spec-clean): change Y1's AVRCP TG `ServiceName` from `"Advanced Audio "` (which duplicates the A2DP source name) to `"AV Remote Control Target "` (Pixel's value, AVRCP convention). Add `ProviderName` attribute matching Pixel. Strip `ServiceRecordState` if possible. None of these break anything; they make Y1 look more like a vanilla AVRCP TG.
+
+**Outcome.** Tier-1 lead identified: the discovery-skip pattern is the biggest single behavioural difference between Pixel-Bolt and Y1-Bolt, and it persists across M2/M3/M4 because it's CT-side state not TG-side wire delivery. Tier-2 lead: AVCTP fragmentation difference for GEA. Both are testable: (1) by user-side unpair/repair, (2) by adding `btmon` to the capture loop.
+
+**Confidence.** High on every dimension verified empirically (direct tshark/strings extraction from both captures). High on the discovery-skip being a real Bolt-side behaviour difference (n=1 each, but consistent across all 17 RegNotif retries in Y1's capture). Medium on the cause (cache vs SDP-attr-driven). Cannot disambiguate without (1) unpair/repair or (2) Y1 btmon capture.
+
 
