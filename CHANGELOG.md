@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 ### Fixed
-- Reliable metadata-pane updates on subscription-style head units. Stock `mtkbt` silently dropped the AVRCP responses these head units rely on for subscription confirmation under sustained audio load, causing them to abandon the AVRCP session after a few seconds.
+- Reliable metadata-pane updates on subscription-style head units. Stock `mtkbt` silently dropped the AVRCP subscription confirmations these head units rely on, causing them to abandon the AVRCP session after a few seconds and only display metadata on rare tracks.
 
 ### Added
 - `apply.bash --debug` captures per-attribute wire shape for `GetElementAttributes` responses. New `tools/avrcp-wire-trace.py` reconstructs each response's total size from the logs for offline analysis of head-unit-specific metadata issues. `tools/btlog-parse.py` gains an `--avrcp` preset for the matching mtkbt-side view.
