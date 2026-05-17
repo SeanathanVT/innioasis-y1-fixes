@@ -4296,108 +4296,74 @@ The two paths populate different regions of the chan struct (Path A → `chan[0x
 
 **Confidence.** High on the data: the 3-second retry cadence + zero L-gate logs + Path A success vs Path B failure is unambiguous. High on the structural-bug hypothesis at the byte level — the two paths build different chan-struct regions and consume them via the same downstream chain, so any divergence in field population could explain the symptom. Medium on which specific field is the bug — requires the next round of disassembly diff.
 
-## Trace #51 (2026-05-17) — M5 hypothesis tested on device → hard regression on Bolt → M5 reverted
+## Trace #51 (2026-05-17) — M5 attempt: flip Path B's `buffer[+0x08]` from 2 to 0 → regression on Bolt → reverted
 
-**Context.** Following Trace #50, byte-level diff of `fcn.0x6d048` (Path A) vs `fcn.0x6d0f0` (Path B) identified the cleanest divergence at frame-buffer offset +0x08:
+**Hypothesis.** Following Trace #50, byte-level diff of `fcn.0x6d048` (Path A, `chan+0xc0` region) vs `fcn.0x6d0f0` (Path B, `chan+0xd8` region) identified the cleanest single-byte divergence at frame-buffer offset `+0x08`: Path A writes 0 (`strb r3, [r4, 0xc8]` with r3=0 at `0x6d086`), Path B writes 2 (`strb r1, [r4, 0xe0]` with r1=2 at `0x6d138`). `fcn.0xae418`'s AVCTP single-packet builder reads buffer[+0x08] twice — first as a discriminator at `0xae43c` (`ldrb r3, [r1, 8]; cbnz r3, 0xae448`) selecting between two TID slots, second as the low nibble of AVCTP wire byte 0 at `0xae4f2`–`0xae4f4` (`ldrb r6, [r3, 8]; add r6, lr`). The M5 candidate patch: change Path B's `strb.w r1, [r4, 0xe0]` at `0x6d138` to `strb.w r2, [r4, 0xe0]` — a 1-byte edit at file offset `0x6d13b` (`10 → 20` in the strb.w T2 imm12 Rt-field encoding). After M5, Path B writes 0 at `+0x08`, matching Path A and routing through the alternate TID slot.
 
-| | offset | instruction | value written |
+**Hardware test.** Reflashed Y1 with M5-patched mtkbt (MD5 `52a4ab9f50d4f5293421324d1a5dcd84`), captured `dual-bolt-20260517-1009`. Observed:
+- **Hard regression.** No metadata pane updates on Bolt; button presses unresponsive on Bolt's UI even for NEXT/PREV. Music-app-side trampolines still fire (T8reg / T9emit / T5emit at session start), and PASSTHROUGH commands reach the music app (PlayerService.nextSong fires Y1-side), but Bolt's AVRCP session degrades to a state where neither metadata nor button echo lands.
+- **Indication 590 burst.** Pre-M5 captures had zero `JNI_AVRCP: Recv AVRCP indication : 590` ("AVRCP Unexpected message" — Bolt's wire-side rejection signature); M5 capture has 10 within ~60 s, paced with the post-INTERIM `EXTADP_AVRCP msg=544` retries. After the initial subscription, zero T8reg entries — Bolt never re-registers.
+
+**Re-disassembly of `fcn.0xae418`.** The discriminator at `0xae43c` reads via the pointer field `chan[0x10]` (loaded with `ldr r1, [r4, 0x10]` at `0xae43a`), and `fcn.0xae5e4` at `0xae60a` writes `chan[0x10] = r5` (the frame buffer pointer that the caller passed). So `[r1, 8]` at `0xae43c` resolves to the byte M5 modified. The byte-level mechanics of "this is the byte the discriminator reads" was correct.
+
+What M5 got wrong was the SEMANTICS. The discriminator selects between two distinct transaction-label slots:
+- `chan[0x28]` (offset `[r4, 0x14]` when `r4 = &chan[0x14]` is passed from `fcn.0xae5e4` / `fcn.0x6df20`) — AV/C command-response TID slot (AVRCP 1.3 §6.5: response shall echo the TID of the AV/C command).
+- `chan[0x29]` (offset `[r4, 0x15]`) — RegNotif subscription TID slot (AVRCP 1.3 §6.7.2: notification message shall carry the same TID as the original `RegisterNotification` command).
+
+Path B's stock `buffer[+0x08] = 2` was deliberate: it routes notification responses through the dedicated `chan[0x29]` slot per §6.7.2. By forcing Path B to discriminate as `0 → chan[0x28]`, M5 makes CHANGED responses go out with whatever TID the most recent AV/C command used — which post-INTERIM is whatever Bolt sent next (typically a follow-up `GetCapabilities` or `GetPlayStatus`). That TID does not match the RegNotif TID, so Bolt's AVRCP layer correctly rejects the frame and re-fires indication 590.
+
+**Outcome.** M5 reverted (commit `c5e93be`). OUTPUT_MD5 restored to `a10ca9636417a0ed71495dfa11b5eff0`. The Trace #50 hypothesis ("Path A wire-byte-0 shape works, Path B's doesn't") was wrong about the failure mechanism — Path A and Path B emit deliberately different wire-byte-0 shapes corresponding to different §6.5 / §6.7.2 TID semantics. The actual bug must be upstream, in how `chan[0x29]` (the slot M5 was bypassing) gets populated.
+
+**Process note.** M5 was committed and shipped to hardware-test without first confirming what `chan[0x10]` points to or what semantic distinction the two TID slots carry. Future M-series changes against `fcn.0xae418`'s discriminator must verify (a) which chan-struct slots the discriminator selects, (b) what semantics each slot carries, and (c) whether those semantics are spec-mandated, before flipping the discriminator.
+
+## Trace #52 (2026-05-17) — M6 attempt: lift `IPC[5]` into `packet[0xd]` → broke `msg=520 cmd_frame_ind_rsp` (different IPC semantics) → reverted
+
+**Hypothesis.** Continuing Trace #51's revised candidate list: the `chan[0x29]` slot (Path B's TID source per the `buffer[+0x08] = 2` discriminator) is set by Path B itself at `0x6d186-0x6d188` from `packet[0xd]`, where `packet` is mtkbt's internal outbound packet struct allocated by `fcn.0x11894`. Stock `fcn.0x11894` at file offsets `0x11924-0x11927` writes `movs r6, 0; strb r6, [r4, 0xd]` — `packet[0xd] = 0` unconditionally. Scanned `mtkbt`'s code path from alloc to Path B read (`fcn.0x11894 → fcn.0xf0bc → fcn.0xef08 → fcn.0x6d0f0`); no intermediate function overwrites `packet[0xd]`. So **every Path B wire frame emits with TID = 0** regardless of the originating AV/C command's transaction-label.
+
+This explains why `msg=540` GEA responses landed in Trace #50 (Bolt sent GEA with TID=0, accidentally matching) but `msg=544` RegNotif INTERIM didn't (Bolt's RegNotif used non-zero TID, our TID=0 response failed the §6.7.2 echo check, AVCTP §3.3.5 retry timer fired forever).
+
+Sampled five `libextavrcp.so` response builders (`btmtk_avrcp_send_reg_notievent_track_changed_rsp`, `..._playback_rsp`, `..._rsp`, `..._get_capabilities_rsp`, `..._get_element_attributes_rsp`); each writes `ipc[5] = conn[0x11]` (the libextavrcp transId slot — updated by the inbound-RX path when an AV/C command arrives). The hypothesis: replace mtkbt's `movs r6, 0` at `0x11924` with `ldrb r6, [r1, 5]` (`00 26` → `4e 79`), where r1 holds the IPC payload pointer (loaded at `0x11910` `ldr r1, [arg_28h]` and not modified through `0x11923`). The unchanged `strb r6, [r4, 0xd]` at `0x11926` then writes `packet[0xd] = ipc[5] = transId`, propagating to `chan[0x29]` and then to wire byte 0 = `(transId << 4) + 4 + 2` per §6.7.2.
+
+**Hardware test.** Reflashed Y1 with M6-patched mtkbt (MD5 `3c814fb2715d7919c38b04126e1ec3e2`). Captured `dual-bolt-20260517-1126` (Bolt) and `dual-sonos-20260517-1130` (Sonos). Observed:
+
+| Capture | Inbound CMD_FRAME_IND sizes | Outbound msg=544 | Indication 590 |
 |---|---|---|---|
-| Path A | 0x6d086 | `strb.w r3, [r4, 0xc8]` | r3 = 0 |
-| Path B | 0x6d138 | `strb.w r1, [r4, 0xe0]` | r1 = 2 |
+| Bolt pre-M6 (`...0902`) | 45× size:13 (RegNotif), 16× size:3 (PASSTHROUGH), 3× size:45 (GEA), 1× size:9, 1× size:11 | 77 | 0 |
+| Bolt post-M6 (`...1126`) | **0× size:13** (no RegNotif), 26× size:3 (PASSTHROUGH), 1× size:45 (GEA), 1× size:9 | 15 | 0 |
+| Sonos last-working (`...1441`) | 30× size:13 (RegNotif), 8× size:45 (GEA), 8× size:3 | 60 | 0 |
+| Sonos post-M6 (`...1130`) | **0× size:13** (no RegNotif), 0× size:45 (no GEA), 6× size:3 | 3 | 0 |
 
-Working hypothesis: `fcn.0xae418`'s AVCTP single-packet wire-byte-0 build consumes that frame-buffer byte both as (a) a discriminator at 0xae43c selecting `chan[0x14]` vs `chan[0x15]` as TID source, and (b) directly OR'd into bits 3:0 of wire byte 0 at 0xae4f4. The reasoning was: Path A's "0" emits one wire-byte-0 shape that Bolt accepts (proven by Path A's GEA responses being displayed in Trace #50); Path B's "2" emits a different shape that Bolt silently drops. Flipping Path B's strb.w Rt field from r1 (=2) to r2 (=0) — a single-byte change at file offset 0x6d13b (`10 → 20`, Thumb-2 strb.w T2 imm12 encoding) — would make Path B emit Path A's pattern.
+**Both CTs stopped sending `RegisterNotification` CMDs entirely.** Different from M5's failure mode (which had Bolt rejecting frames after subscription, indication 590 burst). M6's failure mode is "CT silently abandons AVRCP subscription/metadata flow during or before initial handshake." No L2CAP-layer reject signature, no AVRCP-layer indication-590 reject — the CT just doesn't proceed.
 
-M5 was committed (8fbcb26), patched mtkbt OUTPUT_MD5 `52a4ab9f50d4f5293421324d1a5dcd84`, smoke-tested clean (every site verified, byte-exact diff against pre-M5).
-
-**Hardware test — outcome.** dual-bolt-20260517-1009 capture, Y1 reflashed with M5-patched mtkbt. Observed:
-- **Worse than pre-M5.** User reports: no metadata displayed on Bolt's screen on any track, button presses unresponsive on the Bolt UI even for NEXT / PREVIOUS.
-- **logcat tells a more nuanced story.** Trampolines fire (T8reg ev=01/09, T9emit pstat=1, T5emit aid=…) — the §6.7.1 chain still arms / emits. PASSTHROUGH commands DO arrive at the music app: `Y1Patch : PlayerService.nextSong() entry` fires at 10:09:03 and 10:10:23 in response to Bolt-side button presses. So buttons aren't dead Y1-side — they're dead at Bolt-UI-level because Bolt's AVRCP session has degraded to a state where it doesn't display media-pane updates or echo button presses to its own screen.
-- **The wire-side signature is unambiguous.** After 10:09:03 there are zero T8reg entries — Bolt never re-registers. The `EXTADP_AVRCP: AVRCP_SendMessage msg=544 size=40` retries continue every ~10 s, and each is met with `JNI_AVRCP: Recv AVRCP indication: 590 / AVRCP Unexpected message: 590` from Bolt. That's Bolt explicitly rejecting the M5-modified frames at the AVCTP/AVRCP boundary (indication code 590 is mtkbt's "unrecognised inbound" sink — implies Bolt sent an L2CAP-layer reject or unexpected frame back).
-
-**Where the M5 hypothesis broke.** Re-reading `fcn.0xae418` carefully:
+**Root cause: `cmd_frame_ind_rsp` doesn't follow the `ipc[5] = transId` template.** Re-disassembled `sym.btmtk_avrcp_send_cmd_frame_ind_rsp` at `0x1cbc`:
 
 ```
-0xae418  push.w {r3,r4,r5,r6,r7,r8,sb,lr}
-0xae41c  mov  r4, r0                  ; r4 = chan
-0xae43a  ldr  r1, [r4, 0x10]          ; r1 = chan[0x10]  (this is a POINTER stored in chan)
-0xae43c  ldrb r3, [r1, 8]             ; r3 = *(chan[0x10] + 8)   ← discriminator
-0xae43e  cbnz r3, 0xae448             ; r3 != 0 → r6 = chan[0x15]
-0xae440  ldrh r0, [r1, 0xe]
-0xae442  cbz  r0, 0xae448
-0xae444  ldrb r6, [r4, 0x14]          ; else r6 = chan[0x14]
+0x1cc2  mov lr, r2                 ; lr = r2 = arg3
+0x1cf8  strb.w lr, [sp, #0x9]      ; ipc[5] = lr = arg3
 ```
 
-`chan[0x10]` is a 4-byte **pointer field** the upstream setup writes with `&chan[0xc0]` (when Path A is active) or `&chan[0xd8]` (when Path B is active). So `[r1, 8]` does resolve to the byte M5 modified — the M5 byte-level mechanics aren't wrong about WHICH byte is read.
+`cmd_frame_ind_rsp(arg1, arg2, arg3, arg4, ...)` writes `ipc[5] = arg3`, where arg3 is the caller-supplied ctype-like byte (mirroring the convention of other `*_rsp` functions where arg3 is the AV/C ctype, not the transId). It does NOT do `ldrb r3, [conn, #0x11]` — it does NOT touch `conn[0x11]`. So for `msg=520` (cmd_frame_ind_rsp), `ipc[5]` carries the response ctype, not the transId.
 
-What M5 got wrong is the SEMANTICS. The discriminator selects between **two distinct transaction-label slots** in the chan struct:
-- `chan[0x14]` — the TID echoed from the **last incoming command** (AVRCP 1.3 §6.5: response shall echo the TID of the AV/C command).
-- `chan[0x15]` — the TID for **register-notification subscriptions** (AVRCP 1.3 §6.7.2: notification message shall carry the same TID as the original `RegisterNotification` command, NOT the TID of any unrelated intervening command).
+Pre-M6: mtkbt's `packet[0xd] = 0` → wire TID = 0 for all msg_ids → Bolt's GEA-with-TID-0 + cmd_frame_ind_rsp-with-TID-0 both accidentally matched.
 
-The two slots exist precisely because RegNotif INTERIM/CHANGED responses cannot share a TID source with arbitrary in-flight command responses. By forcing Path B to discriminate as 0 → `chan[0x14]`, M5 makes CHANGED responses go out with whatever TID the most recent inbound command used — which, post-INTERIM, is whatever command Bolt sent next (typically a `GetCapabilities` or `GetPlayStatus`). That TID does not match the RegNotif TID, so Bolt's AVRCP layer correctly rejects the frame as either an out-of-sequence response or a duplicate. The `Recv AVRCP indication: 590` cadence is the wire-side signature of that rejection.
+Post-M6: mtkbt's `packet[0xd] = ipc[5]` → wire TID = transId for the five response builders that follow that template, BUT wire TID = ctype-byte (0x0F / 0x0D / 0x0C / etc.) for `cmd_frame_ind_rsp`. The CT's AVRCP layer sees `msg=520` responses with malformed TIDs (TID = ctype low nibble) and stops proceeding with the AVRCP handshake. Both Bolt and Sonos exhibit the same "abandon AVRCP" symptom because both rely on the early-session `cmd_frame_ind_rsp` exchange to confirm AVRCP transaction routing.
 
-**The Trace #50 working hypothesis ("Path A wire-byte-0 shape works, Path B wire-byte-0 shape doesn't") was wrong about the failure mechanism.** Path B's `buffer[+0x08] = 2` was deliberate — it routes CHANGED responses through the dedicated RegNotif TID slot, which is what §6.7.2 requires. The dimension that needs fixing isn't the wire-byte-0 shape; it's something upstream (probably `chan[0x15]` not being populated with Bolt's actual RegNotif TID).
+**Outcome.** M6 reverted (commit reverting `6d73620`). OUTPUT_MD5 restored to `a10ca9636417a0ed71495dfa11b5eff0`. The "patch mtkbt's allocator universally" approach has too broad a blast radius — `libextavrcp.so` response builders have heterogeneous `ipc[5]` semantics, and `cmd_frame_ind_rsp` is the spoiler.
 
-**M5 reverted** (commit reverting 8fbcb26). mtkbt OUTPUT_MD5 restored to `a10ca9636417a0ed71495dfa11b5eff0` (post-M4 / pre-M5 state, equivalent to v2.3.0-rc).
+**Lesson + revised approach.** Patching `fcn.0x11894`'s `packet[0xd]` source affects ALL msg_ids that traverse Path B (msg > 6 = all common AVRCP responses). For the M6 mechanic to work, every Path-B-bound msg_id's IPC payload must carry the transId at the same byte offset. The five sampled response builders do (write `ipc[5] = conn[0x11]`); `cmd_frame_ind_rsp` doesn't (writes `ipc[5] = arg3` which is the response ctype). Future TID-routing fixes need to either:
 
-**What we now know that Trace #50 didn't.** Bolt is happy to receive frames through Path B (`buffer[+0x08] = 2` → `chan[0x15]` TID slot) **so long as `chan[0x15]` holds the TID from the original RegNotif command**. Trace #50's "3-second retry cadence" symptom means INTERIM is either (a) never emitted via Path B at all, (b) emitted with the wrong TID source, or (c) emitted with a downstream-layer corruption that Bolt rejects pre-AVRCP-layer. Trace #51's hardware result rules out the wire-shape-difference theory. The remaining candidates:
+1. **Patch `libextavrcp.so`'s `cmd_frame_ind_rsp`** to also set `ipc[5] = conn[0x11]`. Requires finding 6 bytes of space in the 124-byte function (`push {r4..r7, lr}; sub sp, 0xe4; ...`) — challenging without restructuring. Could overlay into the stack-canary epilogue if a free register is available.
 
-1. **`chan[0x15]` not populated when the RegNotif arrives.** Some earlier code-path that should latch Bolt's RegNotif TID into `chan[0x15]` is skipped. If `chan[0x15]` is stale or zero, Path B emits responses with a meaningless TID and Bolt rejects.
-2. **Path B's frame body is malformed at a non-`+0x08` offset.** Trace #50 listed three candidates (chan-struct sub-header diff at +0x0a..+0x0c, `fcn.0xae5e4` dedup at 0xae660, `fcn.0x7d204` L1/L2 silent gates). Those weren't tested. The `+0x08` byte is now confirmed structurally correct in stock form, so other bytes need revisiting.
-3. **The §6.7.2 TID-echo isn't done at Path B level at all.** Maybe the TID echo happens upstream in the T8 trampoline path, and the trampoline either fails to capture Bolt's TID or stores it in the wrong slot. Worth checking `patch_libextavrcp_jni.py`'s T8 store sites.
+2. **Patch `mtkbt`'s Path B response builder `fcn.0x6d0f0`** to dereference `packet[0x10]` (the IPC data pointer, set via `fcn.0x11894`'s memcpy at `0x11934`) and read byte 5 there: `ldr rtmp, [r5, 0x10]; ldrb r0, [rtmp, 5]; strb.w r0, [r4, 0x29]`. Same byte-source issue applies for `cmd_frame_ind_rsp` (ipc[5] is ctype, not transId), so no improvement over M6.
 
-**Confidence.** High on the regression — the indication 590 burst is a clear "Bolt rejecting frame" signature, and the no-re-register pattern is unambiguous wire-side rejection. High on the §6.7.2 TID-slot interpretation — the two-slot structure (`chan[0x14]` vs `chan[0x15]`) is consistent with AVRCP's command-vs-notification TID separation, and the hardware result confirms forcing them to share a slot breaks. Medium on which fix to try next; need to find where RegNotif TID is supposed to be latched into `chan[0x15]`.
+3. **Patch only specific msg_ids.** Insert a `cmp r6, 0x220` (or similar) check in `fcn.0x11894` before the `packet[0xd]` write, so only the RegNotif IPC msg=544 gets the conditional transId-lift. Requires a code-cave trampoline since the inline path doesn't have space for a conditional.
 
-**Process note.** This trace also marks a process failure: the M5 hypothesis was committed and shipped to hardware-test without first confirming what `chan[0x10]` points to or what semantic distinction `chan[0x14]` vs `chan[0x15]` carries. The Trace #50 byte-diff identified a real divergence but the Trace #51 commit interpreted that divergence as a wire-shape bug when in fact it was a deliberate TID-routing decision. Future M-series changes against `fcn.0xae418`'s discriminator need to verify (a) which chan-struct slots the discriminator selects, (b) what semantics each slot carries, and (c) whether those semantics are spec-mandated, before flipping the discriminator.
+4. **Patch `libextavrcp.so` to set `conn[0x11]` from the right TID at the right time** — i.e., before any outbound response, ensure `conn[0x11]` holds the TID of the AVRCP command that's being responded to. This is already what stock does for response builders that read `conn[0x11]`; `cmd_frame_ind_rsp` doesn't, so we'd need a different mechanism for it.
 
-## Trace #52 (2026-05-17) — TID-source RE: stock Path B always emits AVCTP wire byte 0 with TID = 0; M6 lifts the actual transId from IPC[5] into `packet[0xd]`
+5. **Patch the inbound-RX path in `mtkbt`** to write the inbound TID into both `chan[0x28]` AND `chan[0x29]` (i.e., both TID slots from §6.5 and §6.7.2 point to the same value, the current inbound CMD's TID). For pure command-response exchanges (`msg=520 cmd_frame_ind_rsp`, `msg=540 GEA`, `msg=522 GetCaps`), this is correct per §6.5. For `msg=544 RegNotif INTERIM/CHANGED` it requires `chan[0x29]` to be sticky between the RegNotif CMD arrival and the subsequent CHANGED emits (which can fire arbitrarily later from T9 / T5 trampolines). Whether stock `chan[0x29]` is sticky or gets overwritten by subsequent inbound CMDs needs RE.
 
-**Context.** Post-Trace #51 revert. The Bolt symptom (3-second RegNotif retry cadence in `dual-bolt-20260517-0902`, zero `JNI_AVRCP: indication : 590` rejections in the pre-M5 baseline vs 10 in the M5-broken capture) is consistent with two failure modes: (a) wire frame reaches Bolt but Bolt's AVRCP layer can't match it to a pending subscription, (b) wire frame never reaches Bolt at L2CAP. Trace #51's candidate list called out option (a) via the §6.7.2 TID slot (`chan[0x15]` in its terminology, see Trace #51's coordinate-system note below) needing to hold Bolt's RegNotif TID.
+Option (5) looks cleanest if `chan[0x29]` is sticky. Option (3) is targeted but requires a code cave. Options (1)/(2)/(4) have their own RE costs. Each option needs verification before committing.
 
-**Re-disassembling the chan-struct offsets.** Trace #51 referred to the TID slots as `chan[0x14]` and `chan[0x15]`, based on the immediate offsets in `fcn.0xae418`'s `ldrb r6, [r4, 0x14]` / `ldrb r6, [r4, 0x15]` instructions. But `r4` in `fcn.0xae418` isn't the chan-struct base — it's the arg-0 of the prior `fcn.0xae5e4` call, which both Path A and Path B pass as `&chan[0x14]` (Path A: `add.w r0, r4, 0x14` at `0x6df46` inside `fcn.0x6df20`; Path B: `add.w r0, r4, 0x14` at `0x6d18c` inline). So in `fcn.0xae418`'s frame, `[r4, 0x14]` resolves to `chan[0x28]` and `[r4, 0x15]` resolves to `chan[0x29]`. The TID-slot semantics Trace #51 identified are correct — `chan[0x28]` for §6.5 AV/C command-response echo, `chan[0x29]` for §6.7.2 RegNotif subscription — just at different byte offsets than Trace #51 said.
-
-**Where stock writes `chan[0x29]`.** Path B (`fcn.0x6d0f0`) writes `chan[0x29]` itself at `0x6d186-0x6d188`:
-
-```
-0x6d186  ldrb r0, [r5, 0xd]      ; r0 = msg[0xd]  (where msg = mtkbt's outbound packet struct from fcn.0x11894)
-0x6d188  strb.w r0, [r4, 0x29]    ; chan[0x29] = r0
-```
-
-So Path B's wire-side TID = `packet[0xd]`. Path A's TID source is `chan[0x28]` — populated by a separate code-path (the inbound AV/C command receiver, which echoes the just-received command's TID into `chan[0x28]` before triggering the response).
-
-**Where stock writes `packet[0xd]`.** In `fcn.0x11894` (mtkbt's outbound IPC packet allocator) at file offset `0x11924-0x11927`:
-
-```
-0x11924  00 26     movs r6, 0
-0x11926  66 73     strb r6, [r4, 0xd]
-```
-
-Unconditionally `packet[0xd] = 0`. Searched `mtkbt` for any other write to packet field offset `0xd` between `fcn.0x11894`'s alloc and Path B's read at `0x6d186` — the chain is `fcn.0x11894 → fcn.0xf0bc → fcn.0xef08 → fcn.0x6d0f0`. None of these overwrite `packet[0xd]`. `fcn.0xef08` at `0xefa6` READS `packet[0xd]` and writes it to `chan[0x31b]` (a different output struct, dead state for Path B's wire-frame builder), but doesn't modify the source byte.
-
-**Therefore: every stock Path B wire frame has TID = 0.**
-
-**Sanity-checking the path routing.** `fcn.0xf0bc`'s dispatcher reads `packet[9]` and `cbz r3, 0xf186` selects Path B. `packet[9]` is set in `fcn.0x11894` from a `cmp r6, 6; ite hi; movs r2, 0; movs r2, 1; strb r2, [r4, 9]` block at `0x11906-0x11912`. Validated the ITE-HI direction via standalone disassembly of the bytes (`rasm2 -a arm -b 16 -d '8cbf 0022 0122'`): instruction 1 is `movhi r2, 0`, instruction 2 is `movls r2, 1`. So `msg_id > 6` → `packet[9] = 0` → cbz taken → Path B. All common AVRCP responses (`msg=540`, `msg=544`, `msg=520`, `msg=522`) have `msg_id > 6` and route to Path B; `msg_id ≤ 6` (rare AVCTP-control paths) takes Path A. The M4 patcher's "msg=540 GEA goes through Path A" comment was inverted — both `msg=540` and `msg=544` are Path B.
-
-**Why GEA worked in the 0902 capture despite Path B's TID = 0.** The 3 successful GEA wire deliveries (Anti-Flag, 311) match a Bolt-side pattern of querying GEA with TID = 0. AVCTP §6.5 says the response must echo the AV/C command's TID; if Bolt's GEA CMD carried TID = 0, our wire-byte-0 = `(0 << 4) + 4 + 0 = 4` accidentally matched. RegNotif CMDs from Bolt presumably use non-zero TIDs (consistent with the wire-side §3.3.5 retry signature — no `indication 590` reject and a clean retry cadence means Bolt's AVRCP layer treats our INTERIM as "for a different transaction" and drops it pre-AVRCP).
-
-**Where the TID actually lives in the IPC.** `libextavrcp.so`'s response builders (`sym.btmtk_avrcp_send_reg_notievent_track_changed_rsp` at `0x2458`, `..._playback_rsp` at `0x23f0`, `..._rsp` at `0x239c`, `..._get_capabilities_rsp` at `0x1dac`, `..._get_element_attributes_rsp` at `0x2188`) all follow the same template:
-
-```
-ldrb r3, [conn, #0x11]    ; r3 = conn[0x11] = latched inbound transId
-strb r3, [ipc+0x5]         ; ipc[5] = transId
-```
-
-`conn[0x11]` is the standard libextavrcp transId slot, updated by the inbound-RX path when an AV/C command arrives (cross-referenced with Trace #46 lines 3270-3273, which documents the stock JNI's `notificationPlayStatusChangedNative` prolog writing `conn[0x11]` from a `.rodata` byte — bypassed by our T9 trampoline, which relies on the inbound-RX path having already latched the real transId).
-
-So `ipc[5]` always carries the right transId. mtkbt's `fcn.0x11894` memcpy's the IPC payload into `packet.data` (= `packet[0x10]`-pointed buffer) at `0x11934`, but doesn't propagate `ipc[5]` to `packet[0xd]`.
-
-**M6 fix.** Replace the constant-zero source at `0x11924` (`movs r6, 0`, encoding `00 26`) with `ldrb r6, [r1, 5]` (encoding `4e 79`). r1 holds the IPC payload pointer (`ldr r1, [arg_28h]` at `0x11910`, untouched through `0x11923` — verified by single-stepping the disassembly). The unchanged `strb r6, [r4, 0xd]` at `0x11926` then writes `packet[0xd] = ipc[5] = transId`. Path B's downstream chain at `0x6d186-0x6d188` lifts this into `chan[0x29]`, and `fcn.0xae418`'s wire-byte-0 builder emits `(transId << 4) + 4 + 2` = correct AVCTP byte 0 per §6.7.2.
-
-**Per-call-site safety check.** r6 is consumed by the prior `strb r6, [r4, 0xb]` at `0x11922` (writes msg_id low byte into `packet[0xb]`) and unused after the unchanged strb at `0x11926` within this function — repurposing it is local. Path A flows through `fcn.0x11894` too, and `fcn.0xed50` at `0xedee` reads `packet[0xd]` into chan[0x31b]. Path A's wire-frame builder (`fcn.0x6d048` and downstream) doesn't consume chan[0x31b] in its TID-source path (Path A uses `chan[0x28]` per `buffer[+0x08] = 0` discriminator), so the changed `packet[0xd]` is dead state on Path A.
-
-**MD5.** Stock `3af1d4ad8f955038186696950430ffda` → patched `3c814fb2715d7919c38b04126e1ec3e2`. Smoke-tested: every patch site verifies; idempotent on the patched output. M6 is `+1 site, +2 bytes` over the prior 14-site `a10ca9636417a0ed71495dfa11b5eff0` baseline.
-
-**Confidence.** High on the byte-diff mechanics — the source instruction at `0x11924` and the consumer at `0x6d186` are both 2 bytes apart from each other in the disassembly and the data flow `0x11924 → 0x11926 → 0x6d186 → 0x6d188` is direct. High on the IPC-byte-5-is-transId pattern — five separate libextavrcp.so response builders write `ipc[5] = conn[0x11]` with identical encoding. Medium-high on the hypothesis that Bolt uses non-zero RegNotif TIDs — the §3.3.5 retry cadence is consistent with TID-echo mismatch, but a working capture (Pixel↔Bolt with non-zero RegNotif TID matched) would confirm. Pending hardware test on Bolt to verify metadata-pane updates flow.
-
-**Process improvement on Trace #51.** Trace #51's process-note called out "verify what `chan[0x10]` points to and what slots the discriminator selects before changing the discriminator." This trace did that: re-disassembled `fcn.0xae5e4` to see `str r5, [r4, 0x10]` writing the frame buffer pointer into the chan-struct, traced the discriminator at `[r1, 8]` to the buffer's offset-8 byte, then traced TID slot reads `[r4, 0x14]` and `[r4, 0x15]` to chan[0x28]/[0x29]. The M6 fix targets a different layer than M5 did — the IPC-side propagation, not the wire-frame builder — so its blast radius is contained to a single field within Path B's frame setup.
+**Confidence.** High that M6's universal-allocator approach is wrong — both Bolt and Sonos went from "subscribing" to "not subscribing" post-M6, which matches the cmd_frame_ind_rsp / TID-mismatch failure mode. High on the cmd_frame_ind_rsp RE (the `mov lr, r2; strb.w lr, [sp+9]` chain is unambiguous). Medium on which of the five options to pursue next — option (5) is the most ambitious but most spec-aligned. Pending: HCI snoop capture from a working CT (Pixel↔Bolt) to confirm what TIDs Bolt actually uses for `cmd_frame_ind_rsp`-triggering CMDs vs RegNotif CMDs, before committing to option (5)'s "sticky `chan[0x29]`" strategy.
 
 
