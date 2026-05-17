@@ -3858,3 +3858,61 @@ If none of L1–L6 fire (no log lines), the M-trampoline emits ARE reaching the 
 
 **Confidence.** High on byte-level identification of L1–L6 sites (MD5-anchored stock binary, every gate verified with explicit byte patterns). Medium on the L3/L5 fire-under-our-load hypothesis (would explain Trace #41's <100% delivery but unverified against logcat). Low on pool-exhaustion-causing-corruption hypothesis (would manifest as crashes, not delivery regressions, so probably not load-bearing).
 
+## Trace #44 (2026-05-17) — Pre-M4 capture re-analysis: L-gates ruled out; M4 hypothesis structurally supported; no post-M4 capture exists yet
+
+**Goal.** With Trace #43's L-gate candidates outlined, check whether `L2CAP_SendData state:`, `l2cap: return no-connection state:`, or `l2cap QueueTx fail at cid:` actually appear in the existing Bolt-session btlog. mtkbt internal logs ARE captured by btlog (271 `avctpCB AVCTP_EVENT` hits, hundreds of `[AVCTP] chid:` hits, 132 `avrcp: sbunit type:` hits), so absence of L-gate logs is informative — they're not firing.
+
+**Capture-timing audit.** The Bolt-session capture `dual-bolt-20260516-1453` is timestamped `2026-05-16 19:00 UTC`. M4 commit `cacf389` is timestamped `2026-05-16 20:05 UTC`. The capture is **65 minutes pre-M4**. Therefore the existing data reflects the M2/M3-only build (v2.3.0 just-released), not post-M4. No post-M4 capture exists in `/work/logs/`.
+
+**btlog grep results (pre-M4 Bolt session):**
+
+| String | Hits | Source | Interpretation |
+|---|---|---|---|
+| `avctpCB AVCTP_EVENT` | 271 | `fcn.0xfb04` | AVCTP callback fires on every channel event — confirms mtkbt internal logs DO reach btlog |
+| `avrcp: sbunit type:` | 132 | `fcn.0xf0bc:0xf1d4` (just before Path B `fcn.0x6d0f0` call) | Path B in the dispatcher fired 132 times — confirms fcn.0xf0bc is routing as expected |
+| `[AVCTP] cmdFrame->ctype:` | 0 | `fcn.0x6d048:0x6d0ce` (Path A entry log) | Path A never fired — all 132 routes went to Path B, consistent with `msg[9]=0` for `msg=544` |
+| `L2CAP_SendData state:` | 0 | `fcn.0x7d204:0x7d244` (L3 drop log) | **L3 does not fire** — L2CAP channel state always passes `fcn.0x7cc7c` |
+| `l2cap: return no-connection state:` | 0 | `fcn.0x7d034:0x7d0b4` (L5 drop log) | **L5 does not fire** — channel state always in {3,4,5} |
+| `l2cap QueueTx fail at cid:` | 0 | `fcn.0x7d034:0x7d17a` (L6 drop log) | **L6 does not fire** — `pkt[0xfe]` always non-zero |
+| `(qPacket->data_len ` | 0 | `fcn.0xed50/0xef08` header-builder data-len asserts | Header builders never assert (qPackets always have non-zero data_len) |
+| `IsListCircular` | 0 | various queue-corruption asserts | No queue corruption events |
+
+**Conclusion.** **Trace #43's L1–L6 hypothesis is refuted by direct measurement.** No L-gate fires in the pre-M4 Bolt session. The L2CAP layer is not the bottleneck.
+
+**Conclusion (positive).** The 132 `avrcp: sbunit type:` log hits in btlog confirm `fcn.0xf0bc` is routing `msg=544` IPC emits to Path B (`fcn.0x6d0f0`) 132 times pre-M4. With M4 unpatched, every one of those 132 hits the `0x6d116` list-contains drop and returns `r0=0xd` — exactly Trace #41's structural model. **M4 is structurally the right patch.**
+
+**3-second-cadence wire evidence (logcat).** Bolt sends RegNotif COMMAND every 3 seconds (the AVCTP V13 §3.3.5 retry timer):
+
+- 98 `JNI_AVRCP: MSG_ID_BT_AVRCP_CMD_FRAME_IND size:13` hits over a 7m20s window. The 13-byte size is consistent with one RegNotif CMD frame (AVCTP header + ctype/subunit/opcode + companyID + PDU + reserved + param_len + event_id).
+- Timestamps form a clean 3-second cadence: 14:50:45.462, 48.450, 51.447, 54.464, 57.453, ... continuing across the whole session.
+- Outbound `EXTADP_AVRCP: msg=544` emits land 0–30 ms after each inbound CMD (117 total — the Y1 trampoline T8 fires INTERIM on every CMD, including retries).
+- The cadence means Bolt never receives an INTERIM response: per V13 §3.3.5 the CT should stop retrying after an INTERIM lands. Continuous 3 s retries → 100% wire-side drop of INTERIM, consistent with the unpatched `0x6d116` gate dropping every Path B emit.
+
+**Trampoline state confirms only one event arms persistently.** Y1Patch debug logs show `tramp.state[13..19] = 0 0 1 0 0 0 0` in steady state — only `state[15]` (sub_papp, `ev=0x08` PLAYER_APPLICATION_SETTING_CHANGED) is armed. `state[14]` (sub_play_status, `ev=0x01`) is briefly armed at session start (`state[14]=1` in the very first dump) and clears on the first metachanged broadcast, never re-arming. This is consistent with: Bolt subscribes to multiple events but only ONE of T8's emits got registered before Bolt gave up retrying that one. State[15]=PAPP is sticky because PAPP CHANGED is never triggered by anything in our pipeline (no source of "player app setting changed" event), so the arm-byte never clears.
+
+**Stale `output/mtkbt.patched` discovered.** The file at `/work/koensayr/output/mtkbt.patched` (timestamped 2026-05-15) has bytes:
+- `0x6d06e`: `37 d0` — M2 NOT applied (stock byte)
+- `0x6df42`: `84 f8 f2 00` — M3 NOT applied (stock byte)
+- `0x6d116`: `41 d0` — M4 NOT applied (stock byte)
+
+MD5 `926b8e808693a4c44028ee257b33e898` ≠ current `OUTPUT_MD5 a10ca9636417a0ed71495dfa11b5eff0`. This file predates the M-series and is leftover from an earlier patcher version. `apply.bash` regenerates output to `${PATH_TMP_STAGE}/` and does NOT read this file, so it's a misleading artefact but not actively used in the flash workflow. Consider deleting it to avoid future confusion.
+
+**Diagnostic recommendation for the user.** Before further investigation, confirm M4 is actually on the flashed device:
+
+```
+adb pull /system/bin/mtkbt /tmp/mtkbt-onflash
+md5sum /tmp/mtkbt-onflash
+```
+
+Expected: `a10ca9636417a0ed71495dfa11b5eff0` (post-M2/M3/M4). If different, M4 wasn't applied; investigate why apply.bash didn't pick it up (cached binary? stale staging? wrong branch on test host?).
+
+If M4 IS confirmed on device and Bolt still shows no metadata:
+
+- **Capture a post-M4 logcat** of a fresh Bolt session. Compare the `MSG_ID_BT_AVRCP_CMD_FRAME_IND` cadence. If the 3-second retry cadence has STOPPED (e.g., 5–8 CMD frames total instead of 98 over the same window), M4 lifted the wire delivery and Bolt subscribed successfully — the metadata-pane regression is then **not a delivery problem** and points at frame content (V1/V2/V6 SDP shape, AVRCP-1.3-vs-1.6 dashboard-pane requirements, or CHANGED-event sequencing/timing).
+- If the 3-second retry cadence persists post-M4, there IS still a drop site we haven't found. Next candidate to audit: the IPC layer between JNI (libextavrcp / libextavrcp_jni) and mtkbt daemon over `/dev/socket/bt.int.adp`. If that socket is `SOCK_DGRAM` with a small kernel buffer, msg=544 burst sends could be dropping at the kernel-side enqueue (the Trace #40 pattern but in the JNI→mtkbt direction).
+
+**Outcome.** M4 hypothesis still intact, L1–L6 ruled out. Next move is user-side MD5-verification of the flashed binary + a post-M4 logcat capture to distinguish "M4 didn't apply" from "M4 applied but a different blocker remains".
+
+**Confidence.** High on L-gate rule-out (direct btlog measurement, zero hits across three independent log strings). High on the pre-M4 capture being structurally consistent with M4 as the fix (132 Path B routes + 100% wire drop + 3 s retry cadence). High on the stale `output/mtkbt.patched` finding (direct byte-level inspection). Cannot disambiguate "user didn't actually flash M4" vs "M4 doesn't help" without the user-side MD5 check or a post-M4 capture.
+
+
