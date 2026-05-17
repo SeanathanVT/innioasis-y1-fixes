@@ -4610,6 +4610,28 @@ Net wire-side: CT sees ONE `PLAYBACK_STATUS_CHANGED CHANGED` per track-change (p
 - Bolt: T9emit pstat=2 events should disappear from track-change boundaries; only pstat=1 emits remain after each skip. T8reg ev=01 should keep firing (Bolt continues subscribing).
 - TV / Kia / Sonos: same as before — the AVRCP.kl K1 + B5.2t are both no-ops for the toggle-via-0x44 path until/unless those CTs press pause while a track-change is mid-flight, which is rare.
 
+## Trace #58 (2026-05-17) — B5.2t setPlayStatus-skip reverted: 2-second play(Z) regression on Sonos
+
+`b0d8be1` ("also skip setPlayStatus during track-change window") was reverted in `9c2f873` after `dual-sonos-20260517-1757` showed a precise **2,004 ms** delay between every `PlayerService.play(Z) entry` and the matching `PlaybackStateBridge.onPlayValue entry`. Six distinct play(Z) calls in the capture all landed at 2.003-2.005 s — deterministic enough to rule out random work.
+
+Cross-references:
+
+- **Bolt 1420** (post B5.2t initial, BEFORE setPlayStatus-skip): `play(Z) → onPlayValue` gap **8-10 ms**.
+- **Sonos 1347** (post K1, pre B5.2t entirely): gap **28-33 ms**.
+- **Sonos 1757** (post setPlayStatus-skip): gap **2004 ms**.
+
+The smali change in `b0d8be1` only moved `setPlayStatus(B)V` from before the suppression branch into the `:do_wake_play_state` arm. For `newValue=1` (PLAYING), the branch falls through to `:do_wake_play_state` and the same instructions execute — same `setPlayStatus`, same `wakePlayStateChanged`, same `wakeTrackChanged`. Functionally identical for the PLAY path. Yet timing differs by 2 s.
+
+User-visible symptom (Sonos): press pause → audio pauses. Press play → audio doesn't resume visibly for 2 s. User presses play again → `cond_play_strict` sees `isPlaying=true` (audio just resumed via the in-flight first press) → `playOrPause()` toggles back to PAUSE. User perceives "stays paused" because the second press keeps toggling.
+
+**Mechanism unknown.** Candidates worth investigating before retrying the setPlayStatus-skip approach:
+
+1. **`.locals 8` register pressure**: my change uses v3..v7 for the cmp-long deadline check. Unlikely to add 2 s.
+2. **Dalvik JIT recompilation**: bigger `onPlayValue` may re-JIT. Wouldn't explain a consistent 2.004 s across calls.
+3. **Indirect cascade through `IjkMediaPlayer.start()` buffer state**: the in-flight `PositionTicker` broadcast may serve a purpose (buffer keep-warm); suppressing the setPlayStatus write leaves the player in a state where `start()` blocks 2 s on buffer refill. Most plausible — would mean 2 s is IjkMediaPlayer-native, not our Java.
+
+The setPlayStatus-skip approach is shelved pending deeper RE on the IjkMediaPlayer / PositionTicker interaction. For now, the in-flight broadcast pstat=2 leaks (~7 per Bolt session per the 1420 capture) remain a known issue but don't block subscription health — Bolt re-subscribed 32 times across the leaks. User-perceived audio behaviour is the higher priority.
+
 
 
 
