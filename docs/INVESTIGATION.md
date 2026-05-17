@@ -3802,3 +3802,59 @@ The RX-side list state might be more stable than the TX side (it's populated by 
 
 **Confidence.** High on byte-level identification of every conditional-drop site in the audited functions (direct static analysis, MD5-anchored stock binary). High on the browse-channel scoping for `fcn.0xf290` → `fcn.0x6d1a8` (the `txBrowsePacketList` source-level field name + disjoint chan offsets are direct evidence). Low on Tier-4 RX-side relevance — that requires wire-side measurement we don't have.
 
+## Trace #43 (2026-05-17) — Post-M4 hardware regression on subscription-class CT; L2CAP-layer audit reveals deeper drop sites
+
+**Symptom.** User reflashed Bolt-class CT test rig with `feature/bluetooth-metadata-fixes` containing M2/M3/M4 patches. Bolt metadata-pane regression persists. M4's "structurally identical to M2/M4 list-contains gate" hypothesis was either wrong, partially right, or right-but-insufficient.
+
+**Re-examining Trace #41's wire-side claim.** Per `architecture_y1_btlog_undersampling` memory note: btlog captures only ~16–30% of actual UART traffic, so the "117 IPC emits / ~7 wire frames / ~6% delivery" derivation in Trace #41 had a load-bearing measurement on the noisy side of the ratio. Real msg=544 wire-delivery rate could have been anywhere in [20–38%] pre-M4. M4 may have lifted it further or had no effect — we don't know without a btlog-independent measurement.
+
+**Static audit of the L2CAP layer below M4.** Trace #42 stopped at `fcn.0xae5e4` (L2CAP_SendData). Continuing downstream into `fcn.0xae418` (fragment-build) → `fcn.0x7d204` (L2CAP send entry) → `fcn.0x7d034` (L2CAP send post-checks) → `fcn.0x7cecc` (queue insert) reveals **six additional silent-drop gates beneath M4**, of which one-to-three could plausibly fire under our metadata pipeline:
+
+| Tag | Function | Site | Mnemonic | Drop rc | Condition | Log? |
+|---|---|---|---|---|---|---|
+| L1 | `fcn.0x7d204` | `0x7d212` | `beq 0x7d260` | `r0=1` | `fcn.0x83014(CID)` returns 0 (CID-to-chan lookup miss: CID out of range, slot unused, or state==0) | no |
+| L2 | `fcn.0x7d204` | `0x7d21a` | `bne 0x7d260` | `r0=1` | `pkt[0xe] & 0xf6 != 0` (packet status-flag sanity mask) | no |
+| L3 | `fcn.0x7d204` | `0x7d23a` | `cbnz r0, 0x7d252` (drop on fall-through) | `r0=1` | `fcn.0x7cc7c(chan)` returns 0 (channel state ∉ {4 with bit 1 of `chan[0]` set, 5, 13, 14, 15}) | **yes** — `L2CAP_SendData state:%d return:%d` |
+| L4 | `fcn.0x7d034` | `0x7d096` | `blo 0x7d186` | `r0=1` | `chan[0x24] < (chan[0xc] + chan[0x1c] + pkt[0x2c])` when `arg3 > 3` (buffer-size sanity) | no |
+| L5 | `fcn.0x7d034` | `0x7d0a6` | `bhi 0x7d0b2` | `r0=0x11` | channel state ∉ {3, 4, 5} (tighter than L3) | **yes** — `l2cap: return no-connection state:%d` |
+| L6 | `fcn.0x7d034` | `0x7d170` (logical) | `cbz r0, 0x7d18a` then fall-through-fail-log | `r0=2` (success-shaped!) | `fcn.0x7cecc(chan, pkt, ...)` returns non-zero, which fires when `pkt[0xfe] == 0` (BDS_DISC) | **yes** — `l2cap QueueTx fail at cid:0x%x` |
+
+L6 is the most pernicious: even when the L2CAP queue-insert fails, the function returns `r0=2` (success-shaped). Caller chain (`fcn.0xae418` → `fcn.0xae5e4` → builder twins) all check `cmp r0, 2; bne <drop>` — they see `2` and treat as success. The packet is gone but no one upstream knows. Note however the trigger condition is `pkt[0xfe] == 0`, which is a packet-state flag, not a queue-depth flag. So L6 is silent-on-fail but rare in practice.
+
+**L3 / L5 are the strongest "matches the M-series pattern" candidates.** Both are chip-readiness checks: the L2CAP channel must be in a specific state set, otherwise drop. Under sustained A2DP saturation an AVRCP channel can briefly transition through states 6–11 (disconnect-pending, AMP move, etc.) — and any AVRCP TX during that window would silently drop. Both log, so we can directly test from existing logcat captures.
+
+**L1 / L2 / L4 are NOT safely patchable.** L1 would deref null after the lookup miss. L2 sends malformed packets if the status mask is meaningful. L4 is a buffer-size sanity check; bypassing it could write past the L2CAP TX buffer.
+
+**L3 / L5 patch candidates (would be L3-patch / L5-patch, NOT staged):**
+
+- **L3-patch.** `cbnz r0, 0x7d252` at `0x7d23a` (`50 b9`) → unconditional `b 0x7d252` (`0a e0`). Skips the L2CAP state check; channel can be in any state passed by L1. Risk: medium — if channel is in state 6 (disconnect-pending), forcing a send onto a soon-to-be-closed channel could trigger unexpected behaviour in `fcn.0x7d034`.
+- **L5-patch.** `bhi 0x7d0b2` at `0x7d0a6` (`04 d8`) → `00 bf` NOP, falls through into the success path. Permits sends on any state including ≥6. Same risk profile as L3-patch but inside the next stage of the L2CAP pipeline.
+
+Both patches would need to land **together** to bypass the dual-state check. Apply only L3 without L5 → L5 still drops most cases L3 was bypassing.
+
+**Other findings worth recording:**
+
+- **qPacket pool is `AVRCP_NUM_TX_PACKETS=4` per ctx, 2 ctx total = 8 packets system-wide** (per startup log at `fcn.0x13754:0x13798` printing `[AVRCP] AVRCP_NUM_TX_PACKETS:%d AVRCP_MAX_PACKET_LEN:%d` with literals `r1=4`, `r2=0x200`). Under a 117-emit msg=544 burst, pool exhaustion is plausible. Exhaustion semantics in `fcn.0x6cd48 → fcn.0x6cd18`: returns the list-head pointer (non-zero) rather than NULL when empty, so caller's `cmp r4, 0; beq <drop>` does NOT trigger — instead the caller treats the head-ptr as a qPacket and writes through it, which is **memory corruption**, not a clean drop. Field. If this fires in production, mtkbt's heap gets clobbered; the absence of daemon crashes argues the pool doesn't actually exhaust under our load — but it's a quiet hazard worth knowing.
+- **`fcn.0xae6ac` drains queue one-at-a-time per chip ACK.** Sets `chan[0x16]=1` per send, clears on ACK, dequeues next from `chan->txPacketList` via `fcn.0x6cd48`. If ACK rate < emit rate, queue grows unboundedly (well, until the qPacket pool exhausts — see above). No silent drop here.
+- **`chan[0x528]` (Path A/B txPending flag) writes**: SET at `0xf1f6` (success), CLEAR at `0xeb60` (chan-struct init/reset) and `0xfe48` (`fcn.0xfb04` AVCTP-callback path — likely link-state-change handler). Maintained correctly under normal operation.
+
+**Strongest next-step diagnostics (btlog-independent):** grep existing Bolt-session `adb logcat` capture for these strings; each tells us which (if any) gate is the actual blocker:
+
+| String to grep | Hits = | If hits > 0 |
+|---|---|---|
+| `L2CAP_SendData state:` | L3 fires | L3-patch candidate, plus L5-patch (paired) |
+| `l2cap: return no-connection state:` | L5 fires | L5-patch (with L3-patch paired) |
+| `l2cap QueueTx fail at cid:` | L6 fires | L6 candidate, but probably rare (BDS_DISC) |
+| `[AVCTP] AVCTP_ConnectRsp not in incoming state:` | AVCTP-side rejection | not a drop — investigate why we'd reject |
+| `[AVRCP] AVRCP_NUM_TX_PACKETS:` | startup confirms pool size (= 4, expected) | informational only |
+
+If none of L1–L6 fire (no log lines), the M-trampoline emits ARE reaching the wire and Bolt's regression is not delivery-rate-related at all — it would be frame-content, sequencing, or RX-side. That would point at:
+
+- **Frame content**: V1/V2/V6 SDP patches changed the advertised AVRCP version (1.0 → 1.3). Bolt's stack might require AVRCP 1.6+ shape for the metadata-pane code path to engage. AVRCP 1.6+ implementation is out of scope per `feedback_avrcp13_only_scope`, but we should know if this is the wall.
+- **Subscription sequencing**: Bolt might expect TRACK_CHANGED (`ev=0x02`) INTERIM before PSTAT/POS/REACHED_END/SETTINGS_CHANGED INTERIMs. If our T2 / T8 trampoline arm-order is wrong, Bolt could ignore the metadata after a "wrong-first-INTERIM" event.
+- **RX-side drop** (Trace #42 Tier-4): the `fcn.0x6cee4` / `fcn.0x6cf30` / `fcn.0x6cf8c` list-contains gates on the AVCTP RX path could be dropping Bolt's RegNotif COMMAND frames before we ever see them. Diagnostic: count CT-side COMMAND frames vs Y1-side `[AVCTP] cmdFrame->ctype:` log lines (the `fcn.0x6d048` and `fcn.0x6d0f0` builder entries log this at file `0x6d0c4` / `0x6d180`-region).
+
+**Outcome.** Six new candidate drop sites at the L2CAP layer (L1–L6), two of them (L3, L5) potentially patchable as paired NOPs **after diagnostic confirmation** they fire. Three secondary diagnoses if L1–L6 don't fire (Bolt frame-content rejection, subscription sequencing, RX-side gates). No patches staged — patching L3+L5 without confirming they fire risks introducing send-to-closed-channel issues without solving Bolt.
+
+**Confidence.** High on byte-level identification of L1–L6 sites (MD5-anchored stock binary, every gate verified with explicit byte patterns). Medium on the L3/L5 fire-under-our-load hypothesis (would explain Trace #41's <100% delivery but unverified against logcat). Low on pool-exhaustion-causing-corruption hypothesis (would manifest as crashes, not delivery regressions, so probably not load-bearing).
+
