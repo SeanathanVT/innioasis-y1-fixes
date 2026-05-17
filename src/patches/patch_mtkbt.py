@@ -7,11 +7,12 @@ record to AVRCP 1.3 / AVCTP 1.2 (V1+V2), A2DP/AVDTP 1.3 (V3+V4), drops the
 bit (V8), inserts a 0x0100 ServiceName attribute (S1), reroutes the daemon
 to the v=14 SDP template (V6), force-emits PASSTHROUGH dispatch for all
 AV/C frames (P1), best-effort aliases AVDTP sig 0x0c → 0x02 (V5), widens
-the RegNotif INTERIM/CHANGED dispatch cmp from 1 to 0x0F (M1), and removes
-the outbound-frame builder's chip-readiness list-contains check + chip-busy
-flag SET (M2 + M3 — eliminate ambiguity in "did this CHANGED reach the
-wire?" by removing two gates whose practical wire-side effect couldn't be
-distinguished from btlog sampling under sustained traffic).
+the RegNotif INTERIM/CHANGED dispatch cmp from 1 to 0x0F (M1), removes the
+outbound-frame builder's chip-readiness list-contains check + chip-busy
+flag SET on both Path A and Path B (M2 + M3 + M4), and lifts the AVCTP
+transaction-label from the IPC payload into Path B's TID slot so RegNotif
+INTERIM/CHANGED responses echo the original RegisterNotification CMD's
+transId per AVRCP 1.3 §6.5 / §6.7.2 (M6).
 
 Per-patch byte-level reference (offsets, before/after, rationale, ICS row
 coverage, spec citations): docs/PATCHES.md.
@@ -29,7 +30,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "a10ca9636417a0ed71495dfa11b5eff0"
+OUTPUT_MD5        = "3c814fb2715d7919c38b04126e1ec3e2"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -312,6 +313,70 @@ PATCHES = [
         "offset": 0x6d116,
         "before": bytes([0x41, 0xd0]),  # beq 0x6d19c (drop with rc=0xd)
         "after":  bytes([0x00, 0xbf]),  # nop
+    },
+    {
+        # M6 — populate Path B's AVCTP transaction-label slot with the actual
+        # transId from the IPC payload, instead of the constant 0 the stock
+        # allocator writes.
+        #
+        # The bug chain:
+        #   1. libextavrcp.so's response builders (track_changed_rsp /
+        #      playback_rsp / reg_notievent_rsp / get_capabilities_rsp /
+        #      get_element_attributes_rsp / etc.) uniformly write
+        #          ipc[5] = conn[0x11]
+        #      where conn[0x11] is the latched transId from the most recent
+        #      inbound AV/C command (the standard libextavrcp transId slot
+        #      per AVRCP 1.3 §6.5 / §6.7.2 — see also Trace #46 lines
+        #      3270-3273 documenting that JNI / inbound-RX paths latch
+        #      conn[0x11] from the wire transId).
+        #
+        #   2. mtkbt's outbound-IPC allocator fcn.0x11894 at file offset
+        #      0x11924 does `movs r6, 0` and at 0x11926 `strb r6, [r4, 0xd]`
+        #      — i.e., always writes packet[0xd] = 0. Nothing else in the
+        #      `fcn.0xf0bc → (fcn.0xef08 | fcn.0xed50) → (Path B | Path A)`
+        #      preprocessor chain overwrites packet[0xd] before the builder
+        #      reads it.
+        #
+        #   3. Path B (fcn.0x6d0f0) at file offset 0x6d186 reads packet[0xd]
+        #      and at 0x6d188 stores it into chan[0x29] — the §6.7.2
+        #      notification-TID slot consumed by fcn.0xae418's wire-byte-0
+        #      builder (selected when buffer[+0x08] != 0, which is Path B's
+        #      stock value of 2).
+        #
+        # Net result: every Path B wire frame goes out with TID = 0. For
+        # CTs whose RegisterNotification CMD uses transId = 0 this matches
+        # by coincidence (the 3 successful GEA wire deliveries in Trace #50
+        # / dual-bolt-20260517-0902 fit this — Bolt sends GEA with transId
+        # = 0). For CTs whose RegNotif CMD uses non-zero transId, the
+        # response with TID = 0 fails the §6.7.2 TID-echo check, the CT's
+        # AVRCP layer silently drops the INTERIM, and the AVCTP §3.3.5 3-s
+        # response-timeout retry timer fires — exactly the 3-second cadence
+        # observed in dual-bolt-20260517-0902 (Trace #50: inbound RegNotif
+        # CMD at .11.543 / .14.554 / .17.545 / .20-gap / .23.564 / .26.554 /
+        # .29.555 / .32.587 / .35.558 / .38.555 / .41.555).
+        #
+        # M6 replaces `movs r6, 0` (00 26, encoding 0x2600) at 0x11924 with
+        # `ldrb r6, [r1, 5]` (4E 79, encoding 0x794E). r1 holds the IPC
+        # payload pointer (loaded at 0x11910 `ldr r1, [arg_28h]` and not
+        # modified through 0x11923), so the patched instruction lifts
+        # ipc[5] = transId into r6, which the unchanged `strb r6, [r4, 0xd]`
+        # at 0x11926 then stores into packet[0xd]. The downstream Path B
+        # read at 0x6d186 picks up the real transId and propagates it to
+        # chan[0x29] → wire byte 0 = (transId << 4) + 4 + 2.
+        #
+        # Safety notes:
+        #   - r6 at 0x11924 has already been consumed by the prior
+        #     `strb r6, [r4, 0xb]` at 0x11922 (which writes msg_id low byte
+        #     into packet[0xb]) and is unused after the unchanged strb at
+        #     0x11926 within this function — so repurposing it is local.
+        #   - Path A (msg_id ≤ 6, fcn.0x6d048) also flows through fcn.0x11894
+        #     and reads packet[0xd] via fcn.0xed50 at 0xedee → chan[0x31b].
+        #     Path A's wire-frame builder doesn't consume chan[0x31b], so
+        #     the changed value is dead state on that path.
+        "name":   "[M6] Path B TID slot: lift transId from IPC[5] into packet[0xd] (mtkbt 0x11924)",
+        "offset": 0x11924,
+        "before": bytes([0x00, 0x26]),  # movs r6, 0
+        "after":  bytes([0x4e, 0x79]),  # ldrb r6, [r1, 5]
     },
 ]
 
