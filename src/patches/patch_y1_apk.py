@@ -2262,14 +2262,18 @@ DBG_VALUE_PATCHES_TRACKINFOWRITER = [
 
 DBG_VALUE_PATCHES_PLAYBACKSTATEBRIDGE = [
     # onPlayValue entry: log raw newValue + reason ints (pre-mapping).
+    # .locals 8 because the host method uses v3..v7 for the B5.2t track-change
+    # blip-suppression cmp-long check. Our debug prelude clobbers v0..v2 only,
+    # which the host method re-initialises immediately after the const/4 v0
+    # line we anchor on.
     (
         ".method public static onPlayValue(II)V\n"
-        "    .locals 3\n"
+        "    .locals 8\n"
         "\n"
         "    :try_start_b5\n"
         "    const/4 v0, -0x1\n",
         ".method public static onPlayValue(II)V\n"
-        "    .locals 3\n"
+        "    .locals 8\n"
         "\n"
         "    :try_start_b5\n"
         "    # === DEBUG: log new play-value + reason ===\n"
@@ -2450,78 +2454,29 @@ print(f"  Patch B5.2: PlayerService 6 listener lambdas → PlaybackStateBridge")
 # only suppressed for newValue=3 (PAUSED); newValue=1 (PLAYING) and the
 # downstream wakeTrackChanged / PositionTicker calls remain synchronous.
 PATCH_B5_2T_HOOKS = [
-    # (method header header bytes — entire method declaration + .locals N + blank line + first body line)
-    (
-        ".method public final restartPlay(Z)V\n"
-        "    .locals 4\n"
-        "\n"
-        "    .line 581\n"
-        "    invoke-virtual {p0}, Lcom/innioasis/y1/service/PlayerService;->stopRepeat()V\n",
-        ".method public final restartPlay(Z)V\n"
-        "    .locals 4\n"
-        "\n"
-        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
-        "\n"
-        "    .line 581\n"
-        "    invoke-virtual {p0}, Lcom/innioasis/y1/service/PlayerService;->stopRepeat()V\n",
-        "restartPlay(Z)",
-    ),
-    (
-        ".method private final autoSwitch()V\n"
-        "    .locals 7\n"
-        "\n"
-        "    .line 825\n"
-        "    new-instance v0, Ljava/lang/StringBuilder;\n",
-        ".method private final autoSwitch()V\n"
-        "    .locals 7\n"
-        "\n"
-        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
-        "\n"
-        "    .line 825\n"
-        "    new-instance v0, Ljava/lang/StringBuilder;\n",
-        "autoSwitch()",
-    ),
-    (
-        ".method public final nextSong()V\n"
-        "    .locals 6\n"
-        "\n"
-        "    const/4 v0, 0x1\n"
-        "\n"
-        "    .line 730\n"
-        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
-        ".method public final nextSong()V\n"
-        "    .locals 6\n"
-        "\n"
-        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
-        "\n"
-        "    const/4 v0, 0x1\n"
-        "\n"
-        "    .line 730\n"
-        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
-        "nextSong()",
-    ),
-    (
-        ".method public final prevSong()V\n"
-        "    .locals 6\n"
-        "\n"
-        "    const/4 v0, 0x1\n"
-        "\n"
-        "    .line 778\n"
-        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
-        ".method public final prevSong()V\n"
-        "    .locals 6\n"
-        "\n"
-        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
-        "\n"
-        "    const/4 v0, 0x1\n"
-        "\n"
-        "    .line 778\n"
-        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
-        "prevSong()",
-    ),
+    # (method_signature, locals_count, label)
+    # Anchors on the .method header + .locals N + blank line only — tolerates
+    # the optional `_inject_log_d` debug-trace block that may already sit
+    # between .locals and the first body line in --debug builds. The
+    # markTrackChange call uses no caller-visible v-registers, so locals N
+    # remains correct in both release and debug builds.
+    (".method public final restartPlay(Z)V",       4, "restartPlay(Z)"),
+    (".method private final autoSwitch()V",        7, "autoSwitch()"),
+    (".method public final nextSong()V",           6, "nextSong()"),
+    (".method public final prevSong()V",           6, "prevSong()"),
 ]
 
-for old_head, new_head, label in PATCH_B5_2T_HOOKS:
+PATCH_B5_2T_INVOKE = "invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V"
+
+for sig, locals_n, label in PATCH_B5_2T_HOOKS:
+    old_head = f"{sig}\n    .locals {locals_n}\n\n"
+    new_head = (
+        f"{sig}\n"
+        f"    .locals {locals_n}\n"
+        f"\n"
+        f"    {PATCH_B5_2T_INVOKE}\n"
+        f"\n"
+    )
     if new_head in ps_src:
         # idempotent re-run; already patched
         continue
