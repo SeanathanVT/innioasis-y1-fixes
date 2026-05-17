@@ -3915,4 +3915,56 @@ If M4 IS confirmed on device and Bolt still shows no metadata:
 
 **Confidence.** High on L-gate rule-out (direct btlog measurement, zero hits across three independent log strings). High on the pre-M4 capture being structurally consistent with M4 as the fix (132 Path B routes + 100% wire drop + 3 s retry cadence). High on the stale `output/mtkbt.patched` finding (direct byte-level inspection). Cannot disambiguate "user didn't actually flash M4" vs "M4 doesn't help" without the user-side MD5 check or a post-M4 capture.
 
+## Trace #45 (2026-05-17) — User confirmed M4 on device; T8 emits INTERIM-ACK for AVRCP 1.4+ events Bolt subscribes to
+
+**User-side MD5 check confirms M4 applied.** Bolt still shows no metadata. The drop hypothesis is dead — something past the wire is rejecting our responses or interpreting them differently than expected.
+
+**Wire-frame decode of btlog reveals Bolt's actual subscription order.** Pattern `00 19 58 31 00 00 05 XX` (CompanyID + RegNotif PDU + reserved + paramlen=5 + event_id) captured 63 times in `dual-bolt-20260516-1453/btlog.bin` — likely IPC-logged inbound CMD frames; under-sampled vs the 98 in logcat (≈64% capture rate). All 63 hits have ctype=0x00 (CONTROL) preceding the AVRCP payload. The events Bolt subscribes to:
+
+| event_id | name | AVRCP version | hits | first appearance |
+|---|---|---|---|---|
+| `0x01` | PLAYBACK_STATUS_CHANGED | 1.3 | 8 | 1st |
+| `0x02` | TRACK_CHANGED | 1.3 | 16 | 3rd |
+| `0x05` | PLAYBACK_POS_CHANGED | 1.3 | 14 | 4th |
+| `0x08` | PLAYER_APPLICATION_SETTING_CHANGED | 1.3 | 8 | 8th |
+| `0x09` | NOW_PLAYING_CONTENT_CHANGED | **1.4+** | 3 | **2nd** |
+| `0x0b` | ADDRESSED_PLAYER_CHANGED | **1.4+** | 1 | 6th |
+| `0x0c` | UIDS_CHANGED | **1.4+** | 1 | 7th |
+| `0x0d` | VOLUME_CHANGED | **1.4+** | 12 | 5th |
+
+The **second** event Bolt asks for is **`0x09 NOW_PLAYING_CONTENT_CHANGED` — an AVRCP 1.4+ event**, before it even subscribes to TRACK_CHANGED.
+
+**T8 violates AVRCP 1.3-only scope by INTERIM-ACK'ing 1.4+ events.** `_trampolines.py:2030–2075`:
+
+- `0x09 NOW_PLAYING_CONTENT_CHANGED` → emit INTERIM, arm `state[20]` (`sub_now_playing_content`)
+- `0x0a AVAILABLE_PLAYERS_CHANGED` → emit INTERIM (no arm)
+- `0x0b ADDRESSED_PLAYER_CHANGED` → emit INTERIM with PlayerID=0, UidCounter=0
+- `0x0c UIDS_CHANGED` → emit INTERIM with UidCounter=0
+- `0x0d VOLUME_CHANGED` → falls through to `t8_unknown_event` → NOT_IMPLEMENTED (spec-correct)
+
+Per `feedback_avrcp13_only_scope`: *"Strict scope: AVRCP 1.3 (V13 + ESR07). [...] All other 1.4+/1.5+/1.6+ PDU/event names forbidden outside INVESTIGATION.md."* The `0x09 / 0x0a / 0x0b / 0x0c` handlers are scope violations. The inline comment at line 2027–2029 (`Events 0x09..0x0c — INTERIM ack; only 0x09 arms its gate (sub_now_playing_content). 0x0a / 0x0b / 0x0c stay INTERIM-only`) confirms the intent was "1.4+ CT compatibility" — pre-dates the strict-1.3 scope rule.
+
+**Hypothesis.** Bolt is a 1.4+ CT. Per AVRCP 1.3 §6.7.1 a 1.3 TG should respond `NOT_IMPLEMENTED` to RegNotif for events outside the 1.3 set {0x01..0x08}. By INTERIM-ACK'ing `0x09 / 0x0b / 0x0c`, we're inconsistent with our SDP (advertised as 1.3 via V1/V2/V6) — Bolt sees mixed signals: "TG advertises 1.3 but accepts 1.4+ subscriptions." Bolt's stack may then expect 1.4+ behaviour for the AVRCP-1.4 metadata flow (Browse channel for NOW_PLAYING list, ADDRESSED_PLAYER state machine, GetItemAttributes on UIDS), find that we don't support any of it, and fall back to displaying no metadata.
+
+A spec-strict 1.3 TG that returns `NOT_IMPLEMENTED` for events ≥ 0x09 forces a 1.4+ CT to fall back cleanly to the 1.3 metadata flow (RegNotif PSTAT/TRACK/POS/PAPP + GetElementAttributes on TRACK_CHANGED edges). That flow is fully supported by our current trampolines.
+
+**Proposed patch (would be a trampoline edit, NOT staged yet).** In `_trampolines.py:2030–2075`, replace the four 1.4+ event handlers (`t8_check_9 / t8_check_a / t8_check_b / t8_check_c`) with direct fall-through to `t8_unknown_event` (NOT_IMPLEMENTED). That is, after `t8_check_8`'s `b.w t8_done` for PAPP, the next instruction becomes `b.w t8_unknown_event` (or simply remove the four `t8_check_*` labels and let any `event_id ≥ 0x09` reach the unknown-event handler). State[20] (`sub_now_playing_content`) also stops being armed, which is correct under 1.3 scope.
+
+Risk profile:
+
+- **Low correctness risk.** Returning NOT_IMPLEMENTED is the AVRCP 1.3-spec-correct response. 1.3 CTs are unaffected (they don't subscribe to 0x09+). 1.4+ CTs receive an explicit "not supported" signal and fall back to 1.3 flow.
+- **One regression risk.** A CT that requires 0x09 INTERIM-ACK to proceed (rather than falling back gracefully) would lose its current INTERIM-ACK and not subscribe at all. None of the CTs in our memory-documented test matrix are known to require this. If a CT regresses, the fix is reversible (restore the four handlers).
+- **State-byte impact.** `state[20]` writes from `_emit_subscription_write(a, 1, 20, ...)` would no longer happen, which removes one path that touches the state file. `T5 / T9 CHANGED` emits that gate on `state[20]` would never fire. This is fine per scope — we're not supposed to emit 1.4+ CHANGED events anyway.
+
+**Other findings from this re-analysis.**
+
+- `[AVCTP] cmdFrame->ctype:` log (in `fcn.0x6d048`, the Path A finalizer) has 0 hits in btlog. The `avrcp: sbunit type:` log (in `fcn.0xf0bc`, immediately before Path B call) has 132 hits — confirming Path B is the only path used for `msg=544` (consistent with M4 being the correct gate). msg=540 uses Path A, but there were only 3 of those in this session.
+- Y1Patch trampoline state dumps show `state[14]` (`sub_play_status`), `state[15]` (`sub_papp`), and `state[16]` (`sub_track_changed`) all get armed by T8/T2 emits, then `state[14]` and `state[16]` get cleared promptly by T5/T9 CHANGED emits (per AVRCP §6.7.1). `state[15]` (PAPP) stays armed persistently because there's no internal PAPP-change trigger in our pipeline (Y1 user doesn't toggle Repeat/Shuffle during normal driving). This is correct behaviour, not a bug.
+- TRACK_CHANGED INTERIM reads `y1-track-info[0..7]` for track UID. If Bolt subscribes to TRACK_CHANGED before the music app has played a single track, the read returns all-zero UID. Spec-strict CTs may not accept an all-zero UID. Defensive but probably not Bolt's issue (Bolt subscribes during playback, not before).
+- Bolt's RegNotif sequence is `01 09 02 09 01 01 01 01 01 01 01 02 02 ...` — interleaved 1.3 + 1.4 events with `0x09` being the second event ever asked for, strongly suggesting Bolt's subscription order is `[PSTAT, NOW_PLAYING, TRACK_CHANGED, POS, VOLUME, ADDRESSED_PLAYER, UIDS, PAPP]` with retries inflating each row.
+
+**Outcome.** Strong hypothesis identified: scope-violating 1.4+ event INTERIM-ACK in T8 may be confusing 1.4+ CTs into expecting 1.4+ TG behaviour we don't support. Concrete patch proposed (revert to spec-correct NOT_IMPLEMENTED). Not staged — wants user review since this reverses an intentional "1.4+ CT compatibility" choice the trampoline author made. If user approves, the patch is a ~10-line trampoline edit; M4 stays as-is.
+
+**Confidence.** High on the byte-level finding (Bolt's RegNotif order verified from btlog wire-frame extraction). Medium on the causal chain (1.4+ INTERIM-ACK → Bolt enters 1.4+ mode → Bolt's flow breaks); reasonable but not proven without a post-trampoline-edit capture. Low on whether this is the *only* remaining issue — there may be additional content-correctness issues post-M4 that emerge once 1.4+ events stop being mis-acknowledged.
+
 
