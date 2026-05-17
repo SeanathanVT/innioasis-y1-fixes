@@ -7,6 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ## [Unreleased]
 ### Fixed
 - Reliable metadata-pane updates on subscription-style head units. Stock `mtkbt` silently dropped the AVRCP responses these head units rely on for subscription confirmation under sustained audio load, causing them to abandon the AVRCP session after a few seconds.
+- AVRCP transaction-label echoing on head units that rotate AVCTP transaction IDs across the 0-15 range. Stock `mtkbt` clobbered the inbound command's transaction ID before building the outbound response, shipping every Path B response with transaction ID 0; head units that don't use transaction ID 0 exclusively saw their subscriptions and command-responses mismatch and abandon the AVRCP session.
 
 ### Added
 - `apply.bash --debug` captures per-attribute wire shape for `GetElementAttributes` responses. New `tools/avrcp-wire-trace.py` reconstructs each response's total size from the logs for offline analysis of head-unit-specific metadata issues. `tools/btlog-parse.py` gains an `--avrcp` preset for the matching mtkbt-side view.

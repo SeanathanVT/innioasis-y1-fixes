@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "a10ca9636417a0ed71495dfa11b5eff0"
+OUTPUT_MD5        = "dc01a7c1337ad2dc6573819bdc22834d"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -312,6 +312,100 @@ PATCHES = [
         "offset": 0x6d116,
         "before": bytes([0x41, 0xd0]),  # beq 0x6d19c (drop with rc=0xd)
         "after":  bytes([0x00, 0xbf]),  # nop
+    },
+    # ------------------------------------------------------------------
+    # M5 — TID echo via code-cave trampoline in `fcn.0x6d0f0` (Path B).
+    #
+    # Path B's `ldrb r0, [r5, 0xd]; strb.w r0, [r4, 0x29]` at file offset
+    # 0x6d186 writes `chan[+0x29]` from `packet[0xd]`. The same site is
+    # reached from two callers:
+    #   - INBOUND CMD path (`fcn.0x11374 → fcn.0xed0a → Path B`): `r5`
+    #     points at the per-channel stash struct (`chan+0xb9c`); `r5[+0xd]`
+    #     holds the inbound AV/C command's transId (latched by
+    #     `fcn.0x11374:0x11436 strb.w sl, [r4, 0xba9]`). The strb propagates
+    #     transId to `chan+0x39` (= [chan+0x10, 0x29], since Path B's
+    #     `r4 = chan + 0x10`).
+    #   - OUTBOUND RESPONSE path (`fcn.0x11894 → fcn.0xf0bc → Path B`):
+    #     `r5` points at a freshly-allocated IPC packet from
+    #     `fcn.0x11894`'s free-list pop; the allocator unconditionally
+    #     writes `packet[0xd] = 0` at `0x11924-0x11927`. The strb clobbers
+    #     `chan+0x39` with 0, overwriting the inbound-latched transId
+    #     before the wire-frame builder `fcn.0xae418` reads it at
+    #     `0xae448 ldrb r6, [r4, 0x15]` (= `chan+0x39`). Wire byte 0 of
+    #     every Path B response then encodes as `(0 << 4) + 4 + pkt[8]`,
+    #     i.e. transId=0 regardless of the originating command.
+    #
+    # CTs that cycle AV/C transIds across the 0-15 range (`AVCTP §6.1`
+    # transaction-label rotation, observed via `[AVRCP] transId:%d` btlog
+    # entries) see all their RegNotif INTERIM / CHANGED responses with
+    # TID=0, fail the `AVCTP §6.5` command-response TID echo and `§6.7.2`
+    # subscription TID match, and retry-storm on the V13 §3.3.5 3 s AVCTP
+    # retry timer until they disengage AVRCP TG. CTs that use transId=0
+    # exclusively (no rotation) match accidentally and work pre-M5.
+    #
+    # M5 discriminates outbound vs inbound at Path B's strb site via
+    # `packet[+8]`:
+    #   - allocator path writes `packet[8] = 1` at `fcn.0x11894:0x11908`
+    #     (`movs r2, 1; strb r2, [r4, 8]`) for every outbound IPC packet
+    #   - inbound stash struct's `+8` is the low byte of a per-channel
+    #     resolved address `ip + (chnl << 11)` stored at
+    #     `fcn.0x11374:0x11458 str.w r6, [r4, 0xba4]`, where `ip` is the
+    #     PC-relative resolution of the literal `0xeaba8` at
+    #     `fcn.0x11374:0x1142c-0x1143e`. The literal + PC at 0x11442 =
+    #     0xfbfea (static); at runtime + load_base (page-aligned), the
+    #     low byte is constant 0xea. Never 1.
+    #
+    # The patch replaces `0x6d186-0x6d18b` (6 bytes) with a `b.w` into a
+    # code-cave at vaddr 0xf3680 (in the LOAD #1 page-padding region,
+    # extended via the filesz/memsz bumps below — same trick used by
+    # patch_libextavrcp_jni.py for the trampoline blob). The cave loads
+    # `packet[+8]`, compares to 1, and skips the strb on outbound while
+    # executing it on inbound. Outbound responses then read the most
+    # recent inbound-latched transId at `chan+0x39` via Path B's
+    # downstream `add.w r0, r4, 0x14; b.w fcn.0xae5e4 → fcn.0xae418`, and
+    # the wire frame echoes the correct §6.5 / §6.7.2 transId.
+    {
+        "name":   "[M5] TID echo trampoline call: replace ldrb+strb.w with b.w cave (mtkbt 0x6d186)",
+        "offset": 0x6d186,
+        "before": bytes([0x68, 0x7b, 0x84, 0xf8, 0x29, 0x00]),  # ldrb r0, [r5, 0xd]; strb.w r0, [r4, 0x29]
+        "after":  bytes([0x86, 0xf0, 0x7b, 0xba, 0x00, 0xbf]),  # b.w 0xf3680; nop
+    },
+    {
+        # Cave content at vaddr 0xf3680 (file 0xf3680, since LOAD #1 has
+        # file_off == vaddr). 16 bytes:
+        #   68 7b              ldrb r0, [r5, 0xd]       — original 1st insn
+        #   2a 7a              ldrb r2, [r5, 8]          — discriminator load
+        #   01 2a              cmp r2, 1                  — outbound = 1
+        #   01 d0              beq +2 (skip strb)
+        #   84 f8 29 00        strb.w r0, [r4, 0x29]      — original 2nd insn
+        #   79 f7 7e bd        b.w 0x6d18c                — return into Path B
+        "name":   "[M5-CAVE] TID echo trampoline blob @ 0xf3680 (16 bytes in LOAD #1 padding)",
+        "offset": 0xf3680,
+        "before": bytes([0x00] * 16),
+        "after":  bytes([
+            0x68, 0x7b,                    # ldrb r0, [r5, 0xd]
+            0x2a, 0x7a,                    # ldrb r2, [r5, 8]
+            0x01, 0x2a,                    # cmp r2, 1
+            0x01, 0xd0,                    # beq +2
+            0x84, 0xf8, 0x29, 0x00,        # strb.w r0, [r4, 0x29]
+            0x79, 0xf7, 0x7e, 0xbd,        # b.w 0x6d18c
+        ]),
+    },
+    {
+        # LOAD #1 phdr is at file 0x74 (the 3rd phdr: PHDR, INTERP, LOAD).
+        # filesz is the 5th field (offset +16 = file 0x84).
+        "name":   "[M5-FILESZ] LOAD #1 filesz: 0xf366c → 0xf3690",
+        "offset": 0x84,
+        "before": (0xf366c).to_bytes(4, "little"),
+        "after":  (0xf3690).to_bytes(4, "little"),
+    },
+    {
+        # memsz is the 6th field (offset +20 = file 0x88). Must match
+        # filesz so the loader maps the cave bytes into the segment.
+        "name":   "[M5-MEMSZ] LOAD #1 memsz: 0xf366c → 0xf3690",
+        "offset": 0x88,
+        "before": (0xf366c).to_bytes(4, "little"),
+        "after":  (0xf3690).to_bytes(4, "little"),
     },
 ]
 

@@ -4436,11 +4436,64 @@ The TID is latched twice: first by `fcn.0x11374` at file offset `0x11436` (`strb
 
 3. **Per-msg-id conditional in `fcn.0x11894`** (Option 3 from Trace #52). Insert `cmp r6, <RegNotif_internal_msg_type>; beq do_lift; movs r6, 0; b cont; do_lift: ldrb r6, [r1, 5]; cont: strb r6, [r4, 0xd]`. Same code-cave requirement as (1). Less spec-aligned than (1) — leaves GEA + GetCaps still emitting TID=0.
 
-4. **Scope-cut per `project_y1_scope_cut_plan.md`.** Drop PLAYBACK_POS_CHANGED + track length, keep Artist/Track/Album + PASSTHROUGH. Doesn't fix the TID bug but reduces the matrix of CTs that hit it (since Sonos remains working pre-M4 and post-M4 unchanged).
-
 (1) is structurally cleanest if a code-cave exists in mtkbt. (2) is a two-binary change but doesn't need code-caves — could be done with byte-level overlay if 6 bytes can be found in `cmd_frame_ind_rsp`'s prologue/epilogue. Pending user decision on which to pursue.
 
 **Confidence.** High on the call-chain mapping (verified by axt cross-references in radare2). High on `chan+0x39` being the single shared slot (re-traced through both wrapper paths with consistent r4 = chan+0x10 in Path B). Medium on (1)'s code-cave availability — needs an inventory pass on mtkbt. High on (2)'s feasibility given the prior libextavrcp.so RE done for E1.
+
+## Trace #54 (2026-05-17) — M5 landed: code-cave trampoline in mtkbt LOAD #1 padding
+
+**Pursued option (2) from Trace #53** (renamed to fit the M-series naming convention in `patch_mtkbt.py`; superseded the option-(1) "patch `cmd_frame_ind_rsp`" approach which turned out to need coordinated 2-binary IPC-layout changes plus mtkbt-side ctype-source RE for `msg=520`). Single-binary mtkbt fix using the same ELF segment-extension trick `patch_libextavrcp_jni.py` already uses for its trampoline blob.
+
+**Cave space inventory.** mtkbt's LOAD #1 ends at file/vaddr `0xf366c` (`.ARM.extab` end). The next LOAD segment (RW data) starts at file `0xf3d40` / vaddr `0xf4d40` (page-aligned). File bytes `0xf366c..0xf3d40` and vaddr bytes `0xf366c..0xf4d40` are page-padding zeros; verified all-zero in the stock binary via `python3` byte scan. 1748 bytes of file padding, 5332 bytes of vaddr gap before LOAD #2 — plenty of room for a 16-byte trampoline.
+
+**Cave placement.** vaddr `0xf3680` (16-byte aligned, 20 bytes past `0xf366c` for cleanliness). Trampoline body 16 bytes; extended LOAD #1 filesz/memsz = `0xf3690`. Net file growth: 36 bytes (20-byte alignment padding + 16-byte cave content), but the original 20 padding bytes were already zero in the stock file — only the 16 cave bytes flip from `00 00 …` to the trampoline.
+
+**Trampoline design.**
+
+```
+0xf3680  68 7b           ldrb r0, [r5, 0xd]        ; original 1st insn — TID byte
+0xf3682  2a 7a           ldrb r2, [r5, 8]           ; discriminator load
+0xf3684  01 2a           cmp r2, 1                  ; outbound = 1 (allocator), inbound = 0xea+ (LSB of resolved literal)
+0xf3686  01 d0           beq 0xf368c                ; skip strb on outbound
+0xf3688  84 f8 29 00     strb.w r0, [r4, 0x29]      ; original 2nd insn (inbound only — latch transId at chan+0x39)
+0xf368c  79 f7 7e bd     b.w 0x6d18c                ; return into Path B's post-strb body
+```
+
+**Call site rewrite** at `0x6d186` (6 bytes):
+
+```
+before  68 7b 84 f8 29 00     ldrb r0, [r5, 0xd]; strb.w r0, [r4, 0x29]
+after   86 f0 7b ba 00 bf     b.w 0xf3680; nop
+```
+
+**Discriminator robustness verified via static literal resolution.** Inbound stash struct's `+8` field is set at `fcn.0x11374:0x11458 str.w r6, [r4, 0xba4]` where `r6 = ip + (chnl_num << 11)`. `ip` resolves from the literal at `0x114a0` (value `0xeaba8`) added to PC at `fcn.0x11374:0x1143e add ip, pc` (PC + 4 = `0x11442`): static `ip = 0xfbfea`. At runtime, `ip + load_base` (page-aligned load_base) preserves LSB `0xea`. For `chnl_num` ∈ {0, 1}: stash[+8] LSB is constant `0xea` ≠ 1. Outbound allocator path writes `packet[8] = 1` unconditionally at `fcn.0x11894:0x11908`. `cmp r2, 1` cleanly separates the two; no value collision possible.
+
+**ELF surgery.** LOAD #1 phdr at file `0x74` (the 3rd phdr after PHDR + INTERP). filesz at `+16` = file `0x84`; memsz at `+20` = file `0x88`. Both bumped from `0xf366c` to `0xf3690`. No section headers touched (Linux kernel ELF loader uses program headers exclusively for segment mapping; the section table is for static linker / objdump consumption only).
+
+**Patch list** (4 entries appended to `patch_mtkbt.py`):
+
+1. `[M5]` call-site rewrite at `0x6d186` (6 bytes: ldrb+strb → b.w cave + nop).
+2. `[M5-CAVE]` trampoline blob at `0xf3680` (16 bytes: replace zero padding with the conditional-store body).
+3. `[M5-FILESZ]` LOAD #1 filesz at `0x84` (`0xf366c → 0xf3690`).
+4. `[M5-MEMSZ]` LOAD #1 memsz at `0x88` (`0xf366c → 0xf3690`).
+
+OUTPUT_MD5: `a10ca9636417a0ed71495dfa11b5eff0` → `dc01a7c1337ad2dc6573819bdc22834d`.
+
+**Pre-flash verification done:**
+
+1. `python3 patch_mtkbt.py /work/v3.0.2/.../mtkbt` → output MD5 matches expected. All 18 patch sites verified (M1-M5).
+2. Re-run patcher on the patched output → idempotency-detected, no-op exit 0.
+3. radare2 disassembles cave correctly at `0xf3680` (6 instructions, return b.w resolves to `0x6d18c`) and the call site at `0x6d186` shows `b.w 0xf3680` with bidirectional xref. r2 reports proper CODE XREFs between the two regions.
+4. Byte-level verification of patched output: `0x6d186 = 86 f0 7b ba 00 bf` (correct b.w + nop); `0xf3680 = 68 7b 2a 7a 01 2a 01 d0 84 f8 29 00 79 f7 7e bd` (correct cave content); phdr filesz/memsz both `0xf3690`.
+
+**Risk assessment.** M5 lands without flashing in this session; the user will flash and capture from the separate flash machine. Known risk surface:
+
+- **Discriminator collision** (`packet[8] == 1` for an inbound stash) — ruled out by static literal resolution; LSB is constant `0xea` across `chnl_num` ∈ {0, 1}.
+- **Path B path coverage** — M5 affects every Path B call site (both inbound and outbound). The inbound case unchanged (strb still executes). The outbound case now skips the strb. No other code paths read `[r4, 0x29]` from `r4 = chan + 0x10` post-Path-B besides `fcn.0xae418`'s wire-frame builder, so the only downstream consumer benefits from the fix.
+- **Subsequent inbound CMD overwrites** — `chan+0x39` is per-channel and gets re-latched on the next inbound CMD. For RegNotif subscriptions, the §6.7.2 stickiness depends on the RegNotif being the most recent CMD before the corresponding INTERIM/CHANGED is built. Wire-side timing (mtkbt's IPC dispatcher is single-threaded; responses are built in IPC msg arrival order) makes intervening CMDs unlikely between a RegNotif and its INTERIM. For T9/T5 edge-driven CHANGED emits hours after the subscription, the most recent CMD's TID is used — which is the §6.5 echo target anyway, so it works for command-response exchanges too. Both Sonos (TID=0 always) and Bolt (TID 0-15 rotation) should land correctly.
+- **MD5 drift on idempotent re-runs** — `apply.bash`'s `patch_in_place_bytes` helper detects "already patched" and skips the write-back. Verified by re-running the patcher on the patched output.
+
+Pending: hardware flash + dual-capture from Bolt and Sonos to confirm. If the trampoline misfires, revert is a single-commit revert; the patch set is contained.
 
 
 

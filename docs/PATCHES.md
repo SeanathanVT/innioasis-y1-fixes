@@ -6,7 +6,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 
 | ID(s) | Binary | Site / effect |
 |---|---|---|
-| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3, M4** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, three NOPs across the two outbound-frame builders that remove the chip-readiness list-contains check on each path + the chip-busy flag SET on the multi-frame path so the matching CHECK never trips). |
+| **V1, V2, V3, V4, V5, V6, V7, V8, S1, P1, M1, M2, M3, M4, M5** | `mtkbt` | SDP shape (AVRCP 1.0→1.3, AVCTP 1.0→1.2, A2DP/AVDTP 1.0→1.3, sig 0x0c→0x02 alias, internal `activeVersion` 10→14 to route the dispatcher to the AVRCP 1.3 served record, drop AdditionalProtocolDescriptorList Browse-PSM advertisement (AVRCP 1.4 §8 Table 8.2 introduced; absent from AVRCP 1.3 §6 Table 6.2), clear stock GroupNavigation feature bit (Y1 doesn't implement the Group Navigation PASSTHROUGH PDUs), ServiceName-for-SupportedFeatures swap, force-PASSTHROUGH-emit op_code dispatch, RegNotif INTERIM/CHANGED dispatch cmp constant widened from 1 to 0x0F so wire ctype matches the JNI trampoline's reasonCode, three NOPs across the two outbound-frame builders that remove the chip-readiness list-contains check on each path + the chip-busy flag SET on the multi-frame path so the matching CHECK never trips, and a code-cave trampoline in Path B that conditional-stores `chan[+0x29]` so outbound responses echo the inbound AV/C transId per AVCTP V13 §6.5 / §6.7.2 instead of clobbering to 0). |
 | **R1, T1, T2 stub, extended_T2, T4, T5, T_charset, T_battery, T_continuation, T6, T8, T9, U1** | `libextavrcp_jni.so` | Trampoline chain in `_Z17saveRegEventSeqIdhh` + LOAD #1 page-padding extension + uinput EV_REP NOP. Synthesises AVRCP 1.3 metadata responses directly from C, bypassing the no-op Java AVRCP TG. |
 | **F1, F2** | `MtkBt.odex` | `getPreferVersion()=14` to unblock 1.3+ command dispatch through MtkBt's Java layer; `disable()` resets `sPlayServiceInterface`. |
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
@@ -130,7 +130,35 @@ M3 NOPs the SET (not the CHECK). After M3 the flag is never set, so `cbnz r3, 0x
 
 `fcn.0x6d0f0` is byte-for-byte structurally identical to M2's `fcn.0x6d048`: same `fcn.0x6ccdc` list-contains check at `0x6d110`, same INTERIM/CHANGED discriminator at `0x6d11e`, same drop target `movs r0, 0xd; pop {r3, r4, r5, pc}` at `0x6d19c`. Unlike Path A on busy A2DP-heavy CTs, Path B's list-contains check fails on most invocations, dropping the majority of `msg=544` emits before the wire frame is built. Subscription-class CTs that depend on RegNotif INTERIM responses (ev=01 / 05 / 08 / 0A) then retry-storm on the AVCTP V13 §3.3.5 3 s timer until they disengage AVRCP TG. M4 NOPs the analogous `beq 0x6d19c` at `0x6d116`, so `fcn.0x6d0f0` unconditionally builds the wire frame and tail-calls `b.w 0xae5e4` (`L2CAP_SendData`). `fcn.0x6d0f0` skips `fcn.0x6df20` entirely, so M3's chip-busy SET has no analogue on Path B.
 
-**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `a10ca9636417a0ed71495dfa11b5eff0`.
+**M5 — TID echo trampoline: code-cave at `0xf3680`** (4 sites, 6 + 16 + 4 + 4 bytes):
+
+| | offset | before | after |
+|---|---|---|---|
+| call site | `0x6d186` | `68 7b 84 f8 29 00` (`ldrb r0, [r5, 0xd]; strb.w r0, [r4, 0x29]`) | `86 f0 7b ba 00 bf` (`b.w 0xf3680; nop`) |
+| cave blob | `0xf3680` | 16 × `00` (LOAD #1 page padding) | `68 7b 2a 7a 01 2a 01 d0 84 f8 29 00 79 f7 7e bd` (Thumb-2 conditional store + return) |
+| LOAD #1 filesz | `0x84` | `6c 36 0f 00` (`0xf366c`) | `90 36 0f 00` (`0xf3690`) |
+| LOAD #1 memsz | `0x88` | `6c 36 0f 00` (`0xf366c`) | `90 36 0f 00` (`0xf3690`) |
+
+Path B at `0x6d186` writes `chan[+0x29]` from `packet[+0xd]`. The same site is reached from two callers: the INBOUND CMD chain (`fcn.0x11374 → fcn.0xed0a → Path B`), where `r5` points at the per-channel stash struct and `r5[+0xd]` is the inbound AV/C command's transId (latched by `fcn.0x11374:0x11436`); and the OUTBOUND RESPONSE chain (`fcn.0x11894 → fcn.0xf0bc → Path B`), where `r5` points at a freshly-allocated IPC packet and `packet[+0xd] = 0` unconditionally (`fcn.0x11894:0x11924-0x11927` writes `movs r6, 0; strb r6, [r4, 0xd]`). Unpatched Path B propagates the inbound transId on inbound calls but clobbers `chan[+0x29]` with 0 on outbound calls before the wire-frame builder `fcn.0xae418` reads it at `0xae448 ldrb r6, [r4, 0x15]`. Every Path B wire response then encodes byte 0 as `(0 << 4) + 4 + pkt[8]` per AVCTP V13 §6.1.1, i.e. transId=0 regardless of the originating command.
+
+CTs that cycle AV/C transIds across the 0-15 range (`AVCTP §6.1` transaction-label rotation, observed via `[AVRCP] transId:%d` btlog entries) see all their RegNotif INTERIM / CHANGED responses with TID=0, fail the `AVCTP §6.5` command-response TID echo and `§6.7.2` subscription TID match, and retry-storm on the V13 §3.3.5 3 s AVCTP retry timer until they disengage AVRCP TG. CTs that use transId=0 exclusively (no rotation) match accidentally and work pre-M5.
+
+M5 places a conditional-store trampoline in the LOAD #1 page-padding region (same ELF-extension trick used by `patch_libextavrcp_jni.py` for its trampoline blob — extend the segment's filesz / memsz to claim previously-unmapped zero-padding bytes as R+E). The trampoline discriminates outbound vs inbound at the Path B strb site via `packet[+8]`: the allocator path writes `packet[8] = 1` unconditionally at `fcn.0x11894:0x11908`, while the inbound stash struct's `+8` is the low byte of a per-channel resolved address `ip + (chnl << 11)` (stored at `fcn.0x11374:0x11458`, where `ip` is the PC-relative resolution of the literal `0xeaba8` at `fcn.0x11374:0x1142c-0x1143e`; static resolution `0xfbfea`, runtime LSB constant `0xea`). The cave loads `packet[+8]`, compares to 1, and skips the strb on outbound while executing it on inbound. Outbound responses then read the most recent inbound-latched transId at `chan+0x39` via Path B's downstream `add.w r0, r4, 0x14; b.w fcn.0xae5e4 → fcn.0xae418`, and the wire frame echoes the correct §6.5 / §6.7.2 transId.
+
+Cave disassembly (16 bytes at `0xf3680`):
+
+```
+0xf3680  68 7b           ldrb r0, [r5, 0xd]        ; original 1st insn
+0xf3682  2a 7a           ldrb r2, [r5, 8]           ; discriminator: outbound=1, inbound=0xea+
+0xf3684  01 2a           cmp r2, 1
+0xf3686  01 d0           beq 0xf368c                ; skip strb on outbound
+0xf3688  84 f8 29 00     strb.w r0, [r4, 0x29]      ; original 2nd insn (inbound only)
+0xf368c  79 f7 7e bd     b.w 0x6d18c                ; return into Path B
+```
+
+LOAD #1 filesz / memsz expand from `0xf366c` to `0xf3690` (a 36-byte extension — the cave at `0xf3680` is 16 bytes; the 20 bytes of preceding zero-padding `0xf366c..0xf3680` are absorbed harmlessly into the extended segment). No section headers are modified; the kernel ELF loader maps segments by program headers exclusively.
+
+**MD5s:** Stock `3af1d4ad8f955038186696950430ffda` → Output `dc01a7c1337ad2dc6573819bdc22834d`.
 
 ---
 
