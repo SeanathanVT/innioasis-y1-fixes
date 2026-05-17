@@ -7,11 +7,11 @@ record to AVRCP 1.3 / AVCTP 1.2 (V1+V2), A2DP/AVDTP 1.3 (V3+V4), drops the
 bit (V8), inserts a 0x0100 ServiceName attribute (S1), reroutes the daemon
 to the v=14 SDP template (V6), force-emits PASSTHROUGH dispatch for all
 AV/C frames (P1), best-effort aliases AVDTP sig 0x0c → 0x02 (V5), widens
-the RegNotif INTERIM/CHANGED dispatch cmp from 1 to 0x0F (M1), bypasses
-the outbound-frame builders' chip-readiness list-contains checks + chip-
-busy flag SET on both short-frame paths (M2 / M3 / M4), and re-aligns the
-twin builder's AVCTP wire-shape so subscription-class CTs accept its
-RegNotif INTERIM/CHANGED responses (M5).
+the RegNotif INTERIM/CHANGED dispatch cmp from 1 to 0x0F (M1), and removes
+the outbound-frame builder's chip-readiness list-contains check + chip-busy
+flag SET (M2 + M3 — eliminate ambiguity in "did this CHANGED reach the
+wire?" by removing two gates whose practical wire-side effect couldn't be
+distinguished from btlog sampling under sustained traffic).
 
 Per-patch byte-level reference (offsets, before/after, rationale, ICS row
 coverage, spec citations): docs/PATCHES.md.
@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 STOCK_MD5         = "3af1d4ad8f955038186696950430ffda"
-OUTPUT_MD5        = "52a4ab9f50d4f5293421324d1a5dcd84"
+OUTPUT_MD5        = "a10ca9636417a0ed71495dfa11b5eff0"
 
 DEBUG_LOGGING     = os.environ.get("KOENSAYR_DEBUG", "") == "1"
 OUTPUT_DEBUG_MD5  = OUTPUT_MD5
@@ -312,55 +312,6 @@ PATCHES = [
         "offset": 0x6d116,
         "before": bytes([0x41, 0xd0]),  # beq 0x6d19c (drop with rc=0xd)
         "after":  bytes([0x00, 0xbf]),  # nop
-    },
-    {
-        # M5 — align Path B (fcn.0x6d0f0) AVCTP wire-shape with Path A
-        # (fcn.0x6d048). The two short-frame builders write their frame
-        # bodies into different chan-struct regions (Path A at chan+0xc0,
-        # Path B at chan+0xd8) but otherwise carry structurally equivalent
-        # payloads. Their only meaningful divergence is the byte at
-        # frame-buffer relative offset +0x08:
-        #
-        #   Path A (0x6d086):  strb.w r3, [r4, 0xc8]   with r3 = 0
-        #   Path B (0x6d138):  strb.w r1, [r4, 0xe0]   with r1 = 2
-        #
-        # fcn.0xae418 consumes this byte twice in the single-AVCTP-packet
-        # branch (the only branch our wire sizes ever hit — see Trace #50,
-        # all empirical responses < 502 B):
-        #
-        #   0xae43c  ldrb r3, [r1, 8]    ; discriminator
-        #   0xae43e  cbnz r3, 0xae448    ;   r3 == 0 → r6 = chan[0x14]
-        #                                ;   r3 != 0 → r6 = chan[0x15]
-        #   ...
-        #   0xae4e6  lsls r2, r6, 4      ; TID shifted into bits 7:4
-        #   0xae4f2  ldrb r6, [r3, 8]    ; reread buffer[0x08]
-        #   0xae4f4  add  r6, lr         ; wire byte 0 = (TID << 4) | buffer[0x08]
-        #
-        # So buffer[0x08] simultaneously selects which chan-struct TID slot
-        # feeds bits 7:4 and provides bits 3:0 (AVCTP V13 §3.3 Cr/IPID/
-        # PktType). Path A's r3=0 emits wire byte 0 = (chan[0x14] << 4) | 0;
-        # Path B's r1=2 emits (chan[0x15] << 4) | 2. The Bolt regression in
-        # Trace #50 shows Bolt accepts Path A's pattern (GEA responses for
-        # Anti-Flag / 311 displayed) and silently drops Path B's pattern
-        # (the §3.3.5 3-second RegNotif retry cadence proves no INTERIM
-        # reaches Bolt's AVRCP layer). The two dimensions (CR-bit value and
-        # TID source slot) cannot be isolated without patching fcn.0xae418
-        # itself; M5 flips both at once by making Path B write 0 instead of
-        # 2 at frame-buffer +0x08.
-        #
-        # The change: re-encode the Thumb-2 strb.w T2 imm12 at 0x6d138 from
-        # `strb.w r1, [r4, 0xe0]` to `strb.w r2, [r4, 0xe0]`. r2 is set to 0
-        # by `movs r2, 0` at 0x6d132 and is dead until 0x6d180 (`ldr r2, [r5, 8]`).
-        # r1 is dead until 0x6d150 (`and r1, r0, 0xf`). Surgically local.
-        #
-        # Encoding: halfword 2 of strb.w (LE bytes at file offset 0x6d13a-3b)
-        # carries `Rt:4 imm12:12`. Rt=1 → halfword `0x10e0` → bytes `e0 10`.
-        # Rt=2 → halfword `0x20e0` → bytes `e0 20`. One-byte change at file
-        # offset 0x6d13b: `10` → `20`. See INVESTIGATION.md Trace #51.
-        "name":   "[M5] Path B AVCTP wire-shape align: buffer[0x08]=0 (mtkbt 0x6d13b — strb.w Rt: r1 → r2)",
-        "offset": 0x6d13b,
-        "before": bytes([0x10]),
-        "after":  bytes([0x20]),
     },
 ]
 

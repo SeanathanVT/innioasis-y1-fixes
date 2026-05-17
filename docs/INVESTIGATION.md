@@ -10,7 +10,7 @@ Current shipped patches by binary:
 
 | Binary | Patches |
 |---|---|
-| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 / M1b / M1c (three sites in fn 0x379e0 flipped 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34), M2 (NOP `beq 0x6d0e0` at `0x6d06e` — bypass the outbound-frame builder's list-contains drop gate on Path A, the fragmented multi-frame path for `msg=540` GetElementAttributes), M3 (NOP `strb.w r0, [r4, #0xf2]` at `0x6df42` — disable the chip-busy flag SET on Path A so the gate at `0x6df3a` never trips; both M2 and M3 derived in Trace #40 to eliminate the silent ~80% drop of T9 CHANGED emits under A2DP saturation), M4 (NOP `beq 0x6d19c` at `0x6d116` — bypass the structurally-identical list-contains drop gate on Path B `fcn.0x6d0f0`, the short single-PDU path for `msg=544` RegNotif INTERIM/CHANGED that the dispatcher at `fcn.0xf0bc` selects via `cbz r3, 0xf186` when IPC `byte[9]==0`; see Trace #41 — addresses the subscription-class CT retry-storm where `msg=544` was delivering at ~6% on the wire while `msg=540` on Path A was at ~100%), M5 (re-encode `strb.w r1, [r4, 0xe0]` to `strb.w r2, [r4, 0xe0]` at `0x6d138` so Path B writes 0 (matching Path A) instead of 2 at frame-buffer relative offset `+0x08` — one byte at file offset `0x6d13b`, `10 → 20`; `fcn.0xae418` consumes this byte both as a discriminator selecting `chan[0x14]` vs `chan[0x15]` for the AVCTP TID nibble AND as bits 3:0 of AVCTP wire byte 0, so M5 simultaneously aligns Path B's TID source and wire byte 0 low nibble with Path A's empirically-accepted pattern; see Trace #51 — addresses the subscription-class CT regression where Path A's GEA responses landed but Path B's INTERIMs were silently dropped wire-side despite M4) |
+| `mtkbt` | V1 (AVRCP 1.0→1.3 SDP byte on legacy served record), V2 (AVCTP 1.0→1.2 SDP byte), V3 (A2DP 1.0→1.3 SDP byte), V4 (AVDTP 1.0→1.3 SDP byte), V5 (AVDTP sig 0x0c TBH-table alias to sig 0x02 handler — best-effort workaround for GAVDP 1.3 ICS Acceptor row 9), V6 (internal `activeVersion` 10→14 — routes the SDP record builder to the AVRCP 1.3 served record so the wire-served record matches the F1-surfaced version), V7 (drop AVRCP 1.4 attr 0x000d Browse PSM advertisement on the AVRCP 1.3 record — swap entry slot to 0x0100 ServiceName), V8 (clear stock GroupNavigation bit 5 from SupportedFeatures byte stream so mask = 0x0001), S1 (0x0311 SupportedFeatures → 0x0100 ServiceName attr-table swap on legacy record), P1 (force VENDOR_DEPENDENT through PASSTHROUGH-emit so the JNI sees the frame), M1 / M1b / M1c (three sites in fn 0x379e0 flipped 0x0D→0x0F so trampoline-emitted RegNotif responses get AV/C ctype INTERIM on the wire instead of CHANGED — see Trace #34), M2 (NOP `beq 0x6d0e0` at `0x6d06e` — bypass the outbound-frame builder's list-contains drop gate on Path A, the fragmented multi-frame path for `msg=540` GetElementAttributes), M3 (NOP `strb.w r0, [r4, #0xf2]` at `0x6df42` — disable the chip-busy flag SET on Path A so the gate at `0x6df3a` never trips; both M2 and M3 derived in Trace #40 to eliminate the silent ~80% drop of T9 CHANGED emits under A2DP saturation), M4 (NOP `beq 0x6d19c` at `0x6d116` — bypass the structurally-identical list-contains drop gate on Path B `fcn.0x6d0f0`, the short single-PDU path for `msg=544` RegNotif INTERIM/CHANGED that the dispatcher at `fcn.0xf0bc` selects via `cbz r3, 0xf186` when IPC `byte[9]==0`; see Trace #41 — addresses the subscription-class CT retry-storm where `msg=544` was delivering at ~6% on the wire while `msg=540` on Path A was at ~100%) |
 | `libextavrcp_jni.so` | R1 (msg=519 redirect into trampoline-chain entry) + T1 / T2-stub / extended_T2 / T4 / T5 / T_charset / T_battery / T_continuation / T6 / T8 / T9 trampolines hosted in LOAD #1 page-padding extension; U1 (NOP `UI_SET_EVBIT(EV_REP)` to defang kernel auto-repeat on the AVRCP virtual keyboard). T1 advertises `{0x01, 0x02, 0x05, 0x08, 0x09, 0x0a, 0x0b, 0x0c}` — events 0x09-0x0c are 1.4+ event IDs INTERIM-acked with zero payload via existing `libextavrcp.so` builders (no CHANGED ever fires; Y1 has one player, no Now Playing folder, no UID database). Mirrors Pixel-as-TG; what unblocks strict CT metadata-pane render (see Trace #32). |
 | `MtkBt.odex` | F1 (`getPreferVersion()`=14 unblocks 1.3+ Java dispatch), F2 (`disable()` resets `sPlayServiceInterface`), 2 cardinality NOPs (TRACK_CHANGED + PLAYBACK_STATUS_CHANGED switch arms in `BTAvrcpMusicAdapter.handleKeyMessage`) |
 | `com.innioasis.y1*.apk` | A / B / C (Artist→Album navigation), E (discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREV per AV/C Panel Subunit Spec), H / H′ / H″ (foreground-activity propagation of unhandled discrete media keys + framework-synthetic-repeat filter) |
@@ -4295,85 +4295,5 @@ The two paths populate different regions of the chan struct (Path A → `chan[0x
 **Next investigation.** Byte-level diff of `chan+0xc0..` (Path A) vs `chan+0xd8..` (Path B) build sequences in `fcn.0x6d048` and `fcn.0x6d0f0`. Any field Path A writes that Path B doesn't (or writes differently) is a candidate.
 
 **Confidence.** High on the data: the 3-second retry cadence + zero L-gate logs + Path A success vs Path B failure is unambiguous. High on the structural-bug hypothesis at the byte level — the two paths build different chan-struct regions and consume them via the same downstream chain, so any divergence in field population could explain the symptom. Medium on which specific field is the bug — requires the next round of disassembly diff.
-
-## Trace #51 (2026-05-17) — Byte-level diff of Path A vs Path B buffer-build sequences: divergence at buffer[0x08]
-
-**Method.** Disassembled `fcn.0x6d048` (Path A, chan+0xc0 region) and `fcn.0x6d0f0` (Path B, chan+0xd8 region) and tabulated every store into the AVRCP frame-buffer region. Then traced `fcn.0xae418` to determine which buffer offsets feed which wire bytes.
-
-**Buffer-build comparison (offsets relative to the AVRCP frame buffer base — `chan+0xc0` for Path A, `chan+0xd8` for Path B).**
-
-| rel. offset | Path A (`fcn.0x6d048`) | Path B (`fcn.0x6d0f0`) | Match? |
-|---|---|---|---|
-| `+0x08` | `strb r3, [r4, 0xc8]` @ 0x6d086 with **r3=0** | `strb r1, [r4, 0xe0]` @ 0x6d138 with **r1=2** | **DIVERGENT** |
-| `+0x09` | `strb r0, [r4, 0xc9]` @ 0x6d07e with r0=1 | `strb r3, [r4, 0xe1]` @ 0x6d14c with r3=1 | identical (=1) |
-| `+0x0d` | `strb r1, [r4, 0xcd]` @ 0x6d08a with r1=2 | `strb r1, [r4, 0xe5]` @ 0x6d13c with r1=2 | identical (=2) |
-| `+0x0e..0f` | `strh ip, [r4, 0xce]` @ 0x6d07a with ip=0x110e | `strh r0, [r4, 0xe6]` @ 0x6d148 with r0=0x110e | identical (=0x0e 0x11 LE) |
-| `+0x10` | `strb r3, [r4, 0xd0]` @ 0x6d08e with r3=0 | `strb r2, [r4, 0xe8]` @ 0x6d140 with r2=0 | identical (=0) |
-
-The two builders write structurally equivalent frames **except at relative offset 0x08**: Path A writes 0 (from r3), Path B writes 2 (from r1).
-
-**How buffer[0x08] propagates to the wire.** `fcn.0xae418` (the AVCTP single-packet builder reached via `fcn.0xae5e4`) reads buffer[0x08] *twice*:
-
-1. **As a discriminator** at `0x000ae43c`–`0x000ae448`:
-   ```
-   0x000ae43c   ldrb r3, [r1, 8]           ; r3 = buffer[0x08]
-   0x000ae43e   cbnz r3, 0xae448           ; if r3 != 0 → branch
-   0x000ae440   ldrh r0, [r1, 0xe]         ; (fall-through) check buffer[0x0e]
-   0x000ae442   cbz  r0, 0xae448
-   0x000ae444   ldrb r6, [r4, 0x14]        ; r6 = chan[0x14]
-   0x000ae446   b    0xae44a
-   0x000ae448   ldrb r6, [r4, 0x15]        ; r6 = chan[0x15]
-   ```
-   Path A (buffer[8]=0) → falls through → `r6 = chan[0x14]`.
-   Path B (buffer[8]=2) → cbnz taken → `r6 = chan[0x15]`.
-
-2. **As the low nibble of AVCTP wire byte 0** at `0x000ae4e6`–`0x000ae4f6` (single-packet branch, taken when num_fragments ≤ 1 — both paths empirically, since Trace #50 confirmed wire ≤ 502 B):
-   ```
-   0x000ae4e6   lsls r2, r6, 4             ; r2 = r6 << 4 (TID into bits 7:4)
-   0x000ae4e8   uxtb.w lr, r2              ; lr = low byte of r2
-   0x000ae4ec   strb lr, [sb, -1]          ; (intermediate write)
-   0x000ae4f0   ldr  r3, [r4, 0x10]        ; r3 = frame buffer ptr
-   0x000ae4f2   ldrb r6, [r3, 8]           ; r6 = buffer[0x08]
-   0x000ae4f4   add  r6, lr                ; r6 = (TID << 4) | buffer[0x08]
-   0x000ae4f6   strb r6, [sb, -1]!         ; write to wire byte 0
-   ```
-
-So wire byte 0 = `(TID << 4) | buffer[0x08]`, with TID coming from `chan[0x14]` for Path A and `chan[0x15]` for Path B.
-
-Per AVCTP V13 §3.3, byte 0 bits 1 = CR (0=Command, 1=Response), bit 0 = IPID, bits 3:2 = PktType, bits 7:4 = Transaction Label.
-
-| Path | TID source | AVCTP byte 0 low nibble | CR-bit |
-|---|---|---|---|
-| A | `chan[0x14]` | `0000` | **0 (Command)** |
-| B | `chan[0x15]` | `0010` | 1 (Response) |
-
-**Path A emits AVCTP RESPONSE-class GEA bodies with a COMMAND-flagged AVCTP header.** Per spec this is technically malformed: a frame containing AV/C ctype=STABLE (0xC, a response ctype) inside an AVCTP Command-flagged packet. Bolt accepts these anyway (the Anti-Flag/311 GEA responses displayed correctly per Trace #50) — Bolt evidently demuxes by Transaction Label and AV/C body ctype, lenient on the AVCTP CR-bit.
-
-**Path B emits spec-compliant Response-flagged frames, using `chan[0x15]` as the TID.** Bolt's 3-second retry storm (Trace #50) proves these frames are *not* reaching Bolt's AVRCP layer.
-
-**Two distinct candidate causes — patches differ in which dimension is "the bug":**
-
-| Candidate | Hypothesis | Patch |
-|---|---|---|
-| **(a) buffer[0x08] value** | Bolt rejects spec-compliant CR=Response and only accepts CR=Command. Implausible (most spec violations *gain* lenience, not lose it). | Change Path B's `strb r1, [r4, 0xe0]` @ `0x6d138` to use r2 (=0) instead of r1 (=2). 1-byte change at file offset `0x6d13b`: `10 → 20` (alters the encoded Rt field in the strb.w T2 imm12 encoding). Has the side-effect of also flipping the TID source from chan[0x15] → chan[0x14]. |
-| **(b) TID source** | `chan[0x15]` holds stale / uninitialized data for `msg=544` RegNotif emits, whereas `chan[0x14]` holds the saved inbound-request TID. Bolt rejects frames whose TID doesn't match any outstanding command. More plausible — explains why Pixel works (Pixel's transaction-label cycle may happen to keep `chan[0x14]` and `chan[0x15]` in sync, or Pixel reads TID from a different downstream slot). | Same 1-byte patch as (a) — it flips both dimensions simultaneously. To isolate the TID dimension would require patching `fcn.0xae418`'s discriminator (lines `0xae43c`–`0xae448`), which is more invasive. |
-
-Candidates (a) and (b) cannot be distinguished without a hardware test, because the minimal patch flips both dimensions at once. The hypothesis being tested is "Path A's wire pattern is exactly what works; replicate it on Path B."
-
-**Candidate M5 patch (proposed, not yet staged):**
-
-- **File offset `0x6d13b`**: change byte `0x10` → `0x20`.
-- **Effect**: `strb.w r1, [r4, 0xe0]` → `strb.w r2, [r4, 0xe0]`. Both r1 (=2) and r2 (=0) are dead-by-the-end-of-the-function (r1 is reloaded at 0x6d150, r2 at 0x6d180), so this is a surgically local change. Buffer[0xe0] becomes 0 instead of 2, which:
-  1. Causes `fcn.0xae418` discriminator to select `chan[0x14]` instead of `chan[0x15]` (matches Path A's TID source).
-  2. Sets AVCTP wire byte 0 low nibble to 0 (matches Path A's Command-flagged pattern).
-- **Verification cost**: full mtkbt MD5 retag + flash + Bolt session. The 3-second-retry cadence is the test: if INTERIMs land, retry stops and Bolt holds the subscription steady.
-
-**What if M5 doesn't work?** Then the divergence is downstream of buffer[0x08]. Most likely candidates (in order):
-
-1. `chan+0xd8` region missing fields that `chan+0xc0` has — specifically the multi-byte sub-headers between offsets `+0x0a`–`+0x0c` (Path A populates these via `0x6d09a..0x6d0b6` with ldrb/uxtb/strb sequences; Path B has structurally similar code at `0x6d150..0x6d168` but operates on a different chan-struct base — needs full byte-by-byte diff of *those* sub-header sequences).
-2. `fcn.0xae5e4`'s queue / dedup logic at `0xae660`–`0xae68c` (the `cbnz r0, 0xae69c` "packet already in list" path) — Path B's reused ptr pattern might trigger silent dedup.
-3. `fcn.0x7d204`'s L1 / L2 silent gates (per Trace #48).
-
-**Confidence.** High on the byte-level diff (verified via radare2 disassembly against stock mtkbt MD5 3af1d4ad…). High on the wire-byte-0 formula. Medium on which dimension (buffer value vs TID source) is "the bug" — both flip simultaneously under M5, so the hardware test is necessary but not sufficient to distinguish. High that M5 is reversible (1 byte) and contained (no register lifetime issues, no instruction-length changes).
 
 
