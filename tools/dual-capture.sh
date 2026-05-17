@@ -150,7 +150,12 @@ echo "  getevent.txt:      $(wc -l < "$OUT/getevent.txt"       2>/dev/null || ec
 echo "  dumpsys-input.txt: $(wc -l < "$OUT/dumpsys-input.txt"  2>/dev/null || echo 0) lines"
 echo
 echo "Quick decode:"
-echo "  ./tools/btlog-parse.py \"$OUT/btlog.bin\" --tag-include AVRCP --tag-include AVCTP --tag-exclude \"GetByte\" --tag-exclude \"PutByte\""
+echo "  # mtkbt internals (AVRCP / AVCTP):"
+echo "  ./tools/btlog-parse.py --avrcp \"$OUT/btlog.bin\""
+echo "  # Trampoline-side wire-shape (requires apply.bash --debug):"
+echo "  ./tools/avrcp-wire-trace.py \"$OUT/logcat.txt\""
+echo "  ./tools/avrcp-wire-trace.py \"$OUT/logcat.txt\" --frag-only"
+echo "  # Generic greps:"
 echo "  grep -E \"CONNECT_CNF|activeVersion|REGISTER_NOTIFICATION|tg_feature\" \"$OUT/logcat.txt\""
 echo "  grep -E \"KEY_(PLAY|PAUSE|FAST|REWIND|NEXT|PREV)\" \"$OUT/getevent.txt\""
 exit 0
