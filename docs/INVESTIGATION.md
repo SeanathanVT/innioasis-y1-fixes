@@ -4364,6 +4364,30 @@ Post-M6: mtkbt's `packet[0xd] = ipc[5]` → wire TID = transId for the five resp
 
 Option (5) looks cleanest if `chan[0x29]` is sticky. Option (3) is targeted but requires a code cave. Options (1)/(2)/(4) have their own RE costs. Each option needs verification before committing.
 
-**Confidence.** High that M6's universal-allocator approach is wrong — both Bolt and Sonos went from "subscribing" to "not subscribing" post-M6, which matches the cmd_frame_ind_rsp / TID-mismatch failure mode. High on the cmd_frame_ind_rsp RE (the `mov lr, r2; strb.w lr, [sp+9]` chain is unambiguous). Medium on which of the five options to pursue next — option (5) is the most ambitious but most spec-aligned. Pending: HCI snoop capture from a working CT (Pixel↔Bolt) to confirm what TIDs Bolt actually uses for `cmd_frame_ind_rsp`-triggering CMDs vs RegNotif CMDs, before committing to option (5)'s "sticky `chan[0x29]`" strategy.
+**Confidence.** High that M6's universal-allocator approach is wrong — both Bolt and Sonos went from "subscribing" to "not subscribing" post-M6, which matches the cmd_frame_ind_rsp / TID-mismatch failure mode. High on the cmd_frame_ind_rsp RE (the `mov lr, r2; strb.w lr, [sp+9]` chain is unambiguous). Medium on which of the five options to pursue next — option (5) is the most ambitious but most spec-aligned.
+
+**Wire-side transId evidence from existing `btlog.bin` captures.** mtkbt's xlog stream logs inbound transId via the `[AVRCP] transId:%d` format string (caller `fcn.00051a20` reads from `event[5]` per Trace #46 lines 1117-1123). Parsing the existing dual-capture btlogs with `tools/btlog-parse.py --avrcp` gives a per-CT TID histogram:
+
+| Capture | TID histogram (count × TID) | Distinct TIDs |
+|---|---|---|
+| Bolt post-M4 pre-M5 (`dual-bolt-20260517-0902`) | 2×9, 1×{7, 6, 15, 14, 13, 12, 10, 1, 0} | 10 (0, 1, 6, 7, 9, 10, 12, 13, 14, 15) |
+| Bolt post-M6 (`dual-bolt-20260517-1126`) | 2×{8, 7, 5, 1}, 1×{4, 3, 2, 15, 10} | 9 (1, 2, 3, 4, 5, 7, 8, 10, 15) |
+| Sonos last-working (`dual-sonos-20260516-1441`) | 6×0, 1×02 | 1 (0) |
+
+**Bolt cycles transIds across the full 0-15 range** (likely every AV/C command increments the previous TID modulo 16, the conventional AVCTP §6.1 transaction-label rotation). **Sonos uses transId=0 for essentially all commands**. This explains the symptom asymmetry without needing a new HCI snoop:
+
+- Stock `mtkbt` emits Path B wire frames with TID = 0 (because `packet[0xd]` is constant 0). Sonos's TID=0-only CMDs accidentally match, so Sonos works pre-M6. Bolt's cycled CMDs match only when Bolt happens to be at TID=0 — empirically ~1/16 of the time, plus the §6.7.2 wrinkle that a CHANGED on a subscription that was opened at TID=N never matches TID=0 unless N=0.
+- Post-M5 (`buffer[+0x08] = 2 → 0`, forcing Path B to read `chan[0x28]` instead of `chan[0x29]`): the §6.5 slot `chan[0x28]` holds the LATEST inbound AV/C CMD's TID, so the FIRST Bolt RegNotif INTERIM matches (the RegNotif is what's "latest"), but any subsequent CHANGED emit picks up whatever non-RegNotif CMD came in after (GetCaps, GEA, etc.), TID mismatches, Bolt sends indication 590 ("AVRCP Unexpected message"). The 10× indication 590 burst in `dual-bolt-20260517-1009` is the wire-side signature.
+- Post-M6 (universal `packet[0xd] = ipc[5]`): for response builders that follow the `ipc[5] = conn[0x11] = transId` template, the wire TID becomes the correct §6.5 / §6.7.2 echo. But for `cmd_frame_ind_rsp` (msg=520) which uses `ipc[5] = arg3 = ctype`, the wire TID becomes the response ctype byte (0x0c / 0x0d / 0x0f / etc.). Both Bolt and Sonos's AVRCP layer sees garbage-TIDs on `msg=520` (Sonos's stock TID=0 protection no longer holds because we're actively writing ctype as TID instead of leaving the byte zero), abandons the handshake. Zero RegNotif CMDs post-M6 on both CTs is the abandonment signature.
+
+So the TID-mismatch hypothesis is confirmed quantitatively without new captures. The "Sonos works, Bolt doesn't" pre-M6 asymmetry is purely the TID-distribution difference. The remaining open question is the SCOPE of any fix: it must change `msg=544` (and ideally `msg=540` GEA + `msg=522` GetCaps) to echo the inbound TID, WITHOUT changing `msg=520` (which already works for Sonos and would re-break post-M6).
+
+**Updated option ranking.** Given the btlog evidence:
+
+- Option (3) — patch `fcn.0x11894` to conditional-lift only for msg_id ∈ {544, 540, 522} — is the most targeted but needs a code-cave trampoline (the inline path has no room for a `cmp r6, …; beq` conditional).
+- Option (5) — write inbound TID to chan[0x28] + chan[0x29] in mtkbt's AVCTP RX — depends on chan[0x29] being sticky (only written on RegNotif CMDs, not every CMD). RE on `fcn.0x7d204` (AVCTP RX entry) is the prerequisite.
+- Option (1) — patch `cmd_frame_ind_rsp` to also `ipc[5] = conn[0x11]` — would change what mtkbt receives at `ipc[5]` for msg=520, breaking mtkbt's interpretation of the response ctype. Unless we can ALSO patch mtkbt's IPC RX for msg=520 to read ctype from a different IPC byte. Two-binary patch coordination needed.
+
+Best next step: examine `fcn.0x7d204` / the AVCTP RX path to see whether stock writes the inbound TID anywhere on the chan struct, and if so where. If chan[0x29] is already written from inbound RX (just overwritten by Path B at `0x6d188`), the fix collapses to a single NOP at `0x6d188-0x6d18b` (4 bytes `84 f8 29 00` → 4 NOPs).
 
 
