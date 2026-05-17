@@ -40,6 +40,11 @@ FLAGS:
                  (see those flags above).
   --debug        Build patches with KOENSAYR_DEBUG=1. Build-time switch
                  (reflash to toggle); zero runtime overhead when omitted.
+                 Surfaces three independent log streams:
+                   - Y1Patch (Java)    : adb logcat -s Y1Patch:*
+                   - Y1T     (native)  : adb logcat -s Y1T:* | tools/avrcp-wire-trace.py
+                   - mtkbt   (xlog)    : btlog.bin           | tools/btlog-parse.py --avrcp
+                 See docs/PATCHES.md §"--debug instrumentation" for coverage.
   -h, --help     This help
 
 TOOLING (override tools/ defaults; useful if you have these installed

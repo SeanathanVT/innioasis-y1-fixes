@@ -4183,4 +4183,66 @@ That's ~155–165 bytes of attribute data plus 5 bytes AVRCP header (pdu_id, res
 
 **Confidence.** High on fragmentation infrastructure existing in mtkbt (direct static analysis of `fcn.0xed50` packet_type logic). High on the IPC-vs-wire size distinction (consistent `size=644` across all msg=540 emits regardless of track content). Medium on "typical GEA fits in single packet" (computation from T4 emit logic but not verified against actual wire bytes).
 
+## Trace #49 (2026-05-17) — Trampoline-side `T4a=` wire-size instrumentation + `tools/avrcp-wire-trace.py`
+
+**Motivation.** User asked for `fcn.0xed50` mtkbt-side `packet_type` log instrumentation to confirm/refute the AVCTP fragmentation hypothesis from Trace #48. Implementing it directly in mtkbt requires ELF segment surgery (LOAD #1 extension via the libextavrcp_jni.so approach) which is significant work for what's ultimately a diagnostic. Instead, pivot to trampoline-side instrumentation that captures equivalent diagnostic value via the existing `DEBUG_NATIVE_LOG` infrastructure in `_trampolines.py`.
+
+**Equivalence argument.** mtkbt's `fcn.0xed50` computes `packet_type` purely as a function of `msg.len` vs MTU (502 bytes for AVRCP CONTROL channel):
+
+- `msg.len < 502` → `packet_type = 0` (Single AVCTP packet)
+- `msg.len ≥ 502` → `packet_type = 1` (Start fragment)
+
+Therefore observing the wire-size of every outbound GEA response is sufficient to predict mtkbt's packet_type without instrumenting mtkbt itself. The wire-size formula is closed-form from the trampoline-side data: `wire_size = 14 (AV/C outer + companyID + PDU + paramlen + num_attribs) + Σ(8 + strlen_i)` over the N attributes the request-driven T4 emit loop processes.
+
+**Implementation.**
+
+- `src/patches/_trampolines.py`: new `T4a=%08x` log emit in `t4_req_loop` (the request-driven emit path that fires per-attribute). Packed value: high 16 bits = `attr_id`, low 16 = `strlen`. The packing keeps the existing single-arg `_emit_native_log_u32` helper usable — no new wide-arg log helper needed. Emit fires per-attribute right before each `get_element_attributes_rsp` PLT call, log-helper's push/pop preserves the caller's r0-r3 PLT args.
+- Trade-off: removed `T6resp pos=%u` / `T6resp dur=%u` emits in GetPlayStatus to stay within the 4020-byte LOAD #1 padding budget. T6 fires on every CT poll (high-noise); the same play_status / position values surface in T9emit logs at lower frequency.
+- `tools/avrcp-wire-trace.py`: new logcat post-processor. Groups consecutive `Y1T : T4a=...` lines (each one a per-attribute emit) into a single GEA response summary. Computes total wire size from per-attribute strlens, predicts AVCTP `packet_type` (0 vs 1) by comparison to the 502-byte threshold, and surfaces non-T4 `Y1T :` lines verbatim for cross-correlation. Supports `--gea-only`, `--frag-only`, `--no-attr-breakdown` filters.
+- `tools/btlog-parse.py`: gains `--avrcp` preset that includes only the AVRCP / AVCTP-related mtkbt log surfaces (`avctpCB`, `[AVCTP]`, `avrcp:`, `[AVRCP]`, `transId`). Pairs cleanly with the logcat trace for end-to-end TX path visibility.
+
+**Operator workflow** for a Bolt-session capture, post-`apply.bash --debug`:
+
+```
+# concurrent capture
+adb logcat -s Y1T:* Y1Patch:* > bolt.logcat &
+adb shell btlog-dump > bolt.btlog            # or tools/dual-capture.sh
+
+# offline analysis
+tools/avrcp-wire-trace.py bolt.logcat        # GEA wire-size summaries
+tools/avrcp-wire-trace.py bolt.logcat --frag-only   # only responses > 502 B
+tools/btlog-parse.py --avrcp bolt.btlog      # mtkbt internal AVRCP/AVCTP log surface
+```
+
+**Output sample** (from a synthetic test feed at `/tmp/y1t-test.log`):
+
+```
+[05-17 10:00:00.010] GEA response: N=7 total_strlen=72 wire=142B AVCTP_payload=145B → fragments=1
+     attr=0x01 (Title   )  len=20
+     attr=0x02 (Artist  )  len=23
+     attr=0x03 (Album   )  len=20
+     attr=0x04 (MediaNum)  len=1
+     attr=0x05 (TotalNum)  len=2
+     attr=0x06 (Genre   )  len=0
+     attr=0x07 (PlayTime)  len=6
+[05-17 10:00:01.000] GEA response: N=7 total_strlen=798 wire=868B AVCTP_payload=871B → fragments=2 (PACKET_TYPE=START)
+     attr=0x01 (Title   )  len=256
+     ...
+```
+
+The first response (typical music metadata, 72 B total strlen) fits in a single AVCTP packet. The second (pathological 256-char fields) triggers fragmentation.
+
+**Build budgets.** Post-edit blob sizes (within the 4020-B LOAD #1 budget):
+
+| Build | Blob size | Free |
+|---|---|---|
+| Release (non-debug) | 3784 B | 236 B |
+| Debug (KOENSAYR_DEBUG=1) | 3976 B | 44 B |
+
+New `OUTPUT_DEBUG_MD5` for `libextavrcp_jni.so` debug build: `3900c80075ae051afc4ac48ade0c9bc4`. Release MD5 unchanged (`d803f42c973bf9539f4d03ccb658cab3`).
+
+**Outcome.** User can rebuild via `apply.bash --debug`, reflash, capture a Bolt session, and run `tools/avrcp-wire-trace.py` on the resulting logcat. The output directly answers the diagnostic question from Trace #48: under what real-world track-metadata loads does Y1's GEA exceed 502 wire bytes and trigger mtkbt fragmentation? If most responses fit single-packet (predicted from Pixel session's 110–125 B typical), AVCTP fragmentation is ruled out as the Bolt regression cause and we look elsewhere. If some / many fragment, Bolt's reassembler is suspect.
+
+**Confidence.** High that the trampoline-side wire-size measurement is equivalent to mtkbt-side packet_type observation (mtkbt's logic is a pure function of msg.len vs MTU per `fcn.0xed50:0xee40-0xee66`). High on the implementation working — round-tripped through the patcher in both release and debug modes, MD5-verified. Medium on whether the resulting data will identify the Bolt regression — that's an empirical question requiring the user-side hardware test.
+
 

@@ -585,6 +585,18 @@ Two new classes routed to `smali_classes2/` (secondary DEX) because `classes.dex
 
 Tail with `adb logcat -s Y1Patch:*` to observe the metadata pipeline live; pipe to a file for post-test analysis.
 
+**Trampoline-side native debug instrumentation (`Y1T :` logcat tag).** `patch_libextavrcp_jni.py`'s `--debug` build branch wires native `__android_log_print(INFO, "Y1T", ...)` calls into the dynamic trampoline blob at every wire-emit site. These surface as `Y1T : <text>` lines in `adb logcat -s Y1T:*` and pair with the Y1Patch traces above for end-to-end visibility from Java broadcast → trampoline emit → mtkbt IPC.
+
+| Tag (format string) | Site | Value |
+|---|---|---|
+| `T8reg ev=%02x` | `_emit_t8` entry | inbound `RegisterNotification` `event_id` (8-bit). Counts CT subscription requests per event. |
+| `T5emit aid=%08x` | `t5_track_changed` before `track_changed_rsp` | high 32 bits of the `y1-track-info[0..7]` audio_id about to be sent in `TRACK_CHANGED` CHANGED. |
+| `T9emit pstat=%u` | `t9_play_status_changed` before `reg_notievent_playback_rsp` | `play_status` byte (0=STOPPED, 1=PLAYING, 2=PAUSED) about to be sent in PLAYBACK_STATUS_CHANGED CHANGED. |
+| `T9emit pos=%u` | `t9_pos_changed` before `reg_notievent_pos_changed_rsp` | live-extrapolated position in milliseconds about to be sent in PLAYBACK_POS_CHANGED CHANGED. |
+| `T4a=%08x` | `t4_req_loop` before each `get_element_attributes_rsp` PLT call | packed `(attr_id<<16) | strlen` per attribute in the request-driven GEA response loop. `tools/avrcp-wire-trace.py` parses these to reconstruct the total wire-frame size and predicts whether mtkbt's `fcn.0xed50` will fragment the response (wire size > 502 B). |
+
+Tail with `adb logcat -s Y1T:*` and pipe through `tools/avrcp-wire-trace.py` for the GEA wire-size analysis. Pair with `tools/btlog-parse.py --avrcp` on the simultaneously-captured `btlog.bin` for mtkbt internal log surfaces (`avctpCB`, `[AVCTP]`, `avrcp:` lines).
+
 `AndroidManifest.xml` is NOT modified by the patcher. `com.innioasis.y1` declares `sharedUserId="android.uid.system"`, which constrains the package's signing key to the OEM platform key. Any change to AndroidManifest.xml bytes invalidates `META-INF/MANIFEST.MF`'s recorded SHA1-Digest, JarVerifier throws SecurityException, PackageParser logs "no certificates at entry AndroidManifest.xml; ignoring!", and PackageManager drops the package. JarVerifier doesn't digest-check classes.dex / classes2.dex / resources at scan time — that's why DEX-only modifications work. The intent-filter `<service>` MtkBt's `bindService` resolves to lives in Y1Bridge.apk's manifest, which is self-signed and unconstrained by the platform key requirement.
 
 **Apktool reassembly:** `apktool d --no-res` decode → smali edits → `apktool b` reassemble (the post-DEX aapt step fails because resources weren't decoded, but DEX is already built by then; the script intentionally ignores the exit code). Patched DEX bytes are dropped into a copy of the original APK with `META-INF/` + `AndroidManifest.xml` preserved bit-exact.

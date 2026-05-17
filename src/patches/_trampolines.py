@@ -555,6 +555,20 @@ def _emit_t4(a: Asm) -> None:
     a.movs_imm8(1, 0)                         # r1 = 0
     a.mov_lo_lo(2, 6)                         # r2 = i
     a.mov_lo_lo(3, 7)                         # r3 = N
+    if DEBUG_NATIVE_LOG:
+        # Pack (attr_id<<16) | (strlen & 0xFFFF) for single-arg log call.
+        # AVRCP §26 Tbl 26.1 attr_id ≤ 7; UTF-8 string slot ≤ 256 → both fit.
+        # Compute in r4 + r11 (both AAPCS callee-saved across upcoming PLT
+        # blx; not in the r0-r3 set that _emit_native_log_u32 push/pops).
+        # r4 was last used as table-index pointer above and is free to clobber:
+        # the loop top re-inits it via addw(4, 13, T4_ATTRIDS_OFF).
+        a.mov_lo_lo(4, 9)                     # r4 = attr_id (T2 mov reg, r9→r4)
+        a.lsls_imm5(4, 4, 16)                 # r4 = attr_id << 16 (low regs)
+        a.ldr_w(11, 13, T4_OFF_ARGS + 8)      # r11 = strlen at sp+T4_OFF_ARGS+8
+        a.add_reg(4, 11)                      # r4 = (attr_id << 16) | strlen
+        _emit_native_log_u32(a, "log_fmt_t4attr", 4)
+        # Caller's r0=conn / r1=0 / r2=i / r3=N restored by _emit_native_log_u32
+        # via its internal push/pop. r4 / r11 clobbered (not used post-loop).
     a.blx_imm(PLT_get_element_attributes_rsp)
 
     # i++; if i < N: loop.
@@ -592,6 +606,10 @@ def _emit_t4(a: Asm) -> None:
         a.str_sp_imm(6, T4_OFF_ARGS + 8)      # sp[8]  = strlen
         a.add_sp_imm(4, str_offset)
         a.str_sp_imm(4, T4_OFF_ARGS + 12)     # sp[12] = ptr
+        # Note: no debug log on the N==0 fallback path — that's only hit by
+        # CTs that send an empty attribute-ID list (§6.6.1 "return all"
+        # variant), which is rare. The request-driven loop above carries the
+        # primary T4attr debug log site. Keeps blob within the 4020-B budget.
         a.blx_imm(PLT_get_element_attributes_rsp)
 
     # ---- restore stack and tail-call the function epilogue ----
@@ -1151,12 +1169,14 @@ def _emit_t6(a: Asm) -> None:
     # r0 = conn buffer (r5+8); r1 = 0 (success); r3 = position (already set)
     a.add_imm_t3(0, 5, 8)
     a.movs_imm8(1, 0)
-    if DEBUG_NATIVE_LOG:
-        # Log duration then position. The log helper push/pops r0..r3 so
-        # all four response builder args (conn, success, dur, pos) survive
-        # both log calls.
-        _emit_native_log_u32(a, "log_fmt_t6dur", 2)
-        _emit_native_log_u32(a, "log_fmt_t6pos", 3)
+    # T6 GetPlayStatus debug logs (dur / pos) removed 2026-05-17 to make
+    # room within the 4020-B LOAD #1 padding budget for the T4 per-attribute
+    # wire-size log — far more diagnostic for the Bolt-side AVRCP
+    # fragmentation investigation. T6 fires on every CT poll, generating
+    # high-volume low-signal noise; the same play_status / position values
+    # surface in T9emit logs at lower frequency. If needed, re-enable by
+    # restoring the two `_emit_native_log_u32(a, "log_fmt_t6*", ...)` calls
+    # and the matching format-string definitions below.
     a.blx_imm(PLT_get_playstatus_rsp)
 
     # ---- restore stack and tail-call epilogue ----
@@ -2596,12 +2616,9 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
         a.label("log_fmt_t5emit")
         a.asciiz("T5emit aid=%08x")
         a.align(4)
-        a.label("log_fmt_t6pos")
-        a.asciiz("T6resp pos=%u")
-        a.align(4)
-        a.label("log_fmt_t6dur")
-        a.asciiz("T6resp dur=%u")
-        a.align(4)
+        # log_fmt_t6pos / log_fmt_t6dur removed in tandem with the T6 dur/pos
+        # emits — see "T6 GetPlayStatus debug logs ... removed 2026-05-17"
+        # comment above for rationale.
         a.label("log_fmt_t9pos")
         a.asciiz("T9emit pos=%u")
         a.align(4)
@@ -2610,6 +2627,16 @@ def build(debug: bool = False) -> tuple[bytes, dict[str, int]]:
         a.align(4)
         a.label("log_fmt_t8reg")
         a.asciiz("T8reg ev=%02x")
+        a.align(4)
+        # T4 per-attribute emit. Packed value: high 16 = attr_id, low 16 = strlen.
+        # tools/avrcp-wire-trace.py reconstructs total wire-frame size per GEA
+        # response by summing the per-attr emits per response:
+        #   wire_size = 16 (AVCTP+AV/C outer) + 1 (num_attribs) + N * (8 + strlen_i)
+        # If wire_size > 502 bytes, mtkbt's fcn.0xed50 will set packet_type=1
+        # (Start) and fragmentation triggers — exactly the case we want to detect.
+        # Short label "T4a" to fit the 4020-B LOAD #1 padding budget after align.
+        a.label("log_fmt_t4attr")
+        a.asciiz("T4a=%08x")
         a.align(4)
 
     # PApp UTF-8 attribute / value text strings (charset 0x006A).

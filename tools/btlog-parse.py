@@ -24,6 +24,13 @@ Usage:
   ./btlog-parse.py <input.bin> --tag-include AVRCP     # only frames whose text contains "AVRCP"
   ./btlog-parse.py <input.bin> --tag-exclude '[BT]'    # drop the byte-level HCI noise
   ./btlog-parse.py <input.bin> --raw                   # print framing meta too
+  ./btlog-parse.py <input.bin> --avrcp                 # AVRCP-only preset: keeps avctpCB,
+                                                       # [AVCTP], avrcp:, [AVRCP] etc.
+                                                       # Use with adb logcat + avrcp-wire-
+                                                       # trace.py for full TX path visibility:
+                                                       #   - mtkbt internals via btlog (this tool)
+                                                       #   - trampoline-side emit shape via
+                                                       #     logcat (avrcp-wire-trace.py)
 """
 
 import sys
@@ -100,7 +107,17 @@ def main():
     ap.add_argument('--raw', action='store_true', help='include framing metadata in output')
     ap.add_argument('--from-ts', type=int, default=0, help='skip frames before this timestamp')
     ap.add_argument('--to-ts',   type=int, default=0, help='stop after this timestamp (0 = no limit)')
+    ap.add_argument('--avrcp', action='store_true',
+                    help="AVRCP-only preset: includes any frame matching the standard AVRCP/AVCTP "
+                         "log tags (avctpCB, [AVCTP], avrcp:, [AVRCP], transId). Pairs with "
+                         "tools/avrcp-wire-trace.py which parses the trampoline-side Y1T logcat "
+                         "tags emitted by apply.bash --debug.")
     args = ap.parse_args()
+
+    if args.avrcp:
+        # AVRCP-only preset — covers mtkbt's outbound + inbound AVRCP / AVCTP
+        # log surfaces, excluding the per-byte HCI snoop noise (sev=0xb4).
+        args.tag_include = args.tag_include + ["avctpCB", "[AVCTP]", "avrcp:", "[AVRCP]", "transId"]
 
     data = open(args.infile, 'rb').read()
     n_in = n_out = 0

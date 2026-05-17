@@ -8,6 +8,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 ### Fixed
 - mtkbt M4 patch: bypass the outbound-frame builder list-contains drop gate on the second of two structurally-identical builders (`fcn.0x6d0f0`, Path B). Path B carries short single-PDU AVRCP responses (`msg=544` RegNotif INTERIM/CHANGED); Path A carries fragmented multi-frame responses (`msg=540` GetElementAttributes) and was already covered by M2/M3. Subscription-class CTs that depend on RegNotif INTERIM confirmation for ev=01 / 05 / 08 / 0A now establish subscriptions instead of retry-storming until they disengage AVRCP TG.
 
+### Added
+- `apply.bash --debug` extension: trampoline-side `T4a=%08x` per-attribute logcat emit at every `get_element_attributes_rsp` call site (request-driven loop). Combined with `tools/avrcp-wire-trace.py`, surfaces the total AVRCP wire-frame size for each GEA response and flags responses that exceed the 502-byte L2CAP MTU threshold where mtkbt's `fcn.0xed50` triggers AVCTP fragmentation. `tools/btlog-parse.py` gains `--avrcp` preset for AVRCP-only filtering of the mtkbt-side `btlog.bin` stream — pair with the logcat trace for end-to-end TX path visibility (trampoline emit → IPC → mtkbt → wire).
+- Trade-off: dropped `T6resp pos=%u` / `T6resp dur=%u` debug emits in the GetPlayStatus response to keep the trampoline blob within the 4020-byte LOAD #1 padding budget. T9emit pos/pstat surface the same position / play-status values at lower volume; T6 emits fired on every CT poll which was high-noise.
+
 ## [2.3.0] - 2026-05-16
 ### Added
 - Stock firmware v3.0.7 support. `KNOWN_FIRMWARES` enrols the new build; `patch_y1_apk.py` accepts both 3.0.2 and 3.0.7 stock music APKs. MediaTek BT stack binaries (`mtkbt`, `libextavrcp*.so`, `libaudio.a2dp.default.so`, `MtkBt.odex`) are byte-identical between the two builds — `--avrcp` and `--bluetooth` patches apply unchanged. The music APK differs (resource-ID shifts, additional methods in `Y1Repository`); every smali anchor in `patch_y1_apk.py` (literal-text + the `AlbumsActivity.initView` regex) handles both builds.

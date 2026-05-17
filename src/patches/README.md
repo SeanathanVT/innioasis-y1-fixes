@@ -52,7 +52,13 @@ The bash's `patch_in_place_bytes` helper detects "already patched" exit-0-withou
 
 ## Debug logging
 
-`apply.bash --debug` (or `KOENSAYR_DEBUG=1` in the env) makes `patch_y1_apk.py` emit `Log.d("Y1Patch", …)` at every metadata-relevant entry point and inline `_dbgKV(key, long)` at diagnostic-critical sites in `TrackInfoWriter` + `PlaybackStateBridge.onPlayValue`. Release builds are byte-identical without the env var. Tail with `adb logcat -s Y1Patch:*`. Coverage list: [`../../docs/PATCHES.md`](../../docs/PATCHES.md) §"`--debug` instrumentation".
+`apply.bash --debug` (or `KOENSAYR_DEBUG=1` in the env) routes diagnostic logging through three independent tags:
+
+- **`Y1Patch :`** — Java-side. `patch_y1_apk.py` injects `Log.d("Y1Patch", …)` at every metadata-relevant entry point and inline `_dbgKV(key, long)` at diagnostic-critical sites in `TrackInfoWriter` + `PlaybackStateBridge.onPlayValue`. Tail with `adb logcat -s Y1Patch:*`.
+- **`Y1T :`** — Native trampoline-side. `patch_libextavrcp_jni.py` splices `__android_log_print(INFO, "Y1T", fmt, value)` into T4 / T5 / T8 / T9 emit sites. Surfaces inbound `RegisterNotification` event_ids, outbound CHANGED arg values (PSTAT / POS / track UID), and per-attribute strlen for GEA responses. Tail with `adb logcat -s Y1T:*`; parse GEA wire-size predictions via [`../../tools/avrcp-wire-trace.py`](../../tools/avrcp-wire-trace.py).
+- **mtkbt's own xlog stream (btlog).** Not affected by `--debug` — these are stock mtkbt internals (`avctpCB`, `[AVCTP] chid:`, `avrcp: sbunit type:`). Capture with `tools/dual-capture.sh` and parse via [`../../tools/btlog-parse.py`](../../tools/btlog-parse.py) (use `--avrcp` for the AVRCP/AVCTP-only preset that pairs cleanly with the `Y1T` logcat trace).
+
+Release builds are byte-identical without the env var. Coverage list: [`../../docs/PATCHES.md`](../../docs/PATCHES.md) §"`--debug` instrumentation".
 
 ## Status
 
