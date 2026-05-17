@@ -132,15 +132,21 @@
 
     int-to-byte v0, v0
 
-    invoke-virtual {v1, v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPlayStatus(B)V
-
     # Track-change blip suppression. If v0 == 2 (AVRCP PAUSED) AND
-    # elapsedRealtime() < trackChangeDeadlineMs, skip the wakePlayStateChanged
-    # so the CT doesn't see a transient pstat=PAUSED CHANGED during the
-    # restartPlay pause→play handshake. setPlayStatus has already flushed the
-    # file synchronously, so polling CTs (T6 GetPlayStatus) still see correct
-    # state during the gap. The wakeTrackChanged below is unaffected — T5
-    # still fires, the CT still gets TRACK_CHANGED for the new track.
+    # elapsedRealtime() < trackChangeDeadlineMs, SKIP BOTH setPlayStatus AND
+    # wakePlayStateChanged so the CT doesn't see a transient pstat=PAUSED
+    # CHANGED during the restartPlay pause→play handshake. Two suppression
+    # mechanics required because PositionTicker fires wakePlayStateChanged
+    # asynchronously on its 1-s cadence; if a tick's broadcast is in flight
+    # while setPlayStatus(2) writes file[792]=2, the in-flight T9 reads the
+    # newly-written PAUSED byte and emits pstat=2 even though we skipped the
+    # wakePlayStateChanged call in our own onPlayValue. Skipping the file
+    # write keeps file[792] at its prior value (typically PLAYING=1) so any
+    # in-flight T9 sees no edge → no emit. mPlayStatus stays at its prior
+    # value too, so subsequent flushLocked calls (e.g. from
+    # onEarlyTrackChange) propagate the prior value. The wakeTrackChanged
+    # below still fires unconditionally — T5 still emits TRACK_CHANGED for
+    # the new track UID.
     const/4 v3, 0x2
 
     if-ne v0, v3, :do_wake_play_state
@@ -156,8 +162,8 @@
     if-ltz v7, :skip_wake_play_state
 
     :do_wake_play_state
-    # State-edge wake: setPlayStatus has flushed y1-track-info[792]/[780..787]
-    # synchronously; fire playstatechanged so MtkBt routes through T9 and emits
+    # setPlayStatus flushes y1-track-info[792]/[780..787] synchronously, then
+    # we fire playstatechanged so MtkBt routes through T9 and emits
     # PLAYBACK_STATUS / POS CHANGED. Also fire metachanged so MtkBt's Java
     # mirror picks up the latest AOSP-convention extras (id/track/artist/album);
     # setPlayStatus may have just detected a fresh-track edge (audio_id changed
@@ -169,6 +175,8 @@
     # hook would. wakeTrackChanged is idempotent when no edge is present
     # (T5 dedups via file[0..7] vs state[0..7]) — safe to fire on every
     # play-status edge.
+    invoke-virtual {v1, v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPlayStatus(B)V
+
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
 
     :skip_wake_play_state
