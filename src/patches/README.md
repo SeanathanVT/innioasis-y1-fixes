@@ -12,6 +12,7 @@ Byte-level and smali patchers for Innioasis Y1 firmware binaries. Invoked by the
 | **`patch_mtkbt_odex.py`** | `MtkBt.odex` — F1 (`getPreferVersion()` flag), F2 (`disable()` resets `sPlayServiceInterface`), two cardinality NOPs that wake `notificationTrackChangedNative` / `notificationPlayStatusChangedNative` on every `metachanged` / `playstatechanged` broadcast. Recomputes DEX adler32. | `--avrcp` |
 | **`patch_y1_apk.py`** | `com.innioasis.y1*.apk` — A/B/C (Artist→Album navigation), Patch E (discrete PASSTHROUGH PLAY/PAUSE/STOP routing), Patch H (`BaseActivity.dispatchKeyEvent` propagates unhandled media keys). Uses androguard + apktool. | `--music-apk` (A/B/C/H), `--avrcp` (E) |
 | **`patch_libaudio_a2dp.py`** | `libaudio.a2dp.default.so` — single-byte cond-flip in `A2dpAudioStreamOut::standby_l` so AudioFlinger's silence-timeout standby leaves the AVDTP source stream alive (no SUSPEND on the wire). Matches AVDTP 1.3 §8.13 / §8.15. | `--avrcp` |
+| **`patch_avrcp_kl.py`** | `usr/keylayout/AVRCP.kl` — K1: row 201 (`KEY_PAUSECD`) `MEDIA_PLAY_PAUSE → MEDIA_PAUSE` so stock AOSP's 2010-era coalescing of discrete `PASSTHROUGH 0x46 PAUSE` into the toggle keycode is undone. After K1, `0x46` propagates through Patch H to `PlayControllerReceiver`'s `cond_pause_strict` arm (`pause(0x12, true)`) — discrete pause per AVRCP 1.3 §4.6.1, idempotent on repeat presses. Row 200 (`KEY_PLAYCD → MEDIA_PLAY`) unchanged. | `--avrcp` |
 
 Per-patch byte-level reference (offsets, before/after bytes, rationale, ICS row coverage, spec citations): [`../../docs/PATCHES.md`](../../docs/PATCHES.md).
 
@@ -63,7 +64,7 @@ Release builds are byte-identical without the env var. Coverage list: [`../../do
 ## Status
 
 Active patchers (wired into the bash):
-- `patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp_jni.py`, `patch_libaudio_a2dp.py`, `patch_y1_apk.py`
+- `patch_mtkbt.py`, `patch_mtkbt_odex.py`, `patch_libextavrcp_jni.py`, `patch_libextavrcp.py`, `patch_libaudio_a2dp.py`, `patch_avrcp_kl.py`, `patch_y1_apk.py`
 
 Root escalation is handled by [`../su/`](../su/) (setuid `/system/xbin/su`).
 

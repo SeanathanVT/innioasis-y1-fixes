@@ -586,6 +586,7 @@ if [[ "$FLAG_AVRCP" == true ]]; then
   patch_in_place_bytes "lib/libextavrcp_jni.so"       "patch_libextavrcp_jni.py"   644
   patch_in_place_bytes "lib/libextavrcp.so"           "patch_libextavrcp.py"       644
   patch_in_place_bytes "lib/libaudio.a2dp.default.so" "patch_libaudio_a2dp.py"     644
+  patch_in_place_bytes "usr/keylayout/AVRCP.kl"        "patch_avrcp_kl.py"          644
 fi
 
 # Configure Bluetooth fixes

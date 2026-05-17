@@ -12,6 +12,7 @@ Byte-level reference for the patches currently shipped by this repo. Each sectio
 | **odex cardinality NOPs** (×2) | `MtkBt.odex` | NOP the `if-eqz v5` cardinality gates in `BTAvrcpMusicAdapter.handleKeyMessage` for events 0x02 (TRACK_CHANGED, sswitch_1a3) and 0x01 (PLAYBACK_STATUS_CHANGED, sswitch_18a) so the JNI natives fire on every `metachanged` / `playstatechanged` broadcast. Pairs with T5 / T9 in `libextavrcp_jni.so`. |
 | **A, B, C, E, H, H′, H″** | `com.innioasis.y1*.apk` | Smali edits: A/B/C for Artist→Album navigation; E for discrete PASSTHROUGH PLAY/PAUSE/STOP/NEXT/PREVIOUS routing per AV/C Panel Subunit Spec op_id table; H for foreground-activity propagation of `KEYCODE_MEDIA_PLAY/PAUSE/STOP/NEXT/PREVIOUS`; H′ for the same propagation in `BasePlayerActivity` (which overrides `dispatchKeyEvent` and bypasses BaseActivity); H″ adds a `repeatCount > 0 → silent consume` filter to both H and H′ so framework-synthesized key repeats from `InputDispatcher::synthesizeKeyRepeatLocked` don't trigger long-press FF/RW handlers. |
 | **AH1** | `libaudio.a2dp.default.so` | `A2dpAudioStreamOut::standby_l` cond-flip: `beq 8684` → `b 8684` at file offset `0x000086ab` so silence-timeout standby skips `a2dp_stop` unconditionally. Keeps the AVDTP source stream alive across pauses; matches AVDTP 1.3 §8.13 / §8.15 expectation that PAUSED leaves the stream paused-but-up. |
+| **K1** | `usr/keylayout/AVRCP.kl` | Row 201 (`KEY_PAUSECD`) `MEDIA_PLAY_PAUSE` → `MEDIA_PAUSE`. Undoes stock AOSP's 2010-era coalescing of discrete `PASSTHROUGH 0x46 PAUSE` into the toggle keycode, restoring AVRCP 1.3 §4.6.1 + ICS Table 8 discrete-PAUSE semantics for CTs that send `0x46` (vs. `0x44 PLAY`-as-toggle). Row 200 (`KEY_PLAYCD → MEDIA_PLAY`) unchanged. |
 | **su** | `/system/xbin/su` | Setuid-root `su` binary installed by `--root`. |
 
 ---
@@ -413,6 +414,38 @@ Single-byte cond-flip in `_ZN20android_audio_legacy18A2dpAudioInterface18A2dpAud
 **Why this site.** AudioFlinger's silence-timeout (~3 s after the music app stops writing samples) calls `A2dpAudioStreamOut::standby` → `standby_l`, the only HAL-side path that calls `a2dp_stop`. NOPing that call leaves the AVDTP source stream alive while AudioFlinger thinks the HAL is in standby; the next `write()` after PLAYING resumes pushes samples into the same open AVDTP session. Per AVDTP 1.3 §8.13 / §8.15: PAUSED leaves the source stream paused-but-up; SUSPEND is reserved for explicit policy changes.
 
 **MD5s:** Stock `0d909a0bcf7972d6e5d69a1704d35d1f` → Output `adbd98afeb5593f1ffe3b90acd0f2536`.
+
+---
+
+## `patch_avrcp_kl.py`
+
+Single-line text edit to `/system/usr/keylayout/AVRCP.kl` — the keylayout file that maps Linux input keycodes from the AVRCP uinput device (`/dev/input/event4`, created by `libextavrcp_jni.so`'s `avrcp_input_init`) to Android keycodes consumed by the app layer.
+
+**K1 — row 201: `MEDIA_PLAY_PAUSE` → `MEDIA_PAUSE`** at file offset `0x2ac` (35 bytes, length-preserving):
+
+| | bytes (ASCII) | meaning |
+|---|---|---|
+| before | `key 201   MEDIA_PLAY_PAUSE    WAKE\n` | Linux `KEY_PAUSECD` (201) → Android `KEYCODE_MEDIA_PLAY_PAUSE` (85, toggle) |
+| after  | `key 201   MEDIA_PAUSE         WAKE\n` | Linux `KEY_PAUSECD` (201) → Android `KEYCODE_MEDIA_PAUSE` (127, discrete) |
+
+The stock file has the standard AOSP copyright header (2010); the `key 201 MEDIA_PLAY_PAUSE` mapping predates Android's discrete `KEYCODE_MEDIA_PAUSE` (127) and coalesces both `0x44 PLAY` and `0x46 PAUSE` PASSTHROUGH commands into the toggle key. AVRCP 1.3 §4.6.1 + ICS Table 8 define `PASSTHROUGH 0x46 PAUSE` as a DISCRETE Optional command distinct from `0x44 PLAY`; the AOSP coalescing is a spec deviation.
+
+**End-to-end flow post-K1.** CTs that send PASSTHROUGH 0x46 PAUSE (rather than 0x44 PLAY-as-toggle):
+```
+PASSTHROUGH 0x46 PAUSE              (CT → Y1, AV/C wire)
+  → libextavrcp_jni.so avrcp_input_sendkey table @ 0xccec entry 2
+  → Linux KEY_PAUSECD (201) on /dev/input/event4
+  → AVRCP.kl row 201 (K1-patched)
+  → Android KEYCODE_MEDIA_PAUSE (127)
+  → BaseActivity.dispatchKeyEvent (Patch H: propagate for 127)
+  → PlayControllerReceiver.onReceive
+  → cond_pause_strict (Patch E: 127 → pause(0x12, true))
+  → PlayerService.pause(0x12, true)         ← discrete pause, idempotent
+```
+
+Row 200 (`KEY_PLAYCD → MEDIA_PLAY`) is unchanged. CTs that send `PASSTHROUGH 0x44 PLAY` (the older toggle convention used by Samsung TV, Kia, Sonos) continue to route through `PlayControllerReceiver.cond_play_strict` (`if isPlaying: playOrPause() else play(true)` — discrete-with-toggle-fallback), preserving the existing toggle UX for those CTs.
+
+**MD5s:** Stock `366670c4f944150bd657d9377839463a` (identical across firmware 3.0.2 and 3.0.7) → Output `dfd9afd58e94c38fc6f92592674b4ef1`. `KNOWN_AVRCP_KL_MD5S` in the patcher maps each known firmware build to its expected stock MD5; a future build that diverges (e.g. Innioasis ships an updated AVRCP.kl with a different layout) gets a clean MD5-mismatch report rather than silent miscompare.
 
 ---
 

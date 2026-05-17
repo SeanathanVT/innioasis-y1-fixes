@@ -4495,6 +4495,65 @@ OUTPUT_MD5: `a10ca9636417a0ed71495dfa11b5eff0` → `dc01a7c1337ad2dc6573819bdc22
 
 Pending: hardware flash + dual-capture from Bolt and Sonos to confirm. If the trampoline misfires, revert is a single-commit revert; the patch set is contained.
 
+## Trace #55 (2026-05-17) — M5 post-flash: TID echo correct but button-handling regression surfaces on Bolt
+
+**Post-M5 capture** (`dual-bolt-20260517-1254`, mtkbt MD5 `dc01a7c1...`): zero indication-590 rejects, no AVCTP retry storm, RegNotif INTERIM-CHANGED handshake completes for the initial track and one mid-session stable track (Bad Religion → 12:52:53 GEA, Paramore → 12:54:26 GEA). The transId echo from M5 lands clean — Bolt accepts the wire frames at the protocol layer.
+
+User-reported regression in the same capture: Bolt's PAUSE button on its stateful UI sometimes "toggles to a Play icon (as if it paused) but did not pause. Hit a couple more times and it eventually resumes playback but does not toggle back to pause." Logcat trace at `12:53:05.262` (the first reported PAUSE press):
+
+```
+12:53:05.262  MMI_AVRCP    Receive a Avrcpkey:70 (= 0x46 PAUSE, from Bolt)         DOWN
+12:53:05.273  MMI_AVRCP    Receive a Avrcpkey:70                                    UP
+12:53:05.288  Y1Patch      BaseActivity.dispatchKeyEvent entry                      DOWN
+12:53:05.292  Y1Patch      BaseActivity.dispatchKeyEvent entry                      UP
+12:53:05.293  Y1Patch      PlayerService.playOrPause() entry                        ← TOGGLE called
+12:53:05.296  Y1Patch      PlayerService.pause(IZ) entry                            ← toggle's inner branch picked pause
+12:53:05.297  Y1Patch      PlaybackStateBridge.onPlayValue entry  newVal=3 reason=3
+12:53:05.298  Y1Patch      TrackInfoWriter.setPlayStatus entry  sPS.from=1  sPS.to=2
+```
+
+`PlayControllerReceiver.onReceive` does NOT fire in the same window. Patch E's discrete `cond_pause_strict` arm (`KEYCODE_MEDIA_PAUSE (0x7f) → pause(0x12, true)`) is in `PlayControllerReceiver` and never gets the chance to handle this press.
+
+**Where the discrete PAUSE keycode is lost.** Tracing through the input stack:
+
+1. `libextavrcp_jni.so`'s `avrcp_input_sendkey` (sym at `0x76b4`) has a keymap table at vaddr `0xccec` (file `0xbcec` in `.data.rel.ro.local`); each 8-byte entry holds an AV/C PASSTHROUGH op_code at `+4` and a Linux keycode at `+6` (uint16). Entry 2 maps `0x46 PAUSE` → Linux `KEY_PAUSECD` (`201`). `libextavrcp_jni.so` `write()`s that to `/dev/input/event4` (the AVRCP uinput device opened in `avrcp_input_init`, name `"AVRCP"`, registered with `BUS_BLUETOOTH`).
+
+2. Android's input dispatcher reads the Linux keycode and consults `/system/usr/keylayout/AVRCP.kl` (selected because the device name matches). The stock AOSP `AVRCP.kl` (MD5 `366670c4f944150bd657d9377839463a`, identical across firmware 3.0.2 and 3.0.7) has:
+
+   ```
+   key 200   MEDIA_PLAY          WAKE      ← KEY_PLAYCD  → 126 KEYCODE_MEDIA_PLAY
+   key 201   MEDIA_PLAY_PAUSE    WAKE      ← KEY_PAUSECD → 85  KEYCODE_MEDIA_PLAY_PAUSE
+   key 166   MEDIA_STOP          WAKE
+   key 163   MEDIA_NEXT          WAKE
+   key 165   MEDIA_PREVIOUS      WAKE
+   key 168   MEDIA_REWIND        WAKE
+   key 208   MEDIA_FAST_FORWARD  WAKE
+   ```
+
+   The file has the standard AOSP copyright header — this is stock AOSP content, not a Y1 vendor remap. The `key 201 MEDIA_PLAY_PAUSE` mapping predates Android's discrete `KEYCODE_MEDIA_PAUSE` (`0x7f` = 127, post-Android-3.0 Honeycomb addition) and coalesces both discrete PASSTHROUGH commands into the toggle key. **No Linux keycode in the stock AVRCP.kl maps to `MEDIA_PAUSE` (127).**
+
+3. `BaseActivity.dispatchKeyEvent` (Patch H) propagates discrete media keys (`126 MEDIA_PLAY`, `127 MEDIA_PAUSE`, `86 STOP`, `87 NEXT`, `88 PREV`) so they reach `PlayControllerReceiver` (Patch E's discrete arms). **`85 MEDIA_PLAY_PAUSE` is NOT in the bypass set** — Patch H falls through to BaseActivity's stock body, which catches `v2 == KeyMap.KEY_PLAY (= 85)` at smali line 2215 and calls `PlayerService.playOrPause()` (toggle).
+
+`playOrPause()` is the legacy toggle: pause-while-playing → pause; pause-while-paused → resume. Press 1 pauses Y1; press 2 (which the user issues thinking "the first didn't pause") resumes. The "doesn't toggle back to pause" perception is because, separately, `T9emit pstat` had stopped firing at `12:52:57` (Bolt had stopped re-subscribing to `PLAYBACK_STATUS_CHANGED` after the rapid track-change burst), so Bolt's UI didn't receive the second `pstat=1` to flip its icon back. Two distinct bugs interacting.
+
+**CT differential** (user-reported, 2026-05-17): Samsung TV is instant and 100%, Kia has lag but works, Sonos works (modulo no playhead). Bolt is the only CT in the test matrix that exhibits this PAUSE symptom. The mechanism: TV / Kia / Sonos send `0x44 PLAY` as a universal toggle (the older convention — CT sends `0x44` every press regardless of icon state, and Y1's `PlayControllerReceiver.cond_play_strict` does the smart toggle `if isPlaying: playOrPause() else play(true)`). Their UIs follow `PLAYBACK_STATUS_CHANGED` to flip icons. Bolt sends DISCRETE `0x44` / `0x46` based on its current icon state — a more spec-compliant CT-side choice that exposes the AOSP `AVRCP.kl` deviation.
+
+**K1 — AVRCP.kl row 201: `MEDIA_PLAY_PAUSE` → `MEDIA_PAUSE`** (`patch_avrcp_kl.py`, file offset `0x2ac`, length-preserving). Post-K1: `KEY_PAUSECD (201)` → `MEDIA_PAUSE (127)` → Patch H propagates → `PlayControllerReceiver.cond_pause_strict` → `pause(0x12, true)` (discrete, idempotent on repeat). Row 200 (`KEY_PLAYCD → MEDIA_PLAY`) unchanged, so the TV / Kia / Sonos toggle-via-`0x44` path is preserved exactly.
+
+**Why patch AVRCP.kl despite `feedback_y1_upstream_spec_compliance.md` ("Don't change AVRCP.kl remap")?** The standing guidance is about not papering over BT-stack bugs with `AVRCP.kl` remaps. Here, the spec deviation IS in `AVRCP.kl` itself — stock AOSP's row 201 violates AVRCP 1.3 §4.6.1's discrete-PAUSE definition. The fix is a one-line completion of the AVRCP-spec → Linux-keycode → Android-keycode chain, not a remap to compensate for something else. It also benefits any music app on Y1 (including Rockbox if it ships with stock `AVRCP.kl`), matching the upstream-compatible philosophy.
+
+**Why not change `libextavrcp_jni.so`'s table instead?** Three options were considered:
+
+1. **AVRCP.kl row 201 → `MEDIA_PAUSE`** (chosen). Single-line text edit, length-preserving, no second binary touched, no risk of byte-mismatch on a future firmware that reorders the keymap table.
+2. Add `key 119 MEDIA_PAUSE WAKE` to AVRCP.kl + patch `libextavrcp_jni.so`'s table entry 2 to emit Linux `KEY_PAUSE` (119) instead of `KEY_PAUSECD` (201). Two-file change, additive, but introduces a second patcher coordination point.
+3. Patch only `libextavrcp_jni.so` to emit a different Linux keycode that the existing AVRCP.kl maps to anything except `MEDIA_PLAY_PAUSE`. Not possible — no Linux keycode in the stock AVRCP.kl maps to discrete `MEDIA_PAUSE`.
+
+Verification: `python3 patch_avrcp_kl.py /work/v3.0.2/system.img.extracted/usr/keylayout/AVRCP.kl` → output MD5 `dfd9afd58e94c38fc6f92592674b4ef1`. Cross-version verification: `/work/v3.0.7/system.img.extracted/usr/keylayout/AVRCP.kl` produces the same output MD5 (input is byte-identical). Idempotency: re-running on the patched output exits 0 with "already at expected output."
+
+**Pending.** Hardware flash + dual-capture from Bolt to confirm the discrete-PAUSE routing. Test plan: pause from playing → state goes paused, no resume on second pause press; play from paused → state goes playing. Should also verify TV / Kia / Sonos still work (the toggle-via-`0x44` path is untouched but worth confirming end-to-end).
+
+**Pending separately:** the `pstat`-delivery gap (Bolt stops re-subscribing to `PLAYBACK_STATUS_CHANGED` after a rapid track-change burst). K1 doesn't address that; it's a different RE thread. Hypothesis to investigate: Bolt's CT logic gates re-subscription on track stability (similar to its GEA-query gating from Trace #50-#53), and the rapid track-change burst (9 T5 emits in 90 seconds, post-12:52:57) trips the back-off. Mitigation might be to coalesce / debounce TRACK_CHANGED CHANGED emits during rapid skips, but this is speculative without more CT-side observation.
+
 
 
 
