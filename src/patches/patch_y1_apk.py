@@ -2441,6 +2441,98 @@ with open(ps_path, 'w') as f:
     f.write(ps_src)
 print(f"  Patch B5.2: PlayerService 6 listener lambdas → PlaybackStateBridge")
 
+# -- Patch B5.2t: track-change-blip suppression markers -----------------------
+# Hook restartPlay(Z) / autoSwitch() / nextSong() / prevSong() entries to call
+# PlaybackStateBridge.markTrackChange(). Each prepend sets the suppression
+# deadline 1s into the future; PlaybackStateBridge.onPlayValue then skips the
+# transient PLAYBACK_STATUS_CHANGED wake during the pause→play handshake
+# inside restartPlay. Stock playback semantics are preserved — the wake is
+# only suppressed for newValue=3 (PAUSED); newValue=1 (PLAYING) and the
+# downstream wakeTrackChanged / PositionTicker calls remain synchronous.
+PATCH_B5_2T_HOOKS = [
+    # (method header header bytes — entire method declaration + .locals N + blank line + first body line)
+    (
+        ".method public final restartPlay(Z)V\n"
+        "    .locals 4\n"
+        "\n"
+        "    .line 581\n"
+        "    invoke-virtual {p0}, Lcom/innioasis/y1/service/PlayerService;->stopRepeat()V\n",
+        ".method public final restartPlay(Z)V\n"
+        "    .locals 4\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
+        "\n"
+        "    .line 581\n"
+        "    invoke-virtual {p0}, Lcom/innioasis/y1/service/PlayerService;->stopRepeat()V\n",
+        "restartPlay(Z)",
+    ),
+    (
+        ".method private final autoSwitch()V\n"
+        "    .locals 7\n"
+        "\n"
+        "    .line 825\n"
+        "    new-instance v0, Ljava/lang/StringBuilder;\n",
+        ".method private final autoSwitch()V\n"
+        "    .locals 7\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
+        "\n"
+        "    .line 825\n"
+        "    new-instance v0, Ljava/lang/StringBuilder;\n",
+        "autoSwitch()",
+    ),
+    (
+        ".method public final nextSong()V\n"
+        "    .locals 6\n"
+        "\n"
+        "    const/4 v0, 0x1\n"
+        "\n"
+        "    .line 730\n"
+        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
+        ".method public final nextSong()V\n"
+        "    .locals 6\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
+        "\n"
+        "    const/4 v0, 0x1\n"
+        "\n"
+        "    .line 730\n"
+        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
+        "nextSong()",
+    ),
+    (
+        ".method public final prevSong()V\n"
+        "    .locals 6\n"
+        "\n"
+        "    const/4 v0, 0x1\n"
+        "\n"
+        "    .line 778\n"
+        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
+        ".method public final prevSong()V\n"
+        "    .locals 6\n"
+        "\n"
+        "    invoke-static {}, Lcom/koensayr/y1/playback/PlaybackStateBridge;->markTrackChange()V\n"
+        "\n"
+        "    const/4 v0, 0x1\n"
+        "\n"
+        "    .line 778\n"
+        "    iput-boolean v0, p0, Lcom/innioasis/y1/service/PlayerService;->meetingSuckNotNext:Z\n",
+        "prevSong()",
+    ),
+]
+
+for old_head, new_head, label in PATCH_B5_2T_HOOKS:
+    if new_head in ps_src:
+        # idempotent re-run; already patched
+        continue
+    if old_head not in ps_src:
+        sys.exit(f"ERROR: Patch B5.2t anchor not found for {label} in PlayerService.smali")
+    ps_src = ps_src.replace(old_head, new_head, 1)
+
+with open(ps_path, 'w') as f:
+    f.write(ps_src)
+print(f"  Patch B5.2t: PlayerService restartPlay/autoSwitch/nextSong/prevSong → markTrackChange")
+
 # -- Patch B5.2a: hook PlayerService.setCurrentPosition (seek edge) -----------
 # The music app doesn't register OnSeekCompleteListener on either engine, so
 # we hook the seek call directly. setCurrentPosition(J) is the single public

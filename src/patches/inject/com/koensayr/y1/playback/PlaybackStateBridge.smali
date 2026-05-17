@@ -7,6 +7,7 @@
 # Hooked at:
 #   - Static.setPlayValue(II)V (one prepend per method body — canonical state-edge entry)
 #   - PlayerService initPlayer / initPlayer2 listener lambdas (six prepends)
+#   - PlayerService restartPlay / autoSwitch / nextSong / prevSong (markTrackChange prepend)
 #
 # Every public static method is wrapped in try/catch(Throwable) so a bug or
 # unexpected state in this code path can NEVER propagate into the host method.
@@ -15,11 +16,66 @@
 # logs a single Log.w line ("Y1Patch") and the host lambda continues.
 
 
+# trackChangeDeadlineMs: SystemClock.elapsedRealtime() value (in ms) before
+# which onPlayValue should SUPPRESS PLAYBACK_STATUS_CHANGED CHANGED emits for
+# newValue=3 (PAUSED). PlayerService's track-change paths (restartPlay /
+# autoSwitch / nextSong / prevSong) call markTrackChange() at entry; the call
+# sets the deadline to elapsedRealtime() + 1000ms. The pause-then-play
+# transient inside restartPlay (IjkMediaPlayer.reset + setDataSource +
+# prepareAsync) emits setPlayValue(3, 3) followed within ~300ms by
+# setPlayValue(1, 8); suppressing the PLAYBACK_STATUS_CHANGED wake during
+# this window prevents a transient pstat=PAUSED CHANGED from reaching the CT
+# (which would otherwise trip CT-side rapid-state-change back-off heuristics
+# observed on subscription-class CTs). Wire-side effect: CT sees TRACK_CHANGED
+# CHANGED for the new track + the post-resume pstat=PLAYING CHANGED, no
+# spurious paused-in-between flap. User-initiated pause (cond_pause_strict)
+# is unaffected unless it happens to fire within 1s of a track-change entry,
+# which is a rare edge case.
+.field private static trackChangeDeadlineMs:J
+
+
 # direct methods
 .method public constructor <init>()V
     .locals 0
 
     invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    return-void
+.end method
+
+
+# Mark a track-change in progress. Called from PlayerService.restartPlay(Z) /
+# autoSwitch() / nextSong() / prevSong() entry prepends. Sets the suppression
+# deadline 1s into the future on the monotonic SystemClock.elapsedRealtime
+# clock.
+.method public static markTrackChange()V
+    .locals 5
+
+    :try_start_mtc
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v0
+
+    const-wide/16 v2, 0x3e8
+
+    add-long/2addr v0, v2
+
+    sput-wide v0, Lcom/koensayr/y1/playback/PlaybackStateBridge;->trackChangeDeadlineMs:J
+
+    return-void
+    :try_end_mtc
+    .catch Ljava/lang/Throwable; {:try_start_mtc .. :try_end_mtc} :catch_mtc
+
+    :catch_mtc
+    move-exception v0
+
+    const-string v1, "Y1Patch"
+
+    invoke-virtual {v0}, Ljava/lang/Throwable;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-static {v1, v2}, Landroid/util/Log;->w(Ljava/lang/String;Ljava/lang/String;)I
 
     return-void
 .end method
@@ -33,7 +89,7 @@
 #   newValue 5 → STOPPED (0x00)
 # Other values (2/4/6/7/8/9 — internal Y1 transitions) are ignored.
 .method public static onPlayValue(II)V
-    .locals 3
+    .locals 8
 
     :try_start_b5
     const/4 v0, -0x1
@@ -78,6 +134,28 @@
 
     invoke-virtual {v1, v0}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->setPlayStatus(B)V
 
+    # Track-change blip suppression. If v0 == 2 (AVRCP PAUSED) AND
+    # elapsedRealtime() < trackChangeDeadlineMs, skip the wakePlayStateChanged
+    # so the CT doesn't see a transient pstat=PAUSED CHANGED during the
+    # restartPlay pause→play handshake. setPlayStatus has already flushed the
+    # file synchronously, so polling CTs (T6 GetPlayStatus) still see correct
+    # state during the gap. The wakeTrackChanged below is unaffected — T5
+    # still fires, the CT still gets TRACK_CHANGED for the new track.
+    const/4 v3, 0x2
+
+    if-ne v0, v3, :do_wake_play_state
+
+    invoke-static {}, Landroid/os/SystemClock;->elapsedRealtime()J
+
+    move-result-wide v3
+
+    sget-wide v5, Lcom/koensayr/y1/playback/PlaybackStateBridge;->trackChangeDeadlineMs:J
+
+    cmp-long v7, v3, v5
+
+    if-ltz v7, :skip_wake_play_state
+
+    :do_wake_play_state
     # State-edge wake: setPlayStatus has flushed y1-track-info[792]/[780..787]
     # synchronously; fire playstatechanged so MtkBt routes through T9 and emits
     # PLAYBACK_STATUS / POS CHANGED. Also fire metachanged so MtkBt's Java
@@ -93,6 +171,7 @@
     # play-status edge.
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakePlayStateChanged()V
 
+    :skip_wake_play_state
     invoke-virtual {v1}, Lcom/koensayr/y1/trackinfo/TrackInfoWriter;->wakeTrackChanged()V
 
     # Drive the 1 s position-tick loop. AVRCP 1.3 §5.4.2 Tbl 5.33 leaves the

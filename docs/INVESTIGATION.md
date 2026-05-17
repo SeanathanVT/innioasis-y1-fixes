@@ -4554,6 +4554,62 @@ Verification: `python3 patch_avrcp_kl.py /work/v3.0.2/system.img.extracted/usr/k
 
 **Pending separately:** the `pstat`-delivery gap (Bolt stops re-subscribing to `PLAYBACK_STATUS_CHANGED` after a rapid track-change burst). K1 doesn't address that; it's a different RE thread. Hypothesis to investigate: Bolt's CT logic gates re-subscription on track stability (similar to its GEA-query gating from Trace #50-#53), and the rapid track-change burst (9 T5 emits in 90 seconds, post-12:52:57) trips the back-off. Mitigation might be to coalesce / debounce TRACK_CHANGED CHANGED emits during rapid skips, but this is speculative without more CT-side observation.
 
+## Trace #56 (2026-05-17) — B5.2t: suppress the track-change `pstat=PAUSED` blip
+
+**Hypothesis source.** Trace #55 closed with: "rapid `pstat` oscillation during track-change boundaries (`pstat=1 → pstat=2 → pstat=1 → pstat=2` within ~20 seconds) tripped Bolt's TG-misbehaving back-off heuristic." Re-examining the `dual-bolt-20260517-1254` log entries from Y1Patch's `PlaybackStateBridge.onPlayValue` instrumentation surfaces a consistent pattern at every track-change boundary:
+
+```
+12:52:42.266  KEY_NEXTSONG DOWN/UP (Bolt user-press skip)
+12:52:42.328  PlayControllerReceiver.onReceive
+12:52:42.378  ... routes through PlayerService.nextSong()
+12:52:42.392  PlayerService.pause(IZ) entry  ← internal to nextSong/restartPlay chain
+12:52:42.393  PlaybackStateBridge.onPlayValue entry  newVal=3 reason=3
+12:52:42.443  T5emit aid=cf00675b (TRACK_CHANGED for the new track, 50 ms after the pause)
+12:52:42.697  PlaybackStateBridge.onPlayValue entry  newVal=1 reason=8  ← new track playing, 304 ms after pause
+```
+
+The `pause(IZ)` call inside `restartPlay` hard-codes `Static.setPlayValue(3, 3)` (smali line 4344, `const/4 p2, 0x3; invoke-virtual {p1, p2, p2}`) — IDENTICAL `(newValue, reason)` shape to a user-initiated pause. So the inbound stream into `PlaybackStateBridge.onPlayValue` has no native signal distinguishing "this is the start of a track-change pause→play handshake" from "the user just pressed PAUSE on a stable track." With no signal, the previous `wakePlayStateChanged()` fired unconditionally → T9 → `PLAYBACK_STATUS_CHANGED CHANGED` with `pstat=0x02 PAUSED` on the wire, followed within 300 ms by another CHANGED with `pstat=0x01 PLAYING`. Five such transient pause/play pairs occurred between `12:52:42` and `12:53:53` — clustered around user-initiated track skips.
+
+Bolt's last `T8reg ev=01` (RegisterNotification(PLAYBACK_STATUS_CHANGED)) is at `12:52:53`. The next `T9emit pstat` after that (the `12:52:57.711` one for the Strike Anywhere track-change pause-blip) fires AGAINST Bolt's subscription gate (it had a pending subscription) — but Bolt doesn't re-subscribe afterward. The conjecture is Bolt's CT, after seeing the transient `pstat=2` emit that's immediately contradicted by `pstat=1`, decided the TG is unstable and stopped re-subscribing to that event class. POS_CHANGED (`ev=05`) re-subscribes later at `12:54:26`, suggesting the back-off is per-event-class, not session-wide.
+
+**Patch B5.2t.** Inject a `markTrackChange()` static call at the entry of `PlayerService.restartPlay(Z) / autoSwitch() / nextSong() / prevSong()` (four prepends in `PlayerService.smali`). `PlaybackStateBridge.markTrackChange()` sets a `trackChangeDeadlineMs` field to `SystemClock.elapsedRealtime() + 1000ms` (monotonic, no DST/wall-clock skew concerns). `onPlayValue` then skips `wakePlayStateChanged()` when `newValue == 3` (PAUSED) AND `elapsedRealtime() < trackChangeDeadlineMs`. The `setPlayStatus` file flush, `wakeTrackChanged()`, and `PositionTicker.stop()` all remain synchronous, so polling CTs (T6 GetPlayStatus) see correct paused state during the gap, and `TRACK_CHANGED CHANGED` still emits with the new track's UID at the correct cadence.
+
+End-to-end behaviour for a track-change skip post-B5.2t:
+
+```
+Bolt KEY_NEXTSONG
+  → PlayerService.nextSong() entry → markTrackChange() — deadline = +1000 ms
+  → PlayerService.restartPlay(Z) entry → markTrackChange() — deadline re-armed
+  → PlayerService.pause(IZ) → setPlayValue(3, 3) → onPlayValue(3, 3)
+    → file[792] = PAUSED (synchronous flush — polling-correct)
+    → SUPPRESSED: wakePlayStateChanged() (deadline in future)
+    → wakeTrackChanged() — T5 emits TRACK_CHANGED for new track
+    → PositionTicker.stop()
+  → IjkMediaPlayer.reset / setDataSource(new) / prepareAsync()
+  → ~300 ms later: OnPreparedListener → PlayerService.play() → onPlayValue(1, 8)
+    → file[792] = PLAYING
+    → NOT suppressed (newValue != 3)
+    → wakePlayStateChanged() — T9 emits PLAYBACK_STATUS_CHANGED pstat=PLAYING
+    → wakeTrackChanged() (idempotent on same-track edge)
+    → PositionTicker.start()
+```
+
+Net wire-side: CT sees ONE `PLAYBACK_STATUS_CHANGED CHANGED` per track-change (pstat=PLAYING for the new track), not a paused-then-playing flap. The TRACK_CHANGED CHANGED still emits (with the new UID) so the CT knows to invalidate its metadata cache. Same number of state transitions a TV/Kia/Sonos CT would see from a well-implemented TG.
+
+**User-pause path** (CTs sending discrete `PASSTHROUGH 0x46` post-K1 routing through `cond_pause_strict → pause(0x12, true)`): not affected unless the user happens to press PAUSE within 1s of a track-change entry, which is an unusual sequence. In that edge case the user pause is suppressed; the user perceives "pause didn't take" but a second press a moment later (after the 1s window) will pause normally. This trade-off is acceptable for the dominant case (Bolt subscriptions remain alive across track skips).
+
+**Verification done in this session (pre-flash):**
+
+1. `patch_y1_apk.py --clean-staging` against stock 3.0.2 APK → all 4 markTrackChange prepend anchors found; B5.2t reports success.
+2. Patched `PlayerService.smali` inspection: each of `restartPlay(Z) / autoSwitch() / nextSong() / prevSong()` has the `invoke-static markTrackChange()V` line at entry, after `.locals N` and before the first body statement.
+3. Patched `PlaybackStateBridge.smali` inspection: `trackChangeDeadlineMs:J` field present; `markTrackChange()V` method present with `SystemClock.elapsedRealtime() + 1000` math; `onPlayValue` body has the `cmp-long` + `if-ltz :skip_wake_play_state` block guarding `wakePlayStateChanged()` only when `v0 == 2` (AVRCP PAUSED).
+4. APK reassembly: smali assembler accepted the new `.locals 8` and `cmp-long` opcodes; classes.dex rebuilt to 9,244,228 bytes, classes2.dex to 8,971,328 bytes.
+
+**Pending hardware validation:** flash the new APK and re-capture Bolt + the other CTs. Expected wire-side change:
+
+- Bolt: T9emit pstat=2 events should disappear from track-change boundaries; only pstat=1 emits remain after each skip. T8reg ev=01 should keep firing (Bolt continues subscribing).
+- TV / Kia / Sonos: same as before — the AVRCP.kl K1 + B5.2t are both no-ops for the toggle-via-0x44 path until/unless those CTs press pause while a track-change is mid-flight, which is rare.
+
 
 
 
